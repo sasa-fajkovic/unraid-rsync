@@ -1,8 +1,15 @@
 name: Release
 
 # Build the Slackware .txz inside aclemons/slackware:15.0, regenerate the .plg
-# (version + md5), commit the regenerated manifest to the default branch, and
-# publish a GitHub Release with the .txz asset.
+# (version + md5), publish a GitHub Release with BOTH the .txz and the
+# regenerated .plg attached, and sync the regenerated .plg onto the default
+# branch via an auto-merged PR.
+#
+# Why a PR instead of a direct push: `main` is a protected branch ("changes must
+# be made through a pull request"), so the github-actions bot cannot push to it
+# directly. With 0 required approvals and no required status checks, a CI-opened
+# PR merges immediately. The Release (with the .plg attached) is published FIRST,
+# so the plugin is installable even if the branch sync hits a snag.
 #
 # Triggers:
 #   - pushing a tag shaped like YYYY.MM.DD with an optional same-day suffix
@@ -11,8 +18,6 @@ name: Release
 #
 # Reproducibility: on a tag push the .txz is built from the TAGGED commit (not
 # the branch tip), so the published artifact always matches the code at the tag.
-# The regenerated .plg (version + md5) is then committed to the default branch
-# in a separate step, since the raw .plg URL users install from lives there.
 
 on:
   push:
@@ -29,16 +34,17 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   release:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           # Full history so both the tag ref (to build from) and the default
-          # branch (to commit the regenerated .plg to) are available locally.
+          # branch (to sync the regenerated .plg to) are available locally.
           fetch-depth: 0
 
       - name: Determine version + build ref
@@ -81,7 +87,8 @@ jobs:
       - name: Build .txz inside Slackware container
         # VERSION (validated above) is passed into the container via -e and
         # referenced as a shell variable rather than interpolated with ${{ }},
-        # so it cannot break out of the shell command.
+        # so it cannot break out of the shell command. Invoked as `bash
+        # pkg_build.sh` so the build does not depend on the file's exec bit.
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
@@ -90,40 +97,68 @@ jobs:
             bash -c 'bash pkg_build.sh -y -V "$VERSION"'
           sudo chown -R "$(id -u):$(id -g)" .
 
-      - name: Commit regenerated .plg to the default branch
-        run: |
-          set -euo pipefail
-          default_branch="${{ github.event.repository.default_branch }}"
-          # pkg_build.sh rewrote unraid.rsync.plg at the build ref. Preserve that
-          # regenerated manifest, switch to the default branch, and apply it
-          # there - the raw .plg URL users install from lives on the branch.
-          cp unraid.rsync.plg /tmp/unraid.rsync.plg.built
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          # Discard the build-ref working-tree changes (the .txz lives in archive/
-          # which is gitignored), then move onto the branch.
-          git checkout --quiet -- . || true
-          git checkout --quiet "$default_branch"
-          cp /tmp/unraid.rsync.plg.built unraid.rsync.plg
-          git add unraid.rsync.plg
-          if git diff --cached --quiet; then
-            echo "No manifest changes to commit."
-            exit 0
-          fi
-          git commit -m "Release ${{ steps.version.outputs.version }}"
-          # Fail the workflow if the push fails: the raw .plg URL depends on the
-          # regenerated manifest (real version+md5) reaching the branch.
-          git push origin "HEAD:$default_branch"
+      - name: Stage the regenerated .plg alongside the .txz
+        # pkg_build.sh rewrote unraid.rsync.plg (real version+md5) at the build
+        # ref. Attach it to the Release too, so the plugin is installable from
+        # the Release .plg URL even independently of the default-branch sync.
+        run: cp unraid.rsync.plg archive/unraid.rsync.plg
 
-      - name: Create GitHub Release
+      - name: Create GitHub Release (.txz + .plg)
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.version }}
-          # On workflow_dispatch the tag does not exist yet and the action would
-          # create it at the currently checked-out commit (the default branch
-          # HEAD by this point). Pin it to build_ref - the commit the .txz was
-          # actually built from - so the tag/release matches the artifact. On a
-          # tag push the tag already exists and this is a harmless no-op.
+          # On workflow_dispatch the tag does not exist yet; pin it to build_ref
+          # (the commit the .txz was built from) so tag/release match the artifact.
+          # On a tag push the tag already exists and this is a harmless no-op.
           target_commitish: ${{ steps.version.outputs.build_ref }}
-          files: archive/*.txz
+          files: |
+            archive/*.txz
+            archive/unraid.rsync.plg
           generate_release_notes: true
+
+      - name: Sync regenerated .plg to the default branch (via PR)
+        # `main` is protected (PRs required); the bot cannot push directly. Open
+        # a short-lived branch + PR and merge it. 0 required approvals + no
+        # required checks => it merges immediately. A small retry covers the
+        # brief window while GitHub computes mergeability. This runs AFTER the
+        # Release is published, so install never depends on it succeeding.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          default_branch="${{ github.event.repository.default_branch }}"
+          cp unraid.rsync.plg /tmp/unraid.rsync.plg.built
+          # Discard build-ref working-tree changes, move onto the branch, apply.
+          git checkout --quiet -- . || true
+          git checkout --quiet "$default_branch"
+          cp /tmp/unraid.rsync.plg.built unraid.rsync.plg
+          if git diff --quiet -- unraid.rsync.plg; then
+            echo "Manifest already in sync on $default_branch; nothing to do."
+            exit 0
+          fi
+          branch="release/plg-$VERSION"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$branch"
+          git add unraid.rsync.plg
+          git commit -m "Release $VERSION (sync .plg version+md5)"
+          git push -f origin "$branch"
+          gh pr create --base "$default_branch" --head "$branch" \
+            --title "Release $VERSION (.plg sync)" \
+            --body "Automated: sync \`unraid.rsync.plg\` version+md5 to match the \`$VERSION\` release artifact." \
+            || echo "PR may already exist; continuing to merge."
+          merged=""
+          for attempt in 1 2 3 4 5 6; do
+            if gh pr merge "$branch" --squash --delete-branch; then
+              merged="yes"; break
+            fi
+            echo "merge attempt $attempt not ready; retrying in 5s..."
+            sleep 5
+          done
+          if [ -z "$merged" ]; then
+            echo "WARNING: could not auto-merge the .plg sync PR for $branch." >&2
+            echo "The Release (with the .plg attached) is published and installable;" >&2
+            echo "merge the open PR manually to sync the default-branch manifest." >&2
+            exit 1
+          fi
