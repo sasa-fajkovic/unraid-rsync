@@ -119,5 +119,11 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.version }}
+          # On workflow_dispatch the tag does not exist yet and the action would
+          # create it at the currently checked-out commit (the default branch
+          # HEAD by this point). Pin it to build_ref - the commit the .txz was
+          # actually built from - so the tag/release matches the artifact. On a
+          # tag push the tag already exists and this is a harmless no-op.
+          target_commitish: ${{ steps.version.outputs.build_ref }}
           files: archive/*.txz
           generate_release_notes: true
