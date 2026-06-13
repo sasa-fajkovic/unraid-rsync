@@ -425,26 +425,36 @@ class Ssh
     }
 
     /**
-     * Write a secret to a tmpfs file at mode 600, refusing to follow a symlink.
-     * The runtime base is under world-writable /tmp, so an attacker could plant
-     * a symlink at the target file path to redirect the write; we reject any
-     * pre-existing symlink (and unlink a stale regular file first so the new
-     * file is created fresh with our perms).
+     * Write a secret to a tmpfs file at mode 600 WITHOUT ever following a
+     * symlink, even under a TOCTOU race. The runtime base is under
+     * world-writable /tmp, so a check-then-write (is_link then file_put_contents)
+     * is racy: an attacker could plant a symlink at $path in between. Instead we
+     * write the body to a fresh tempnam() file in the SAME directory (tempnam
+     * creates with O_EXCL, so it never opens an attacker's file), chmod it 600,
+     * then rename() it over the target. rename() replaces the destination name
+     * atomically and operates on the symlink itself rather than following it, so
+     * the secret can never land on an attacker-chosen target.
      */
     private static function safeWriteSecret(string $path, string $body, string $label): void
     {
-        if (is_link($path)) {
-            throw new RuntimeException("Refusing to write $label to a symlink: $path");
+        $dir = dirname($path);
+        $tmp = @tempnam($dir, '.ur-secret.');
+        if ($tmp === false) {
+            throw new RuntimeException("Unable to create temp file for $label in: $dir");
         }
-        if (file_exists($path)) {
-            // A stale per-run file (token collision is astronomically unlikely,
-            // but be tidy) - remove it so the write starts from a clean inode.
-            @unlink($path);
-        }
-        if (@file_put_contents($path, $body) === false) {
+        // tempnam created a regular 600-ish file we own; tighten and fill it.
+        @chmod($tmp, 0600);
+        if (@file_put_contents($tmp, $body) === false) {
+            @unlink($tmp);
             throw new RuntimeException("Unable to materialise $label: $path");
         }
-        @chmod($path, 0600);
+        @chmod($tmp, 0600);
+        // rename replaces the name atomically and does NOT follow a symlink that
+        // may have been planted at $path.
+        if (!@rename($tmp, $path)) {
+            @unlink($tmp);
+            throw new RuntimeException("Unable to place $label at: $path");
+        }
     }
 
     /** Write a private key to tmpfs at mode 600 (OpenSSH requires it). */
