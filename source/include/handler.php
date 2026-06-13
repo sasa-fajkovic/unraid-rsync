@@ -1494,7 +1494,12 @@ function ur_handle_request(): void
     } catch (Throwable $e) {
         // Never let an exception escape as an HTML fatal: emit a JSON error so
         // the client always gets parseable JSON and can surface a clear message.
-        sendError('Internal error: ' . $e->getMessage(), 500);
+        // Log the detail server-side (webGui PHP log) but return a GENERIC
+        // message to the browser - an unexpected exception's text can carry
+        // internal paths/config that should not leak to any authenticated UI
+        // user or the browser console.
+        error_log('unraid.rsync handler: unhandled ' . get_class($e) . ': ' . $e->getMessage());
+        sendError('An unexpected internal error occurred. Check the system log for details.', 500);
     }
 }
 
