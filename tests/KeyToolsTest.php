@@ -490,4 +490,46 @@ final class KeyToolsTest extends TestCase
         $this->assertSame(0, $code);
         $this->assertSame('OOO', $stdout);
     }
+
+    /**
+     * THE WEDGE REGRESSION: a child that IGNORES SIGTERM (it traps the signal and
+     * keeps sleeping) must still be force-killed via the SIGKILL escalation, and
+     * the call must RETURN PROMPTLY at the deadline + bounded teardown window -
+     * never blocking the request (the php-fpm worker) on a process that won't die
+     * politely. This is the in-process analogue of the production hang where a
+     * stuck ssh-keyscan held the worker open. We assert the call returns well
+     * before the child's own (long) sleep would have ended.
+     */
+    public function testRunArgvForceKillsChildThatIgnoresSigterm(): void
+    {
+        if (!function_exists('pcntl_signal')) {
+            // The child relies on pcntl to trap SIGTERM. Skip cleanly if the CLI
+            // build under test lacks it; the SIGKILL path is still exercised by
+            // testRunArgvKillsChildPastDeadline for an ordinary child.
+            $this->markTestSkipped('pcntl unavailable in this PHP build');
+        }
+        // The child installs a SIGTERM handler that does nothing (so SIGTERM is
+        // ignored), then sleeps 10s. Only SIGKILL can end it. It must therefore
+        // be returned by the deadline + the SIGTERM grace + the SIGKILL confirm
+        // window, comfortably under 10s.
+        $code = 'pcntl_async_signals(true);'
+              . 'pcntl_signal(SIGTERM, function () {});'
+              . 'for ($i = 0; $i < 100; $i++) { usleep(100000); }'; // ~10s
+        $child = [PHP_BINARY, '-r', $code];
+
+        $start = microtime(true);
+        [$rc, $stdout, $stderr, $timedOut] = RealRunKeyTools::publicRunKeyscan($child, 0.3);
+        $elapsed = microtime(true) - $start;
+
+        $this->assertTrue($timedOut, 'a child past the deadline must be flagged timedOut');
+        $this->assertSame(124, $rc, 'timeout uses exit code 124');
+        // 0.3s deadline + up to ~1s SIGTERM grace + up to ~0.5s SIGKILL confirm
+        // ~= ~1.8s worst case; allow generous headroom but stay well under 10s so
+        // a regression that BLOCKS on proc_close (the wedge) fails loudly.
+        $this->assertLessThan(
+            6.0,
+            $elapsed,
+            'the call must return promptly via SIGKILL, never block on the child'
+        );
+    }
 }

@@ -570,10 +570,28 @@ class KeyTools
 
         if ($timedOut) {
             // The child is (probably) still running and would otherwise hold the
-            // request open. Terminate it, escalate to SIGKILL if it lingers, then
-            // reap so no zombie remains.
-            self::terminateProc($proc);
-            proc_close($proc);
+            // request open. Terminate it (SIGTERM -> SIGKILL) and reap it so no
+            // zombie remains - but NEVER block the request waiting on a child the
+            // kernel can't kill promptly.
+            //
+            // The trap: PHP's proc_close() ALWAYS performs a blocking waitpid()
+            // on the child. SIGKILL is asynchronous - a child stuck in an
+            // uninterruptible (D-state) syscall (a half-open TCP connect, a DNS
+            // lookup that never returns - exactly the "host unreachable" case
+            // here) does not die until that syscall returns, which can be far
+            // past our cap. Calling proc_close() on it would then hang the whole
+            // php-fpm worker indefinitely, serialising every other request behind
+            // it (the production wedge). So we only proc_close() when terminateProc
+            // has CONFIRMED the child is gone; otherwise we abandon the resource
+            // (pipes already closed above) and return immediately. The kernel
+            // reaps the SIGKILL'd child once its syscall unblocks; the worker is
+            // freed now rather than held hostage.
+            $reaped = self::terminateProc($proc);
+            if ($reaped) {
+                proc_close($proc);
+            }
+            // else: deliberately leak the proc resource rather than block. PHP's
+            // request shutdown / the OS will reap the (already SIGKILL'd) child.
             return [124, $buf[1], $buf[2], true]; // 124 == GNU timeout's convention
         }
 
@@ -583,21 +601,30 @@ class KeyTools
 
     /**
      * Terminate a still-running child from proc_open: SIGTERM first, and if it
-     * does not exit within a short grace, SIGKILL. Best-effort and bounded - it
-     * polls proc_get_status for up to ~1s before the hard kill so a well-behaved
-     * child that exits on SIGTERM is reaped cleanly, while a wedged one is forced
-     * down. Leaves the actual reaping (proc_close) to the caller.
+     * does not exit within a short grace, SIGKILL. Best-effort and BOUNDED - it
+     * polls proc_get_status for up to ~1s before the hard kill (so a well-behaved
+     * child that exits on SIGTERM is reaped cleanly), then a further short window
+     * after SIGKILL. The total wall-clock spent here is capped at ~1.5s so a
+     * caller can never be blocked here past that.
+     *
+     * Returns TRUE when the child is CONFIRMED no longer running (so the caller
+     * may safely proc_close() it without blocking), FALSE when it is still alive
+     * after SIGKILL (a D-state child the kernel hasn't been able to kill yet) -
+     * in which case the caller MUST NOT proc_close() it (that would block on
+     * waitpid) and should abandon the resource instead. Does NOT itself reap
+     * (proc_close) - that stays the caller's decision, gated on this result.
      *
      * @param resource $proc
+     * @return bool true == child confirmed gone (safe to proc_close)
      */
-    private static function terminateProc($proc): void
+    private static function terminateProc($proc): bool
     {
         if (!is_resource($proc)) {
-            return;
+            return true; // nothing to reap
         }
         $status = proc_get_status($proc);
         if (empty($status['running'])) {
-            return; // already exited
+            return true; // already exited
         }
 
         // SIGTERM (proc_terminate's default) - polite stop.
@@ -608,15 +635,28 @@ class KeyTools
         while (microtime(true) < $killBy) {
             $status = proc_get_status($proc);
             if (empty($status['running'])) {
-                return;
+                return true;
             }
             usleep(50000); // 50ms
         }
 
         // Still alive - escalate to SIGKILL.
-        $status = proc_get_status($proc);
-        if (!empty($status['running'])) {
-            @proc_terminate($proc, defined('SIGKILL') ? SIGKILL : 9);
+        @proc_terminate($proc, defined('SIGKILL') ? SIGKILL : 9);
+
+        // Poll briefly for the SIGKILL to take effect. A killable child dies
+        // almost immediately; a child wedged in an uninterruptible syscall will
+        // NOT, and we must not block on it - bail after a short grace and report
+        // it as not-yet-reaped so the caller skips the blocking proc_close().
+        $confirmBy = microtime(true) + 0.5;
+        while (microtime(true) < $confirmBy) {
+            $status = proc_get_status($proc);
+            if (empty($status['running'])) {
+                return true;
+            }
+            usleep(50000); // 50ms
         }
+
+        $status = proc_get_status($proc);
+        return empty($status['running']);
     }
 }
