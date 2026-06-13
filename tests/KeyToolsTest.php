@@ -72,9 +72,10 @@ final class FakeKeyTools extends KeyTools
 }
 
 /**
- * Exposes the REAL runKeygen/runKeyscan seams (which call the private,
- * deadlock-safe runArgv) so the concurrent stdout/stderr drain can be exercised
- * against a real subprocess WITHOUT stubbing. Used only by the deadlock test.
+ * Exposes the REAL runKeygen/runKeyscan seams so they can be exercised against a
+ * real subprocess WITHOUT stubbing: runKeygen -> the private deadlock-safe
+ * runArgv (concurrent stdout/stderr drain), and runKeyscan with a deadline ->
+ * the detached, polled, time-bounded path (runDetached).
  */
 final class RealRunKeyTools extends KeyTools
 {
@@ -85,10 +86,12 @@ final class RealRunKeyTools extends KeyTools
     }
 
     /**
-     * Run the REAL, time-bounded runKeyscan seam (-> private runArgv) against a
-     * real subprocess with an explicit wall-clock deadline, so the timeout +
-     * child-kill path can be exercised end-to-end with a TINY deadline (the test
-     * itself never hangs).
+     * Run the REAL, time-bounded runKeyscan seam against a real subprocess with
+     * an explicit wall-clock deadline. A non-null deadline routes through the
+     * DETACHED path (runDetached): ssh-keyscan is launched detached/orphaned and
+     * polled via temp files, so the worker is never the reaping parent and ALWAYS
+     * returns at the deadline. Exercised end-to-end with a TINY deadline so the
+     * test never hangs.
      *
      * @return array{0:int,1:string,2:string,3:bool}
      */
@@ -405,7 +408,7 @@ final class KeyToolsTest extends TestCase
         $this->assertNotNull(HangingKeyscanKeyTools::$deadlines[0]);
     }
 
-    // --- runArgv deadlock-safety -------------------------------------------
+    // --- subprocess seams: deadlock-safety + detached time-bounding --------
 
     /**
      * Build a portable child-process argv that writes $outLen bytes of 'O' to
@@ -460,10 +463,11 @@ final class KeyToolsTest extends TestCase
     }
 
     /**
-     * runArgv enforces the wall-clock deadline on a child that would otherwise
-     * run far longer: a php sleep(5s) against a 0.3s deadline must be killed and
-     * return promptly with timedOut=true (exit 124). This exercises the
-     * proc_terminate -> reap path directly, sub-second, so the suite never hangs.
+     * The DETACHED time-bounded path enforces the wall-clock deadline on a child
+     * that would otherwise run far longer: a php sleep(5s) against a 0.3s deadline
+     * must return promptly with timedOut=true (exit 124). The child is launched
+     * detached/orphaned and only POLLED, so the worker returns at the deadline
+     * without waiting on the child - sub-second, so the suite never hangs.
      */
     public function testRunArgvKillsChildPastDeadline(): void
     {
@@ -474,20 +478,61 @@ final class KeyToolsTest extends TestCase
 
         $this->assertTrue($timedOut, 'a child past the deadline must be flagged timedOut');
         $this->assertSame(124, $code, 'timeout uses exit code 124');
-        // Killed near the 0.3s deadline (+ up to ~1s SIGTERM grace), well under 5s.
-        $this->assertLessThan(4.0, $elapsed, 'the child must be killed, not waited out');
-        $this->assertSame('', $stdout);
+        // Returns near the 0.3s deadline, never waits out the child's 5s sleep.
+        $this->assertLessThan(4.0, $elapsed, 'the worker must not wait out the child');
     }
 
     /**
      * A fast child that finishes well within the deadline returns normally with
-     * timedOut=false (the deadline path must not false-positive on quick exits).
+     * timedOut=false (the deadline path must not false-positive on quick exits)
+     * and its full stdout/stderr are captured from the detached run's temp files.
      */
     public function testRunArgvWithDeadlineDoesNotFalseTimeoutFastChild(): void
     {
-        [$code, $stdout, $stderr, $timedOut] = RealRunKeyTools::publicRunKeyscan(self::emitArgv(3, 0), 10.0);
+        [$code, $stdout, $stderr, $timedOut] = RealRunKeyTools::publicRunKeyscan(self::emitArgv(3, 1), 10.0);
         $this->assertFalse($timedOut);
         $this->assertSame(0, $code);
         $this->assertSame('OOO', $stdout);
+        $this->assertSame('E', $stderr);
+    }
+
+    /**
+     * THE WEDGE REGRESSION: a child that IGNORES SIGTERM (traps it and keeps
+     * sleeping) must NOT be able to hold the request open. Because the detached
+     * path never makes the worker the reaping parent, the call RETURNS PROMPTLY at
+     * the deadline regardless of how the child behaves - this is the in-process
+     * analogue of the production hang where a stuck ssh-keyscan held the worker
+     * open via a blocking proc_close()/waitpid(). We assert the call returns well
+     * before the child's own (long) sleep would have ended.
+     */
+    public function testRunArgvForceKillsChildThatIgnoresSigterm(): void
+    {
+        if (!function_exists('pcntl_signal')) {
+            // The child relies on pcntl to trap SIGTERM. Skip cleanly if the CLI
+            // build under test lacks it; the plain-child timeout is still covered
+            // by testRunArgvKillsChildPastDeadline.
+            $this->markTestSkipped('pcntl unavailable in this PHP build');
+        }
+        // The child installs a SIGTERM handler that does nothing (so SIGTERM is
+        // ignored), then sleeps 10s. The detached path doesn't wait on it at all,
+        // so the call must return at the deadline well under 10s.
+        $code = 'pcntl_async_signals(true);'
+              . 'pcntl_signal(SIGTERM, function () {});'
+              . 'for ($i = 0; $i < 100; $i++) { usleep(100000); }'; // ~10s
+        $child = [PHP_BINARY, '-r', $code];
+
+        $start = microtime(true);
+        [$rc, $stdout, $stderr, $timedOut] = RealRunKeyTools::publicRunKeyscan($child, 0.3);
+        $elapsed = microtime(true) - $start;
+
+        $this->assertTrue($timedOut, 'a child past the deadline must be flagged timedOut');
+        $this->assertSame(124, $rc, 'timeout uses exit code 124');
+        // Returns at ~the 0.3s deadline; generous headroom but well under 10s so a
+        // regression that BLOCKS waiting on the child (the wedge) fails loudly.
+        $this->assertLessThan(
+            6.0,
+            $elapsed,
+            'the call must return at the deadline, never wait on a stuck child'
+        );
     }
 }

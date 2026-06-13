@@ -229,6 +229,41 @@ function ur_check_csrf(): bool
 }
 
 /**
+ * Release the PHP session lock for the rest of the request, if one is held.
+ *
+ * WHY THIS EXISTS (the production wedge):
+ *   handler.php never starts a session itself, but the webGui serves it through
+ *   an authenticated front controller that runs as php-fpm's auto_prepend_file
+ *   and calls session_start() on EVERY request. PHP's default (files) session
+ *   handler then holds an EXCLUSIVE flock on the session file for the WHOLE
+ *   request lifetime. Because every request from the same browser carries the
+ *   same PHPSESSID, a single long-running POST (e.g. a 30s host-key discovery
+ *   against an unreachable host) holds that lock for its entire duration, and
+ *   every subsequent same-session request - all the other CSRF-protected POSTs:
+ *   saveCredentials, generateKey, ... - BLOCKS inside session_start() waiting on
+ *   it. The result is exactly the observed symptom: one slow/stuck discover and
+ *   suddenly every POST hangs.
+ *
+ *   Closing the session as early as possible (we hold nothing in it - the only
+ *   read is the csrf_token fallback in ur_expected_csrf_token, which has already
+ *   run by the time we get here) WRITES IT BACK AND RELEASES THE LOCK, so a long
+ *   request can never serialise other requests behind its session.
+ *
+ * Safe to call unconditionally: it is a no-op when no session is active (e.g.
+ * the unit tests, or a webGui build that doesn't prepend a session). We guard on
+ * session_status() so we never emit a "no active session" warning under
+ * failOnWarning, and never *start* a session just to close it.
+ */
+function ur_release_session_lock(): void
+{
+    if (function_exists('session_status')
+        && session_status() === PHP_SESSION_ACTIVE
+        && function_exists('session_write_close')) {
+        @session_write_close();
+    }
+}
+
+/**
  * Handle POST saveConfig: rebuild the config from the submission, validate
  * every job, and persist on success. Returns JSON describing the outcome.
  *
@@ -979,6 +1014,18 @@ function ur_action_discover_host_key(): void
     $timeout = isset($_POST['timeout']) ? (int) $_POST['timeout'] : 10;
 
     $cls = ur_keytools_class();
+
+    // Defence-in-depth: even though KeyTools enforces its own ~30s wall-clock
+    // deadline (and kills a hanging ssh-keyscan child), cap the PHP execution
+    // time of THIS request too, so a wedged request can never live forever and
+    // hold resources. The cap is the discover cap plus a grace > the SIGTERM ->
+    // SIGKILL teardown window, so a clean timeout still returns its 504 before
+    // this fires. Skipped in tests (no live request to bound) and a no-op if the
+    // function is disabled. set_time_limit also RESETS the timer, so any time
+    // already spent in the request before this point doesn't count against it.
+    if (!defined('UR_HANDLER_TESTING') && function_exists('set_time_limit')) {
+        @set_time_limit($cls::discoverTimeoutMax() + 10);
+    }
     $res = $cls::discoverHostKey($host, $port, $timeout);
     if (empty($res['ok'])) {
         // A wall-clock timeout is distinct from a "host unreachable / no key"
@@ -1551,6 +1598,10 @@ function ur_dispatch(): void
             if (!ur_check_csrf()) {
                 return; // ur_check_csrf already responded
             }
+            // CSRF is verified (and the session's csrf_token, if any, has been
+            // read) - release the webGui session lock so this POST can never
+            // serialise other same-session requests behind it.
+            ur_release_session_lock();
             ur_action_save_config();
             return;
 
@@ -1571,6 +1622,12 @@ function ur_dispatch(): void
             if (!ur_check_csrf()) {
                 return; // ur_check_csrf already responded
             }
+            // CSRF is verified (and the session's csrf_token, if any, has been
+            // read) - release the webGui session lock NOW, before any potentially
+            // slow action (notably discoverHostKey's up-to-30s ssh-keyscan). This
+            // is what stops a slow/stuck request from blocking every other
+            // same-session POST inside session_start(). See ur_release_session_lock.
+            ur_release_session_lock();
             switch ($action) {
                 case 'saveCredentials':   ur_action_save_credentials();   return;
                 case 'generateKey':       ur_action_generate_key();       return;
