@@ -283,10 +283,10 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
     </select>
     <button type="button" id="ur-key-generate"><?=_('Generate key')?></button>
   </dd>
-  <dt><label for="ur_key_import_priv"><?=_('Import private key')?></label><?=ur_required_mark()?>:</dt>
+  <dt><label for="ur_key_import_priv"><?=_('Import private key')?></label>:</dt>
   <dd>
-    <textarea id="ur_key_import_priv" rows="4" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" autocomplete="off" required></textarea>
-    <blockquote class="inline_help"><p><?=_('The private key must have an EMPTY passphrase (jobs run unattended). The public key and fingerprint are derived automatically. For an import you must provide at least the private key (the public key field is optional); the server enforces this either/or rule')?>.</p></blockquote>
+    <textarea id="ur_key_import_priv" rows="4" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" autocomplete="off"></textarea>
+    <blockquote class="inline_help"><p><?=_('A private key must have an EMPTY passphrase (jobs run unattended); its public key and fingerprint are derived automatically. Provide at least ONE of the private or public key fields — the server enforces this either/or rule')?>.</p></blockquote>
   </dd>
   <dt><label for="ur_key_import_pub"><?=_('Import public key (optional)')?></label>:</dt>
   <dd>

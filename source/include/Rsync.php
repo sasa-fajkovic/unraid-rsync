@@ -179,7 +179,10 @@ class Rsync
     }
 
     /**
-     * Run `<rsync> --version` (no shell) and return its combined stdout. Live
+     * Run `<rsync> --version` (no shell) and return its STDOUT (rsync prints its
+     * version banner to stdout). stderr is fully drained too - even though the
+     * version banner goes to stdout, leaving stderr unread risks the child
+     * blocking if it ever writes there, so we read both before proc_close. Live
      * implementation uses proc_open with the argv ARRAY. Overridable in tests.
      */
     protected static function runVersionProbe(string $rsyncPath): string
@@ -194,7 +197,10 @@ class Rsync
         if (!is_resource($proc)) {
             return '';
         }
+        // Drain BOTH pipes so the child can never block writing to a full stderr
+        // buffer while we wait on stdout. We return stdout (the version banner).
         $stdout = stream_get_contents($pipes[1]);
+        stream_get_contents($pipes[2]); // drain + discard stderr
         fclose($pipes[1]);
         fclose($pipes[2]);
         proc_close($proc);
@@ -308,7 +314,7 @@ class Rsync
      *
      * Order:
      *   [sshpassPrefix...]                         (PASSWORD auth only; [] otherwise)
-     *   rsync
+     *   <rsyncPath()>                              (the resolved binary, default /usr/bin/rsync)
      *   <whitelisted option tokens>
      *   <log-level verbosity flags>
      *   --log-file=<runLog>
@@ -358,7 +364,14 @@ class Rsync
             $argv[] = (string) $tok;
         }
 
-        $argv[] = 'rsync';
+        // Use the SAME resolved binary the presence check validates
+        // (rsyncPath(), default /usr/bin/rsync) as argv[0], rather than the bare
+        // name "rsync" resolved via PATH. This closes a gap where rsyncAvailable()
+        // could pass for /usr/bin/rsync while a different "rsync" earlier on PATH
+        // actually ran (a PATH-hijack vector), and makes $rsyncPathOverride affect
+        // the real run, not just the check. proc_open is fed the argv array
+        // without a shell, so this absolute path is exec'd directly.
+        $argv[] = self::rsyncPath();
 
         foreach (self::optionTokens($opts) as $tok) {
             $argv[] = $tok;

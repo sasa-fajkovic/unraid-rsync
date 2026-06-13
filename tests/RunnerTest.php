@@ -291,7 +291,10 @@ final class RunnerTest extends TestCase
         $id = $this->saveLocalJob('j-local');
         Runner::run($id, false);
         $this->assertNotNull($seenArgv);
-        $this->assertSame('rsync', $seenArgv[0], 'LOCAL: rsync is the program, no sshpass prefix');
+        // argv[0] is the RESOLVED rsync binary (here the test override), proving
+        // the run uses the same path the presence check validates - not a bare
+        // "rsync" resolved via PATH. No sshpass prefix on a LOCAL job.
+        $this->assertSame(Rsync::rsyncPath(), $seenArgv[0], 'LOCAL: the resolved rsync binary is the program, no sshpass prefix');
         $this->assertNotContains('-e', $seenArgv, 'LOCAL: no -e transport');
         // operands resolved local -> remote (both local paths) after --.
         $dd = array_search('--', $seenArgv, true);

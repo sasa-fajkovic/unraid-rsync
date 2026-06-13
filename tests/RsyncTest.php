@@ -157,7 +157,7 @@ final class RsyncTest extends TestCase
         $opts = $this->emptyOpts();
         $opts['archive'] = true;
         $argv = Rsync::buildArgv($opts, 'normal', '/rt/logs/j/run.log', '/mnt/user/src/', '/mnt/disk1/dst/');
-        $this->assertSame('rsync', $argv[0], 'LOCAL: no sshpass prefix, rsync is first');
+        $this->assertSame(Rsync::rsyncPath(), $argv[0], 'LOCAL: no sshpass prefix, the resolved rsync binary is first');
         $this->assertContains('-a', $argv);
         $this->assertContains('--log-file=/rt/logs/j/run.log', $argv);
         $this->assertNotContains('-e', $argv, 'LOCAL has no -e transport');
@@ -178,7 +178,7 @@ final class RsyncTest extends TestCase
         ];
         $opts = $this->emptyOpts();
         $argv = Rsync::buildArgv($opts, 'quiet', '/rt/run.log', '/mnt/user/s/', 'user@host:/data/', $ssh);
-        $this->assertSame('rsync', $argv[0]);
+        $this->assertSame(Rsync::rsyncPath(), $argv[0]);
         $eIdx = array_search('-e', $argv, true);
         $this->assertNotFalse($eIdx, 'SSH transport must inject -e');
         $this->assertSame($ssh['dashE'], $argv[$eIdx + 1]);
@@ -197,7 +197,7 @@ final class RsyncTest extends TestCase
         $opts = $this->emptyOpts();
         $argv = Rsync::buildArgv($opts, 'normal', '/rt/run.log', '/mnt/user/s/', 'user@host:/d/', $ssh);
         $this->assertSame(['/usr/bin/sshpass', '-f', '/tmp/pass/tok'], array_slice($argv, 0, 3));
-        $this->assertSame('rsync', $argv[3], 'rsync follows the sshpass prefix');
+        $this->assertSame(Rsync::rsyncPath(), $argv[3], 'the rsync binary follows the sshpass prefix');
         $this->assertContains('-e', $argv);
     }
 
