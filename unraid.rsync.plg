@@ -79,7 +79,11 @@
       # an install log so they don't clutter the banner below. Both remain
       # non-fatal (|| true) - the install banner reflects whether the PACKAGE
       # landed, which is verified separately further down.
+      # Truncate (create) the log up front so each install/upgrade starts a fresh
+      # file rather than appending across runs; if &plugin; is not writable, fall
+      # back to /dev/null so redirection still works and the steps stay non-fatal.
       log="&plugin;/install.log"
+      : >"$log" 2>/dev/null || log="/dev/null"
       if [ -f "&emhttp;/scripts/apply-cron.php" ]; then
         php "&emhttp;/scripts/apply-cron.php" >>"$log" 2>&amp;1 || true
       fi
@@ -110,7 +114,8 @@
         echo ""
         echo "  The package did not extract: expected files are missing under"
         echo "  &emhttp;"
-        echo "  Check the install output above and &plugin;/install.log."
+        echo "  Check the install output above, and this log for details:"
+        echo "    &plugin;/install.log"
         echo "==================================================================="
         echo ""
         exit 1
