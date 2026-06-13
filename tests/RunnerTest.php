@@ -286,24 +286,50 @@ final class RunnerTest extends TestCase
         $this->assertSame('no-pairs', $res['reason'] ?? '');
     }
 
-    public function testAbortFlagSetBeforeRunYieldsAbortedAndSkipsRsync(): void
+    public function testAbortBetweenPairsYieldsAbortedAndStopsRemainingPairs(): void
     {
+        // The runner clears any STALE abort flag at run start (so a leftover flag
+        // from a previous run can't poison a fresh one) and polls it BEFORE each
+        // pair. So we request the abort from inside the first pair's rsync; the
+        // SECOND pair's pre-loop poll then sees it and stops the run.
+        $id = $this->saveLocalJob('j-multi', [
+            'postHook' => 'POST',
+            'pairs'    => [
+                ['local' => '/mnt/user/a/', 'remote' => '/mnt/disk1/a/'],
+                ['local' => '/mnt/user/b/', 'remote' => '/mnt/disk1/b/'],
+            ],
+        ]);
+        $rsyncCalls = 0;
+        Rsync::$runner = function (array $argv, $onOutput) use (&$rsyncCalls, $id): int {
+            $rsyncCalls++;
+            if ($rsyncCalls === 1) {
+                RunState::requestAbort($id); // user clicks Abort during pair #1
+            }
+            return 0;
+        };
+        $res = Runner::run($id, false);
+        $this->assertSame(Rsync::STATE_ABORTED, $res['state']);
+        $this->assertSame(143, $res['exitCode']);
+        $this->assertSame(1, $rsyncCalls, 'only pair #1 ran; the abort stopped pair #2');
+        // postHook still ran, seeing ABORTED.
+        $this->assertContains('hook:POST:ABORTED', $this->trace);
+        // The abort flag is cleared at the end of the run.
+        $this->assertFalse(RunState::abortRequested($id));
+    }
+
+    public function testStaleAbortFlagIsClearedAtRunStart(): void
+    {
+        // A leftover abort flag from a prior run must NOT abort a fresh run.
         $rsyncCalls = 0;
         Rsync::$runner = function (array $argv, $onOutput) use (&$rsyncCalls): int {
             $rsyncCalls++;
             return 0;
         };
-        $id = $this->saveLocalJob('j-local', ['postHook' => 'POST']);
-        // Pre-set the abort flag: the runner polls it before the first pair.
-        RunState::requestAbort($id);
+        $id = $this->saveLocalJob('j-local');
+        RunState::requestAbort($id); // stale flag from "before"
         $res = Runner::run($id, false);
-        $this->assertSame(Rsync::STATE_ABORTED, $res['state']);
-        $this->assertSame(143, $res['exitCode']);
-        $this->assertSame(0, $rsyncCalls, 'no pair runs once abort is requested');
-        // postHook still ran, seeing ABORTED.
-        $this->assertContains('hook:POST:ABORTED', $this->trace);
-        // The abort flag is cleared at the end of the run.
-        $this->assertFalse(RunState::abortRequested($id));
+        $this->assertSame(Rsync::STATE_SUCCESS, $res['state']);
+        $this->assertSame(1, $rsyncCalls, 'a stale abort flag is cleared at run start');
     }
 
     public function testRunnerCliArgParsing(): void

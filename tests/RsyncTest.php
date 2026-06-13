@@ -12,10 +12,19 @@ use PHPUnit\Framework\TestCase;
  */
 final class RsyncTest extends TestCase
 {
-    /** A canonical (full whitelist) options object with everything off/empty. */
+    /**
+     * A canonical (full whitelist) options object with EVERY boolean explicitly
+     * OFF and every value empty. NB: Config::defaultRsyncOptions() turns some
+     * booleans (archive/humanReadable/partial) ON by default, so we cannot use
+     * the bare defaults as an "empty" baseline - we force every boolean false.
+     */
     private function emptyOpts(): array
     {
-        return Config::mergeRsyncOptions([]);
+        $opts = Config::mergeRsyncOptions([]);
+        foreach (Job::BOOL_OPTION_KEYS as $key) {
+            $opts[$key] = false;
+        }
+        return $opts;
     }
 
     public function testWhitelistKeysMatchJobModel(): void
