@@ -1,0 +1,64 @@
+name: Lint
+
+# Lightweight static checks that run on every push / PR. (The release workflow
+# only runs on a version tag, so this gives PRs a fast, dependency-light gate.)
+#
+# Checks:
+#   - .plg is well-formed XML (xmllint)
+#   - pkg_build.sh has valid bash syntax (bash -n) + shellcheck
+#   - every PHP file lints (php -l), including the PHP body of each .page shim
+#     (the part after the `---` separator)
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Validate .plg is well-formed XML
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libxml2-utils
+          xmllint --noout unraid.rsync.plg
+          echo "unraid.rsync.plg: well-formed XML"
+
+      - name: Check pkg_build.sh syntax + shellcheck
+        run: |
+          bash -n pkg_build.sh
+          sudo apt-get install -y -qq shellcheck
+          shellcheck pkg_build.sh
+          echo "pkg_build.sh: syntax + shellcheck clean"
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.2"
+
+      - name: php -l on PHP files and .page bodies
+        run: |
+          set -e
+          # Standalone PHP files
+          find source -name "*.php" -print0 | while IFS= read -r -d '' f; do
+            echo "linting $f"
+            php -l "$f"
+          done
+          # .page shims: lint only the PHP body (after the line that is exactly ---)
+          for pg in $(find source -name "*.page"); do
+            body="$(mktemp --suffix=.php)"
+            awk 'p{print} /^---$/{p=1}' "$pg" > "$body"
+            if [ -s "$body" ]; then
+              echo "linting PHP body of $pg"
+              php -l "$body"
+            fi
+            rm -f "$body"
+          done
+          echo "all PHP lints clean"

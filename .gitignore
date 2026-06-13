@@ -1,0 +1,14 @@
+# Build output: the versioned .txz packages are attached to GitHub Releases,
+# never committed to the repo.
+/archive/
+
+# Build temp dirs / staging
+/tmp/
+*.tmp
+
+# OS / editor cruft
+.DS_Store
+*.swp
+
+# Sublime SFTP config sometimes used when sideloading to a live Unraid box
+sftp-config.json

@@ -1,0 +1,82 @@
+<?xml version="1.0" standalone="yes"?>
+<!DOCTYPE PLUGIN [
+  <!ENTITY repoName        "unraid-rsync">
+  <!ENTITY pluginName      "unraid.rsync">
+  <!ENTITY gitUser         "sasa-fajkovic">
+  <!ENTITY version         "2026.06.13">
+  <!ENTITY gitBranch       "main">
+  <!ENTITY releaseLocation "https://github.com/&gitUser;/&repoName;/releases/download/&version;">
+  <!ENTITY pluginURL       "https://raw.githubusercontent.com/&gitUser;/&repoName;/&gitBranch;/&pluginName;.plg">
+  <!ENTITY plugin          "/boot/config/plugins/&pluginName;">
+  <!ENTITY emhttp          "/usr/local/emhttp/plugins/&pluginName;">
+  <!-- md5 is intentionally empty in source control. pkg_build.sh computes it
+       from the freshly built .txz and rewrites this ENTITY (together with
+       version) at release time; the release workflow commits the regenerated
+       .plg back to the default branch, so the raw .plg URL users install from
+       always carries a real md5 that matches the released package. Never
+       hand-edit version/md5 - they must change together. -->
+  <!ENTITY md5             "">
+]>
+<PLUGIN name="&pluginName;" author="sasa-fajkovic" version="&version;"
+        launch="Settings/UnraidRsync" pluginURL="&pluginURL;" icon="refresh"
+        min="7.0.0" support="https://github.com/sasa-fajkovic/unraid-rsync/issues">
+  <CHANGES>
+### 2026.06.13
+- Initial skeleton release.
+  </CHANGES>
+
+  <!-- Remove cached .txz packages from previous versions -->
+  <FILE Run="/bin/bash">
+    <INLINE>
+      # Delete any cached .txz on /boot that is not exactly the current version.
+      # We keep ONLY the exact current filename and delete the rest, rather than
+      # excluding by substring: a substring match on the version would wrongly
+      # spare e.g. "...-2026.06.13a.txz" when the current version is
+      # "2026.06.13". find -delete also avoids parsing `ls`.
+      find &plugin; -maxdepth 1 -type f -name '&pluginName;-*.txz' \
+        ! -name '&pluginName;-&version;.txz' -delete 2>/dev/null
+      # Remove any installed package whose version differs from this one.
+      # removepkg expects a package NAME (the basename in /var/log/packages),
+      # not a full path. Our package installs as exactly "NAME-VERSION" (the
+      # .txz is named NAME-VERSION.txz with no ARCH-BUILD suffix), so the keep
+      # patterns are "NAME-VERSION" and, defensively, "NAME-VERSION-*" in case a
+      # future build ever adds an arch/build suffix. Matching the version with a
+      # delimiter on BOTH sides (start-of-name and end/dash) is what stops a
+      # different version that merely shares this one as a prefix - e.g. a
+      # same-day respin "NAME-VERSIONa" - from being mistakenly kept.
+      for p in /var/log/packages/&pluginName;-*; do
+        [ -e "$p" ] || continue
+        name="$(basename "$p")"
+        case "$name" in
+          &pluginName;-&version;|&pluginName;-&version;-*) ;;  # current version: keep
+          *) removepkg "$name" 2>/dev/null ;;                 # any other version: remove
+        esac
+      done
+    </INLINE>
+  </FILE>
+
+  <!-- Download + install the package; upgradepkg verifies the MD5 -->
+  <FILE Name="/boot/config/plugins/&pluginName;/&pluginName;-&version;.txz" Run="upgradepkg --install-new">
+    <URL>&releaseLocation;/&pluginName;-&version;.txz</URL>
+    <MD5>&md5;</MD5>
+  </FILE>
+
+  <FILE Run="/bin/bash">
+    <INLINE>
+      echo ""
+      echo "Unraid Rsync &version; installed."
+      echo "Open Settings -> Unraid Rsync to configure."
+      echo ""
+    </INLINE>
+  </FILE>
+
+  <!-- Uninstall: clean both the emhttp runtime tree and the persistent /boot config -->
+  <FILE Run="/bin/bash" Method="remove">
+    <INLINE>
+      removepkg &pluginName;-&version;
+      rm -rf &emhttp;
+      rm -rf &plugin;
+      echo "Unraid Rsync uninstalled."
+    </INLINE>
+  </FILE>
+</PLUGIN>

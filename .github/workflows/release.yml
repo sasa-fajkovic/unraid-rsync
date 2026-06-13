@@ -1,0 +1,129 @@
+name: Release
+
+# Build the Slackware .txz inside aclemons/slackware:15.0, regenerate the .plg
+# (version + md5), commit the regenerated manifest to the default branch, and
+# publish a GitHub Release with the .txz asset.
+#
+# Triggers:
+#   - pushing a tag shaped like YYYY.MM.DD with an optional same-day suffix
+#     letter (e.g. 2026.06.13 or 2026.06.13a - see RELEASING.md), or
+#   - manual workflow_dispatch with an explicit version input.
+#
+# Reproducibility: on a tag push the .txz is built from the TAGGED commit (not
+# the branch tip), so the published artifact always matches the code at the tag.
+# The regenerated .plg (version + md5) is then committed to the default branch
+# in a separate step, since the raw .plg URL users install from lives there.
+
+on:
+  push:
+    tags:
+      # YYYY.MM.DD plus an optional trailing lowercase letter for same-day respins.
+      - "20[0-9][0-9].[0-9][0-9].[0-9][0-9]"
+      - "20[0-9][0-9].[0-9][0-9].[0-9][0-9][a-z]"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build (YYYY.MM.DD). Defaults to today if blank."
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          # Full history so both the tag ref (to build from) and the default
+          # branch (to commit the regenerated .plg to) are available locally.
+          fetch-depth: 0
+
+      - name: Determine version + build ref
+        id: version
+        # The dispatch input is user-controlled, so it is passed via env (never
+        # interpolated into the shell with ${{ }}) and then format-validated
+        # before use. This avoids shell injection in a workflow that has
+        # contents: write.
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          GIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "push" ]; then
+            # Tag push: the tag name is the version (refs/tags/<version>).
+            version="${GITHUB_REF#refs/tags/}"
+            build_ref="$version"            # build from the tagged commit
+          elif [ -n "$INPUT_VERSION" ]; then
+            version="$INPUT_VERSION"
+            build_ref="$GIT_SHA"            # dispatch: build from the commit it ran on
+          else
+            version="$(date +%Y.%m.%d)"
+            build_ref="$GIT_SHA"
+          fi
+          # Validate against the documented scheme (YYYY.MM.DD[suffix-letter]).
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]{4}\.[0-9]{2}\.[0-9]{2}[a-z]?$'; then
+            echo "ERROR: invalid version '$version' (expected YYYY.MM.DD or YYYY.MM.DDx)." >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "build_ref=$build_ref" >> "$GITHUB_OUTPUT"
+          echo "Building version $version from ref $build_ref"
+
+      - name: Check out the build ref (so artifacts match the tag)
+        env:
+          BUILD_REF: ${{ steps.version.outputs.build_ref }}
+        run: git checkout --quiet "$BUILD_REF"
+
+      - name: Build .txz inside Slackware container
+        # VERSION (validated above) is passed into the container via -e and
+        # referenced as a shell variable rather than interpolated with ${{ }},
+        # so it cannot break out of the shell command.
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          docker run --rm -e VERSION -v "${{ github.workspace }}":/workspace -w /workspace \
+            aclemons/slackware:15.0 \
+            bash -c './pkg_build.sh -y -V "$VERSION"'
+          sudo chown -R "$(id -u):$(id -g)" .
+
+      - name: Commit regenerated .plg to the default branch
+        run: |
+          set -euo pipefail
+          default_branch="${{ github.event.repository.default_branch }}"
+          # pkg_build.sh rewrote unraid.rsync.plg at the build ref. Preserve that
+          # regenerated manifest, switch to the default branch, and apply it
+          # there - the raw .plg URL users install from lives on the branch.
+          cp unraid.rsync.plg /tmp/unraid.rsync.plg.built
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # Discard the build-ref working-tree changes (the .txz lives in archive/
+          # which is gitignored), then move onto the branch.
+          git checkout --quiet -- . || true
+          git checkout --quiet "$default_branch"
+          cp /tmp/unraid.rsync.plg.built unraid.rsync.plg
+          git add unraid.rsync.plg
+          if git diff --cached --quiet; then
+            echo "No manifest changes to commit."
+            exit 0
+          fi
+          git commit -m "Release ${{ steps.version.outputs.version }}"
+          # Fail the workflow if the push fails: the raw .plg URL depends on the
+          # regenerated manifest (real version+md5) reaching the branch.
+          git push origin "HEAD:$default_branch"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          # On workflow_dispatch the tag does not exist yet and the action would
+          # create it at the currently checked-out commit (the default branch
+          # HEAD by this point). Pin it to build_ref - the commit the .txz was
+          # actually built from - so the tag/release matches the artifact. On a
+          # tag push the tag already exists and this is a harmless no-op.
+          target_commitish: ${{ steps.version.outputs.build_ref }}
+          files: archive/*.txz
+          generate_release_notes: true
