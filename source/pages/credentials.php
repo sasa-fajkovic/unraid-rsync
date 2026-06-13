@@ -241,6 +241,24 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
 .ur-discover-bar-fill { width: 0%; height: 100%; border-radius: 4px;
   background: var(--blue-500, #2196f3); transition: width 0.1s linear; }
 .ur-discover-label { color: var(--color-text-secondary, #777); white-space: nowrap; }
+/* Terminal states for the discover progress: the bar must visibly resolve to
+   success (green) or fail (red) rather than just vanishing, so the user always
+   sees the outcome. Colours reuse the dynamix palette vars already used in this
+   file for the required-asterisk red, with sane fallbacks. */
+.ur-discover-progress.is-success .ur-discover-bar-fill { background: var(--green, #1c7d3f); }
+.ur-discover-progress.is-success .ur-discover-label { color: var(--green, #1c7d3f); }
+.ur-discover-progress.is-fail .ur-discover-bar-fill { background: var(--red-800, #b71c1c); }
+.ur-discover-progress.is-fail .ur-discover-label { color: var(--red-800, #b71c1c); white-space: normal; }
+
+/* Inline two-step delete confirm: an "armed" Delete/Remove button reuses the
+   required-asterisk red so the destructive intent reads clearly, and the
+   consequence warning is shown inline next to it (never in a popup). */
+.ur-armed-delete { color: var(--red-800, #b71c1c); border-color: var(--red-800, #b71c1c); font-weight: bold; }
+
+/* Inline copy-public-key fallback box (shown only when navigator.clipboard is
+   unavailable): a readonly, selectable rendering of the key the user can copy
+   by hand. */
+.ur-copy-pub-fallback { display: block; width: 100%; margin-top: 6px; font-family: monospace; font-size: 0.85em; }
 </style>
 <div class="title">
   <span class="left">
@@ -522,6 +540,99 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
     return (fallback || 'Request failed') + ' (HTTP ' + res.status + ').';
   }
 
+  /* ---- two-step inline delete confirm (replaces window.confirm) ----
+   * First click on a Delete/Remove button ARMS it: the label becomes
+   * "Confirm delete?", a red "armed" class is applied, and the destructive
+   * consequence is shown inline in the supplied result element so the warning is
+   * never lost. A second click within ARM_WINDOW_MS runs the delete; otherwise it
+   * auto-reverts. Re-clicking a DIFFERENT armed button cancels any other. This is
+   * non-blocking — there is no popup and automation is never frozen. */
+  var ARM_WINDOW_MS = 4000;
+
+  // At most ONE delete button is armed at a time. Arming a new one disarms the
+  // previous, so two destructive buttons can never be armed simultaneously.
+  var armedDeleteBtn = null;
+
+  function disarmDelete(btn) {
+    if (!btn || !btn._urArm) { return; }
+    clearTimeout(btn._urArm.timer);
+    btn.textContent = btn._urArm.label;
+    btn.classList.remove('ur-armed-delete');
+    var resultEl = btn._urArm.resultEl;
+    var armedMsg = btn._urArm.message;
+    // Only clear the inline warning if it STILL shows OUR exact armed message.
+    // Other flows (key generate/import, the delete's own success/error) call
+    // show(...) on the same element WITHOUT clearing data-ur-armed, so checking
+    // the attribute alone could stomp an unrelated later message; matching the
+    // text too makes the clear safe.
+    if (resultEl && resultEl.getAttribute('data-ur-armed') === '1'
+        && resultEl.textContent === armedMsg) {
+      resultEl.className = 'ur-result';
+      resultEl.textContent = '';
+      resultEl.removeAttribute('data-ur-armed');
+    } else if (resultEl && resultEl.getAttribute('data-ur-armed') === '1') {
+      // Message was replaced by another flow; just drop our marker.
+      resultEl.removeAttribute('data-ur-armed');
+    }
+    btn._urArm = null;
+    if (armedDeleteBtn === btn) { armedDeleteBtn = null; }
+  }
+
+  function armOrConfirmDelete(btn, opts) {
+    if (btn._urArm) {            // second click within the window -> do it
+      var run = btn._urArm.run;
+      disarmDelete(btn);
+      run();
+      return;
+    }
+    // Arming a new button cancels any other still-armed one.
+    if (armedDeleteBtn && armedDeleteBtn !== btn) { disarmDelete(armedDeleteBtn); }
+    var message = (opts.warning || '') + ' Click "Confirm delete?" again to proceed.';
+    btn._urArm = {
+      label: btn.textContent,
+      resultEl: opts.resultEl || null,
+      message: message,
+      run: opts.run,
+      timer: setTimeout(function () { disarmDelete(btn); }, ARM_WINDOW_MS)
+    };
+    armedDeleteBtn = btn;
+    btn.textContent = 'Confirm delete?';
+    btn.classList.add('ur-armed-delete');
+    if (opts.resultEl && opts.warning) {
+      // Reuse the existing result element to surface the consequence inline.
+      // It is plain text via .textContent (no HTML injection).
+      opts.resultEl.className = 'ur-result ur-err';
+      opts.resultEl.textContent = message;
+      opts.resultEl.setAttribute('data-ur-armed', '1');
+    }
+  }
+
+  /* ---- inline copy-public-key fallback (replaces window.prompt) ----
+   * When the Clipboard API is unavailable, reveal the key in a readonly,
+   * pre-selected text field next to the button so the user can copy it manually.
+   * Non-blocking; one reusable field per button. */
+  function revealPublicKeyInline(btn, pub) {
+    var field = btn._urPubField;
+    if (!field) {
+      field = document.createElement('input');
+      field.type = 'text';
+      field.readOnly = true;
+      field.className = 'ur-copy-pub-fallback';
+      btn._urPubField = field;
+      if (btn.parentNode) {
+        if (btn.nextSibling) { btn.parentNode.insertBefore(field, btn.nextSibling); }
+        else { btn.parentNode.appendChild(field); }
+      }
+    }
+    field.value = pub;
+    field.title = 'Copy manually: select all and copy';
+    field.focus();
+    field.select();
+    var old = btn.textContent;
+    btn.textContent = 'Copy manually:';
+    setTimeout(function () { btn.textContent = old; }, 1600);
+  }
+
   /* ---- key generate / import ---- */
   var keyResult = document.getElementById('ur-key-result');
 
@@ -576,33 +687,51 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
           setTimeout(function () { t.textContent = old; }, 1200);
         });
       } else {
-        window.prompt('Public key:', pub);
+        // No Clipboard API (e.g. non-secure context): reveal the key inline in a
+        // readonly, pre-selected field so the user can copy it by hand. This is
+        // non-blocking — no popup. Reuse one field per button.
+        revealPublicKeyInline(t, pub);
       }
     } else if (t.classList.contains('ur-key-del-saved')) {
-      var kid = t.getAttribute('data-key-id');
-      var kname = t.getAttribute('data-key-name') || kid;
-      if (!window.confirm('Delete key "' + kname + '"? Connections that use it must be repointed first.')) { return; }
-      postForm({ action: 'deleteKey', id: kid }).then(function (res) {
-        if (res.ok && res.body && res.body.ok) {
-          window.location.reload();
-        } else {
-          show(keyResult, false, errText(res, 'Delete failed.'));
+      // Two-step inline confirm (no popup). First click arms the button and shows
+      // the destructive-consequence warning inline; a second click within the
+      // window performs the delete.
+      armOrConfirmDelete(t, {
+        warning: 'Delete key "' + (t.getAttribute('data-key-name') || t.getAttribute('data-key-id')) + '"? '
+          + 'Connections that use it must be repointed first.',
+        resultEl: keyResult,
+        run: function () {
+          var kid = t.getAttribute('data-key-id');
+          postForm({ action: 'deleteKey', id: kid }).then(function (res) {
+            if (res.ok && res.body && res.body.ok) {
+              window.location.reload();
+            } else {
+              show(keyResult, false, errText(res, 'Delete failed.'));
+            }
+          }).catch(function (e) { show(keyResult, false, 'Unexpected error: ' + (e && e.message ? e.message : e)); });
         }
-      }).catch(function (e) { show(keyResult, false, 'Unexpected error: ' + (e && e.message ? e.message : e)); });
+      });
     } else if (t.classList.contains('ur-conn-del')) {
       var card = t.closest ? t.closest('.ur-conn-card') : null;
       if (!card) { return; }
       var savedId = card.getAttribute('data-conn-id') || '';
       if (savedId) {
-        if (!window.confirm('Delete this saved connection? Jobs that use it will be DISABLED.')) { return; }
-        postForm({ action: 'deleteConnection', id: savedId }).then(function (res) {
-          if (res.ok && res.body && res.body.ok) {
-            show(document.getElementById('ur-conns-result'), true, res.body.message || 'Deleted.');
-            setTimeout(function () { window.location.reload(); }, 800);
-          } else {
-            show(document.getElementById('ur-conns-result'), false, errText(res, 'Delete failed.'));
+        // Two-step inline confirm (no popup), same pattern as key delete.
+        var connsResult = document.getElementById('ur-conns-result');
+        armOrConfirmDelete(t, {
+          warning: 'Delete this saved connection? Jobs that use it will be DISABLED.',
+          resultEl: connsResult,
+          run: function () {
+            postForm({ action: 'deleteConnection', id: savedId }).then(function (res) {
+              if (res.ok && res.body && res.body.ok) {
+                show(connsResult, true, res.body.message || 'Deleted.');
+                setTimeout(function () { window.location.reload(); }, 800);
+              } else {
+                show(connsResult, false, errText(res, 'Delete failed.'));
+              }
+            }).catch(function (e) { show(connsResult, false, 'Unexpected error: ' + (e && e.message ? e.message : e)); });
           }
-        }).catch(function (e) { show(document.getElementById('ur-conns-result'), false, 'Unexpected error: ' + (e && e.message ? e.message : e)); });
+        });
       } else if (card.parentNode) {
         card.parentNode.removeChild(card); // unsaved card: just remove from DOM
       }
@@ -681,20 +810,23 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
    * progress bar + countdown advance toward 30s so the user knows it is working
    * and roughly how long it can take. The fetch is itself aborted client-side at
    * 35s via AbortController, so a stalled backend can never leave the UI spinning
-   * forever; a timeout/error shows a clear inline message and re-enables the
-   * button. The abort budget sits ABOVE the server's worst-case response time
-   * (DISCOVER_TIMEOUT_MAX 30s + DISCOVER_TIMEOUT_GRACE 2s + up to ~1s for SIGKILL
-   * ≈ 33s) so that, whenever possible, the user gets the server's structured
-   * timeout (504) message rather than a generic client-side abort. */
+   * forever. The progress widget always VISIBLY RESOLVES to a success (green,
+   * 100%) or fail (red, with the concrete reason) terminal state — never a
+   * blocking popup — then auto-clears. The abort budget sits ABOVE the server's
+   * worst-case response time (DISCOVER_TIMEOUT_MAX 30s + DISCOVER_TIMEOUT_GRACE 2s
+   * + up to ~1s for SIGKILL ≈ 33s) so that, whenever possible, the user gets the
+   * server's structured timeout (504) message rather than a generic client-side
+   * abort. */
   var DISCOVER_MAX_SECONDS = 30;          // mirrors KeyTools::DISCOVER_TIMEOUT_MAX
   var DISCOVER_CLIENT_ABORT_MS = 35000;   // > server worst-case (~33s) so the 504 wins
+  var DISCOVER_SUCCESS_HIDE_MS = 2000;    // keep the green "done" state briefly, then hide
+  var DISCOVER_FAIL_HIDE_MS = 6000;       // keep the red fail+reason longer to read
 
   function discoverHostKey(btn) {
     var idb = btn.getAttribute('data-idb');
     var host = (document.getElementById(idb + '_host').value || '').trim();
     var port = (document.getElementById(idb + '_port').value || '22').trim();
     var ta = document.getElementById(idb + '_hostkey');
-    if (!host) { window.alert('Enter a host first.'); return; }
 
     /* Locate (or build) the progress UI that lives next to this button. */
     var wrap = btn.parentNode;
@@ -710,12 +842,35 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
     var fill  = prog ? prog.querySelector('.ur-discover-bar-fill') : null;
     var label = prog ? prog.querySelector('.ur-discover-label') : null;
 
+    /* Reset any prior terminal state and cancel its pending auto-hide. */
+    if (prog) {
+      prog.classList.remove('is-success', 'is-fail');
+      if (prog._urHideTimer) { clearTimeout(prog._urHideTimer); prog._urHideTimer = null; }
+    }
+
+    /* Missing host: show an inline error in the label area (red), do NOT start
+       the request, do NOT alert. */
+    if (!host) {
+      if (prog) {
+        prog.style.display = 'flex';
+        prog.classList.add('is-fail');
+        if (fill) { fill.style.width = '100%'; }
+        if (label) { label.textContent = 'Enter a host first.'; }
+        prog._urHideTimer = setTimeout(function () {
+          prog.style.display = 'none';
+          prog.classList.remove('is-fail');
+          if (fill) { fill.style.width = '0%'; }
+        }, DISCOVER_FAIL_HIDE_MS);
+      }
+      return;
+    }
+
     var old = btn.textContent;
     btn.disabled = true; btn.textContent = 'Discovering…';
     if (prog) { prog.style.display = 'flex'; }
 
     /* A 100ms ticker advances the bar/countdown toward the 30s cap. It does NOT
-       cancel the request (the AbortController does that at 32s); it only conveys
+       cancel the request (the AbortController does that at 35s); it only conveys
        progress, so it caps the fill at 100% and keeps showing the max. */
     var started = Date.now();
     var ticker = setInterval(function () {
@@ -730,26 +885,59 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
       }
     }, 100);
 
-    function done() {
+    /* Stop the ticker and re-enable the button, but LEAVE the progress widget in
+       place so a terminal (success/fail) state can be shown on it. */
+    function stopTicker() {
       clearInterval(ticker);
       btn.disabled = false; btn.textContent = old;
-      if (prog) { prog.style.display = 'none'; }
-      if (fill) { fill.style.width = '0%'; }
+    }
+
+    function finishSuccess() {
+      stopTicker();
+      if (prog) {
+        prog.classList.remove('is-fail');
+        prog.classList.add('is-success');
+        if (fill) { fill.style.width = '100%'; }
+        if (label) { label.textContent = 'Host key discovered ✓'; }
+        prog._urHideTimer = setTimeout(function () {
+          prog.style.display = 'none';
+          prog.classList.remove('is-success');
+          if (fill) { fill.style.width = '0%'; }
+        }, DISCOVER_SUCCESS_HIDE_MS);
+      }
+    }
+
+    /* Show a red fail terminal state with the concrete reason. The bar reads as
+       complete-but-failed (100%, red); it auto-clears after a while OR when the
+       user clicks Discover again (handled by the reset at the top of this fn). */
+    function finishFail(msg) {
+      stopTicker();
+      if (prog) {
+        prog.classList.remove('is-success');
+        prog.classList.add('is-fail');
+        if (fill) { fill.style.width = '100%'; }
+        if (label) { label.textContent = msg; }
+        prog.style.display = 'flex';
+        prog._urHideTimer = setTimeout(function () {
+          prog.style.display = 'none';
+          prog.classList.remove('is-fail');
+          if (fill) { fill.style.width = '0%'; }
+        }, DISCOVER_FAIL_HIDE_MS);
+      }
     }
 
     postForm(
       { action: 'discoverHostKey', host: host, port: port, timeout: DISCOVER_MAX_SECONDS },
       { timeoutMs: DISCOVER_CLIENT_ABORT_MS }
     ).then(function (res) {
-      done();
       if (res.ok && res.body && res.body.ok) {
         if (ta) { ta.value = res.body.hostKey || ''; }
+        finishSuccess();
       } else {
-        window.alert(errText(res, 'Host key discovery failed.'));
+        finishFail(errText(res, 'Host key discovery failed.'));
       }
     }).catch(function (e) {
-      done();
-      window.alert('Unexpected error: ' + (e && e.message ? e.message : e));
+      finishFail('Unexpected error: ' + (e && e.message ? e.message : e));
     });
   }
 
