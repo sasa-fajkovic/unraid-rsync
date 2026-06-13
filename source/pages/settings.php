@@ -33,6 +33,15 @@ try {
 }
 $defaultOpts = $config['global']['defaultRsyncOptions'] ?? Config::defaultRsyncOptions();
 $handlerUrl  = '/plugins/unraid.rsync/include/handler.php';
+
+/* Emit the option help CSS/JS once, in LIVE page-body context, before the form
+ * (which is the only place this page renders the shared options block). On the
+ * combined tabbed page the Jobs tab emits these first; the static guard inside
+ * the function makes this a no-op then. But when this body is rendered alone (or
+ * the Jobs tab's only option block sat inside the hidden template on a fresh
+ * install), this guarantees the assets are present in live DOM so the "?" help
+ * actually works. */
+ur_emit_option_help_assets();
 ?>
 <style>
 /* Clear Unraid's fixed bottom status bar (#footer, "Array Started", ~30-40px tall
