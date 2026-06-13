@@ -3,9 +3,10 @@
  * RunState.php - per-job RUNTIME state, held in RAM (tmpfs) so it never touches
  * the FAT32 flash and is cleared on reboot.
  *
- * Two files per job under <runtimeBase>/state/:
- *   <jobid>.json   {pid, running, dryRun, startedAt, currentLog}
+ * Files per job under <runtimeBase>/state/:
+ *   <jobid>.json   {jobId, pid, running, dryRun, startedAt, currentLog}
  *   <jobid>.abort  a flag file (its mere existence means "abort requested")
+ *   <jobid>.lock   an advisory flock target for the atomic concurrency guard
  *
  * The interesting part is isRunning(): a stale state file (the worker was
  * killed, the box rebooted into the same pid space, etc.) must NOT make us

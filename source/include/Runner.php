@@ -386,7 +386,8 @@ class Runner
      *
      * @param array<string,mixed> $job
      * @param array<string,mixed> $pair
-     * @param string              $userHost pre-resolved "user@host" (SSH only)
+     * @param string              $transport SSH | LOCAL
+     * @param string              $userHost  pre-resolved "user@host" (SSH only)
      * @return array{src:string,dest:string}
      */
     public static function resolvePair(array $job, array $pair, string $transport, string $userHost = ''): array
