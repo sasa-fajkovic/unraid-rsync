@@ -1126,6 +1126,247 @@ function ur_action_abort_job(): void
     ], 200);
 }
 
+// =====================================================================
+// Phase 6: read-only GET pollers (status / log tails / run list)
+//
+// These are GET, no CSRF (they are side-effect-free reads behind the webGui's
+// own authenticated front controller). Every job id and run-file id is
+// whitelisted against a safe pattern, and every log read is confined to the
+// job's own log dir and BOUNDED in size. Log text returned to the browser is
+// ALREADY HTML-escaped by Logger::tail() - the UI injects it verbatim and must
+// NEVER re-escape or build raw innerHTML from unescaped log bytes.
+// =====================================================================
+
+/** Max bytes a GET log tail returns to the browser (bounds the response). */
+const UR_GET_LOG_TAIL_BYTES = 128 * 1024; // 128 KiB
+
+/** Default number of runs listed by listRuns / the run selector. */
+const UR_LIST_RUNS_DEFAULT = 10;
+
+/**
+ * Whitelist a job id to the slug shape the rest of the plugin produces
+ * ("j-" + lowercase/digits/hyphen, by construction) plus a small tolerance for
+ * any legacy id. We accept [A-Za-z0-9._-] only and a sane length; ANYTHING with
+ * a path separator, "..", NUL, etc. is rejected. This is the gate before a job
+ * id is ever used to build a state/log path. Returns the id on success, '' on
+ * rejection.
+ */
+function ur_safe_job_id(string $id): string
+{
+    // Reject any embedded NUL/control byte BEFORE trimming: trim() strips NULs
+    // and whitespace, which would otherwise silently sanitise a "j-music\0..."
+    // id into a valid one rather than rejecting the tampered input.
+    if (preg_match('/[\x00-\x1f\x7f]/', $id)) {
+        return '';
+    }
+    $id = trim($id);
+    if ($id === '' || strlen($id) > 128) {
+        return '';
+    }
+    // The \D modifier anchors $ at the true string end (not before a trailing
+    // newline), so a "valid prefix + newline" can never sneak through.
+    if (!preg_match('/^[A-Za-z0-9._-]+$/D', $id)) {
+        return '';
+    }
+    // Reject a pure-dots id ("." / "..") which is a traversal even within the
+    // character class above.
+    if (preg_match('/^\.+$/', $id)) {
+        return '';
+    }
+    return $id;
+}
+
+/**
+ * Derive a job's display state from its live running flag + last-run summary.
+ * RUNNING (live) OVERRIDES the summary; otherwise the summary's state is used;
+ * with no summary the job is PENDING (never run). This is the single source of
+ * truth for the badge + the Status tab.
+ *
+ * @param array<string,mixed>|null $summary the readSummary() result (or null)
+ * @return string one of the Rsync STATE_* vocabulary, RUNNING, or PENDING
+ */
+function ur_derive_state(bool $running, ?array $summary): string
+{
+    if ($running) {
+        return 'RUNNING';
+    }
+    if (is_array($summary) && !empty($summary['state'])) {
+        return (string) $summary['state'];
+    }
+    return Rsync::STATE_PENDING; // 'PENDING' - no summary == never run
+}
+
+/**
+ * Normalise a last-run summary into the canonical lastRun JSON shape, or null
+ * when there is no (valid) summary. Defensive against a partial/corrupt file:
+ * any missing field falls back to a safe default.
+ *
+ * @param array<string,mixed>|null $summary
+ * @return array{state:string,startedAt:string,finishedAt:string,exitCode:int,durationSec:int,dryRun:bool}|null
+ */
+function ur_last_run_shape(?array $summary): ?array
+{
+    if (!is_array($summary)) {
+        return null;
+    }
+    return [
+        'state'       => (string) ($summary['state'] ?? ''),
+        'startedAt'   => (string) ($summary['startedAt'] ?? ''),
+        'finishedAt'  => (string) ($summary['finishedAt'] ?? ''),
+        'exitCode'    => (int) ($summary['exitCode'] ?? 0),
+        'durationSec' => (int) ($summary['durationSec'] ?? 0),
+        'dryRun'      => !empty($summary['dryRun']),
+    ];
+}
+
+/**
+ * GET getStatus: a per-job status map for ALL configured jobs. Each entry:
+ *   { running, state, lastRun: {...}|null, nextRun: epoch|null }
+ * running  <- RunState::isRunning (PID-reuse-safe, self-heals stale state)
+ * lastRun  <- Runner::readSummary (the /boot durable summary)
+ * state    <- ur_derive_state (RUNNING overrides summary; PENDING when none)
+ * nextRun  <- Cron::nextRun for an enabled job with a valid schedule, else null
+ *
+ * Side-effect-free (isRunning may CLEAR a provably-stale state file, which is a
+ * self-heal, not a state change driven by this request).
+ */
+function ur_action_get_status(): void
+{
+    try {
+        $config = Config::load();
+    } catch (Throwable $e) {
+        // A read failure here is non-fatal for a poller: report it so the UI can
+        // show a transient error without breaking, rather than 500-ing the poll.
+        sendResponse(['ok' => false, 'error' => 'Configuration could not be read: ' . $e->getMessage(), 'jobs' => []], 200);
+        return;
+    }
+
+    $now  = time();
+    $jobs = (isset($config['jobs']) && is_array($config['jobs'])) ? $config['jobs'] : [];
+    $out  = [];
+
+    foreach ($jobs as $job) {
+        if (!is_array($job)) {
+            continue;
+        }
+        $id = ur_safe_job_id((string) ($job['id'] ?? ''));
+        if ($id === '') {
+            continue;
+        }
+
+        $running = RunState::isRunning($id);
+        $summary = Runner::readSummary($id);
+
+        $nextRun = null;
+        if (!empty($job['enabled'])) {
+            $schedule = trim((string) ($job['schedule'] ?? ''));
+            if ($schedule !== '') {
+                $next = Cron::nextRun($schedule, $now);
+                $nextRun = ($next === null) ? null : (int) $next;
+            }
+        }
+
+        $out[$id] = [
+            'name'    => (string) ($job['name'] ?? $id),
+            'running' => $running,
+            'state'   => ur_derive_state($running, $summary),
+            'lastRun' => ur_last_run_shape($summary),
+            'nextRun' => $nextRun,
+        ];
+    }
+
+    sendResponse(['ok' => true, 'now' => $now, 'jobs' => $out], 200);
+}
+
+/**
+ * GET getJobLog: the HTML-escaped tail of a single run log for a job, plus the
+ * job's live running flag (so the poller knows whether to keep tailing).
+ * Params: id (job id, required) + optional run (a run-file id from listRuns).
+ * With no run id we serve the CURRENT/latest run log. The run id is whitelisted
+ * and confined to the job's log dir (Logger::runLogPathById); a bad/traversing
+ * id is a 400. The tail is bounded.
+ */
+function ur_action_get_job_log(): void
+{
+    $jobId = ur_safe_job_id(isset($_GET['id']) ? (string) $_GET['id'] : '');
+    if ($jobId === '') {
+        sendError('A valid job id is required.', 400);
+        return;
+    }
+
+    $runId = isset($_GET['run']) ? (string) $_GET['run'] : '';
+    if ($runId !== '') {
+        $path = Logger::runLogPathById($jobId, $runId);
+        if ($path === null) {
+            sendError('Invalid run id.', 400);
+            return;
+        }
+    } else {
+        $path = Logger::latestRunLogPath($jobId);
+    }
+
+    // The `running` flag must describe whether the LOG BEING RETURNED is still
+    // being written, not merely whether the job is running - otherwise selecting
+    // an older run while a new one is in flight would mark the stale log "live"
+    // and keep tailing it. The job is running AND the served log is the live one
+    // only when the served run matches the current run's log (RunState.currentLog).
+    $jobRunning = RunState::isRunning($jobId);
+    $servedRun  = ($path !== '') ? Logger::runIdFromPath($path) : '';
+    $running    = false;
+    if ($jobRunning && $servedRun !== '') {
+        $state      = RunState::read($jobId);
+        $currentLog = ($state !== null) ? (string) ($state['currentLog'] ?? '') : '';
+        // currentLog is an absolute path; compare on its basename (the run id).
+        $running = ($currentLog !== '' && basename($currentLog) === $servedRun);
+    }
+
+    // tail() returns '' for a missing/empty file and is ALREADY HTML-escaped.
+    $log = ($path !== '') ? Logger::tail($path, UR_GET_LOG_TAIL_BYTES) : '';
+
+    sendResponse([
+        'ok'      => true,
+        'jobId'   => $jobId,
+        'run'     => $servedRun,
+        'log'     => $log,
+        'running' => $running,
+    ], 200);
+}
+
+/**
+ * GET listRuns: the last N run logs for a job, newest first, as
+ * [{ id, ts, state }] for the viewer's run selector. Bounded by a `limit`
+ * param (default UR_LIST_RUNS_DEFAULT, capped at 200).
+ */
+function ur_action_list_runs(): void
+{
+    $jobId = ur_safe_job_id(isset($_GET['id']) ? (string) $_GET['id'] : '');
+    if ($jobId === '') {
+        sendError('A valid job id is required.', 400);
+        return;
+    }
+
+    $limit = isset($_GET['limit']) ? (int) $_GET['limit'] : UR_LIST_RUNS_DEFAULT;
+    if ($limit <= 0) {
+        $limit = UR_LIST_RUNS_DEFAULT;
+    }
+    if ($limit > 200) {
+        $limit = 200;
+    }
+
+    $runs = Logger::listRuns($jobId, $limit);
+    sendResponse(['ok' => true, 'jobId' => $jobId, 'runs' => $runs], 200);
+}
+
+/**
+ * GET getPluginLog: the HTML-escaped tail of the rolling cross-job plugin.log.
+ * Bounded. No id needed - there is one plugin log.
+ */
+function ur_action_get_plugin_log(): void
+{
+    $log = Logger::tail(Logger::pluginLogPath(), UR_GET_LOG_TAIL_BYTES);
+    sendResponse(['ok' => true, 'log' => $log], 200);
+}
+
 /**
  * Front-controller dispatch. Skipped when included by the test harness
  * (UR_HANDLER_TESTING defined), which calls the individual functions directly.
@@ -1180,6 +1421,25 @@ function ur_handle_request(): void
                 case 'runJob':            ur_action_run_job(false);        return;
                 case 'dryRunJob':         ur_action_run_job(true);         return;
                 case 'abortJob':          ur_action_abort_job();           return;
+            }
+            return;
+
+        // Read-only GET pollers (no CSRF; side-effect-free reads). They must be
+        // GET so a poll never mutates state; reject a POST to one so the contract
+        // is explicit.
+        case 'getStatus':
+        case 'getJobLog':
+        case 'listRuns':
+        case 'getPluginLog':
+            if ($method !== 'GET') {
+                sendError($action . ' requires GET.', 405);
+                return;
+            }
+            switch ($action) {
+                case 'getStatus':     ur_action_get_status();     return;
+                case 'getJobLog':     ur_action_get_job_log();    return;
+                case 'listRuns':      ur_action_list_runs();      return;
+                case 'getPluginLog':  ur_action_get_plugin_log(); return;
             }
             return;
 
