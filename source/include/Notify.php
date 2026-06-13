@@ -11,7 +11,7 @@
  *     via proc_open with an argv array the way rsync is - the only robust,
  *     portable way to invoke it is a single shell command line. That means EVERY
  *     argument we pass - the event name, subject, description, importance (-i),
- *     message and link - is attacker-influencable (a job name can be anything
+ *     message and link - is attacker-influenceable (a job name can be anything
  *     the user typed) and MUST be escapeshellarg'd. This class guarantees that:
  *     buildCommand() quotes EVERY token, including the literal "-i" value, so a
  *     job named `; rm -rf /` becomes a harmless quoted string, never a second
