@@ -897,13 +897,20 @@ function ur_php_binary(): string
  * additionally constrained to a slug shape before it ever reaches this point.
  * Nothing user-controlled is passed unquoted.
  *
- * Returns true if the launch command was dispatched (we cannot know the run's
- * outcome - it is detached - only that it was started).
+ * Returns true when the launch shell reported success (exit 0). The run itself
+ * is detached, so a true result means "the background launch was dispatched",
+ * not that rsync succeeded - but a FALSE result (missing runner script, shell
+ * failure) is surfaced to the caller so the UI doesn't claim "Run started" when
+ * nothing actually detached.
  */
 function ur_launch_runner(string $jobId, bool $dryRun): bool
 {
-    $php    = ur_php_binary();
     $script = ur_runner_script_path();
+    // Don't claim a launch when the runner script isn't even present.
+    if (!is_file($script)) {
+        return false;
+    }
+    $php = ur_php_binary();
 
     $cmd = escapeshellarg($php) . ' ' . escapeshellarg($script)
         . ' --job=' . escapeshellarg($jobId);
@@ -912,8 +919,11 @@ function ur_launch_runner(string $jobId, bool $dryRun): bool
     }
     // MANDATORY: redirect both streams to /dev/null and background, else the
     // request hangs waiting on the child. setsid (when available) detaches the
-    // runner into its own session/process group so it survives the request and
-    // so abort can signal the whole group.
+    // runner into its own session/process group so abort can SIGTERM the whole
+    // group (reaping the rsync child); when setsid is absent the launch still
+    // works - abort then falls back to signalling the bare runner pid and the
+    // abort flag still stops the run between pairs - so it is best-effort, not
+    // required for correctness.
     $setsid = '';
     foreach (['/usr/bin/setsid', '/bin/setsid'] as $cand) {
         if (is_executable($cand)) {
@@ -923,9 +933,12 @@ function ur_launch_runner(string $jobId, bool $dryRun): bool
     }
     $full = $setsid . $cmd . ' >/dev/null 2>&1 &';
 
-    // exec returns immediately because the command backgrounds itself.
-    @exec($full);
-    return true;
+    // exec returns immediately because the command backgrounds itself; capture
+    // the launching shell's exit so a failed dispatch is reported as such.
+    $output = [];
+    $code   = 0;
+    @exec($full, $output, $code);
+    return $code === 0;
 }
 
 /**
@@ -967,7 +980,12 @@ function ur_action_run_job(bool $dryRun): void
         return;
     }
 
-    ur_launch_runner($jobId, $dryRun);
+    if (!ur_launch_runner($jobId, $dryRun)) {
+        // The detached launch failed to dispatch (missing runner script / shell
+        // failure). Report it rather than misleading the UI into "Run started".
+        sendError('Failed to launch the runner process.', 500, ['running' => false]);
+        return;
+    }
 
     sendResponse([
         'ok'      => true,

@@ -179,4 +179,27 @@ final class RunStateTest extends TestCase
     {
         $this->assertFalse(FakeRunState::isRunning('j-never'));
     }
+
+    public function testAcquireLockIsExclusive(): void
+    {
+        $a = RunState::acquireLock('j-lock');
+        $this->assertIsResource($a, 'first lock acquisition succeeds');
+        // A second acquisition WITHIN THE SAME PROCESS still contends on the same
+        // file; flock is advisory and per-open-file-description, so a second
+        // fopen+flock(LOCK_NB) on the locked file must fail.
+        $b = RunState::acquireLock('j-lock');
+        $this->assertNull($b, 'second concurrent acquisition is refused');
+        // After releasing the first, it can be re-acquired.
+        RunState::releaseLock($a);
+        $c = RunState::acquireLock('j-lock');
+        $this->assertIsResource($c, 're-acquire after release');
+        RunState::releaseLock($c);
+    }
+
+    public function testReleaseLockToleratesNonResource(): void
+    {
+        // Must be a safe no-op (used on error paths where the lock may be null).
+        RunState::releaseLock(null);
+        $this->assertTrue(true);
+    }
 }

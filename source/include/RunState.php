@@ -70,6 +70,58 @@ class RunState
         return self::stateDir() . '/' . self::safeId($jobId) . '.abort';
     }
 
+    /** Absolute path of a job's run lock file. */
+    public static function lockPath(string $jobId): string
+    {
+        return self::stateDir() . '/' . self::safeId($jobId) . '.lock';
+    }
+
+    /**
+     * Acquire an EXCLUSIVE, ATOMIC per-job run lock. Returns the open lock-file
+     * handle on success, or null when another live runner already holds it.
+     *
+     * isRunning() alone is a check-then-act race: two near-simultaneous launches
+     * can both see "not running" and both proceed, producing duplicate concurrent
+     * rsync runs for one job (dangerous with --delete). flock() with LOCK_EX |
+     * LOCK_NB makes the claim atomic - only one process can hold it at a time.
+     *
+     * The lock file persists between runs; we re-use it and rely on flock's
+     * advisory exclusivity, which the kernel releases automatically if the holder
+     * dies (so a crashed runner never wedges the lock forever). The caller MUST
+     * pass the returned handle to releaseLock() in a finally.
+     *
+     * @return resource|null
+     */
+    public static function acquireLock(string $jobId)
+    {
+        self::ensureDir();
+        $path = self::lockPath($jobId);
+        $fh = @fopen($path, 'c'); // create if absent, do NOT truncate
+        if ($fh === false) {
+            return null;
+        }
+        if (!@flock($fh, LOCK_EX | LOCK_NB)) {
+            // Another live runner holds the lock.
+            @fclose($fh);
+            return null;
+        }
+        return $fh;
+    }
+
+    /**
+     * Release a run lock acquired via acquireLock(). Best-effort; safe to call
+     * with a non-resource (no-op).
+     *
+     * @param resource|null $handle
+     */
+    public static function releaseLock($handle): void
+    {
+        if (is_resource($handle)) {
+            @flock($handle, LOCK_UN);
+            @fclose($handle);
+        }
+    }
+
     /**
      * Sanitise a job id for use as a filename segment. Job ids are slug-shaped
      * ("j-" + [a-z0-9-]) by construction, but defend against traversal anyway.

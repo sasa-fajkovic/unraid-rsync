@@ -356,6 +356,39 @@ final class RunnerTest extends TestCase
         $this->assertSame(1, $rsyncCalls, 'a stale abort flag is cleared at run start');
     }
 
+    public function testRunLockIsReleasedSoSubsequentRunSucceeds(): void
+    {
+        Rsync::$runner = function (array $argv, $onOutput): int {
+            return 0;
+        };
+        $id = $this->saveLocalJob('j-local');
+        $r1 = Runner::run($id, false);
+        $this->assertSame(Rsync::STATE_SUCCESS, $r1['state']);
+        // A second run must succeed too - proving the lock was released in finally.
+        $r2 = Runner::run($id, false);
+        $this->assertSame(Rsync::STATE_SUCCESS, $r2['state']);
+    }
+
+    public function testRunRefusedWhileLockHeld(): void
+    {
+        $rsyncCalls = 0;
+        Rsync::$runner = function (array $argv, $onOutput) use (&$rsyncCalls): int {
+            $rsyncCalls++;
+            return 0;
+        };
+        $id = $this->saveLocalJob('j-local');
+        // Hold the per-job lock externally (simulating a concurrent live runner).
+        $held = RunState::acquireLock($id);
+        $this->assertIsResource($held);
+        try {
+            $res = Runner::run($id, false);
+            $this->assertSame('already-running', $res['reason'] ?? '');
+            $this->assertSame(0, $rsyncCalls, 'no rsync runs while the lock is held');
+        } finally {
+            RunState::releaseLock($held);
+        }
+    }
+
     public function testRunnerCliArgParsing(): void
     {
         // Require the CLI without executing its main block (UR_RUNNER_TESTING).

@@ -33,8 +33,8 @@ class Rsync
     /**
      * Whitelisted BOOLEAN option key -> rsync flag. Mirrors
      * Job::BOOL_OPTION_KEYS exactly; a key present here but absent there (or
-     * vice versa) would be a bug, so the constructor-time guard in
-     * assertWhitelistInSync() checks the two stay aligned under test.
+     * vice versa) would be a bug. The test suite asserts the two stay aligned
+     * (RsyncTest::testWhitelistKeysMatchJobModel).
      *
      * @var array<string,string>
      */

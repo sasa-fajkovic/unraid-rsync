@@ -95,11 +95,21 @@ class Runner
             return self::hardFail($jobId, "Job not found: $jobId");
         }
 
-        // 2. Concurrency guard.
-        if (RunState::isRunning($jobId)) {
+        // 2. Concurrency guard. Acquire an ATOMIC per-job lock FIRST so two
+        //    near-simultaneous launches can't both pass an isRunning() check and
+        //    start duplicate concurrent rsync runs for one job (dangerous with
+        //    --delete). isRunning() is still consulted as a secondary, friendlier
+        //    signal (and to clear stale state), but the flock is the real guard.
+        try {
+            $lock = RunState::acquireLock($jobId);
+        } catch (Throwable $e) {
+            return self::hardFail($jobId, 'Could not acquire run lock: ' . $e->getMessage());
+        }
+        if ($lock === null) {
             return self::hardFail($jobId, "Job is already running: $jobId", 'already-running');
         }
 
+        // From here the lock is held; every exit path must release it.
         // 3. Open the run log + write RunState (running=true). A filesystem
         //    failure here (e.g. the tmpfs runtime dir is not writable) must NOT
         //    escape - it would contradict the contract (no structured result, no
@@ -117,6 +127,7 @@ class Runner
                 'currentLog' => $runLog,
             ]);
         } catch (Throwable $e) {
+            RunState::releaseLock($lock);
             return self::hardFail($jobId, 'Could not initialise run state/log: ' . $e->getMessage());
         }
 
@@ -287,6 +298,10 @@ class Runner
 
             // Phase 7 hook point - NOT implemented here.
             self::notifyHook($job, $state, $exitCode, $dryRun);
+
+            // Release the per-job run lock last, so a queued launch only proceeds
+            // once this run has fully wound down (state cleared, summary written).
+            RunState::releaseLock($lock);
         }
 
         $result = ['state' => $state, 'exitCode' => $exitCode, 'runLog' => $runLog];
@@ -552,16 +567,48 @@ class Runner
             $onOutput("Failed to start hook (bash).\n");
             return 127;
         }
-        $out = stream_get_contents($pipes[1]);
-        $err = stream_get_contents($pipes[2]);
-        fclose($pipes[1]);
-        fclose($pipes[2]);
-        $code = proc_close($proc);
-        if (is_string($out) && $out !== '') {
-            $onOutput($out);
+
+        // Drain stdout AND stderr concurrently with a non-blocking select loop.
+        // Reading one pipe fully before the other can DEADLOCK: a hook that fills
+        // the stderr pipe buffer while we are still blocked on stdout would hang
+        // forever (and vice versa).
+        stream_set_blocking($pipes[1], false);
+        stream_set_blocking($pipes[2], false);
+        $open = [1 => $pipes[1], 2 => $pipes[2]];
+        while (!empty($open)) {
+            $read = array_values($open);
+            $w = null;
+            $x = null;
+            $n = @stream_select($read, $w, $x, 1);
+            if ($n === false) {
+                break;
+            }
+            foreach ($open as $fd => $stream) {
+                if (!in_array($stream, $read, true)) {
+                    continue;
+                }
+                $chunk = fread($stream, 8192);
+                if ($chunk === '' || $chunk === false) {
+                    if (feof($stream)) {
+                        fclose($stream);
+                        unset($open[$fd]);
+                    }
+                    continue;
+                }
+                $onOutput($chunk);
+            }
         }
-        if (is_string($err) && $err !== '') {
-            $onOutput($err);
+
+        // Capture signal status before proc_close (see Rsync::defaultRun).
+        $status = @proc_get_status($proc);
+        $code   = proc_close($proc);
+        if (is_array($status)) {
+            if (!empty($status['signaled']) && isset($status['termsig'])) {
+                return 128 + (int) $status['termsig'];
+            }
+            if (array_key_exists('exitcode', $status) && (int) $status['exitcode'] >= 0) {
+                return (int) $status['exitcode'];
+            }
         }
         return $code < 0 ? 1 : $code;
     }
