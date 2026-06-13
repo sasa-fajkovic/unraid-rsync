@@ -304,6 +304,12 @@ class Credentials
         foreach ($defaults as $k => $default) {
             $out[$k] = array_key_exists($k, $key) ? (string) $key[$k] : $default;
         }
+        // Canonicalise identity fields by trimming, so stored values are
+        // whitespace-clean and downstream uniqueness checks (which compare
+        // case-insensitively) can't be fooled by leading/trailing whitespace.
+        // The key MATERIAL (privateKey/publicKey/fingerprint) is left intact.
+        $out['id']   = trim($out['id']);
+        $out['name'] = trim($out['name']);
         return $out;
     }
 
@@ -319,11 +325,17 @@ class Credentials
         $defaults = self::defaultConnection();
         $out = [];
 
-        $out['id']       = isset($conn['id'])       ? (string) $conn['id']       : $defaults['id'];
-        $out['name']     = isset($conn['name'])     ? (string) $conn['name']     : $defaults['name'];
-        $out['host']     = isset($conn['host'])     ? (string) $conn['host']     : $defaults['host'];
-        $out['username'] = isset($conn['username']) ? (string) $conn['username'] : $defaults['username'];
-        $out['keyId']    = isset($conn['keyId'])    ? (string) $conn['keyId']    : $defaults['keyId'];
+        // Identity / connection-target fields are trimmed so stored values are
+        // whitespace-clean: a name/host/username with stray whitespace can look
+        // valid in the UI yet fail (or behave inconsistently in uniqueness
+        // checks) at run time. password + remoteHostKey are NOT trimmed here
+        // (a password may legitimately contain leading/trailing spaces; the
+        // host key is multi-line text written verbatim).
+        $out['id']       = isset($conn['id'])       ? trim((string) $conn['id'])       : $defaults['id'];
+        $out['name']     = isset($conn['name'])     ? trim((string) $conn['name'])     : $defaults['name'];
+        $out['host']     = isset($conn['host'])     ? trim((string) $conn['host'])     : $defaults['host'];
+        $out['username'] = isset($conn['username']) ? trim((string) $conn['username']) : $defaults['username'];
+        $out['keyId']    = isset($conn['keyId'])    ? trim((string) $conn['keyId'])    : $defaults['keyId'];
         $out['password'] = isset($conn['password']) ? (string) $conn['password'] : $defaults['password'];
         $out['remoteHostKey'] = isset($conn['remoteHostKey']) ? (string) $conn['remoteHostKey'] : $defaults['remoteHostKey'];
 
@@ -365,7 +377,10 @@ class Credentials
             $errors[] = 'Key name is required.';
         } else {
             $lower = strtolower($name);
-            $taken = array_map('strtolower', $existingNames);
+            // Trim AND lowercase the existing names so a hand-edited
+            // credentials.json with stray whitespace can't sneak in a duplicate
+            // that differs only by invisible whitespace.
+            $taken = array_map(static fn($n) => strtolower(trim((string) $n)), $existingNames);
             if (in_array($lower, $taken, true)) {
                 $errors[] = 'A key named "' . $name . '" already exists; names must be unique.';
             }

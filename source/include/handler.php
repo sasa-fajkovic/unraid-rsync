@@ -570,8 +570,8 @@ function ur_action_generate_key(): void
         return;
     }
     // Uniqueness across existing keys.
-    $existingNames = array_map(static fn($k) => (string) ($k['name'] ?? ''), $creds['keys']);
-    if (in_array(strtolower($name), array_map('strtolower', $existingNames), true)) {
+    $existingNames = array_map(static fn($k) => strtolower(trim((string) ($k['name'] ?? ''))), $creds['keys']);
+    if (in_array(strtolower($name), $existingNames, true)) {
         sendError('A key named "' . $name . '" already exists; names must be unique.', 422);
         return;
     }
@@ -632,8 +632,8 @@ function ur_action_import_key(): void
         sendError('A key name is required.', 422);
         return;
     }
-    $existingNames = array_map(static fn($k) => (string) ($k['name'] ?? ''), $creds['keys']);
-    if (in_array(strtolower($name), array_map('strtolower', $existingNames), true)) {
+    $existingNames = array_map(static fn($k) => strtolower(trim((string) ($k['name'] ?? ''))), $creds['keys']);
+    if (in_array(strtolower($name), $existingNames, true)) {
         sendError('A key named "' . $name . '" already exists; names must be unique.', 422);
         return;
     }

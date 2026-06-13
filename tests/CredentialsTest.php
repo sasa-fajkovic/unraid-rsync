@@ -66,6 +66,39 @@ final class CredentialsTest extends TestCase
         $this->assertStringNotContainsString('\\/', $raw);     // slashes unescaped
     }
 
+    public function testMergeTrimsIdentityFields(): void
+    {
+        $k = Credentials::mergeKey(['id' => '  k-1 ', 'name' => "  alpha\t", 'privateKey' => "  PRIV  \n"]);
+        $this->assertSame('k-1', $k['id']);
+        $this->assertSame('alpha', $k['name']);
+        // Key material is NOT trimmed (only the trailing key write normalises it).
+        $this->assertSame("  PRIV  \n", $k['privateKey']);
+
+        $c = Credentials::mergeConnection([
+            'id' => ' c-1 ', 'name' => '  conn ', 'host' => "  h.example \n",
+            'username' => ' user ', 'keyId' => ' k-1 ', 'authMethod' => 'PASSWORD',
+            'password' => '  spaced-pass  ',
+        ]);
+        $this->assertSame('c-1', $c['id']);
+        $this->assertSame('conn', $c['name']);
+        $this->assertSame('h.example', $c['host']);
+        $this->assertSame('user', $c['username']);
+        $this->assertSame('k-1', $c['keyId']);
+        // Password is NOT trimmed - leading/trailing spaces may be significant.
+        $this->assertSame('  spaced-pass  ', $c['password']);
+    }
+
+    public function testValidateKeyRejectsWhitespaceOnlyDuplicate(): void
+    {
+        // "backup" vs "backup " (trailing space) must still collide.
+        $res = Credentials::validateKey(
+            ['name' => 'backup', 'publicKey' => 'p'],
+            ['backup ']
+        );
+        $this->assertFalse($res['valid']);
+        $this->assertNotEmpty(array_filter($res['errors'], fn($e) => stripos($e, 'unique') !== false));
+    }
+
     public function testMergeConnectionClampsEnumsAndPort(): void
     {
         $c = Credentials::mergeConnection([
