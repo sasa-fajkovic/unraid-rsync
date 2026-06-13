@@ -514,3 +514,115 @@ if (!function_exists('ur_emit_option_help_assets')) {
         <?php
     }
 }
+
+if (!function_exists('ur_emit_ajax_helpers')) {
+    /**
+     * Emit the shared robust-fetch helpers (window.urAjax = { parseResponse, postForm,
+     * postFormElement, show, errText }) exactly once per page, mirroring
+     * ur_emit_option_help_assets()'s once-guard. These centralise the "parse the
+     * response body as TEXT, then try
+     * JSON.parse it" pattern so a non-JSON 403/500 from the front controller becomes a
+     * VISIBLE error WITH its HTTP status, instead of throwing inside r.json() and
+     * landing in a generic .catch as a silent "Network error" (the exact class of
+     * silent-failure the Credentials page already fixed).
+     *
+     * Consumed by jobs.php and settings.php (which previously used the brittle
+     * fetch().then(r=>r.json()) pattern). credentials.php keeps its own local copies
+     * (it wires a lot of behaviour around them); the contract here matches those copies
+     * so the two stay interchangeable.
+     *
+     * The CSRF token is NOT baked in here (it is per-page and per-form); callers pass
+     * their own. All static markup; no user data is interpolated.
+     */
+    function ur_emit_ajax_helpers(): void
+    {
+        static $done = false;
+        if ($done) {
+            return;
+        }
+        $done = true;
+        ?>
+<script type="text/javascript">
+/* Shared robust-fetch helpers. Exposed as window.urAjax so every tab body can
+ * surface a non-JSON error (with its HTTP status) instead of failing silently. */
+(function () {
+  'use strict';
+  if (window.urAjax) { return; }
+
+  /* Resolve a fetch Response to { ok, status, body, parseError } WITHOUT ever
+   * throwing on a non-JSON body: read the body as text, then try to JSON.parse it.
+   *   - ok          the HTTP response was 2xx;
+   *   - status      the numeric HTTP status;
+   *   - body        the parsed JSON object, or null when the body wasn't JSON;
+   *   - parseError  true when a non-empty body was NOT valid JSON (e.g. an HTML
+   *                 403/500 from the front controller). */
+  function parseResponse(r) {
+    return r.text().then(function (text) {
+      var body = null, parseError = false;
+      try { body = JSON.parse(text); } catch (e) { parseError = (text !== ''); }
+      return { ok: r.ok, status: r.status, body: body, parseError: parseError };
+    });
+  }
+
+  /* POST a FormData and ALWAYS resolve (never reject) to the parseResponse shape,
+   * plus { status: 0, networkError: true } on a genuine could-not-reach-server
+   * failure, so the UI is ALWAYS updated. The CSRF token is appended when given. */
+  function postForm(handlerUrl, fields, csrfToken) {
+    var fd = new FormData();
+    if (csrfToken) { fd.append('csrf_token', csrfToken); }
+    Object.keys(fields || {}).forEach(function (k) { fd.append(k, fields[k]); });
+    return fetch(handlerUrl, { method: 'POST', body: fd, credentials: 'same-origin' })
+      .then(parseResponse)
+      .catch(function () {
+        return { ok: false, status: 0, body: null, parseError: false, networkError: true };
+      });
+  }
+
+  /* POST an existing <form> (its FormData) with the same robust parsing. */
+  function postFormElement(form) {
+    var fd = new FormData(form);
+    return fetch(form.getAttribute('action'), { method: 'POST', body: fd, credentials: 'same-origin' })
+      .then(parseResponse)
+      .catch(function () {
+        return { ok: false, status: 0, body: null, parseError: false, networkError: true };
+      });
+  }
+
+  /* Paint a result element as success/error with a plain-text message. */
+  function show(el, ok, msg) {
+    if (!el) { return; }
+    el.className = 'ur-result ' + (ok ? 'ur-ok' : 'ur-err');
+    el.textContent = msg;
+  }
+
+  /* Build a clear failure message from a postForm result, ALWAYS including the
+   * HTTP status (or a network/parse hint), so a failure is never silent. */
+  function errText(res, fallback) {
+    fallback = fallback || 'Request failed';
+    if (res.networkError || res.status === 0) {
+      return fallback + ': could not reach the server (network error).';
+    }
+    if (res.body && res.body.errors && res.body.errors.length) {
+      return res.body.errors.join('; ') + ' (HTTP ' + res.status + ')';
+    }
+    if (res.body && res.body.error) {
+      return res.body.error + ' (HTTP ' + res.status + ')';
+    }
+    if (res.parseError) {
+      return fallback + ': the server returned a non-JSON response (HTTP ' + res.status + ').';
+    }
+    return fallback + ' (HTTP ' + res.status + ').';
+  }
+
+  window.urAjax = {
+    parseResponse: parseResponse,
+    postForm: postForm,
+    postFormElement: postFormElement,
+    show: show,
+    errText: errText
+  };
+})();
+</script>
+        <?php
+    }
+}

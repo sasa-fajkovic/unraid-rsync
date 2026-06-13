@@ -42,6 +42,10 @@ $handlerUrl  = '/plugins/unraid.rsync/include/handler.php';
  * install), this guarantees the assets are present in live DOM so the "?" help
  * actually works. */
 ur_emit_option_help_assets();
+/* Emit the shared robust-fetch helpers (window.urAjax) so this tab's save uses the
+ * text->JSON parse that surfaces a non-JSON 403/500 WITH its status instead of
+ * failing silently in r.json(). */
+ur_emit_ajax_helpers();
 ?>
 <style>
 /* Clear Unraid's fixed bottom status bar (#footer, "Array Started", ~30-40px tall
@@ -119,34 +123,27 @@ ur_emit_option_help_assets();
   });
 
   /* Submit via fetch so we can show validation errors/warnings inline rather
-   * than navigating away from the tab. */
+   * than navigating away from the tab. Uses the shared robust text->JSON parse
+   * (window.urAjax) so a non-JSON 403/500 from the front controller becomes a
+   * VISIBLE error WITH its HTTP status instead of a silent failure inside
+   * r.json(). */
   var form = document.getElementById('ur-settings-form');
   if (form) {
     form.addEventListener('submit', function (ev) {
       ev.preventDefault();
       var result = document.getElementById('ur-settings-result');
-      var fd = new FormData(form);
-      fetch(form.getAttribute('action'), { method: 'POST', body: fd, credentials: 'same-origin' })
-        .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); })
-        .then(function (res) {
-          if (res.ok && res.body && res.body.ok) {
-            var msg = res.body.message || 'Saved.';
-            if (res.body.warnings && res.body.warnings.length) {
-              msg += ' (' + res.body.warnings.join('; ') + ')';
-            }
-            result.className = 'ur-result ur-ok';
-            result.textContent = msg;
-          } else {
-            var errs = (res.body && res.body.errors) ? res.body.errors.join('; ')
-                     : ((res.body && res.body.error) ? res.body.error : 'Save failed.');
-            result.className = 'ur-result ur-err';
-            result.textContent = errs;
+      window.urAjax.show(result, true, 'Saving…');
+      window.urAjax.postFormElement(form).then(function (res) {
+        if (res.ok && res.body && res.body.ok) {
+          var msg = res.body.message || 'Saved.';
+          if (res.body.warnings && res.body.warnings.length) {
+            msg += ' (' + res.body.warnings.join('; ') + ')';
           }
-        })
-        .catch(function () {
-          result.className = 'ur-result ur-err';
-          result.textContent = 'Network error while saving.';
-        });
+          window.urAjax.show(result, true, msg);
+        } else {
+          window.urAjax.show(result, false, window.urAjax.errText(res, 'Save failed.'));
+        }
+      });
     });
   }
 })();

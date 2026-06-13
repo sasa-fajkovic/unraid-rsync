@@ -231,7 +231,7 @@ function ur_render_job_card($job, $index): void
     // captured into the per-run log, which is rendered in the browser. Surface
     // that privilege/leak surface inline next to each textarea so the user does
     // not echo secrets into a browser-visible, root-written log.
-    $hookHelp = ur_t('Runs as root, before/after the transfer. Output is captured into the run log (visible in the UI) — do not echo secrets here.');
+    $hookHelp = ur_t('Runs as ROOT on this server, before/after the transfer (full privileges — be careful what you put here). Output is captured into the run log (visible in the UI) — do not echo secrets here.');
     echo '<dt><label for="' . ur_h($idb . '_pre') . '">' . ur_h(ur_t('Pre-run hook')) . '</label>:</dt>';
     echo '<dd><textarea id="' . ur_h($idb . '_pre') . '" name="' . ur_h($p . '[preHook]') . '" rows="2">' . ur_h($preHook) . '</textarea>';
     echo '<blockquote class="inline_help"><p>' . ur_h($hookHelp) . '</p></blockquote></dd>';
@@ -477,6 +477,31 @@ function ur_ago(int $deltaSec): string
    <abbr> underline so it reads as a clean asterisk. */
 .ur-required { color: var(--red-800, #b71c1c); font-weight: bold; text-decoration: none; cursor: help; }
 
+/* Native-looking slider toggle for the Enabled / Use-global-defaults checkboxes.
+   These are plain <input type="checkbox" class="ur-switch"> (preceded by a hidden
+   "0" so an unchecked box still POSTs a value at the same name — the round-trip is
+   unchanged), so we restyle the checkbox itself with appearance:none into a pill
+   slider rather than introducing a wrapper element. Colours pull from the inherited
+   dynamix palette (green "on", grey "off") with safe fallbacks under any theme. */
+input.ur-switch {
+  -webkit-appearance: none; -moz-appearance: none; appearance: none;
+  position: relative; display: inline-block; vertical-align: middle;
+  width: 40px; height: 20px; margin: 0; padding: 0;
+  border-radius: 20px; cursor: pointer;
+  background: var(--color-tablebody, #b0b0b0);
+  transition: background .15s ease-in-out;
+}
+input.ur-switch::before {
+  content: ""; position: absolute; top: 2px; left: 2px;
+  width: 16px; height: 16px; border-radius: 50%;
+  background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,0.3);
+  transition: transform .15s ease-in-out;
+}
+input.ur-switch:checked { background: var(--green, #1c7d3f); }
+input.ur-switch:checked::before { transform: translateX(20px); }
+input.ur-switch:focus-visible { outline: 2px solid var(--blue-500, #2196f3); outline-offset: 2px; }
+input.ur-switch:disabled { opacity: 0.5; cursor: default; }
+
 /* TrueNAS-style colored state badges + the per-run log viewer. Colors pull from
    the inherited dynamix palette where available (--orange-500, --green-...),
    with safe fallbacks so the badges read correctly under any theme. */
@@ -493,7 +518,9 @@ function ur_ago(int $deltaSec): string
   white-space: nowrap;
 }
 .ur-badge-success  { background: #1c7d3f; }                 /* green  */
-.ur-badge-warning  { background: var(--orange-500, #ff8c2f); }
+/* Warning badge: dark text on a darkened orange. White-on-#ff8c2f was ~2.4:1,
+   below WCAG AA for small bold text; #b15c00 with near-black text clears AA. */
+.ur-badge-warning  { background: #b15c00; color: #1a1a1a; }
 .ur-badge-failed   { background: var(--red-800, #b71c1c); } /* red    */
 .ur-badge-aborted  { background: #6b6b6b; }                 /* grey   */
 .ur-badge-pending  { background: #9aa0a6; }                 /* grey   */
@@ -537,6 +564,10 @@ function ur_ago(int $deltaSec): string
  * deterministically active; the static guard inside the function then makes the
  * template's and Global Settings' later calls no-ops. */
 ur_emit_option_help_assets();
+/* Emit the shared robust-fetch helpers (window.urAjax) so the run/dry/abort and
+ * save AJAX surface a non-JSON 403/500 WITH its HTTP status instead of failing
+ * silently in r.json() (the same fix the Credentials page already carries). */
+ur_emit_ajax_helpers();
 ?>
 <div class="ur-jobs-page">
 <div class="title">
@@ -555,7 +586,7 @@ ur_emit_option_help_assets();
 <p>
   <?=_('Define independent rsync backup jobs. Each job has its own schedule and runs one rsync per source -> destination pair (no cartesian product)')?>.
   <?=_('Enabled jobs run automatically on their cron schedule; the Next run column shows when each will fire. You can also Run or Dry-run a job on demand')?>.
-  <?=_('The State column shows each job\'s live status (updated automatically while a job runs); use the Logs button to view per-run output. Notifications arrive in a later release')?>.
+  <?=_('The State column shows each job\'s live status (updated automatically while a job runs); use the Logs button to view per-run output. Per-job notifications are sent through Unraid\'s notification system — pick when to notify with each job\'s Notify setting')?>.
 </p>
 
 <!-- Summary list ------------------------------------------------------------>
@@ -595,7 +626,7 @@ ur_emit_option_help_assets();
         <td><?=htmlspecialchars((string)($job['transport'] ?? ''), ENT_QUOTES, 'UTF-8')?></td>
         <td><?=htmlspecialchars((string)($job['schedule'] ?? ''), ENT_QUOTES, 'UTF-8')?></td>
         <td class="ur-last-run-cell"><?=htmlspecialchars(ur_last_run_label($summary, $urNow), ENT_QUOTES, 'UTF-8')?></td>
-        <td><?=htmlspecialchars(ur_next_run_label($job, $urNow), ENT_QUOTES, 'UTF-8')?></td>
+        <td class="ur-next-run-cell"><?=htmlspecialchars(ur_next_run_label($job, $urNow), ENT_QUOTES, 'UTF-8')?></td>
       </tr>
     <?php endforeach; endif; ?>
   </tbody>
@@ -606,7 +637,7 @@ ur_emit_option_help_assets();
      the handler; we inject it with textContent / as-escaped HTML and never build
      raw innerHTML from unescaped bytes. -->
 <div id="ur-log-modal" class="ur-log-modal" aria-hidden="true">
-  <div class="ur-log-modal-inner">
+  <div class="ur-log-modal-inner" role="dialog" aria-modal="true" aria-labelledby="ur-log-title">
     <div class="ur-log-modal-head">
       <span class="ur-log-title" id="ur-log-title"><?=_('Run log')?></span>
       <label for="ur-log-run-select"><?=_('Run')?>:</label>
@@ -752,13 +783,12 @@ ur_emit_option_help_assets();
     if (!jobId) { return; }
     var card = btn && btn.closest ? btn.closest('.ur-job-card') : null;
     var result = card ? card.querySelector('.ur-job-run-result') : null;
-    var fd = new FormData();
-    fd.append('action', action);
-    fd.append('csrf_token', CSRF_TOKEN);
-    fd.append('id', jobId);
     if (btn) { btn.disabled = true; }
-    fetch(HANDLER_URL, { method: 'POST', body: fd, credentials: 'same-origin' })
-      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); })
+    /* Uses the shared robust text->JSON parse (window.urAjax) so a non-JSON
+     * 403/500 from the front controller surfaces WITH its HTTP status instead of
+     * throwing inside r.json() and showing a generic "Network error". This never
+     * rejects, so the result line is ALWAYS updated. */
+    window.urAjax.postForm(HANDLER_URL, { action: action, id: jobId }, CSRF_TOKEN)
       .then(function (res) {
         if (result) {
           if (res.ok && res.body && res.body.ok) {
@@ -766,20 +796,16 @@ ur_emit_option_help_assets();
             result.textContent = res.body.message || 'Done.';
           } else {
             result.className = 'ur-job-run-result ur-result ur-err';
-            result.textContent = (res.body && res.body.error) ? res.body.error : 'Action failed.';
+            result.textContent = window.urAjax.errText(res, 'Action failed.');
           }
         }
+        /* On a failed launch the job did not start, so re-enable the button; on
+         * success the status poll re-derives the enable state below. */
+        if (btn && !(res.ok && res.body && res.body.ok)) { btn.disabled = false; }
         /* Resume polling so the badge + buttons reflect the new running state
          * immediately (poll re-derives the enable state from getStatus). */
         ensurePolling();
         pollStatusOnce();
-      })
-      .catch(function () {
-        if (result) {
-          result.className = 'ur-job-run-result ur-result ur-err';
-          result.textContent = 'Network error.';
-        }
-        if (btn) { btn.disabled = false; }
       });
   }
 
@@ -855,36 +881,29 @@ ur_emit_option_help_assets();
     Array.prototype.forEach.call(sels, syncConnRequired);
   }
 
-  /* Submit via fetch; show validation errors/warnings inline. */
+  /* Submit via fetch; show validation errors/warnings inline. Uses the shared
+   * robust text->JSON parse (window.urAjax) so a non-JSON 403/500 from the front
+   * controller becomes a VISIBLE error WITH its HTTP status instead of a silent
+   * failure inside r.json(). */
   var form = document.getElementById('ur-jobs-form');
   if (form) {
     form.addEventListener('submit', function (ev) {
       ev.preventDefault();
       var result = document.getElementById('ur-jobs-result');
-      var fd = new FormData(form);
-      fetch(form.getAttribute('action'), { method: 'POST', body: fd, credentials: 'same-origin' })
-        .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); })
-        .then(function (res) {
-          if (res.ok && res.body && res.body.ok) {
-            var msg = res.body.message || 'Saved.';
-            if (res.body.warnings && res.body.warnings.length) {
-              msg += ' (' + res.body.warnings.join('; ') + ')';
-            }
-            result.className = 'ur-result ur-ok';
-            result.textContent = msg;
-            /* Reload so the summary table reflects the saved state. */
-            setTimeout(function () { window.location.reload(); }, 600);
-          } else {
-            var errs = (res.body && res.body.errors) ? res.body.errors.join('; ')
-                     : ((res.body && res.body.error) ? res.body.error : 'Save failed.');
-            result.className = 'ur-result ur-err';
-            result.textContent = errs;
+      window.urAjax.show(result, true, 'Saving…');
+      window.urAjax.postFormElement(form).then(function (res) {
+        if (res.ok && res.body && res.body.ok) {
+          var msg = res.body.message || 'Saved.';
+          if (res.body.warnings && res.body.warnings.length) {
+            msg += ' (' + res.body.warnings.join('; ') + ')';
           }
-        })
-        .catch(function () {
-          result.className = 'ur-result ur-err';
-          result.textContent = 'Network error while saving.';
-        });
+          window.urAjax.show(result, true, msg);
+          /* Reload so the summary table reflects the saved state. */
+          setTimeout(function () { window.location.reload(); }, 600);
+        } else {
+          window.urAjax.show(result, false, window.urAjax.errText(res, 'Save failed.'));
+        }
+      });
     });
   }
 
@@ -947,6 +966,34 @@ ur_emit_option_help_assets();
       + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
   }
 
+  /* Coarse forward "in 3h 5m" label for a future epoch (seconds) — mirrors
+   * jobs.php ur_relative_time() so a JS-updated next-run cell reads like the
+   * server-rendered one. */
+  function inLabel(nextEpoch, nowEpoch) {
+    var delta = nextEpoch - nowEpoch;
+    if (delta <= 0) { return 'due now'; }
+    var units = [['d', 86400], ['h', 3600], ['m', 60]];
+    var parts = [];
+    var rem = delta;
+    for (var i = 0; i < units.length && parts.length < 2; i++) {
+      var c = Math.floor(rem / units[i][1]);
+      if (c > 0) { parts.push(c + units[i][0]); rem -= c * units[i][1]; }
+    }
+    return parts.length ? ('in ' + parts.join(' ')) : 'in less than a minute';
+  }
+
+  /* The next-run cell label from a getStatus entry, mirroring jobs.php
+   * ur_next_run_label(): a disabled job reads "disabled"; an enabled job with no
+   * computable next fire reads an em-dash; otherwise absolute local time + an
+   * "in …" hint. getStatus always carries both `enabled` (bool) and `nextRun`
+   * (epoch|null), so we read enabled directly to distinguish "disabled" from an
+   * enabled-but-uncomputable schedule. */
+  function nextRunLabel(s, nowEpoch) {
+    if (s && s.enabled === false) { return 'disabled'; }
+    if (!s || !s.nextRun) { return '—'; }
+    return fmtLocal(s.nextRun) + ' (' + inLabel(s.nextRun, nowEpoch) + ')';
+  }
+
   /* Apply a getStatus payload: update each job's badge, last-run cell, and the
    * Run/Dry/Abort enable state on its card. Returns true if ANY job is running
    * (so the caller can decide whether to keep polling). */
@@ -969,7 +1016,7 @@ ur_emit_option_help_assets();
         b.textContent = badgeLabelFor(s.state);
       });
 
-      /* Last-run cell in the summary row. */
+      /* Last-run + next-run cells in the summary row. */
       var row = document.querySelector('tr[data-jobid="' + cssEsc(jobId) + '"]');
       if (row) {
         var cell = row.querySelector('.ur-last-run-cell');
@@ -981,6 +1028,10 @@ ur_emit_option_help_assets();
             cell.textContent = '—';
           }
         }
+        /* Keep the Next-run cell live too (it would otherwise go stale after a
+         * run); mirrors the server-rendered ur_next_run_label vocabulary. */
+        var nextCell = row.querySelector('.ur-next-run-cell');
+        if (nextCell) { nextCell.textContent = nextRunLabel(s, now); }
       }
 
       /* Run/Dry/Abort enable state on the edit card (if present). */
@@ -1034,6 +1085,10 @@ ur_emit_option_help_assets();
   var modalPre   = document.getElementById('ur-log-pre');
   var modalSel   = document.getElementById('ur-log-run-select');
   var modalLive  = document.getElementById('ur-log-live');
+  var modalClose = document.getElementById('ur-log-close');
+  /* Element focused before the dialog opened, so focus can be restored on close
+   * (basic focus management for the role="dialog" log viewer). */
+  var modalReturnFocus = null;
 
   function viewerTailing() { return viewer.timer !== null && viewer.running; }
 
@@ -1043,8 +1098,13 @@ ur_emit_option_help_assets();
     viewer.run = '';
     if (modalTitle) { modalTitle.textContent = 'Run log — ' + jobName; }
     if (modalPre) { modalPre.textContent = 'Loading…'; }
+    /* Remember what to restore focus to, then move focus into the dialog (the
+     * Close button) so keyboard users land inside it. */
+    modalReturnFocus = (document.activeElement && document.activeElement.focus)
+      ? document.activeElement : null;
     modal.classList.add('ur-open');
     modal.setAttribute('aria-hidden', 'false');
+    if (modalClose && modalClose.focus) { modalClose.focus(); }
     refreshRunList(function () {
       fetchJobLog();        // load the latest/selected run
       startLogTail();
@@ -1057,6 +1117,9 @@ ur_emit_option_help_assets();
     }
     stopLogTail();
     viewer.jobId = '';
+    /* Restore focus to the control that opened the dialog. */
+    if (modalReturnFocus && modalReturnFocus.focus) { modalReturnFocus.focus(); }
+    modalReturnFocus = null;
   }
 
   function refreshRunList(cb) {
@@ -1150,6 +1213,14 @@ ur_emit_option_help_assets();
       if (ev.target === modal) { closeLogViewer(); }
     });
   }
+  /* Esc-to-close the dialog while it is open (basic dialog keyboard semantics). */
+  document.addEventListener('keydown', function (ev) {
+    if ((ev.key === 'Escape' || ev.key === 'Esc')
+        && modal && modal.classList.contains('ur-open')) {
+      ev.preventDefault();
+      closeLogViewer();
+    }
+  });
 
   /* Seed the Connection-required state for all initially-rendered cards. */
   syncAllConnRequired();

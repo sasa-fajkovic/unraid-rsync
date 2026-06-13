@@ -294,6 +294,90 @@ final class OptionsFormHelpTest extends TestCase
     }
 
     /**
+     * The shared robust-fetch helpers (window.urAjax) must be emitted exactly once
+     * per page by ur_emit_ajax_helpers(), mirroring the option-help once-guard.
+     *
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function testAjaxHelpersEmittedExactlyOncePerPage(): void
+    {
+        require_once __DIR__ . '/../source/pages/_options_form.php';
+        ob_start();
+        ur_emit_ajax_helpers();
+        ur_emit_ajax_helpers(); // second call must be a no-op (static guard)
+        $html = (string) ob_get_clean();
+
+        $this->assertSame(
+            1,
+            preg_match_all('/window\s*\.\s*urAjax\s*=/', $html),
+            'Shared AJAX helpers (window.urAjax) must be emitted exactly once per page.'
+        );
+        // The helper surface the consumers rely on must be present.
+        foreach (['postForm', 'postFormElement', 'errText', 'show', 'parseResponse'] as $fn) {
+            $this->assertStringContainsString($fn, $html, "window.urAjax must expose $fn().");
+        }
+    }
+
+    /**
+     * The Jobs tab's two STATE-CHANGING AJAX handlers (the per-job run/dry/abort
+     * action and the save-form submit — review finding #1's scope) must go through
+     * the shared robust helpers so a non-JSON 403/500 surfaces WITH its HTTP
+     * status instead of throwing in r.json() as a silent "Network error". (The
+     * read-only GET pollers — status/log tails — are out of that finding's scope
+     * and keep their simple r.json() reads, so we assert the POST path's helpers
+     * are present rather than a blanket absence of r.json().)
+     *
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function testJobsPageUsesRobustAjaxHelpers(): void
+    {
+        $html = $this->renderPageBody(__DIR__ . '/../source/pages/jobs.php');
+        $this->assertSame(
+            1,
+            preg_match_all('/window\s*\.\s*urAjax\s*=/', $html),
+            'jobs.php must emit the shared AJAX helpers exactly once.'
+        );
+        // The run/dry/abort action uses urAjax.postForm; the save submit uses
+        // urAjax.postFormElement; both report failures via urAjax.errText.
+        $this->assertStringContainsString('window.urAjax.postForm(', $html,
+            'jobs.php run/dry/abort must POST via window.urAjax.postForm.');
+        $this->assertStringContainsString('window.urAjax.postFormElement(', $html,
+            'jobs.php save must POST via window.urAjax.postFormElement.');
+        $this->assertStringContainsString('window.urAjax.errText', $html,
+            'jobs.php must surface non-JSON errors via window.urAjax.errText.');
+    }
+
+    /**
+     * The Global Settings tab must likewise emit + use the shared AJAX helpers and
+     * drop the brittle r.json() parse. Regression guard for review finding #1.
+     *
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function testSettingsPageUsesRobustAjaxHelpers(): void
+    {
+        $html = $this->renderPageBody(__DIR__ . '/../source/pages/settings.php');
+        $this->assertSame(
+            1,
+            preg_match_all('/window\s*\.\s*urAjax\s*=/', $html),
+            'settings.php must emit the shared AJAX helpers exactly once.'
+        );
+        $this->assertStringContainsString('window.urAjax.postFormElement(', $html,
+            'settings.php save must POST via window.urAjax.postFormElement.');
+        $this->assertStringContainsString('window.urAjax.errText', $html,
+            'settings.php must surface non-JSON errors via window.urAjax.errText.');
+        // settings.php has only the one save handler, so the brittle r.json()
+        // parse must be gone entirely from it.
+        $this->assertDoesNotMatchRegularExpression(
+            '/\.then\(\s*function\s*\(\s*r\s*\)\s*\{\s*return\s+r\.json\(\)/',
+            $html,
+            'settings.php must not parse responses with the brittle r.json() pattern.'
+        );
+    }
+
+    /**
      * Render the shared options partial to a string.
      *
      * @param array<string,mixed> $opts
