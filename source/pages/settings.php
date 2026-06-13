@@ -20,10 +20,16 @@ if (isset($GLOBALS['var']) && is_array($GLOBALS['var']) && !empty($GLOBALS['var'
     $csrf = (string) $GLOBALS['var']['csrf_token'];
 }
 
+// If the on-disk config can't be read (unreadable, corrupt, or from a newer
+// schema), render defaults for DISPLAY only but surface a visible warning -
+// otherwise it looks like the settings reset, and the handler will refuse the
+// save (409) anyway. We never persist on load.
+$loadError = '';
 try {
     $config = Config::load();
 } catch (Throwable $e) {
     $config = Config::defaults();
+    $loadError = $e->getMessage();
 }
 $defaultOpts = $config['global']['defaultRsyncOptions'] ?? Config::defaultRsyncOptions();
 $handlerUrl  = '/plugins/unraid.rsync/include/handler.php';
@@ -33,6 +39,13 @@ $handlerUrl  = '/plugins/unraid.rsync/include/handler.php';
     <i class="fa fa-cog title"></i>&nbsp;<?=_('Global Settings')?>
   </span>
 </div>
+
+<?php if ($loadError !== ''): ?>
+<div class="ur-result ur-err">
+  <?=_('The saved configuration could not be read, so defaults are shown below. Saving is blocked until this is resolved')?>:
+  <?=htmlspecialchars($loadError, ENT_QUOTES, 'UTF-8')?>
+</div>
+<?php endif; ?>
 
 <p>
   <?=_('These default rsync options seed every new job and are applied to any job set to "use global defaults". Changing them here does not retroactively change jobs that keep their own options')?>.

@@ -36,10 +36,16 @@ if (isset($GLOBALS['var']) && is_array($GLOBALS['var']) && !empty($GLOBALS['var'
     $csrf = (string) $GLOBALS['var']['csrf_token'];
 }
 
+// If the on-disk config can't be read (unreadable, corrupt, or from a newer
+// schema), render defaults for DISPLAY only but surface a visible warning -
+// otherwise it looks like jobs were lost, and the handler will refuse the save
+// (409) anyway. We never persist on load.
+$loadError = '';
 try {
     $config = Config::load();
 } catch (Throwable $e) {
     $config = Config::defaults();
+    $loadError = $e->getMessage();
 }
 $jobs        = (isset($config['jobs']) && is_array($config['jobs'])) ? $config['jobs'] : [];
 $globalOpts  = $config['global']['defaultRsyncOptions'] ?? Config::defaultRsyncOptions();
@@ -212,6 +218,13 @@ function ur_render_pair_row(string $prefix, $k, string $local, string $remote): 
     <i class="fa fa-list title"></i>&nbsp;<?=_('Jobs')?>
   </span>
 </div>
+
+<?php if ($loadError !== ''): ?>
+<div class="ur-result ur-err">
+  <?=_('The saved configuration could not be read, so defaults are shown below. Saving is blocked until this is resolved')?>:
+  <?=htmlspecialchars($loadError, ENT_QUOTES, 'UTF-8')?>
+</div>
+<?php endif; ?>
 
 <p>
   <?=_('Define independent rsync backup jobs. Each job has its own schedule and runs one rsync per source -> destination pair (no cartesian product)')?>.

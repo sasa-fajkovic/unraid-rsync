@@ -30,9 +30,10 @@ if (!function_exists('ur_h')) {
 if (!function_exists('ur_t')) {
     /**
      * Translation wrapper. On a live webGui the global _() is provided; under a
-     * bare PHP lint/preview it may not be, so fall back to identity. (The
-     * .page bodies still use the literal _('...')_ idiom; this is only for the
-     * shared partial which may be previewed in isolation.)
+     * bare PHP lint/preview it may not be, so fall back to identity. (The .page
+     * bodies still call the webGui translation function directly as _('...');
+     * this wrapper is only for the shared partial, which may be previewed in
+     * isolation without the webGui environment.)
      */
     function ur_t(string $s): string
     {
