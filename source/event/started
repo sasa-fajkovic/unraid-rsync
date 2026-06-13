@@ -1,0 +1,30 @@
+#!/bin/bash
+#
+# event/started - Unraid plugin event hook, fired at the end of array start
+# (cmdStart). See /usr/local/sbin/emhttp_event: for each plugin it runs
+# /usr/local/emhttp/plugins/<name>/event/<eventname> (this file) when <eventname>
+# matches. "started" is the right hook to (re-)apply our per-job cron schedules on
+# boot/array-start.
+#
+# WHY this exists: Unraid 7.x has a known bug where the boot-time update_cron may
+# not run, so the live crontab can come up WITHOUT our plugin's schedules even
+# though the .cron file is on the flash. The plugin therefore re-applies its cron
+# itself on every array start by regenerating the cron file from config.json and
+# invoking update_cron. This is idempotent and cheap (Cron::apply rewrites one
+# file + one update_cron call), so running it again here is harmless if cron did
+# come up correctly.
+#
+# It delegates to a tiny PHP entry point (scripts/apply-cron.php) so all the real
+# logic lives in the unit-tested Cron::apply(); this hook is just the shell
+# wiring the webGui event system requires (an executable file named after the
+# event). Output goes to the boot log via emhttp_event; errors are non-fatal so a
+# transient failure never blocks array start.
+
+PLUGIN="unraid.rsync"
+APPLY="/usr/local/emhttp/plugins/${PLUGIN}/scripts/apply-cron.php"
+
+if [ -f "$APPLY" ]; then
+  php "$APPLY" || logger -t "$PLUGIN" "event/started: cron re-apply failed (non-fatal)"
+fi
+
+exit 0
