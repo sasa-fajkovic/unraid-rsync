@@ -529,12 +529,11 @@ class Cron
             $dows[$v === 7 ? 0 : $v] = true;
         }
 
-        // "Restricted" follows standard vixie-cron: a day field is restricted
-        // unless it is literally "*" (or "*/1", which is semantically identical
-        // to "*"). This is keyed on the field STRING, not on whether the parsed
-        // set happens to cover the range - e.g. an explicit "1-31" dom is still
-        // "restricted" in cron, exactly as crond would treat it - so the dom/dow
-        // OR rule matches what the system crontab actually does.
+        // "Restricted" follows standard vixie-cron, which decides the dom/dow OR
+        // rule purely by whether the FIRST character of the day field is an
+        // asterisk. So "*", "*/1", "*/01" and "*/2" are all "unrestricted"
+        // (star-prefixed), while "1-31", "1", "15" and named/list forms are
+        // "restricted" - exactly as the system crontab would treat them.
         $domRestricted = !self::isUnrestricted($fields[2]);
         $dowRestricted = !self::isUnrestricted($fields[4]);
 
@@ -542,14 +541,15 @@ class Cron
     }
 
     /**
-     * True when a cron field is the "every value" wildcard - literally "*" or
-     * "*\/1". Matches vixie-cron's notion of an unrestricted day field, which is
-     * what the dom/dow OR rule keys on.
+     * True when a cron field is "unrestricted" for the vixie-cron dom/dow OR
+     * rule. vixie-cron keys this solely on whether the field's first character
+     * is an asterisk, so "*", "*\/1", "*\/01" and "*\/2" are all unrestricted,
+     * while "1-31", "1" and lists are restricted - matching the real crontab.
      */
     private static function isUnrestricted(string $field): bool
     {
         $field = trim($field);
-        return $field === '*' || $field === '*/1';
+        return $field !== '' && $field[0] === '*';
     }
 
     /**

@@ -366,6 +366,35 @@ final class CronTest extends TestCase
         $this->assertSame('2026-09-07 00:00', date('Y-m-d H:i', $nextSep));
     }
 
+    public function testNextRunWildcardStepDayIsUnrestrictedForOrRule(): void
+    {
+        // vixie-cron decides the dom/dow OR rule by the FIRST char of the day
+        // field. "*/01" is star-prefixed -> dom is UNRESTRICTED, so only the dow
+        // (Mondays) constrains the day. Without this, dom would wrongly count as
+        // restricted, the OR rule would kick in, dom would match every day, and
+        // the weekday constraint would be ignored.
+        // From Sat 2026-06-13 12:34 -> next Monday 2026-06-15 00:00.
+        $next = Cron::nextRun('0 0 */01 * 1', $this->from());
+        $this->assertSame('2026-06-15 00:00', date('Y-m-d H:i', $next));
+        $this->assertSame('1', date('w', $next)); // Monday, not just "next day"
+
+        // Leading-zero variant behaves identically to "*".
+        $this->assertSame(
+            Cron::nextRun('0 0 * * 1', $this->from()),
+            Cron::nextRun('0 0 */01 * 1', $this->from())
+        );
+    }
+
+    public function testNextRunWildcardStepTwoIsUnrestrictedForOrRule(): void
+    {
+        // "*/2" is also star-prefixed -> unrestricted for the OR rule (matching
+        // real cron, which keys only on the leading "*"). dow Monday therefore
+        // constrains the day on its own.
+        $next = Cron::nextRun('0 0 */2 * 1', $this->from());
+        $this->assertSame('2026-06-15 00:00', date('Y-m-d H:i', $next));
+        $this->assertSame('1', date('w', $next));
+    }
+
     public function testNextRunDomRestrictedDowStarUsesDomOnly(): void
     {
         // 0 0 15 * *  : only dom restricted -> dow ignored. The 15th regardless
