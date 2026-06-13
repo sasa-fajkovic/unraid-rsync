@@ -549,20 +549,33 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
    * non-blocking — there is no popup and automation is never frozen. */
   var ARM_WINDOW_MS = 4000;
 
+  // At most ONE delete button is armed at a time. Arming a new one disarms the
+  // previous, so two destructive buttons can never be armed simultaneously.
+  var armedDeleteBtn = null;
+
   function disarmDelete(btn) {
     if (!btn || !btn._urArm) { return; }
     clearTimeout(btn._urArm.timer);
     btn.textContent = btn._urArm.label;
     btn.classList.remove('ur-armed-delete');
     var resultEl = btn._urArm.resultEl;
-    // Only clear the inline warning if it still shows OUR armed message (don't
-    // stomp a later success/error message rendered by the delete itself).
-    if (resultEl && resultEl.getAttribute('data-ur-armed') === '1') {
+    var armedMsg = btn._urArm.message;
+    // Only clear the inline warning if it STILL shows OUR exact armed message.
+    // Other flows (key generate/import, the delete's own success/error) call
+    // show(...) on the same element WITHOUT clearing data-ur-armed, so checking
+    // the attribute alone could stomp an unrelated later message; matching the
+    // text too makes the clear safe.
+    if (resultEl && resultEl.getAttribute('data-ur-armed') === '1'
+        && resultEl.textContent === armedMsg) {
       resultEl.className = 'ur-result';
       resultEl.textContent = '';
       resultEl.removeAttribute('data-ur-armed');
+    } else if (resultEl && resultEl.getAttribute('data-ur-armed') === '1') {
+      // Message was replaced by another flow; just drop our marker.
+      resultEl.removeAttribute('data-ur-armed');
     }
     btn._urArm = null;
+    if (armedDeleteBtn === btn) { armedDeleteBtn = null; }
   }
 
   function armOrConfirmDelete(btn, opts) {
@@ -572,19 +585,24 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
       run();
       return;
     }
+    // Arming a new button cancels any other still-armed one.
+    if (armedDeleteBtn && armedDeleteBtn !== btn) { disarmDelete(armedDeleteBtn); }
+    var message = (opts.warning || '') + ' Click "Confirm delete?" again to proceed.';
     btn._urArm = {
       label: btn.textContent,
       resultEl: opts.resultEl || null,
+      message: message,
       run: opts.run,
       timer: setTimeout(function () { disarmDelete(btn); }, ARM_WINDOW_MS)
     };
+    armedDeleteBtn = btn;
     btn.textContent = 'Confirm delete?';
     btn.classList.add('ur-armed-delete');
     if (opts.resultEl && opts.warning) {
       // Reuse the existing result element to surface the consequence inline.
       // It is plain text via .textContent (no HTML injection).
       opts.resultEl.className = 'ur-result ur-err';
-      opts.resultEl.textContent = opts.warning + ' Click "Confirm delete?" again to proceed.';
+      opts.resultEl.textContent = message;
       opts.resultEl.setAttribute('data-ur-armed', '1');
     }
   }
