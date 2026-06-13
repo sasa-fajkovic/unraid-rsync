@@ -25,11 +25,17 @@
  *       documented in the UI/README. Empty passphrase only (unattended cron).
  *
  *   Connections
- *     { id, name, host, port, username, authMethod, keyId, password,
- *       remoteHostKey, strictHostKey, connectTimeout }
- *     - authMethod KEY references a key by id (keyId); PASSWORD stores an
- *       OBFUSCATED password (reversible, NOT encryption - documented as
- *       recoverable by anyone with flash access).
+ *     { id, name, host, port, username, authMethod, keyId, keyFilePath,
+ *       password, remoteHostKey, strictHostKey, connectTimeout }
+ *     - authMethod KEYFILE points at an EXISTING private key file already on
+ *       this Unraid system (keyFilePath, e.g. /root/.ssh/id_ed25519). The plugin
+ *       NEVER reads, copies, uploads or stores the key material - OpenSSH reads
+ *       the file directly via `ssh -i`. This is the common Unraid case and the
+ *       default for new connections.
+ *     - authMethod KEY references a managed (generated/imported) key by id
+ *       (keyId) stored in this file; PASSWORD stores an OBFUSCATED password
+ *       (reversible, NOT encryption - documented as recoverable by anyone with
+ *       flash access).
  *
  * Referential integrity (the TrueNAS used_by pattern) is enforced by the
  * handler, which calls usedBy() / the typed delete helpers here:
@@ -53,8 +59,21 @@ class Credentials
     /** Current schema version this code writes. */
     const SCHEMA_VERSION = 1;
 
-    /** Allowed connection auth methods. */
-    const AUTH_METHODS = ['KEY', 'PASSWORD'];
+    /**
+     * Allowed connection auth methods.
+     *   KEYFILE  - use an existing private key file already on this system
+     *              (keyFilePath); nothing is read/copied/stored by the plugin.
+     *   KEY      - use a managed (generated/imported) key stored in this file.
+     *   PASSWORD - use an obfuscated stored password.
+     */
+    const AUTH_METHODS = ['KEYFILE', 'KEY', 'PASSWORD'];
+
+    /**
+     * The default key file path offered for a new KEYFILE connection. This is
+     * the conventional location of root's ed25519 key on Unraid; most users who
+     * already set up SSH have their key here.
+     */
+    const DEFAULT_KEY_FILE_PATH = '/root/.ssh/id_ed25519';
 
     /** Allowed StrictHostKeyChecking modes (the ssh -o value). */
     const STRICT_HOST_KEY_MODES = ['accept-new', 'yes', 'no'];
@@ -121,8 +140,12 @@ class Credentials
             'host'           => '',
             'port'           => 22,
             'username'       => '',
-            'authMethod'     => 'KEY',
+            // KEYFILE is the default for NEW connections: it's the common Unraid
+            // case (the user already has /root/.ssh/id_ed25519 and has copied the
+            // matching public key to the remote's authorized_keys).
+            'authMethod'     => 'KEYFILE',
             'keyId'          => '',
+            'keyFilePath'    => self::DEFAULT_KEY_FILE_PATH,
             'password'       => '',           // stored obfuscated
             'remoteHostKey'  => '',
             'strictHostKey'  => 'accept-new',
@@ -250,6 +273,12 @@ class Credentials
             }
         }
 
+        // The KEYFILE auth method + keyFilePath field were added WITHIN schema v1
+        // as a purely additive, backward-compatible change (no version bump). No
+        // explicit transform is needed: mergeConnection() fills a missing
+        // keyFilePath from the default and leaves any existing KEY/PASSWORD
+        // authMethod untouched, so old connections load unchanged.
+
         $data['schemaVersion'] = self::SCHEMA_VERSION;
         return $data;
     }
@@ -336,6 +365,12 @@ class Credentials
         $out['host']     = isset($conn['host'])     ? trim((string) $conn['host'])     : $defaults['host'];
         $out['username'] = isset($conn['username']) ? trim((string) $conn['username']) : $defaults['username'];
         $out['keyId']    = isset($conn['keyId'])    ? trim((string) $conn['keyId'])    : $defaults['keyId'];
+        // keyFilePath: a path to an existing key file (KEYFILE auth). Trimmed
+        // (whitespace-clean) so the run-time `ssh -i <path>` token is sane. An
+        // existing connection with no keyFilePath (pre-KEYFILE on-disk data)
+        // falls back to the default path - safe, since the field is only USED
+        // when authMethod is KEYFILE (existing KEY/PASSWORD connections ignore it).
+        $out['keyFilePath'] = isset($conn['keyFilePath']) ? trim((string) $conn['keyFilePath']) : $defaults['keyFilePath'];
         $out['password'] = isset($conn['password']) ? (string) $conn['password'] : $defaults['password'];
         $out['remoteHostKey'] = isset($conn['remoteHostKey']) ? (string) $conn['remoteHostKey'] : $defaults['remoteHostKey'];
 
@@ -437,13 +472,26 @@ class Credentials
 
         $auth = (string) ($conn['authMethod'] ?? '');
         if (!in_array($auth, self::AUTH_METHODS, true)) {
-            $errors[] = 'Auth method must be KEY or PASSWORD.';
+            $errors[] = 'Auth method must be KEYFILE, KEY or PASSWORD.';
         }
         if (!in_array((string) ($conn['strictHostKey'] ?? ''), self::STRICT_HOST_KEY_MODES, true)) {
             $errors[] = 'Strict host key checking must be accept-new, yes or no.';
         }
 
-        if ($auth === 'KEY') {
+        if ($auth === 'KEYFILE') {
+            // An existing key file already on this system. We require a non-empty,
+            // ABSOLUTE, option-injection-safe path. We deliberately do NOT require
+            // the file to EXIST at save time (the user may create/persist it
+            // later); existence + readability are checked at RUN time (Ssh /
+            // Runner) with a clear error there.
+            $keyFilePath = trim((string) ($conn['keyFilePath'] ?? ''));
+            if ($keyFilePath === '') {
+                $errors[] = 'Existing-key-file connections require a key file path.';
+            } elseif (!self::isSafeKeyFilePath($keyFilePath)) {
+                $errors[] = 'The key file path must be an absolute path (starting with "/") '
+                    . 'and must not contain unsafe characters.';
+            }
+        } elseif ($auth === 'KEY') {
             $keyId = trim((string) ($conn['keyId'] ?? ''));
             if ($keyId === '') {
                 $errors[] = 'Key-based connections must select an SSH key.';
@@ -484,6 +532,42 @@ class Credentials
         // No whitespace or shell metacharacters (defence in depth - we build
         // argv arrays, but ssh itself parses leading-dash tokens as options).
         return !preg_match('/[\s;&|`$()<>"\'\\\\]/', $value);
+    }
+
+    /**
+     * True when a key file path is safe to hand to `ssh -i <path>`. It must be an
+     * ABSOLUTE path (begins with '/') so it can never be read as an ssh option
+     * (a leading '-' would be), and must contain no whitespace, shell
+     * metacharacters, NUL/control bytes, or a ".." traversal segment. PURE.
+     *
+     * We build argv arrays (no shell), but this is defence in depth: a path that
+     * begins with '-' or carries metacharacters could otherwise be mis-parsed by
+     * OpenSSH itself or surprise a future caller that joins it into a string.
+     */
+    public static function isSafeKeyFilePath(string $value): bool
+    {
+        $value = trim($value);
+        // Must be a non-empty ABSOLUTE path. An absolute path can never start
+        // with '-', so this also closes the option-injection vector.
+        if ($value === '' || $value[0] !== '/') {
+            return false;
+        }
+        // Reject NUL / control bytes outright.
+        if (preg_match('/[\x00-\x1f\x7f]/', $value)) {
+            return false;
+        }
+        // No whitespace or shell metacharacters.
+        if (preg_match('/[\s;&|`$()<>"\'\\\\]/', $value)) {
+            return false;
+        }
+        // Reject any ".." path segment (a normalised-path guard; "/root/../etc"
+        // style traversal has no legitimate use for a configured key path).
+        foreach (explode('/', $value) as $segment) {
+            if ($segment === '..') {
+                return false;
+            }
+        }
+        return true;
     }
 
     // --- lookups -----------------------------------------------------------

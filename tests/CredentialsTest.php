@@ -104,12 +104,14 @@ final class CredentialsTest extends TestCase
         $c = Credentials::mergeConnection([
             'id' => 'c', 'name' => 'n', 'host' => 'h', 'username' => 'u',
             'port' => 99999,            // out of range -> default 22
-            'authMethod' => 'telnet',   // invalid -> default KEY
+            'authMethod' => 'telnet',   // invalid -> default KEYFILE
             'strictHostKey' => 'maybe', // invalid -> default accept-new
             'connectTimeout' => -5,     // out of range -> default 10
         ]);
         $this->assertSame(22, $c['port']);
-        $this->assertSame('KEY', $c['authMethod']);
+        // The default auth method is now KEYFILE (the common Unraid case): an
+        // invalid/unknown authMethod clamps to it.
+        $this->assertSame('KEYFILE', $c['authMethod']);
         $this->assertSame('accept-new', $c['strictHostKey']);
         $this->assertSame(10, $c['connectTimeout']);
     }
@@ -295,6 +297,134 @@ final class CredentialsTest extends TestCase
         ]);
         $res = Credentials::validateConnection($conn, $creds);
         $this->assertTrue($res['valid'], implode(' | ', $res['errors']));
+    }
+
+    // --- KEYFILE auth (existing key file already on this system) ------------
+
+    public function testDefaultConnectionUsesKeyfileAndDefaultPath(): void
+    {
+        // KEYFILE is the default for NEW connections (the common Unraid case),
+        // pre-filled with the conventional root ed25519 path.
+        $c = Credentials::defaultConnection();
+        $this->assertSame('KEYFILE', $c['authMethod']);
+        $this->assertSame('/root/.ssh/id_ed25519', $c['keyFilePath']);
+        $this->assertSame(Credentials::DEFAULT_KEY_FILE_PATH, $c['keyFilePath']);
+    }
+
+    public function testMergeConnectionBackfillsMissingKeyFilePath(): void
+    {
+        // An existing (pre-KEYFILE) connection on disk has no keyFilePath; merge
+        // must backfill the default rather than leave it undefined.
+        $c = Credentials::mergeConnection([
+            'id' => 'c-old', 'name' => 'old', 'host' => 'h', 'username' => 'u',
+            'authMethod' => 'PASSWORD',
+        ]);
+        $this->assertArrayHasKey('keyFilePath', $c);
+        $this->assertSame(Credentials::DEFAULT_KEY_FILE_PATH, $c['keyFilePath']);
+        // ...and the existing authMethod is preserved (migration is safe).
+        $this->assertSame('PASSWORD', $c['authMethod']);
+    }
+
+    public function testMergeConnectionTrimsKeyFilePath(): void
+    {
+        $c = Credentials::mergeConnection([
+            'id' => 'c', 'name' => 'n', 'host' => 'h', 'username' => 'u',
+            'authMethod' => 'KEYFILE', 'keyFilePath' => "  /root/.ssh/id_ed25519  \n",
+        ]);
+        $this->assertSame('/root/.ssh/id_ed25519', $c['keyFilePath']);
+    }
+
+    public function testValidateConnectionKeyfileRequiresPath(): void
+    {
+        // KEYFILE with an empty (whitespace-only -> '') path is rejected: the
+        // path is required (existence is only checked at run time, not here).
+        $creds = Credentials::defaults();
+        $conn = Credentials::mergeConnection([
+            'id' => 'c', 'name' => 'n', 'host' => 'h', 'username' => 'u',
+            'authMethod' => 'KEYFILE', 'keyFilePath' => '   ',
+        ]);
+        $res = Credentials::validateConnection($conn, $creds);
+        $this->assertFalse($res['valid']);
+        $this->assertNotEmpty(array_filter($res['errors'], fn($e) => stripos($e, 'key file path') !== false));
+    }
+
+    public function testValidateConnectionKeyfileRequiresAbsolutePath(): void
+    {
+        $creds = Credentials::defaults();
+        $conn = Credentials::mergeConnection([
+            'id' => 'c', 'name' => 'n', 'host' => 'h', 'username' => 'u',
+            'authMethod' => 'KEYFILE', 'keyFilePath' => 'relative/id_ed25519',
+        ]);
+        $res = Credentials::validateConnection($conn, $creds);
+        $this->assertFalse($res['valid']);
+        $this->assertNotEmpty(array_filter($res['errors'], fn($e) => stripos($e, 'absolute') !== false));
+    }
+
+    public function testValidateConnectionKeyfileDoesNotRequireFileToExist(): void
+    {
+        // The path is valid (absolute + safe) even though the file does not
+        // exist yet - existence is a RUN-time check, not a save-time one.
+        $creds = Credentials::defaults();
+        $conn = Credentials::mergeConnection([
+            'id' => 'c', 'name' => 'n', 'host' => 'h.example', 'username' => 'u',
+            'authMethod' => 'KEYFILE', 'keyFilePath' => '/root/.ssh/does-not-exist-yet',
+        ]);
+        $res = Credentials::validateConnection($conn, $creds);
+        $this->assertTrue($res['valid'], implode(' | ', $res['errors']));
+        // ...and no managed-key requirement leaks in for KEYFILE.
+        $this->assertSame([], array_filter($res['errors'], fn($e) => stripos($e, 'select an SSH key') !== false));
+    }
+
+    /** @dataProvider unsafeKeyFilePathProvider */
+    public function testValidateConnectionRejectsUnsafeKeyFilePath(string $path): void
+    {
+        $creds = Credentials::defaults();
+        $conn = Credentials::mergeConnection([
+            'id' => 'c', 'name' => 'n', 'host' => 'h.example', 'username' => 'u',
+            'authMethod' => 'KEYFILE', 'keyFilePath' => $path,
+        ]);
+        $res = Credentials::validateConnection($conn, $creds);
+        $this->assertFalse($res['valid'], "path '$path' must be rejected");
+    }
+
+    public function unsafeKeyFilePathProvider(): array
+    {
+        return [
+            'relative'        => ['root/.ssh/id'],
+            'leading dash'    => ['-oProxyCommand=evil'],
+            'space'           => ['/root/.ssh/id rsa'],
+            'semicolon'       => ['/root/.ssh/id;id'],
+            'backtick'        => ['/root/.ssh/`id`'],
+            'dollar paren'    => ['/root/.ssh/$(id)'],
+            'pipe'            => ['/root/.ssh/id|nc'],
+            'traversal'       => ['/root/../etc/shadow'],
+        ];
+    }
+
+    public function testIsSafeKeyFilePath(): void
+    {
+        $this->assertTrue(Credentials::isSafeKeyFilePath('/root/.ssh/id_ed25519'));
+        $this->assertTrue(Credentials::isSafeKeyFilePath('/mnt/user/keys/backup.key'));
+        $this->assertFalse(Credentials::isSafeKeyFilePath(''));
+        $this->assertFalse(Credentials::isSafeKeyFilePath('id_ed25519'));        // relative
+        $this->assertFalse(Credentials::isSafeKeyFilePath('-i'));                // leading dash
+        $this->assertFalse(Credentials::isSafeKeyFilePath('/root/.ssh/a b'));    // space
+        $this->assertFalse(Credentials::isSafeKeyFilePath('/root/../etc'));      // traversal
+        $this->assertFalse(Credentials::isSafeKeyFilePath("/root/\x00id"));      // NUL
+    }
+
+    public function testKeyfileConnectionDoesNotCountAsKeyDependency(): void
+    {
+        // usedBy('key') must ignore a KEYFILE connection even if it carries a
+        // stale keyId - it does not consume a MANAGED key.
+        $creds = Credentials::defaults();
+        $creds['keys'][] = ['id' => 'k-1', 'name' => 'kk', 'publicKey' => 'p'];
+        $creds['connections'][] = Credentials::mergeConnection([
+            'id' => 'c-1', 'name' => 'kf', 'host' => 'h', 'username' => 'u',
+            'authMethod' => 'KEYFILE', 'keyId' => 'k-1', 'keyFilePath' => '/root/.ssh/id_ed25519',
+        ]);
+        $used = Credentials::usedBy($creds, 'key', 'k-1');
+        $this->assertSame([], $used['connections']);
     }
 
     public function testValidateConnectionKeyAuthUnaffectedByPasswordRule(): void

@@ -108,6 +108,138 @@ final class SshTest extends TestCase
         ], $over));
     }
 
+    private function keyfileConn(array $over = []): array
+    {
+        return Credentials::mergeConnection(array_merge([
+            'id' => 'c-kf', 'name' => 'kf', 'host' => 'h.example', 'port' => 22,
+            'username' => 'sasa', 'authMethod' => 'KEYFILE',
+            'keyFilePath' => '/root/.ssh/id_ed25519',
+            'strictHostKey' => 'accept-new', 'connectTimeout' => 10,
+        ], $over));
+    }
+
+    /** Write a fake "key file" in the test runtime base, returning its path. */
+    private function makeKeyFile(string $name = 'id_ed25519'): string
+    {
+        @mkdir($this->rtBase, 0700, true);
+        $path = $this->rtBase . '/' . $name;
+        file_put_contents($path, "-----BEGIN OPENSSH PRIVATE KEY-----\nEXISTING\n-----END OPENSSH PRIVATE KEY-----\n");
+        @chmod($path, 0600);
+        return $path;
+    }
+
+    // --- KEYFILE argv + materialise (no tmpfs key) -------------------------
+
+    public function testKeyfileArgvUsesPathDirectly(): void
+    {
+        $conn = $this->keyfileConn(['port' => 2022, 'strictHostKey' => 'yes']);
+        $argv = Ssh::buildSshArgv($conn, '/root/.ssh/id_ed25519', '/tmp/kh');
+
+        $this->assertSame('ssh', $argv[0]);
+        $i = array_search('-i', $argv, true);
+        $this->assertNotFalse($i);
+        // The identity file is the connection's OWN path, passed verbatim.
+        $this->assertSame('/root/.ssh/id_ed25519', $argv[$i + 1]);
+        $this->assertContains('IdentitiesOnly=yes', $argv);
+        $this->assertContains('BatchMode=yes', $argv);
+        $this->assertContains('StrictHostKeyChecking=yes', $argv);
+        // KEYFILE is key-based, never password-forced.
+        $this->assertNotContains('PubkeyAuthentication=no', $argv);
+    }
+
+    public function testKeyfileHasNoSshpassPrefix(): void
+    {
+        $this->assertSame([], Ssh::buildSshpassPrefix($this->keyfileConn(), '/tmp/pass'));
+    }
+
+    public function testMaterializeKeyfileUsesExistingFileNoTmpfsKey(): void
+    {
+        $keyPath = $this->makeKeyFile();
+        $creds = Credentials::defaults();
+        $creds['connections'][] = $this->keyfileConn([
+            'keyFilePath' => $keyPath,
+            'remoteHostKey' => 'h.example ssh-ed25519 AAAAhostkey',
+        ]);
+
+        $mat = Ssh::materialize($creds, 'c-kf');
+        $this->assertTrue($mat['ok'], $mat['error'] ?? '');
+
+        // The identity file IS the connection's existing path (NOT a tmpfs copy).
+        $this->assertSame($keyPath, $mat['keyPath']);
+        // No tmpfs key file was created for this run's token.
+        $this->assertFileDoesNotExist(Ssh::keyPath((string) $mat['token']));
+        // The existing key file is untouched (still present + same content).
+        $this->assertFileExists($keyPath);
+        $this->assertStringContainsString('EXISTING', file_get_contents($keyPath));
+
+        // The -e value carries -i <keyFilePath> verbatim. rsyncDashE quotes each
+        // argv element individually, so it appears as: '-i' '<keyFilePath>'.
+        $this->assertContains('-i', $mat['sshArgv']);
+        $i = array_search('-i', $mat['sshArgv'], true);
+        $this->assertSame($keyPath, $mat['sshArgv'][$i + 1]);
+        $this->assertStringContainsString("'-i' '" . $keyPath . "'", $mat['dashE']);
+        $this->assertSame([], $mat['sshpassPrefix']);
+
+        // cleanupRuntime must NOT delete the user's real key file.
+        Ssh::cleanupRuntime((string) $mat['token']);
+        $this->assertFileExists($keyPath);
+        // The per-run known_hosts (which IS materialised) is gone.
+        $this->assertFileDoesNotExist($mat['knownHosts']);
+    }
+
+    public function testMaterializeKeyfileMissingFileFailsWithClearMessage(): void
+    {
+        $creds = Credentials::defaults();
+        $creds['connections'][] = $this->keyfileConn([
+            'keyFilePath' => $this->rtBase . '/nope/id_ed25519',
+        ]);
+        $mat = Ssh::materialize($creds, 'c-kf');
+        $this->assertFalse($mat['ok']);
+        $this->assertStringContainsString('not found or unreadable', $mat['error']);
+        // The message warns about the Unraid tmpfs /root reboot gotcha.
+        $this->assertStringContainsString('tmpfs', $mat['error']);
+    }
+
+    public function testCheckKeyFile(): void
+    {
+        $keyPath = $this->makeKeyFile('present.key');
+        $this->assertSame('', Ssh::checkKeyFile($keyPath));            // present + readable
+        $this->assertNotSame('', Ssh::checkKeyFile($this->rtBase . '/absent.key'));
+        $this->assertNotSame('', Ssh::checkKeyFile(''));                // empty path
+    }
+
+    public function testTestConnectionKeyfileSucceedsWithExistingFile(): void
+    {
+        FakeSsh::$nextProbe = [0, ''];
+        $keyPath = $this->makeKeyFile('tc.key');
+        $creds = Credentials::defaults();
+        $creds['connections'][] = $this->keyfileConn([
+            'keyFilePath' => $keyPath, 'remoteHostKey' => 'h ssh-ed25519 AAAA',
+        ]);
+
+        $res = FakeSsh::testConnection($creds, 'c-kf');
+        $this->assertTrue($res['ok'], $res['message']);
+
+        // The probe argv carried -i <keyFilePath> and ended with `-- user@host true`.
+        $argv = FakeSsh::$lastProbeArgv;
+        $this->assertIsArray($argv);
+        $i = array_search('-i', $argv, true);
+        $this->assertSame($keyPath, $argv[$i + 1]);
+        $this->assertSame('true', end($argv));
+    }
+
+    public function testTestConnectionKeyfileMissingFileReportsConfig(): void
+    {
+        $creds = Credentials::defaults();
+        $creds['connections'][] = $this->keyfileConn([
+            'keyFilePath' => $this->rtBase . '/missing.key',
+        ]);
+        $res = FakeSsh::testConnection($creds, 'c-kf');
+        $this->assertFalse($res['ok']);
+        $this->assertSame('config', $res['reason']);
+        $this->assertStringContainsString('not found or unreadable', $res['message']);
+    }
+
     // --- KEY argv ----------------------------------------------------------
 
     public function testKeyArgvShape(): void
