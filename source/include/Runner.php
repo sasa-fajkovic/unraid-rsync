@@ -40,6 +40,7 @@ require_once __DIR__ . '/Ssh.php';
 require_once __DIR__ . '/Rsync.php';
 require_once __DIR__ . '/RunState.php';
 require_once __DIR__ . '/Logger.php';
+require_once __DIR__ . '/Notify.php';
 
 class Runner
 {
@@ -300,7 +301,9 @@ class Runner
             RunState::markStopped($jobId);
             RunState::clearAbort($jobId);
 
-            // Phase 7 hook point - NOT implemented here.
+            // Dispatch the per-job notification (Phase 7). Best-effort: it is
+            // gated on the job's notifyMode and NEVER throws (see notifyHook),
+            // so a notification failure can't break the run's finally/unwind.
             self::notifyHook($job, $state, $exitCode, $dryRun);
 
             // Release the per-job run lock last, so a queued launch only proceeds
@@ -315,17 +318,207 @@ class Runner
         return $result;
     }
 
+    /** notifyMode values (persisted per job in config.json, set in the Jobs form). */
+    const NOTIFY_OFF          = 'off';
+    const NOTIFY_SUCCESS_ONLY = 'success-only';
+    const NOTIFY_FAILURE_ONLY = 'failure-only';
+    const NOTIFY_ALWAYS       = 'always';
+
+    /** The event label shown by the webGui notification UI. */
+    const NOTIFY_EVENT = 'Unraid Rsync';
+
+    /** Clickable deep-link target (the plugin's Settings page). */
+    const NOTIFY_LINK = '/Settings/UnraidRsync';
+
     /**
-     * PHASE 7 NOTIFICATION HOOK POINT - intentionally a no-op in Phase 4.
-     * Phase 7 (Notify.php) will dispatch per the job's notifyMode against the
-     * final outcome here. Left as a named seam so the wiring is obvious and the
-     * runner's finally block already calls it.
+     * Dispatch a per-job notification for a TERMINAL run outcome (Phase 7).
+     *
+     * Called from run()'s `finally` AFTER the /boot summary is written and state
+     * is cleared. The signature and call-site are fixed; all dispatch logic lives
+     * here. It NEVER throws - any failure is swallowed so a notification problem
+     * can't break the run's unwind (a failed notification must never fail the
+     * backup).
+     *
+     * Gating + mapping (no ambiguity):
+     *   - dryRun                  => never notify (suppress for dry-runs).
+     *   - Classify the state:
+     *       isSuccess = state in {SUCCESS, WARNING}
+     *       isFailure = state in {FAILED, PARTIAL, TIMEOUT}
+     *       ABORTED    = user-initiated (neither success nor failure).
+     *   - notifyMode:
+     *       off           => never;
+     *       success-only  => only when isSuccess;
+     *       failure-only  => only when isFailure;
+     *       always        => every terminal state including ABORTED.
+     *   - importance:
+     *       SUCCESS                  => normal
+     *       WARNING/PARTIAL/TIMEOUT  => warning
+     *       FAILED                   => alert
+     *       ABORTED                  => normal
      *
      * @param array<string,mixed> $job
      */
     public static function notifyHook(array $job, string $state, int $exitCode, bool $dryRun): void
     {
-        // no-op (Phase 7)
+        try {
+            // Dry-runs never notify.
+            if ($dryRun) {
+                return;
+            }
+
+            $mode = self::normalizeNotifyMode((string) ($job['notifyMode'] ?? self::NOTIFY_OFF));
+            if (!self::shouldNotify($mode, $state)) {
+                return;
+            }
+
+            $jobName    = (string) ($job['name'] ?? ($job['id'] ?? 'job'));
+            $importance = self::notifyImportance($state);
+            $subject    = sprintf('%s: %s %s', self::NOTIFY_EVENT, $jobName, $state);
+
+            // Duration is read from the just-written /boot summary if available
+            // (it is written immediately before this hook in run()'s finally).
+            $description = self::notifyDescription($job, $state, $exitCode);
+
+            Notify::send([
+                'event'       => self::NOTIFY_EVENT,
+                'subject'     => $subject,
+                'description' => $description,
+                'importance'  => $importance,
+                'link'        => self::NOTIFY_LINK,
+            ]);
+        } catch (Throwable $e) {
+            // Best-effort: a notification failure must never break the run.
+        }
+    }
+
+    /** Coerce a stored notifyMode to a known value; unknown/empty => off. */
+    public static function normalizeNotifyMode(string $mode): string
+    {
+        switch ($mode) {
+            case self::NOTIFY_SUCCESS_ONLY:
+                return self::NOTIFY_SUCCESS_ONLY;
+            case self::NOTIFY_FAILURE_ONLY:
+                return self::NOTIFY_FAILURE_ONLY;
+            case self::NOTIFY_ALWAYS:
+                return self::NOTIFY_ALWAYS;
+            case self::NOTIFY_OFF:
+            default:
+                return self::NOTIFY_OFF;
+        }
+    }
+
+    /** A run state counts as success when it is SUCCESS or WARNING. */
+    public static function isSuccessState(string $state): bool
+    {
+        return $state === Rsync::STATE_SUCCESS || $state === Rsync::STATE_WARNING;
+    }
+
+    /** A run state counts as failure when it is FAILED, PARTIAL or TIMEOUT. */
+    public static function isFailureState(string $state): bool
+    {
+        return $state === Rsync::STATE_FAILED
+            || $state === Rsync::STATE_PARTIAL
+            || $state === Rsync::STATE_TIMEOUT;
+    }
+
+    /**
+     * Decide whether a terminal $state should notify under notifyMode $mode.
+     * ABORTED is neither success nor failure, so only `always` notifies on it.
+     */
+    public static function shouldNotify(string $mode, string $state): bool
+    {
+        switch ($mode) {
+            case self::NOTIFY_ALWAYS:
+                return true;
+            case self::NOTIFY_SUCCESS_ONLY:
+                return self::isSuccessState($state);
+            case self::NOTIFY_FAILURE_ONLY:
+                return self::isFailureState($state);
+            case self::NOTIFY_OFF:
+            default:
+                return false;
+        }
+    }
+
+    /**
+     * Map a terminal run state to a webGui importance level:
+     *   SUCCESS => normal; WARNING/PARTIAL/TIMEOUT => warning; FAILED => alert;
+     *   ABORTED => normal.
+     */
+    public static function notifyImportance(string $state): string
+    {
+        switch ($state) {
+            case Rsync::STATE_FAILED:
+                return Notify::IMPORTANCE_ALERT;
+            case Rsync::STATE_WARNING:
+            case Rsync::STATE_PARTIAL:
+            case Rsync::STATE_TIMEOUT:
+                return Notify::IMPORTANCE_WARNING;
+            case Rsync::STATE_SUCCESS:
+            case Rsync::STATE_ABORTED:
+            default:
+                return Notify::IMPORTANCE_NORMAL;
+        }
+    }
+
+    /**
+     * Compose the notification description: job name, state, rsync exit code, and
+     * (when readily available from the just-written summary) the run duration.
+     * Kept concise - one line.
+     *
+     * @param array<string,mixed> $job
+     */
+    public static function notifyDescription(array $job, string $state, int $exitCode): string
+    {
+        $jobName = (string) ($job['name'] ?? ($job['id'] ?? 'job'));
+        $parts   = [
+            sprintf('Job "%s" finished with state %s (rsync exit code %d).', $jobName, $state, $exitCode),
+        ];
+
+        $duration = self::notifyDuration($job);
+        if ($duration !== null) {
+            $parts[] = 'Duration: ' . self::formatDuration($duration) . '.';
+        }
+
+        return implode(' ', $parts);
+    }
+
+    /**
+     * Best-effort read of this run's duration (seconds) from the /boot summary
+     * that run()'s finally wrote just before calling notifyHook. Returns null
+     * when no usable summary is available - duration is purely advisory.
+     *
+     * @param array<string,mixed> $job
+     */
+    private static function notifyDuration(array $job): ?int
+    {
+        $jobId = (string) ($job['id'] ?? '');
+        if ($jobId === '') {
+            return null;
+        }
+        $summary = self::readSummary($jobId);
+        if ($summary === null || !array_key_exists('durationSec', $summary)) {
+            return null;
+        }
+        return (int) $summary['durationSec'];
+    }
+
+    /** Render a duration in seconds as a compact "Hh Mm Ss" / "Mm Ss" / "Ss" string. */
+    public static function formatDuration(int $seconds): string
+    {
+        if ($seconds < 0) {
+            $seconds = 0;
+        }
+        $h = intdiv($seconds, 3600);
+        $m = intdiv($seconds % 3600, 60);
+        $s = $seconds % 60;
+        if ($h > 0) {
+            return sprintf('%dh %dm %ds', $h, $m, $s);
+        }
+        if ($m > 0) {
+            return sprintf('%dm %ds', $m, $s);
+        }
+        return sprintf('%ds', $s);
     }
 
     // --- helpers -------------------------------------------------------------

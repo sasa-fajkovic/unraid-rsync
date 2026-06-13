@@ -73,6 +73,14 @@
       if [ -f "&emhttp;/scripts/apply-cron.php" ]; then
         php "&emhttp;/scripts/apply-cron.php" || true
       fi
+      # Initialise Unraid's notification subsystem once on install/upgrade so our
+      # Phase 7 per-job notifications can be delivered. `notify init` fixes the
+      # subsystem's permissions and is idempotent. Guarded + non-fatal: a box
+      # without the notify script (or a transient failure) is harmless - we just
+      # skip it and the runner's notify dispatch degrades to a no-op at run time.
+      if [ -x /usr/local/emhttp/webGui/scripts/notify ]; then
+        /usr/local/emhttp/webGui/scripts/notify init || true
+      fi
       echo ""
       echo "Unraid Rsync &version; installed."
       echo "Open Settings -> Unraid Rsync to configure."
