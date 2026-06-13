@@ -3,16 +3,16 @@
 use PHPUnit\Framework\TestCase;
 
 /**
- * Tests for the click-to-read help on the shared rsync-options renderer
+ * Tests for the native inline help on the shared rsync-options renderer
  * (source/pages/_options_form.php).
  *
  * The contract under test: EVERY whitelisted rsync option (the keys in
  * Config::defaultRsyncOptions()) has a non-empty, plain-English description, and
- * the shared renderer actually emits that description plus a click-to-read "?"
- * affordance for it. This guards the help so that a future option added to the
- * whitelist WITHOUT a matching description fails CI here, in either place that
- * includes the partial (Global Settings defaults and the per-job options block),
- * since both call the same renderer.
+ * the shared renderer actually emits that description plus a "?" help affordance
+ * for it that toggles a native blockquote.inline_help box. This guards the help
+ * so that a future option added to the whitelist WITHOUT a matching description
+ * fails CI here, in either place that includes the partial (Global Settings
+ * defaults and the per-job options block), since both call the same renderer.
  */
 final class OptionsFormHelpTest extends TestCase
 {
@@ -100,9 +100,9 @@ final class OptionsFormHelpTest extends TestCase
     public function testRendererEmitsDescriptionAndAffordanceForEveryKey(): void
     {
         // End-to-end: render the shared partial and confirm that for every
-        // whitelisted key it emits both a click-to-read "?" affordance (a button
-        // with aria-controls pointing at the help block) and the help blockquote
-        // itself, carrying the (escaped) description text.
+        // whitelisted key it emits both a "?" help affordance (with aria-controls
+        // pointing at the help block) and the help blockquote itself, carrying the
+        // (escaped) description text.
         $html = $this->renderOptions(Config::defaultRsyncOptions(), 'global[defaultRsyncOptions]', 'ur_t1');
         $help = ur_option_help();
 
@@ -127,6 +127,43 @@ final class OptionsFormHelpTest extends TestCase
         }
     }
 
+    public function testHelpAffordanceIsNativeIconNotAButton(): void
+    {
+        // Regression guard: the "?" affordance must be a lightweight native icon
+        // (a <span role="button" class="ur-help">), NOT a <button>. The webGui base
+        // stylesheet renders every <button> as a large bordered uppercase pill,
+        // which is exactly what made the previous affordance look like a big
+        // "orange HELP button". Keep it a span so it stays a subtle icon.
+        $html = $this->renderOptions(Config::defaultRsyncOptions(), 'global[defaultRsyncOptions]', 'ur_t3');
+
+        // The affordance is the native icon span...
+        $this->assertMatchesRegularExpression(
+            '/<span class="ur-help" role="button"[^>]*aria-controls="/',
+            $html,
+            'The "?" help affordance must render as <span class="ur-help" role="button">.'
+        );
+        // ...and the old heavy <button> affordance must be gone.
+        $this->assertStringNotContainsString(
+            'ur-help-toggle',
+            $html,
+            'The old <button class="ur-help-toggle"> affordance must not be emitted.'
+        );
+    }
+
+    public function testHelpBoxUsesNativeInlineHelpBlockquote(): void
+    {
+        // The revealed help must use Unraid's native blue callout element: a
+        // <blockquote class="inline_help …"> — the same markup Markdown.php emits
+        // for a "> help" line — so it inherits the stock blue box styling instead
+        // of any bespoke widget.
+        $html = $this->renderOptions(Config::defaultRsyncOptions(), 'global[defaultRsyncOptions]', 'ur_t4');
+        $this->assertMatchesRegularExpression(
+            '/<blockquote class="inline_help ur-help-text" id="ur_t4_archive_help">/',
+            $html,
+            'Help text must render inside a native blockquote.inline_help box.'
+        );
+    }
+
     public function testRendererPreservesFieldNamesAndRevealsHelpHidden(): void
     {
         // Purely-additive guarantee: the help UI must not change the form field
@@ -139,10 +176,17 @@ final class OptionsFormHelpTest extends TestCase
         $this->assertStringContainsString('name="jobs[0][rsyncOptions][bwlimit]"', $html);
         $this->assertStringContainsString('name="jobs[0][rsyncOptions][excludes][]"', $html);
 
-        // The help blockquotes are emitted collapsed (hidden) so we don't show
-        // dozens of long descriptions at once.
+        // The descriptions render in the NATIVE Unraid help element: a
+        // blockquote.inline_help blue box. The base dynamix stylesheet ships
+        // `.inline_help { display:none }`, so each block starts collapsed without
+        // any inline attribute; the "?" affordance reveals it by adding `ur-open`.
+        // The blocks must therefore NOT carry the `ur-open` class at render time.
         $this->assertStringContainsString('class="inline_help ur-help-text"', $html);
-        $this->assertMatchesRegularExpression('/<blockquote class="inline_help ur-help-text"[^>]*\shidden>/', $html);
+        $this->assertDoesNotMatchRegularExpression(
+            '/<blockquote class="[^"]*\bur-open\b[^"]*"/',
+            $html,
+            'Help blockquotes must start collapsed (no ur-open class until clicked).'
+        );
     }
 
     /**
@@ -172,10 +216,13 @@ final class OptionsFormHelpTest extends TestCase
             preg_match_all('/window\s*\.\s*urOptionHelpWired\s*=\s*true/', $html),
             'Help toggle JS must be emitted exactly once per page.'
         );
+        // Count a selector that appears exactly once within the emitted CSS block
+        // (the reveal rule). Counting `.ur-help {` would over-count because the
+        // touch-device `@media (hover:none)` query repeats that selector.
         $this->assertSame(
             1,
-            preg_match_all('/\.ur-help-toggle\s*\{/', $html),
-            'Help toggle CSS must be emitted exactly once per page.'
+            preg_match_all('/\.ur-help-text\.ur-open\s*\{/', $html),
+            'Help affordance CSS must be emitted exactly once per page.'
         );
     }
 
