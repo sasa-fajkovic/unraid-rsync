@@ -290,7 +290,12 @@ if (!function_exists('ur_render_rsync_options')) {
         }
         echo '</dl>';
 
-        // --- destructive flags (warned) ------------------------------------
+        // --- destructive flags ---------------------------------------------
+        // Same native rows as the booleans above; the deletion caution lives in
+        // each option's own inline help (the delete / deleteExcluded descriptions
+        // open with a capitalised "DELETE … Destructive:" warning, which
+        // OptionsFormHelpTest::testDestructiveDescriptionsWarn enforces), so no
+        // separate always-on warning element is emitted here.
         echo '<dl>';
         foreach ($destructive as $key => [$label, $flag]) {
             ur_render_bool_row($prefix, $idBase, $key, $label, $flag, !empty($opts[$key]));
@@ -432,8 +437,11 @@ if (!function_exists('ur_emit_option_help_assets')) {
 @media (hover: none) { .ur-help { opacity: 1; } }
 
 /* The revealed description reuses the native blockquote.inline_help blue box.
-   `.inline_help` is `display:none` in the base stylesheet; reveal by adding the
-   ur-open class. Tighten the native margins a touch so it sits under its row. */
+   The base stylesheet already ships `.inline_help { display:none }`, but we also
+   hide `.ur-help-text` here so the partial is self-contained and the help never
+   renders expanded if that upstream rule changes or isn't loaded. Reveal by
+   adding the ur-open class. Tighten the native margins so it sits under its row. */
+.ur-help-text { display: none; }
 .ur-help-text.ur-open { display: block; }
 .ur-rsync-options .inline_help { margin: .4rem 0; }
 </style>
