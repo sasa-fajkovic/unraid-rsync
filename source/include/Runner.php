@@ -277,6 +277,10 @@ class Runner
                     // which REDACTS armed per-run secret paths (F1) and enforces
                     // the per-run-log byte cap (F3) before bytes hit the log.
                     $pairExit = Rsync::run($argv, Logger::sink($runLog));
+                    // rsync ALSO writes the run log directly via --log-file, which
+                    // bypasses the sink's cap; trim the file to the cap now that
+                    // this pair's rsync has closed --log-file (F3, complete).
+                    Logger::enforceRunLogCap($runLog);
                     $exitCodes[] = $pairExit;
                     Logger::event($runLog, $jobId, "Pair #$n rsync exited with code $pairExit (" . Rsync::exitToState($pairExit) . ').');
                 }

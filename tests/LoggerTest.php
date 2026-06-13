@@ -229,6 +229,36 @@ final class LoggerTest extends TestCase
         $this->assertStringNotContainsString('nor this', $contents);
     }
 
+    public function testEnforceRunLogCapTrimsDirectWritesFromRsyncLogFile(): void
+    {
+        // rsync writes the run log directly via --log-file, bypassing Logger's
+        // sink cap. enforceRunLogCap() bounds the file regardless of writer: a
+        // file grown PAST the cap by a direct write (simulated here) is trimmed
+        // to the cap (head kept) with the one-time marker appended.
+        $cap = 4096;
+        Logger::$maxRunLogBytesOverride = $cap;
+
+        $path = Logger::openRun('j-direct', 1750000000);
+        // Simulate rsync's direct --log-file writes overshooting the cap.
+        file_put_contents($path, str_repeat('R', $cap * 3));
+        $this->assertGreaterThan($cap, filesize($path));
+
+        $trimmed = Logger::enforceRunLogCap($path);
+        $this->assertTrue($trimmed);
+
+        $size = filesize($path);
+        $this->assertLessThanOrEqual($cap + 64, $size, 'direct-write log must be trimmed to the cap (+ marker)');
+        $contents = file_get_contents($path);
+        $this->assertStringContainsString(Logger::TRUNCATE_MARKER_PREFIX, $contents);
+        $this->assertSame(1, substr_count($contents, Logger::TRUNCATE_MARKER_PREFIX), 'marker written only once');
+
+        // A second enforcement on an already-trimmed file is a no-op (under cap).
+        $this->assertFalse(Logger::enforceRunLogCap($path));
+
+        // plugin.log is never the target of the cap.
+        $this->assertFalse(Logger::enforceRunLogCap(Logger::pluginLogPath()));
+    }
+
     public function testPluginLogIsNotSizeCapped(): void
     {
         // The cap applies only to per-run logs; plugin.log is the rolling

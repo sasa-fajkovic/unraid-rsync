@@ -332,9 +332,9 @@ class Logger
             self::writeTruncationMarker($path, $cap);
             return;
         }
-        // Writing this chunk would cross the cap: write what fits (up to the
-        // cap), then the marker. We don't split mid-chunk to a byte boundary
-        // beyond the cap - we simply stop once at/over the limit.
+        // Writing this whole chunk would cross the cap: write only the bytes that
+        // fit in the remaining room (truncating this chunk at the cap boundary),
+        // then the one-time marker. The file never exceeds the cap + the marker.
         if ($size + strlen($data) > $cap) {
             $room = $cap - $size;
             if ($room > 0) {
@@ -381,6 +381,50 @@ class Logger
             }
             self::appendCapped($path, self::redact($chunk));
         };
+    }
+
+    /**
+     * Enforce the per-run-log byte cap on an existing run-log file regardless of
+     * who wrote it. appendCapped() only bounds what flows through Logger
+     * (captured stdout/stderr + hooks), but rsync ALSO writes the run log
+     * directly via `--log-file=<runLog>`, bypassing Logger - so a verbose/debug
+     * run could still grow the tmpfs log unbounded. The Runner calls this after
+     * each rsync pair (rsync re-opens --log-file per invocation, so trimming
+     * between pairs is safe): if the file exceeds the cap, it is truncated in
+     * place to the cap (keeping the HEAD, matching appendCapped's "stop
+     * appending" semantics) and the one-time marker is appended. No-op for
+     * non-run-log paths or files under the cap. Best-effort.
+     *
+     * @return bool true when the file was trimmed.
+     */
+    public static function enforceRunLogCap(string $path): bool
+    {
+        if (!self::isRunLogPath($path) || !is_file($path)) {
+            return false;
+        }
+        // Already capped (the marker itself pushes the file a few bytes past the
+        // cap, so a naive size check would re-trim forever): nothing more to do.
+        if (!empty(self::$capped[$path])) {
+            return false;
+        }
+        $cap  = self::maxRunLogBytes();
+        $size = @filesize($path);
+        $size = ($size === false) ? 0 : (int) $size;
+        if ($size <= $cap) {
+            return false;
+        }
+        // Truncate to the cap (keep the head), then append the one-time marker.
+        $fh = @fopen($path, 'r+b');
+        if ($fh === false) {
+            return false;
+        }
+        if (@flock($fh, LOCK_EX)) {
+            @ftruncate($fh, $cap);
+            @flock($fh, LOCK_UN);
+        }
+        @fclose($fh);
+        self::writeTruncationMarker($path, $cap);
+        return true;
     }
 
     /**
