@@ -403,6 +403,15 @@ class KeyTools
     /**
      * proc_open an argv ARRAY without a shell, capturing stdout+stderr.
      *
+     * DEADLOCK-SAFE: stdin is /dev/null (so ssh-keygen never blocks waiting for
+     * an overwrite-prompt / passphrase answer), and stdout+stderr are drained
+     * CONCURRENTLY with a non-blocking stream_select loop. Reading one pipe to
+     * EOF before the other (the old stream_get_contents($pipes[1]) then
+     * stream_get_contents($pipes[2]) sequence) can DEADLOCK: a process that fills
+     * the ~64 KiB stderr pipe buffer while we are still blocked reading stdout
+     * hangs forever (and vice versa) - the "stuck on Generating…" symptom. The
+     * concurrent drain bounds memory and never blocks on the wrong pipe.
+     *
      * @param array<int,string> $argv
      * @return array{0:int,1:string,2:string}
      */
@@ -418,11 +427,46 @@ class KeyTools
         if (!is_resource($proc)) {
             return [127, '', 'Failed to start ' . ($argv[0] ?? 'command') . '.'];
         }
-        $stdout = stream_get_contents($pipes[1]);
-        $stderr = stream_get_contents($pipes[2]);
-        fclose($pipes[1]);
-        fclose($pipes[2]);
+
+        // Drain stdout (fd 1) and stderr (fd 2) concurrently, non-blocking.
+        stream_set_blocking($pipes[1], false);
+        stream_set_blocking($pipes[2], false);
+        $buf  = [1 => '', 2 => ''];
+        $open = [1 => $pipes[1], 2 => $pipes[2]];
+        while (!empty($open)) {
+            $read   = array_values($open);
+            $write  = null;
+            $except = null;
+            $n = @stream_select($read, $write, $except, 1);
+            if ($n === false) {
+                break; // interrupted/error - stop draining and reap below
+            }
+            if ($n === 0) {
+                continue; // timeout tick; keep waiting for output / EOF
+            }
+            foreach ($open as $fd => $stream) {
+                if (!in_array($stream, $read, true)) {
+                    continue;
+                }
+                $chunk = fread($stream, 8192);
+                if ($chunk === '' || $chunk === false) {
+                    if (feof($stream)) {
+                        fclose($stream);
+                        unset($open[$fd]);
+                    }
+                    continue;
+                }
+                $buf[$fd] .= $chunk;
+            }
+        }
+        // Close any pipe stream_select left open (e.g. on a select error).
+        foreach ($open as $stream) {
+            if (is_resource($stream)) {
+                fclose($stream);
+            }
+        }
+
         $code = proc_close($proc);
-        return [(int) $code, is_string($stdout) ? $stdout : '', is_string($stderr) ? $stderr : ''];
+        return [(int) $code, $buf[1], $buf[2]];
     }
 }

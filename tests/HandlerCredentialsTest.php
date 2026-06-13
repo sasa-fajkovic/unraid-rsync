@@ -261,6 +261,84 @@ final class HandlerCredentialsTest extends TestCase
         $this->assertSame('X2', $byId['k-2']['privateKey']);
     }
 
+    // --- KEYFILE auth save round-trip --------------------------------------
+
+    public function testSaveKeyfileConnectionCreatesAndStoresPath(): void
+    {
+        // A KEYFILE connection needs neither a managed key nor a password; only
+        // an absolute key file path (existence is a run-time concern).
+        $_POST = [
+            'action'              => 'saveCredentials',
+            'csrf_token'          => 'test-token',
+            'connections_present' => '1',
+            'connections'         => [
+                0 => [
+                    'id' => '', 'name' => 'keyfileconn', 'host' => 'h.example', 'port' => '22',
+                    'username' => 'root', 'authMethod' => 'KEYFILE',
+                    'keyFilePath' => '/root/.ssh/id_ed25519',
+                    'strictHostKey' => 'accept-new', 'connectTimeout' => '10',
+                ],
+            ],
+        ];
+        [$body, $code] = $this->runCapture(fn() => ur_action_save_credentials());
+        $this->assertSame(200, $code, json_encode($body));
+        $this->assertTrue($body['ok']);
+
+        $creds = Credentials::load();
+        $this->assertCount(1, $creds['connections']);
+        $c = $creds['connections'][0];
+        $this->assertSame('KEYFILE', $c['authMethod']);
+        $this->assertSame('/root/.ssh/id_ed25519', $c['keyFilePath']);
+        // No password, no managed-key reference stored for a KEYFILE connection.
+        $this->assertSame('', $c['password']);
+        $this->assertSame('', $c['keyId']);
+    }
+
+    public function testSaveKeyfileConnectionRejectsRelativePath(): void
+    {
+        $_POST = [
+            'action' => 'saveCredentials', 'csrf_token' => 'test-token',
+            'connections_present' => '1',
+            'connections' => [0 => [
+                'id' => '', 'name' => 'bad', 'host' => 'h', 'username' => 'u',
+                'authMethod' => 'KEYFILE', 'keyFilePath' => 'relative/key',
+            ]],
+        ];
+        [$body, $code] = $this->runCapture(fn() => ur_action_save_credentials());
+        $this->assertSame(422, $code, json_encode($body));
+        $this->assertArrayHasKey('errors', $body);
+        $this->assertFalse(is_file(Credentials::path()));
+    }
+
+    public function testSwitchingToKeyfileClearsKeyIdAndPassword(): void
+    {
+        // A connection that was PASSWORD becomes KEYFILE: the stored password and
+        // any keyId are cleared so no stale credential lingers.
+        $seed = Credentials::defaults();
+        $seed['connections'][] = Credentials::mergeConnection([
+            'id' => 'c-1', 'name' => 'c', 'host' => 'h', 'username' => 'u',
+            'authMethod' => 'PASSWORD', 'password' => Credentials::obfuscate('orig'),
+        ]);
+        $this->seedCreds($seed);
+
+        $_POST = [
+            'action' => 'saveCredentials', 'csrf_token' => 'test-token',
+            'connections_present' => '1',
+            'connections' => [0 => [
+                'id' => 'c-1', 'name' => 'c', 'host' => 'h', 'username' => 'u',
+                'authMethod' => 'KEYFILE', 'keyFilePath' => '/root/.ssh/id_ed25519', 'password' => '',
+            ]],
+        ];
+        [$body, $code] = $this->runCapture(fn() => ur_action_save_credentials());
+        $this->assertSame(200, $code, json_encode($body));
+
+        $c = Credentials::load()['connections'][0];
+        $this->assertSame('KEYFILE', $c['authMethod']);
+        $this->assertSame('/root/.ssh/id_ed25519', $c['keyFilePath']);
+        $this->assertSame('', $c['password']);
+        $this->assertSame('', $c['keyId']);
+    }
+
     public function testSaveCredentialsRejectsInvalidConnection(): void
     {
         $_POST = [
@@ -449,6 +527,75 @@ final class HandlerCredentialsTest extends TestCase
         [$body, $code] = $this->runCapture(fn() => ur_handle_request());
         $this->assertSame(403, $code);
         $this->assertStringContainsString('CSRF', $body['error']);
+    }
+
+    public function testCsrfMismatchReturnsCleanJson(): void
+    {
+        // A mismatched token must produce a parseable JSON error envelope (NOT an
+        // HTML fatal), so the client can surface a clear message. Status is read
+        // from the handler's intended-status seam (http_response_code() is
+        // unreliable under CLI once output has begun - see sendResponse).
+        $_POST = ['action' => 'generateKey', 'csrf_token' => 'wrong', 'name' => 'k'];
+        $_SERVER['REQUEST_METHOD'] = 'POST';
+        ob_start();
+        ur_handle_request();
+        $out = ob_get_clean();
+        $decoded = json_decode($out, true);
+        $this->assertIsArray($decoded, 'response must be valid JSON, got: ' . $out);
+        $this->assertSame(403, (int) ($GLOBALS['ur_last_response_code'] ?? 0));
+        $this->assertArrayHasKey('error', $decoded);
+    }
+
+    public function testCsrfMissingTokenReturnsJsonError(): void
+    {
+        // Token field absent entirely -> still a clean JSON 403.
+        $_POST = ['action' => 'deleteKey'];
+        $_SERVER['REQUEST_METHOD'] = 'POST';
+        ob_start();
+        ur_handle_request();
+        $out = ob_get_clean();
+        $decoded = json_decode($out, true);
+        $this->assertIsArray($decoded, 'response must be valid JSON, got: ' . $out);
+        $this->assertSame(403, (int) ($GLOBALS['ur_last_response_code'] ?? 0));
+    }
+
+    public function testExpectedCsrfTokenFallsBackToVarIni(): void
+    {
+        // ROOT-CAUSE regression guard: when $GLOBALS['var'] is NOT populated
+        // (a direct POST to handler.php), the expected token must come from the
+        // Unraid state file via parse_ini_file - the fix for the silent-403 bug.
+        if (!defined('UR_VAR_INI_PATHS')) {
+            $this->markTestSkipped('UR_VAR_INI_PATHS not overridable in this build');
+        }
+        $path = UR_VAR_INI_PATHS[0];
+        @mkdir(dirname($path), 0777, true);
+        file_put_contents($path, "version=\"7.3.1\"\ncsrf_token=\"from-state-ini\"\n");
+        try {
+            unset($GLOBALS['var']); // simulate the standalone-endpoint case
+            $this->assertSame('from-state-ini', ur_expected_csrf_token());
+        } finally {
+            @unlink($path);
+            $GLOBALS['var'] = ['csrf_token' => 'test-token'];
+        }
+    }
+
+    public function testCsrfValidatesAgainstVarIniTokenOnDirectPost(): void
+    {
+        if (!defined('UR_VAR_INI_PATHS')) {
+            $this->markTestSkipped('UR_VAR_INI_PATHS not overridable in this build');
+        }
+        $path = UR_VAR_INI_PATHS[0];
+        @mkdir(dirname($path), 0777, true);
+        file_put_contents($path, "csrf_token=\"direct-token\"\n");
+        try {
+            unset($GLOBALS['var']); // direct POST: front controller never set $var
+            $_POST = ['csrf_token' => 'direct-token'];
+            [, $code] = $this->runCapture(fn() => $this->assertTrue(ur_check_csrf()));
+            $this->assertSame(200, $code);
+        } finally {
+            @unlink($path);
+            $GLOBALS['var'] = ['csrf_token' => 'test-token'];
+        }
     }
 
     public function testGetMethodRejectedForCredentialActions(): void

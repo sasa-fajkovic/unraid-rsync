@@ -47,6 +47,14 @@ if (!function_exists('_')) {
     }
 }
 
+// Point handler.php's CSRF-from-state-file fallback at a temp var.ini inside the
+// test config base (never the real /var/local/emhttp/var.ini). Tests that
+// exercise the fallback write/remove this file themselves; tests that set
+// $GLOBALS['var']['csrf_token'] are unaffected (that source takes precedence).
+if (!defined('UR_VAR_INI_PATHS')) {
+    define('UR_VAR_INI_PATHS', [$urTestBase . '/var.ini']);
+}
+
 // A separate tmpfs RUNTIME base (state + logs) so RunState/Logger never write to
 // /tmp/unraid.rsync during tests. Defined before requiring those classes.
 $urRuntimeBase = sys_get_temp_dir() . '/unraid-rsync-rt-' . getmypid() . '-' . bin2hex(random_bytes(4));

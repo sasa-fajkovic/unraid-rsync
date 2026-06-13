@@ -71,17 +71,23 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
     $p    = 'connections[' . $index . ']';
     $idb  = 'ur_conn_' . $index;
 
-    $id        = (string) $conn['id'];
-    $name      = (string) $conn['name'];
-    $host      = (string) $conn['host'];
-    $port      = (string) $conn['port'];
-    $username  = (string) $conn['username'];
-    $auth      = (string) $conn['authMethod'];
-    $keyId     = (string) $conn['keyId'];
-    $strict    = (string) $conn['strictHostKey'];
-    $timeout   = (string) $conn['connectTimeout'];
-    $hostKey   = (string) $conn['remoteHostKey'];
-    $hasPass   = ((string) $conn['password']) !== '';
+    $id          = (string) $conn['id'];
+    $name        = (string) $conn['name'];
+    $host        = (string) $conn['host'];
+    $port        = (string) $conn['port'];
+    $username    = (string) $conn['username'];
+    $auth        = (string) $conn['authMethod'];
+    $keyId       = (string) $conn['keyId'];
+    $keyFilePath = (string) $conn['keyFilePath'];
+    $strict      = (string) $conn['strictHostKey'];
+    $timeout     = (string) $conn['connectTimeout'];
+    $hostKey     = (string) $conn['remoteHostKey'];
+    $hasPass     = ((string) $conn['password']) !== '';
+    // A KEYFILE connection always has SOME keyFilePath after merge; offer the
+    // conventional default when it's somehow empty so the field is never blank.
+    if ($keyFilePath === '') {
+        $keyFilePath = Credentials::DEFAULT_KEY_FILE_PATH;
+    }
 
     echo '<div class="ur-conn-card" data-index="' . ur_h($index) . '" data-conn-id="' . ur_h($id) . '">';
     echo '<input type="hidden" name="' . ur_h($p . '[id]') . '" value="' . ur_h($id) . '">';
@@ -103,16 +109,38 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
     echo '<dt><label for="' . ur_h($idb . '_user') . '">' . ur_h(ur_t('Username')) . '</label>' . ur_required_mark() . ':</dt>';
     echo '<dd><input type="text" id="' . ur_h($idb . '_user') . '" name="' . ur_h($p . '[username]') . '" value="' . ur_h($username) . '" required></dd>';
 
-    // auth method
+    // auth method. KEYFILE is FIRST (the default + common Unraid case): point at
+    // an existing key file already on this server. KEY = the managed keychain
+    // key created/imported above. PASSWORD = obfuscated stored password.
     echo '<dt><label for="' . ur_h($idb . '_auth') . '">' . ur_h(ur_t('Auth method')) . '</label>:</dt>';
     echo '<dd><select id="' . ur_h($idb . '_auth') . '" class="ur-conn-auth" name="' . ur_h($p . '[authMethod]') . '" data-idb="' . ur_h($idb) . '">';
-    foreach (['KEY' => 'SSH key', 'PASSWORD' => 'Password'] as $val => $lbl) {
+    foreach ([
+        'KEYFILE'  => 'Existing key file on this server',
+        'KEY'      => 'Managed key (generated/imported here)',
+        'PASSWORD' => 'Password',
+    ] as $val => $lbl) {
         $sel = ($auth === $val) ? ' selected' : '';
         echo '<option value="' . ur_h($val) . '"' . $sel . '>' . ur_h(ur_t($lbl)) . '</option>';
     }
     echo '</select></dd>';
 
-    // KEY: key picker (shown + required only when auth=KEY)
+    // KEYFILE: path to an existing private key file on this server (shown +
+    // required only when auth=KEYFILE). Nothing is uploaded/read/stored by the
+    // plugin - OpenSSH reads the file in place via `ssh -i`.
+    $isKeyFile        = ($auth === 'KEYFILE');
+    $keyFileRowStyle  = $isKeyFile ? '' : ' style="display:none"';
+    echo '<dt class="ur-auth-keyfile" id="' . ur_h($idb . '_keyfilerow_dt') . '"' . $keyFileRowStyle . '><label for="' . ur_h($idb . '_keyfile') . '">' . ur_h(ur_t('Key file path')) . '</label>' . ur_required_mark() . ':</dt>';
+    echo '<dd class="ur-auth-keyfile" id="' . ur_h($idb . '_keyfilerow_dd') . '"' . $keyFileRowStyle . '>';
+    echo '<input type="text" id="' . ur_h($idb . '_keyfile') . '" name="' . ur_h($p . '[keyFilePath]') . '" value="' . ur_h($keyFilePath) . '"' . ($isKeyFile ? ' required' : '') . ' placeholder="' . ur_h(Credentials::DEFAULT_KEY_FILE_PATH) . '">';
+    echo '<blockquote class="inline_help"><p>'
+        . ur_h(ur_t('Recommended if you already have an SSH key on this server. Your private key stays in ~/.ssh — '
+            . 'nothing is uploaded or stored by the plugin. Make sure the remote already has the matching public key '
+            . 'in its authorized_keys. The path must be absolute (e.g. /root/.ssh/id_ed25519); it is checked at run time, '
+            . 'so the key only needs to exist when a job runs.'))
+        . '</p></blockquote>';
+    echo '</dd>';
+
+    // KEY: managed-key picker (shown + required only when auth=KEY)
     $isKey       = ($auth === 'KEY');
     $keyRowStyle = $isKey ? '' : ' style="display:none"';
     echo '<dt class="ur-auth-key" id="' . ur_h($idb . '_keyrow_dt') . '"' . $keyRowStyle . '><label for="' . ur_h($idb . '_key') . '">' . ur_h(ur_t('SSH key')) . '</label>' . ur_required_mark() . ':</dt>';
@@ -134,7 +162,8 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
         echo '<option value="' . ur_h($keyId) . '" selected>' . ur_h($keyId) . ' ' . ur_h(ur_t('(missing)')) . '</option>';
     }
     echo '</select>';
-    echo '<blockquote class="inline_help"><p>' . ur_h(ur_t('Add or generate keys in the SSH Keys section above.')) . '</p></blockquote>';
+    echo '<blockquote class="inline_help"><p>' . ur_h(ur_t('Uses a key the plugin manages (generated or imported in the SSH Keys section above). '
+        . 'If you already have a key on this server, prefer the "Existing key file on this server" option instead.')) . '</p></blockquote>';
     echo '</dd>';
 
     // PASSWORD: write-only field + recoverable-secret warning (shown when
@@ -216,8 +245,17 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
 <?php endif; ?>
 
 <p>
-  <?=_('Reusable SSH keys and connections (TrueNAS-style keychain). Jobs reference a connection by its id (shown here by name); define a connection once and point any number of jobs at it')?>.
+  <?=_('Reusable connections (and an optional managed key keychain). Jobs reference a connection by its id (shown here by name); define a connection once and point any number of jobs at it')?>.
 </p>
+
+<blockquote class="inline_help">
+  <p>
+    <strong><?=_('Most common setup')?>:</strong>
+    <?=_('if you already have an SSH key on this server (e.g. /root/.ssh/id_ed25519) and have copied its public key to the '
+        . 'remote\'s authorized_keys, you do NOT need the SSH Keys keychain below. Just add a Connection and choose '
+        . '"Existing key file on this server" — the plugin runs ssh -i with your key, nothing is uploaded or stored')?>.
+  </p>
+</blockquote>
 
 <blockquote class="inline_help">
   <p>
@@ -233,7 +271,22 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
 <?php endif; ?>
 
 <!-- ============================== SSH KEYS ============================== -->
-<div class="title"><span class="left"><?=_('SSH Keys')?></span></div>
+<div class="title"><span class="left"><?=_('SSH Keys (managed keychain)')?></span></div>
+
+<blockquote class="inline_help">
+  <p>
+    <strong><?=_('Only needed if you do NOT already have an SSH key on this server')?>.</strong>
+    <?=_('This generates or imports a key that the plugin manages and stores in credentials.json on the USB flash. '
+        . 'If you already have /root/.ssh/id_ed25519 (or any key on this server), DO NOT generate one here — instead, '
+        . 'on a Connection below choose "Existing key file on this server" and point it at your key')?>.
+  </p>
+  <p>
+    <?=_('How SSH keys work: the PRIVATE key is what authenticates you and stays on this server (it is never sent to the remote). '
+        . 'The PUBLIC key is what you put in the remote\'s ~/.ssh/authorized_keys so it will accept your private key. '
+        . 'These keys identify YOU to the remote. The remote SERVER\'s own identity is verified separately — pin it per '
+        . 'Connection with "Discover host key"')?>.
+  </p>
+</blockquote>
 
 <table class="tablesorter ur-key-list">
   <thead>
@@ -286,7 +339,9 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
   <dt><label for="ur_key_import_priv"><?=_('Import private key')?></label>:</dt>
   <dd>
     <textarea id="ur_key_import_priv" rows="4" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" autocomplete="off"></textarea>
-    <blockquote class="inline_help"><p><?=_('A private key must have an EMPTY passphrase (jobs run unattended); its public key and fingerprint are derived automatically. Provide at least ONE of the private or public key fields — the server enforces this either/or rule')?>.</p></blockquote>
+    <blockquote class="inline_help"><p><?=_('Importing is secondary — prefer "Generate key", or skip this section entirely and use a Connection\'s "Existing key file on this server" option if your key already lives on this box. '
+        . 'A private key must have an EMPTY passphrase (jobs run unattended); its public key and fingerprint are derived automatically. '
+        . 'Provide at least ONE of the private or public key fields — the server enforces this either/or rule')?>.</p></blockquote>
   </dd>
   <dt><label for="ur_key_import_pub"><?=_('Import public key (optional)')?></label>:</dt>
   <dd>
@@ -377,12 +432,33 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
   var HANDLER = <?=json_encode($handlerUrl)?>;
   var CSRF = <?=json_encode($csrf)?>;
 
+  /* POST a form and ALWAYS resolve to { ok, status, body, parseError }:
+   *   - ok         the HTTP response was 2xx;
+   *   - status     the numeric HTTP status (0 if the request never reached the
+   *                server - a true network error);
+   *   - body       the parsed JSON object, or null when the body wasn't JSON;
+   *   - parseError true when a body was returned but was NOT valid JSON (e.g. an
+   *                HTML 403/500 from the front controller) - so callers can show
+   *                a clear "server returned a non-JSON response (HTTP <status>)"
+   *                message instead of silently doing nothing.
+   * This never rejects: a genuine network failure resolves with status 0 so the
+   * UI is ALWAYS updated and an action can never leave a stuck "Generating…". */
   function postForm(fields) {
     var fd = new FormData();
     fd.append('csrf_token', CSRF);
     Object.keys(fields).forEach(function (k) { fd.append(k, fields[k]); });
     return fetch(HANDLER, { method: 'POST', body: fd, credentials: 'same-origin' })
-      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); });
+      .then(function (r) {
+        return r.text().then(function (text) {
+          var body = null, parseError = false;
+          try { body = JSON.parse(text); } catch (e) { parseError = (text !== ''); }
+          return { ok: r.ok, status: r.status, body: body, parseError: parseError };
+        });
+      })
+      .catch(function () {
+        /* Could not reach the server at all (offline / connection reset). */
+        return { ok: false, status: 0, body: null, parseError: false, networkError: true };
+      });
   }
 
   function show(el, ok, msg) {
@@ -391,10 +467,23 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
     el.textContent = msg;
   }
 
+  /* Build a clear failure message from a postForm result, ALWAYS including the
+   * HTTP status (or a network/parse hint), so a failure is never silent. */
   function errText(res, fallback) {
-    if (res.body && res.body.errors && res.body.errors.length) { return res.body.errors.join('; '); }
-    if (res.body && res.body.error) { return res.body.error; }
-    return fallback;
+    if (res.networkError || res.status === 0) {
+      return (fallback || 'Request failed') + ': could not reach the server (network error).';
+    }
+    if (res.body && res.body.errors && res.body.errors.length) {
+      return res.body.errors.join('; ') + ' (HTTP ' + res.status + ')';
+    }
+    if (res.body && res.body.error) {
+      return res.body.error + ' (HTTP ' + res.status + ')';
+    }
+    if (res.parseError) {
+      return (fallback || 'Request failed')
+        + ': the server returned a non-JSON response (HTTP ' + res.status + ').';
+    }
+    return (fallback || 'Request failed') + ' (HTTP ' + res.status + ').';
   }
 
   /* ---- key generate / import ---- */
@@ -414,7 +503,7 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
         } else {
           show(keyResult, false, errText(res, 'Key generation failed.'));
         }
-      }).catch(function () { show(keyResult, false, 'Network error.'); });
+      }).catch(function (e) { show(keyResult, false, 'Unexpected error: ' + (e && e.message ? e.message : e)); });
     });
   }
 
@@ -434,7 +523,7 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
         } else {
           show(keyResult, false, errText(res, 'Key import failed.'));
         }
-      }).catch(function () { show(keyResult, false, 'Network error.'); });
+      }).catch(function (e) { show(keyResult, false, 'Unexpected error: ' + (e && e.message ? e.message : e)); });
     });
   }
 
@@ -463,7 +552,7 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
         } else {
           show(keyResult, false, errText(res, 'Delete failed.'));
         }
-      }).catch(function () { show(keyResult, false, 'Network error.'); });
+      }).catch(function (e) { show(keyResult, false, 'Unexpected error: ' + (e && e.message ? e.message : e)); });
     } else if (t.classList.contains('ur-conn-del')) {
       var card = t.closest ? t.closest('.ur-conn-card') : null;
       if (!card) { return; }
@@ -477,7 +566,7 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
           } else {
             show(document.getElementById('ur-conns-result'), false, errText(res, 'Delete failed.'));
           }
-        }).catch(function () { show(document.getElementById('ur-conns-result'), false, 'Network error.'); });
+        }).catch(function (e) { show(document.getElementById('ur-conns-result'), false, 'Unexpected error: ' + (e && e.message ? e.message : e)); });
       } else if (card.parentNode) {
         card.parentNode.removeChild(card); // unsaved card: just remove from DOM
       }
@@ -490,24 +579,37 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
 
   /* ---- auth-method conditional fields ----
    * Show/hide AND toggle `required` so the client `required` matches the chosen
-   * auth method and the server rules (Credentials::validateConnection): KEY auth
-   * requires a key, PASSWORD auth requires a password (UNLESS one is already
-   * stored, in which case a blank field keeps it). A hidden field must never be
-   * `required`, so we always clear it on the inactive branch. */
+   * auth method and the server rules (Credentials::validateConnection):
+   *   KEYFILE  -> key file path required;
+   *   KEY      -> managed-key select required;
+   *   PASSWORD -> password required UNLESS one is already stored (a blank field
+   *               then keeps it).
+   * A hidden field must NEVER be `required` (the browser would block submit on
+   * an invisible field), so we always clear `required` on the inactive branches. */
   function syncAuthRequired(authSel) {
     if (!authSel || !authSel.getAttribute) { return; }
     var idb = authSel.getAttribute('data-idb');
     if (!idb) { return; }
-    var isKey = (authSel.value === 'KEY');
+    var mode = authSel.value; // 'KEYFILE' | 'KEY' | 'PASSWORD'
+    var isKeyFile = (mode === 'KEYFILE');
+    var isKey     = (mode === 'KEY');
+    var isPass    = (mode === 'PASSWORD');
 
-    ['_keyrow_dt', '_keyrow_dd'].forEach(function (s) {
-      var el = document.getElementById(idb + s); if (el) { el.style.display = isKey ? '' : 'none'; }
-    });
-    ['_passrow_dt', '_passrow_dd'].forEach(function (s) {
-      var el = document.getElementById(idb + s); if (el) { el.style.display = isKey ? 'none' : ''; }
-    });
+    function setDisplay(suffixes, shown) {
+      suffixes.forEach(function (s) {
+        var el = document.getElementById(idb + s);
+        if (el) { el.style.display = shown ? '' : 'none'; }
+      });
+    }
+    setDisplay(['_keyfilerow_dt', '_keyfilerow_dd'], isKeyFile);
+    setDisplay(['_keyrow_dt', '_keyrow_dd'], isKey);
+    setDisplay(['_passrow_dt', '_passrow_dd'], isPass);
 
-    /* key select: required only on KEY auth. */
+    /* key file path: required only on KEYFILE auth. */
+    var keyFileInput = document.getElementById(idb + '_keyfile');
+    if (keyFileInput) { keyFileInput.required = isKeyFile; }
+
+    /* managed-key select: required only on KEY auth. */
     var keySel = document.getElementById(idb + '_key');
     if (keySel) { keySel.required = isKey; }
 
@@ -517,7 +619,7 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
     passMark = passMark ? passMark.querySelector('.ur-pass-required') : null;
     if (passInput) {
       var hasStored = passInput.getAttribute('data-haspass') === '1';
-      var passRequired = (!isKey) && !hasStored;
+      var passRequired = isPass && !hasStored;
       passInput.required = passRequired;
       if (passMark) { passMark.style.display = passRequired ? '' : 'none'; }
     }
@@ -531,7 +633,7 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
   });
 
   /* Seed the required state for every connection card on load (the server set
-   * the initial values, but a JS-cloned card defaults to KEY auth and must
+   * the initial values, but a JS-cloned card defaults to KEYFILE auth and must
    * reflect that). Re-run after adding a card. */
   function syncAllAuthRequired() {
     var sels = document.querySelectorAll('.ur-conn-auth');
@@ -553,7 +655,10 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
       } else {
         window.alert(errText(res, 'Host key discovery failed.'));
       }
-    }).catch(function () { btn.textContent = old; btn.disabled = false; window.alert('Network error.'); });
+    }).catch(function (e) {
+      btn.textContent = old; btn.disabled = false;
+      window.alert('Unexpected error: ' + (e && e.message ? e.message : e));
+    });
   }
 
   /* ---- test connection (uses last SAVED settings) ---- */
@@ -567,9 +672,21 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
       var b = res.body || {};
       var ok = res.ok && b.ok;
       resultEl.className = 'ur-test-result ' + (ok ? 'ur-ok' : 'ur-err');
-      resultEl.textContent = (b.message || (ok ? 'OK' : 'Failed')) + (b.reason && !ok ? ' [' + b.reason + ']' : '');
-    }).catch(function () {
-      if (resultEl) { resultEl.className = 'ur-test-result ur-err'; resultEl.textContent = 'Network error.'; }
+      if (ok) {
+        resultEl.textContent = b.message || 'OK';
+      } else if (b.message) {
+        // App-level failure with a structured message (auth/hostkey/etc).
+        resultEl.textContent = b.message + (b.reason ? ' [' + b.reason + ']' : '');
+      } else {
+        // Transport-level failure (non-JSON / non-2xx / network) - surface the
+        // status so the user isn't left guessing.
+        resultEl.textContent = errText(res, 'Connection test failed.');
+      }
+    }).catch(function (e) {
+      if (resultEl) {
+        resultEl.className = 'ur-test-result ur-err';
+        resultEl.textContent = 'Unexpected error: ' + (e && e.message ? e.message : e);
+      }
     });
   }
 
@@ -593,12 +710,17 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
       wrap.innerHTML = html.trim();
       var card = wrap.firstElementChild;
       document.getElementById('ur-conns-container').appendChild(card);
-      /* A new card defaults to KEY auth; seed its required state to match. */
+      /* A new card defaults to KEYFILE auth (the template default); seed its
+       * required state to match. */
       syncAllAuthRequired();
     });
   }
 
-  /* ---- form submits (keys rename, connections) ---- */
+  /* ---- form submits (keys rename, connections) ----
+   * Uses the SAME robust text->JSON parse as postForm so a non-JSON 403/500 (the
+   * original silent-save bug: r.json() threw and the result line was never
+   * updated) becomes a VISIBLE error WITH the HTTP status, and a success always
+   * renders a clear "Saved" line. */
   function wireForm(formId, resultId) {
     var form = document.getElementById(formId);
     if (!form) { return; }
@@ -606,8 +728,18 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
       ev.preventDefault();
       var result = document.getElementById(resultId);
       var fd = new FormData(form);
+      show(result, true, 'Saving…');
       fetch(form.getAttribute('action'), { method: 'POST', body: fd, credentials: 'same-origin' })
-        .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); })
+        .then(function (r) {
+          return r.text().then(function (text) {
+            var body = null, parseError = false;
+            try { body = JSON.parse(text); } catch (e) { parseError = (text !== ''); }
+            return { ok: r.ok, status: r.status, body: body, parseError: parseError };
+          });
+        })
+        .catch(function () {
+          return { ok: false, status: 0, body: null, parseError: false, networkError: true };
+        })
         .then(function (res) {
           if (res.ok && res.body && res.body.ok) {
             var hasWarnings = res.body.warnings && res.body.warnings.length;
@@ -624,8 +756,7 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
           } else {
             show(result, false, errText(res, 'Save failed.'));
           }
-        })
-        .catch(function () { show(result, false, 'Network error while saving.'); });
+        });
     });
   }
   wireForm('ur-keys-form', 'ur-keys-save-result');

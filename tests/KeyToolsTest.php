@@ -52,6 +52,20 @@ final class FakeKeyTools extends KeyTools
 }
 
 /**
+ * Exposes the REAL runKeygen/runKeyscan seams (which call the private,
+ * deadlock-safe runArgv) so the concurrent stdout/stderr drain can be exercised
+ * against a real subprocess WITHOUT stubbing. Used only by the deadlock test.
+ */
+final class RealRunKeyTools extends KeyTools
+{
+    /** @return array{0:int,1:string,2:string} */
+    public static function publicRunKeygen(array $argv): array
+    {
+        return static::runKeygen($argv);
+    }
+}
+
+/**
  * Tests for KeyTools.php: fingerprint + public-key parsing from representative
  * ssh-keygen output, generate/import flow with stubbed binaries, host validation
  * (option-injection guard), and ssh-keyscan output filtering.
@@ -227,5 +241,55 @@ final class KeyToolsTest extends TestCase
         $res = FakeKeyTools::discoverHostKey('-oProxyCommand=evil', 22, 10);
         $this->assertFalse($res['ok']);
         $this->assertStringContainsString('Invalid host', $res['error']);
+    }
+
+    // --- runArgv deadlock-safety -------------------------------------------
+
+    public function testRunArgvDrainsLargeStderrWithoutDeadlock(): void
+    {
+        // A child that floods STDERR with > the ~64 KiB pipe buffer while STDOUT
+        // stays small would DEADLOCK the old sequential reader (read stdout to
+        // EOF, then stderr): the child blocks writing stderr, we block reading
+        // stdout, forever. The concurrent stream_select drain must complete and
+        // return BOTH streams in full. Bounded by PHPUnit's per-test timeout so a
+        // regression hangs the test (a clear failure) rather than passing.
+        if (DIRECTORY_SEPARATOR !== '/' || !is_executable('/bin/sh')) {
+            $this->markTestSkipped('POSIX shell required for the deadlock probe');
+        }
+
+        // ~256 KiB to stderr (well past the pipe buffer), a short line to stdout.
+        $bigStderr = str_repeat('E', 256 * 1024);
+        $argv = ['/bin/sh', '-c', 'printf OUT; printf %s "$0" 1>&2', $bigStderr];
+
+        [$code, $stdout, $stderr] = RealRunKeyTools::publicRunKeygen($argv);
+
+        $this->assertSame(0, $code);
+        $this->assertSame('OUT', $stdout);
+        $this->assertSame(strlen($bigStderr), strlen($stderr), 'all stderr must be drained');
+        $this->assertSame($bigStderr, $stderr);
+    }
+
+    public function testRunArgvHandlesLargeStdout(): void
+    {
+        // The mirror case: a large STDOUT with small stderr must also drain fully.
+        if (DIRECTORY_SEPARATOR !== '/' || !is_executable('/bin/sh')) {
+            $this->markTestSkipped('POSIX shell required for the drain probe');
+        }
+        $bigStdout = str_repeat('O', 256 * 1024);
+        $argv = ['/bin/sh', '-c', 'printf %s "$0"; printf ERR 1>&2', $bigStdout];
+
+        [$code, $stdout, $stderr] = RealRunKeyTools::publicRunKeygen($argv);
+
+        $this->assertSame(0, $code);
+        $this->assertSame(strlen($bigStdout), strlen($stdout), 'all stdout must be drained');
+        $this->assertSame('ERR', $stderr);
+    }
+
+    public function testRunArgvMissingBinaryReturns127(): void
+    {
+        // A non-existent program must not hang and must report a clear failure.
+        [$code, $stdout, $stderr] = RealRunKeyTools::publicRunKeygen(['/nonexistent/ur-no-such-binary-xyz']);
+        $this->assertNotSame(0, $code);
+        $this->assertSame('', $stdout);
     }
 }

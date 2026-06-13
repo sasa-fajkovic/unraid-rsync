@@ -247,6 +247,71 @@ final class RunnerTest extends TestCase
         $this->assertSame('/mnt/user/m/', $pull['dest']);
     }
 
+    public function testSshKeyfileJobFailsWhenKeyFileMissing(): void
+    {
+        // An SSH job using a KEYFILE connection whose key file does NOT exist
+        // must fail the run BEFORE any rsync, with the clear run-time message
+        // (no rsync call, postHook still runs, FAILED state + summary).
+        $rsyncCalls = 0;
+        Rsync::$runner = function (array $argv, $onOutput) use (&$rsyncCalls): int {
+            $rsyncCalls++;
+            return 0;
+        };
+
+        $origBase = Ssh::$runtimeBase;
+        $rt = sys_get_temp_dir() . '/ur-runner-ssh-' . getmypid() . '-' . bin2hex(random_bytes(4));
+        Ssh::$runtimeBase = $rt;
+
+        // Seed a KEYFILE connection pointing at a non-existent key file.
+        $creds = Credentials::defaults();
+        $creds['connections'][] = Credentials::mergeConnection([
+            'id' => 'c-kf', 'name' => 'kf', 'host' => 'h.example', 'username' => 'root',
+            'authMethod' => 'KEYFILE', 'keyFilePath' => $rt . '/absent/id_ed25519',
+        ]);
+        Credentials::save($creds);
+
+        // An SSH job referencing that connection.
+        $config = Config::load();
+        $job = Config::defaultJob();
+        $job['id']           = 'j-kf';
+        $job['name']         = 'j-kf';
+        $job['transport']    = 'SSH';
+        $job['direction']    = 'PUSH';
+        $job['connectionId'] = 'c-kf';
+        $job['pairs']        = [['local' => '/mnt/user/src/', 'remote' => '/data/dst/']];
+        $job['postHook']     = 'POST';
+        $config['jobs'][]    = $job;
+        Config::save($config);
+        RunState::clear('j-kf');
+        RunState::clearAbort('j-kf');
+
+        try {
+            $res = Runner::run('j-kf', false);
+        } finally {
+            Ssh::$runtimeBase = $origBase;
+            Credentials::save(Credentials::defaults());
+            if (is_dir($rt)) {
+                $it = new RecursiveIteratorIterator(
+                    new RecursiveDirectoryIterator($rt, FilesystemIterator::SKIP_DOTS),
+                    RecursiveIteratorIterator::CHILD_FIRST
+                );
+                foreach ($it as $f) {
+                    $f->isDir() ? @rmdir($f->getPathname()) : @unlink($f->getPathname());
+                }
+                @rmdir($rt);
+            }
+        }
+
+        $this->assertSame(Rsync::STATE_FAILED, $res['state']);
+        $this->assertSame(0, $rsyncCalls, 'rsync must NOT run when the key file is missing');
+        // postHook still ran on the failure path.
+        $this->assertContains('hook:POST:FAILED', $this->trace);
+        // The clear run-time message landed in the run log.
+        $log = @file_get_contents($res['runLog']);
+        $this->assertIsString($log);
+        $this->assertStringContainsString('not found or unreadable', $log);
+    }
+
     public function testGuardrailDeleteDestForLocalUsesRemoteSideRegardlessOfDirection(): void
     {
         // A hand-edited LOCAL job with direction=PULL must still treat the

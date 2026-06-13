@@ -24,6 +24,13 @@
  *      cleanupRuntime(token) removes that run's files again.
  *
  * AUTH METHODS
+ *   KEYFILE:
+ *     ssh -i <keyFilePath> -o IdentitiesOnly=yes -o BatchMode=yes
+ *         -o StrictHostKeyChecking=<mode> -o UserKnownHostsFile=<kh>
+ *         -o ConnectTimeout=<n> -p <port>
+ *     The key file ALREADY lives on the system (e.g. /root/.ssh/id_ed25519) with
+ *     the user's own permissions; OpenSSH reads it directly. We do NOT read,
+ *     copy, materialise to tmpfs, or store its contents - we only pass the path.
  *   KEY:
  *     ssh -i <tmpkey> -o IdentitiesOnly=yes -o BatchMode=yes
  *         -o StrictHostKeyChecking=<mode> -o UserKnownHostsFile=<kh>
@@ -178,15 +185,21 @@ class Ssh
      * tmpfs paths. This is the single source of truth for the ssh option set;
      * both the `-e` value and testConnection() are derived from it.
      *
-     * KEY auth uses -i <tmpKeyPath> + IdentitiesOnly + BatchMode.
+     * KEYFILE auth uses -i <keyFilePath> (an existing on-system key file, passed
+     * verbatim - NOT materialised) + IdentitiesOnly + BatchMode.
+     * KEY auth uses -i <tmpKeyPath> (a materialised managed key) + the same opts.
      * PASSWORD auth omits the key/BatchMode and forces password auth.
      *
      * @param array<string,mixed> $conn        a merged connection
-     * @param string              $tmpKeyPath  materialised key path (KEY auth)
+     * @param string              $keyPath     the identity-file path: the
+     *                                          materialised tmpfs path for KEY,
+     *                                          or the connection's keyFilePath
+     *                                          (verbatim) for KEYFILE. Empty for
+     *                                          PASSWORD.
      * @param string              $knownHosts  materialised known_hosts path
      * @return array<int,string>  the ssh argv (starting with "ssh")
      */
-    public static function buildSshArgv(array $conn, string $tmpKeyPath, string $knownHosts): array
+    public static function buildSshArgv(array $conn, string $keyPath, string $knownHosts): array
     {
         $conn = Credentials::mergeConnection($conn);
         $mode    = $conn['strictHostKey'];
@@ -204,9 +217,11 @@ class Ssh
             $argv[] = '-o';
             $argv[] = 'PreferredAuthentications=password';
         } else {
-            // KEY auth: use ONLY the supplied key, non-interactively.
+            // KEY / KEYFILE auth: use ONLY the supplied key, non-interactively.
+            // For KEYFILE the path is the connection's existing key file (OpenSSH
+            // reads it directly); for KEY it's the materialised tmpfs copy.
             $argv[] = '-i';
-            $argv[] = $tmpKeyPath;
+            $argv[] = $keyPath;
             $argv[] = '-o';
             $argv[] = 'IdentitiesOnly=yes';
             $argv[] = '-o';
@@ -287,7 +302,11 @@ class Ssh
      *
      * Steps:
      *   - ensure the tmpfs runtime dirs exist with safe modes (700);
-     *   - for KEY auth: write the referenced key's private material to
+     *   - for KEYFILE auth: use the connection's keyFilePath DIRECTLY as the ssh
+     *     identity file. We do NOT read, copy or materialise the key - OpenSSH
+     *     reads the file in place. We DO verify it exists and is readable, and
+     *     fail with a clear message if not (it is never created here);
+     *   - for KEY auth: write the referenced (managed) key's private material to
      *     keys/<token> at mode 600 (OpenSSH refuses world-readable keys);
      *   - for PASSWORD auth: write the de-obfuscated password to a 600 passfile
      *     (only when sshpass is available);
@@ -327,7 +346,19 @@ class Ssh
         $keyPath  = '';
         $passFile = '';
 
-        if ($conn['authMethod'] === 'KEY') {
+        if ($conn['authMethod'] === 'KEYFILE') {
+            // Use the existing on-system key file DIRECTLY: no read, no copy, no
+            // tmpfs materialisation. We only check it's usable and pass the path.
+            $keyFilePath = (string) $conn['keyFilePath'];
+            $check = self::checkKeyFile($keyFilePath);
+            if ($check !== '') {
+                self::cleanupRuntime($token);
+                return ['ok' => false, 'error' => $check];
+            }
+            // The identity file IS the connection's path; nothing is created in
+            // the tmpfs keys dir for KEYFILE, so cleanupRuntime() never touches it.
+            $keyPath = $keyFilePath;
+        } elseif ($conn['authMethod'] === 'KEY') {
             $key = Credentials::findKey($creds, (string) $conn['keyId']);
             if ($key === null) {
                 self::cleanupRuntime($token);
@@ -365,9 +396,41 @@ class Ssh
     }
 
     /**
+     * Run-time check for a KEYFILE connection's identity file. Returns '' when
+     * the file is present and readable, or a CLEAR, user-facing error message
+     * otherwise. We never CREATE the file - the user owns its lifecycle.
+     *
+     * The message calls out the Unraid tmpfs gotcha: /root is RAM-backed and is
+     * wiped on reboot, so a key placed there must be re-created on boot (via
+     * /boot/config/go or the SSH plugin) to persist for scheduled runs.
+     *
+     * NB: PURE except for the filesystem stat (is_file/is_readable). It assumes
+     * the path was already validated as absolute + injection-safe at save time;
+     * we still re-trim defensively.
+     */
+    public static function checkKeyFile(string $keyFilePath): string
+    {
+        $keyFilePath = trim($keyFilePath);
+        if ($keyFilePath === '') {
+            return 'No SSH key file path is configured for this connection.';
+        }
+        if (!is_file($keyFilePath) || !is_readable($keyFilePath)) {
+            return 'SSH key file ' . $keyFilePath . ' not found or unreadable. '
+                . 'Note: /root is tmpfs on Unraid and is wiped on reboot, so ensure your key '
+                . 'persists (e.g. via /boot/config/go or the SSH plugin).';
+        }
+        return '';
+    }
+
+    /**
      * Remove a run's materialised secrets (best-effort), identified by the
      * per-run token returned from materialize(). Phase 4 calls this in a finally
      * after a run; the Credentials tab's testConnection cleans up its own token.
+     *
+     * For KEYFILE auth nothing is materialised in the tmpfs keys dir (the run
+     * uses the user's existing key file in place), so this never touches it -
+     * keyPath($token) is the per-run tmpfs path, never the connection's
+     * keyFilePath.
      *
      * Because every file is keyed by the unique run token, this only ever
      * unlinks THIS run's own private key, known_hosts and password file - a

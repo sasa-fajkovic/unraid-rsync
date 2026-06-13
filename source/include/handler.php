@@ -26,9 +26,20 @@
  * which the webGui serves through its authenticated PHP front controller.
  *
  * Design notes:
- *   - The CSRF token is the webGui-global $var['csrf_token'] (state.php),
- *     submitted as the `csrf_token` POST field on every form. We compare it
- *     with hash_equals to avoid timing leaks.
+ *   - The CSRF token is the webGui-global $var['csrf_token'], submitted as the
+ *     `csrf_token` POST field on every form, and compared with hash_equals to
+ *     avoid timing leaks.
+ *
+ *     ROOT CAUSE of the original "every POST silently fails" bug: $GLOBALS['var']
+ *     is populated by the webGui front controller ONLY when a page is rendered
+ *     through DefaultPageLayout. This handler is hit DIRECTLY at
+ *     /plugins/unraid.rsync/include/handler.php, where nothing has defined $var,
+ *     so $var['csrf_token'] was EMPTY -> the expected token was '' -> every POST
+ *     403'd with "Invalid or missing CSRF token". The fix (ur_expected_csrf_token)
+ *     falls back to reading the canonical Unraid state file
+ *     /var/local/emhttp/var.ini (also exposed at /usr/local/emhttp/state/var.ini)
+ *     with parse_ini_file to obtain csrf_token - exactly the value the webGui
+ *     embeds in the page's forms - so a direct POST validates correctly.
  *   - All responses are JSON with the right Content-Type + status code via the
  *     sendResponse()/sendError() helpers.
  *   - The actual validate/normalise/persist logic lives in Job.php / Config.php
@@ -141,11 +152,54 @@ function sendError(string $message, int $code = 400, array $extra = []): void
 }
 
 /**
- * Resolve the expected webGui CSRF token. On a live Unraid box the global
- * $var array (populated from /usr/local/emhttp/state/var.ini by the front
- * controller) carries csrf_token; $_SESSION may also hold it. We read whatever
- * is available so the same code works under the webGui without a hard
- * dependency that would break unit tests.
+ * Candidate paths to the Unraid state file that carries csrf_token. The first
+ * readable one wins. /var/local/emhttp/var.ini is the canonical location;
+ * /usr/local/emhttp/state/var.ini is the historical alias some releases expose.
+ * Overridable in tests via the UR_VAR_INI_PATHS constant (an array of paths).
+ *
+ * @return array<int,string>
+ */
+function ur_var_ini_candidates(): array
+{
+    if (defined('UR_VAR_INI_PATHS') && is_array(UR_VAR_INI_PATHS)) {
+        return UR_VAR_INI_PATHS;
+    }
+    return ['/var/local/emhttp/var.ini', '/usr/local/emhttp/state/var.ini'];
+}
+
+/**
+ * Read csrf_token from the Unraid state file (var.ini). Returns '' when no
+ * candidate file is readable or none carries a csrf_token. This is the
+ * fallback that makes a DIRECT POST to handler.php work: the front controller
+ * only populates $GLOBALS['var'] when rendering a page via DefaultPageLayout,
+ * so a standalone endpoint must read the token from disk itself.
+ */
+function ur_csrf_token_from_state(): string
+{
+    foreach (ur_var_ini_candidates() as $path) {
+        if (!is_string($path) || $path === '' || !is_file($path) || !is_readable($path)) {
+            continue;
+        }
+        // parse_ini_file without sections; suppress warnings on a malformed file
+        // and fall through to the next candidate rather than emitting HTML noise.
+        $ini = @parse_ini_file($path, false, INI_SCANNER_RAW);
+        if (is_array($ini) && isset($ini['csrf_token']) && $ini['csrf_token'] !== '') {
+            return (string) $ini['csrf_token'];
+        }
+    }
+    return '';
+}
+
+/**
+ * Resolve the expected webGui CSRF token. Order of precedence:
+ *   1. $GLOBALS['var']['csrf_token'] - set by the front controller when the
+ *      handler is included through a rendered page (and by the unit tests).
+ *   2. $_SESSION['csrf_token']       - some webGui contexts carry it here.
+ *   3. /var/local/emhttp/var.ini     - the canonical Unraid state file; read
+ *      directly so a STANDALONE POST to handler.php (where $var is never
+ *      populated) still gets the real token. THIS is the fix for the bug where
+ *      every credentials POST silently 403'd.
+ * Returns '' only when none is available (then ur_check_csrf 403s, as before).
  */
 function ur_expected_csrf_token(): string
 {
@@ -155,7 +209,7 @@ function ur_expected_csrf_token(): string
     if (isset($_SESSION['csrf_token']) && !empty($_SESSION['csrf_token'])) {
         return (string) $_SESSION['csrf_token'];
     }
-    return '';
+    return ur_csrf_token_from_state();
 }
 
 /**
@@ -387,8 +441,11 @@ function ur_normalize_connection_for_save(array $raw, array $existing): array
         'host'           => isset($raw['host'])           ? (string) $raw['host']           : '',
         'port'           => isset($raw['port'])           ? (string) $raw['port']           : 22,
         'username'       => isset($raw['username'])       ? (string) $raw['username']       : '',
-        'authMethod'     => isset($raw['authMethod'])     ? (string) $raw['authMethod']     : 'KEY',
+        // New connections default to KEYFILE (the common Unraid case); an
+        // explicit submitted value always wins.
+        'authMethod'     => isset($raw['authMethod'])     ? (string) $raw['authMethod']     : 'KEYFILE',
         'keyId'          => isset($raw['keyId'])          ? (string) $raw['keyId']          : '',
+        'keyFilePath'    => isset($raw['keyFilePath'])    ? (string) $raw['keyFilePath']    : '',
         'remoteHostKey'  => isset($raw['remoteHostKey'])  ? (string) $raw['remoteHostKey']  : '',
         'strictHostKey'  => isset($raw['strictHostKey'])  ? (string) $raw['strictHostKey']  : 'accept-new',
         'connectTimeout' => isset($raw['connectTimeout']) ? (string) $raw['connectTimeout'] : 10,
@@ -412,9 +469,18 @@ function ur_normalize_connection_for_save(array $raw, array $existing): array
         $conn['password'] = '';
     }
 
-    // KEY auth carries no keyId? keep whatever was submitted; validation checks it.
+    // Clear the auth fields that don't belong to the selected method, so a
+    // connection never carries stale credentials from a previous auth choice
+    // (e.g. a leftover keyId after switching to KEYFILE). The active method's
+    // field is kept as submitted; validation checks it.
     if ($conn['authMethod'] !== 'KEY') {
         $conn['keyId'] = '';
+    }
+    if ($conn['authMethod'] !== 'KEYFILE') {
+        // mergeConnection() backfills an empty keyFilePath to the default; for a
+        // non-KEYFILE connection we store it empty so the on-disk record reflects
+        // that no key file is in use.
+        $conn['keyFilePath'] = '';
     }
 
     return $conn;
@@ -1414,8 +1480,30 @@ function ur_action_get_rsync_status(): void
 /**
  * Front-controller dispatch. Skipped when included by the test harness
  * (UR_HANDLER_TESTING defined), which calls the individual functions directly.
+ *
+ * Wraps the routing in a Throwable guard so an unexpected exception from any
+ * action becomes a JSON 500 envelope rather than an HTML fatal that the browser
+ * would fail to parse as JSON (leaving the UI stuck). The shutdown handler
+ * (ur_fatal_shutdown_handler) covers non-catchable fatals (parse/OOM) the same
+ * way.
  */
 function ur_handle_request(): void
+{
+    try {
+        ur_dispatch();
+    } catch (Throwable $e) {
+        // Never let an exception escape as an HTML fatal: emit a JSON error so
+        // the client always gets parseable JSON and can surface a clear message.
+        sendError('Internal error: ' . $e->getMessage(), 500);
+    }
+}
+
+/**
+ * The actual action router. Always reaches a send*() helper (each sets a JSON
+ * Content-Type + status code), so a well-formed request never falls through
+ * without a JSON body.
+ */
+function ur_dispatch(): void
 {
     $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
     $action = '';
@@ -1495,6 +1583,40 @@ function ur_handle_request(): void
     }
 }
 
+/**
+ * Last-resort shutdown handler: if the request died on a NON-catchable fatal
+ * (e.g. an out-of-memory or a call to an undefined function) AFTER we'd already
+ * started, emit a JSON error envelope so the browser still receives parseable
+ * JSON instead of a half-rendered HTML fatal. Only fires for genuine fatal
+ * error types, and only when no JSON body has been sent yet (best-effort: we
+ * can't know for certain output started, so we guard on headers_sent()).
+ */
+function ur_fatal_shutdown_handler(): void
+{
+    $err = error_get_last();
+    if ($err === null) {
+        return;
+    }
+    $fatalTypes = E_ERROR | E_PARSE | E_CORE_ERROR | E_COMPILE_ERROR | E_USER_ERROR;
+    if (($err['type'] & $fatalTypes) === 0) {
+        return;
+    }
+    if (headers_sent()) {
+        // A (partial) body already went out; we can't cleanly replace it. Append
+        // nothing - the client's bad-JSON path will surface an error with status.
+        return;
+    }
+    if (!headers_sent()) {
+        header('Content-Type: application/json');
+    }
+    http_response_code(500);
+    echo json_encode(
+        ['error' => 'The request failed with an internal error.'],
+        JSON_UNESCAPED_SLASHES
+    );
+}
+
 if (!defined('UR_HANDLER_TESTING')) {
+    register_shutdown_function('ur_fatal_shutdown_handler');
     ur_handle_request();
 }
