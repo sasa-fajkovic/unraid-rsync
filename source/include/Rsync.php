@@ -94,6 +94,119 @@ class Rsync
         'includes' => '--include',
     ];
 
+    /**
+     * The canonical rsync binary location. rsync ships in Unraid's BASE OS at
+     * /usr/bin/rsync, so it is ALWAYS present on a healthy system - the plugin
+     * deliberately does NOT install rsync (there is no clean Slackware artifact
+     * to pin, and a bundled copy would shadow the base binary). We only guard
+     * against a broken/misconfigured system with a defensive presence check
+     * (rsyncAvailable() below), mirroring how sshpass is detect-and-degrade -
+     * except here the expected state is "present", not "optional".
+     *
+     * Overridable for tests via $rsyncPathOverride so the run path can be driven
+     * with a present/absent binary without touching the real /usr/bin/rsync.
+     */
+    const RSYNC_PATH = '/usr/bin/rsync';
+
+    /**
+     * Optional explicit rsync path override (tests set this; '' simulates a
+     * missing binary). When null, rsyncPath() returns the RSYNC_PATH constant.
+     *
+     * @var string|null
+     */
+    public static $rsyncPathOverride = null;
+
+    /** Resolve the rsync binary path to check/run (honours the test override). */
+    public static function rsyncPath(): string
+    {
+        if (static::$rsyncPathOverride !== null) {
+            return (string) static::$rsyncPathOverride;
+        }
+        return self::RSYNC_PATH;
+    }
+
+    /**
+     * True when the rsync binary is present and executable. rsync is part of
+     * Unraid's base OS, so this should normally always be true; a false here
+     * means the system is misconfigured. PURE-ish: a single is_executable()
+     * stat, no process spawned. Overridable via $rsyncPathOverride / the
+     * isExecutable() seam.
+     */
+    public static function rsyncAvailable(): bool
+    {
+        $path = static::rsyncPath();
+        if ($path === '') {
+            return false;
+        }
+        return static::isExecutable($path);
+    }
+
+    /** The user-facing message logged when rsync is missing from the base OS. */
+    public static function rsyncMissingMessage(): string
+    {
+        return 'rsync not found at ' . static::rsyncPath()
+            . ' - it is normally part of Unraid; your system may be misconfigured.';
+    }
+
+    /**
+     * The first line of `rsync --version` (e.g. "rsync  version 3.2.7 ...") for
+     * display on the Status tab, or '' when rsync is absent / the probe fails.
+     * The version probe is injectable via the runVersionProbe() seam so the UI
+     * helper is testable without spawning a process.
+     */
+    public static function rsyncVersionLine(): string
+    {
+        if (!static::rsyncAvailable()) {
+            return '';
+        }
+        $out = static::runVersionProbe(static::rsyncPath());
+        foreach (preg_split('/\r?\n/', $out) ?: [] as $line) {
+            $line = trim($line);
+            if ($line !== '') {
+                return $line;
+            }
+        }
+        return '';
+    }
+
+    /**
+     * is_executable() seam (overridable in tests). Kept protected so a test
+     * subclass can simulate present/absent without touching the filesystem.
+     */
+    protected static function isExecutable(string $path): bool
+    {
+        return is_executable($path);
+    }
+
+    /**
+     * Run `<rsync> --version` (no shell) and return its STDOUT (rsync prints its
+     * version banner to stdout). stderr is fully drained too - even though the
+     * version banner goes to stdout, leaving stderr unread risks the child
+     * blocking if it ever writes there, so we read both before proc_close. Live
+     * implementation uses proc_open with the argv ARRAY. Overridable in tests.
+     */
+    protected static function runVersionProbe(string $rsyncPath): string
+    {
+        $descriptors = [
+            0 => ['file', '/dev/null', 'r'],
+            1 => ['pipe', 'w'],
+            2 => ['pipe', 'w'],
+        ];
+        $pipes = [];
+        $proc = @proc_open([$rsyncPath, '--version'], $descriptors, $pipes);
+        if (!is_resource($proc)) {
+            return '';
+        }
+        // Drain BOTH pipes so the child can never block writing to a full stderr
+        // buffer while we wait on stdout. We return stdout (the version banner).
+        $stdout = stream_get_contents($pipes[1]);
+        stream_get_contents($pipes[2]); // drain + discard stderr
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        proc_close($proc);
+        return is_string($stdout) ? $stdout : '';
+    }
+
     // --- TrueNAS-style state names (also used in the run summary on /boot). ---
     const STATE_SUCCESS = 'SUCCESS';
     const STATE_WARNING = 'WARNING';
@@ -201,7 +314,7 @@ class Rsync
      *
      * Order:
      *   [sshpassPrefix...]                         (PASSWORD auth only; [] otherwise)
-     *   rsync
+     *   <rsyncPath()>                              (the resolved binary, default /usr/bin/rsync)
      *   <whitelisted option tokens>
      *   <log-level verbosity flags>
      *   --log-file=<runLog>
@@ -251,7 +364,14 @@ class Rsync
             $argv[] = (string) $tok;
         }
 
-        $argv[] = 'rsync';
+        // Use the SAME resolved binary the presence check validates
+        // (rsyncPath(), default /usr/bin/rsync) as argv[0], rather than the bare
+        // name "rsync" resolved via PATH. This closes a gap where rsyncAvailable()
+        // could pass for /usr/bin/rsync while a different "rsync" earlier on PATH
+        // actually ran (a PATH-hijack vector), and makes $rsyncPathOverride affect
+        // the real run, not just the check. proc_open is fed the argv array
+        // without a shell, so this absolute path is exec'd directly.
+        $argv[] = self::rsyncPath();
 
         foreach (self::optionTokens($opts) as $tok) {
             $argv[] = $tok;

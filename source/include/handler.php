@@ -241,6 +241,17 @@ function ur_action_save_config(): void
     $normalized = [];
     $seenIds    = [];
 
+    // Load credentials once so Job::validate can confirm an SSH job's selected
+    // Connection actually exists (server-side source of truth). A read error
+    // here is non-fatal: we fall back to the cheap "connection must be non-empty"
+    // rule (passing null) rather than failing the whole save.
+    $credsForValidation = null;
+    try {
+        $credsForValidation = Credentials::load();
+    } catch (Throwable $e) {
+        $credsForValidation = null;
+    }
+
     foreach ($rawJobs as $i => $rawJob) {
         if (!is_array($rawJob)) {
             continue;
@@ -259,7 +270,7 @@ function ur_action_save_config(): void
         $job['id'] = $id;
         $seenIds[$id] = true;
 
-        $result = Job::validate($job);
+        $result = Job::validate($job, $credsForValidation);
         $label  = ($job['name'] !== '') ? $job['name'] : ('#' . ($i + 1));
         foreach ($result['errors'] as $e) {
             $allErrors[] = "Job \"$label\": $e";
@@ -1368,6 +1379,25 @@ function ur_action_get_plugin_log(): void
 }
 
 /**
+ * GET getRsyncStatus: report whether the rsync binary is present (it ships in
+ * Unraid's base OS at /usr/bin/rsync, so it should always be) and, when present,
+ * the first line of `rsync --version`. The plugin does NOT install rsync; this
+ * is a defensive presence check surfaced on the Status tab. The version string
+ * is plain text from the trusted local binary; the UI escapes it before display.
+ */
+function ur_action_get_rsync_status(): void
+{
+    $available = Rsync::rsyncAvailable();
+    sendResponse([
+        'ok'        => true,
+        'available' => $available,
+        'path'      => Rsync::rsyncPath(),
+        'version'   => $available ? Rsync::rsyncVersionLine() : '',
+        'message'   => $available ? '' : Rsync::rsyncMissingMessage(),
+    ], 200);
+}
+
+/**
  * Front-controller dispatch. Skipped when included by the test harness
  * (UR_HANDLER_TESTING defined), which calls the individual functions directly.
  */
@@ -1431,15 +1461,17 @@ function ur_handle_request(): void
         case 'getJobLog':
         case 'listRuns':
         case 'getPluginLog':
+        case 'getRsyncStatus':
             if ($method !== 'GET') {
                 sendError($action . ' requires GET.', 405);
                 return;
             }
             switch ($action) {
-                case 'getStatus':     ur_action_get_status();     return;
-                case 'getJobLog':     ur_action_get_job_log();    return;
-                case 'listRuns':      ur_action_list_runs();      return;
-                case 'getPluginLog':  ur_action_get_plugin_log(); return;
+                case 'getStatus':       ur_action_get_status();       return;
+                case 'getJobLog':       ur_action_get_job_log();      return;
+                case 'listRuns':        ur_action_list_runs();        return;
+                case 'getPluginLog':    ur_action_get_plugin_log();   return;
+                case 'getRsyncStatus':  ur_action_get_rsync_status(); return;
             }
             return;
 

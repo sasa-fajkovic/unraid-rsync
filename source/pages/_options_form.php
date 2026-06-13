@@ -41,6 +41,20 @@ if (!function_exists('ur_t')) {
     }
 }
 
+if (!function_exists('ur_required_mark')) {
+    /**
+     * The visual "required" cue appended to a mandatory field's label: a red
+     * asterisk with a screen-reader hint. Kept in one place so the marker is
+     * consistent across the Jobs and Credentials forms, and so it pairs visually
+     * with the HTML5 `required` attribute on the corresponding input. Output is
+     * static markup (no user data), so it needs no escaping.
+     */
+    function ur_required_mark(): string
+    {
+        return ' <abbr class="ur-required" title="' . ur_h(ur_t('Required')) . '">*</abbr>';
+    }
+}
+
 if (!function_exists('ur_render_rsync_options')) {
     /**
      * @param array<string,mixed> $opts   current option values (already merged

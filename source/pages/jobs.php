@@ -107,9 +107,9 @@ function ur_render_job_card($job, $index): void
 
     echo '<dl>';
 
-    // name
-    echo '<dt><label for="' . ur_h($idb . '_name') . '">' . ur_h(ur_t('Name')) . '</label>:</dt>';
-    echo '<dd><input type="text" id="' . ur_h($idb . '_name') . '" name="' . ur_h($p . '[name]') . '" value="' . ur_h($name) . '"></dd>';
+    // name (required)
+    echo '<dt><label for="' . ur_h($idb . '_name') . '">' . ur_h(ur_t('Name')) . '</label>' . ur_required_mark() . ':</dt>';
+    echo '<dd><input type="text" id="' . ur_h($idb . '_name') . '" name="' . ur_h($p . '[name]') . '" value="' . ur_h($name) . '" required></dd>';
 
     // enabled (checkbox; styled as a switch by webGui where available)
     echo '<dt>' . ur_h(ur_t('Enabled')) . ':</dt>';
@@ -118,9 +118,9 @@ function ur_render_job_card($job, $index): void
     echo '<input type="checkbox" class="ur-switch" name="' . ur_h($p . '[enabled]') . '" value="1"' . ($enabled ? ' checked' : '') . '>';
     echo '</dd>';
 
-    // transport
+    // transport (drives whether Connection is required - see the JS toggle)
     echo '<dt><label for="' . ur_h($idb . '_transport') . '">' . ur_h(ur_t('Transport')) . '</label>:</dt>';
-    echo '<dd><select id="' . ur_h($idb . '_transport') . '" name="' . ur_h($p . '[transport]') . '">';
+    echo '<dd><select id="' . ur_h($idb . '_transport') . '" class="ur-transport-select" data-conn="' . ur_h($idb . '_conn') . '" name="' . ur_h($p . '[transport]') . '">';
     foreach (['SSH' => 'SSH (remote host)', 'LOCAL' => 'Local (this server)'] as $val => $lbl) {
         $sel = ($transport === $val) ? ' selected' : '';
         echo '<option value="' . ur_h($val) . '"' . $sel . '>' . ur_h(ur_t($lbl)) . '</option>';
@@ -138,11 +138,17 @@ function ur_render_job_card($job, $index): void
     echo '<blockquote class="inline_help"><p>' . ur_h(ur_t('Direction only applies to SSH transport.')) . '</p></blockquote>';
     echo '</dd>';
 
-    // connection (populated from the saved Credentials connections)
+    // connection (populated from the saved Credentials connections). REQUIRED
+    // only for SSH transport (LOCAL jobs use no connection), so the `required`
+    // attribute and the visual marker are toggled by JS off the transport select
+    // (and seeded server-side here for the initial transport).
     global $urConnections;
     $conns = is_array($urConnections) ? $urConnections : [];
-    echo '<dt><label for="' . ur_h($idb . '_conn') . '">' . ur_h(ur_t('Connection')) . '</label>:</dt>';
-    echo '<dd><select id="' . ur_h($idb . '_conn') . '" name="' . ur_h($p . '[connectionId]') . '">';
+    $connRequired = ($transport === 'SSH');
+    echo '<dt><label for="' . ur_h($idb . '_conn') . '">' . ur_h(ur_t('Connection')) . '</label>'
+        . '<abbr class="ur-required ur-conn-required" title="' . ur_h(ur_t('Required')) . '"'
+        . ($connRequired ? '' : ' style="display:none"') . '>*</abbr>:</dt>';
+    echo '<dd><select id="' . ur_h($idb . '_conn') . '" class="ur-conn-select" data-transport="' . ur_h($idb . '_transport') . '" name="' . ur_h($p . '[connectionId]') . '"' . ($connRequired ? ' required' : '') . '>';
     echo '<option value=""' . ($connId === '' ? ' selected' : '') . '>' . ur_h(ur_t('(none)')) . '</option>';
     $connFound = false;
     foreach ($conns as $conn) {
@@ -174,9 +180,9 @@ function ur_render_job_card($job, $index): void
     }
     echo '</dd>';
 
-    // schedule (5-field cron)
-    echo '<dt><label for="' . ur_h($idb . '_schedule') . '">' . ur_h(ur_t('Schedule (cron)')) . '</label>:</dt>';
-    echo '<dd><input type="text" id="' . ur_h($idb . '_schedule') . '" name="' . ur_h($p . '[schedule]') . '" value="' . ur_h($schedule) . '" placeholder="0 3 * * *"></dd>';
+    // schedule (5-field cron) (required)
+    echo '<dt><label for="' . ur_h($idb . '_schedule') . '">' . ur_h(ur_t('Schedule (cron)')) . '</label>' . ur_required_mark() . ':</dt>';
+    echo '<dd><input type="text" id="' . ur_h($idb . '_schedule') . '" name="' . ur_h($p . '[schedule]') . '" value="' . ur_h($schedule) . '" placeholder="0 3 * * *" required></dd>';
 
     // pairs
     $pairsRowsId = $idb . '_pairs';
@@ -266,11 +272,14 @@ function ur_render_job_card($job, $index): void
  */
 function ur_render_pair_row(string $prefix, $k, string $local, string $remote): void
 {
+    // Both the source (local) and destination (remote) of a pair are mandatory;
+    // mark them required so the browser blocks a half-filled pair before submit
+    // (the server re-enforces this and the path guardrails).
     $base = $prefix . '[pairs][' . $k . ']';
     echo '<div class="ur-pair-row">';
-    echo '<input type="text" name="' . ur_h($base . '[local]') . '" value="' . ur_h($local) . '" placeholder="/mnt/user/share/sub/">';
+    echo '<input type="text" name="' . ur_h($base . '[local]') . '" value="' . ur_h($local) . '" placeholder="/mnt/user/share/sub/" required>';
     echo ' &rarr; ';
-    echo '<input type="text" name="' . ur_h($base . '[remote]') . '" value="' . ur_h($remote) . '" placeholder="/mnt/disk/backup/ or remote path">';
+    echo '<input type="text" name="' . ur_h($base . '[remote]') . '" value="' . ur_h($remote) . '" placeholder="/mnt/disk/backup/ or remote path" required>';
     echo ' <button type="button" class="ur-pair-del">&minus;</button>';
     echo '</div>';
 }
@@ -448,6 +457,11 @@ function ur_ago(int $deltaSec): string
 ?>
 
 <style>
+/* The "required" field marker: a red asterisk paired with the HTML5 `required`
+   attribute on the mandatory inputs. text-decoration:none drops the dotted
+   <abbr> underline so it reads as a clean asterisk. */
+.ur-required { color: var(--red-800, #b71c1c); font-weight: bold; text-decoration: none; cursor: help; }
+
 /* TrueNAS-style colored state badges + the per-run log viewer. Colors pull from
    the inherited dynamix palette where available (--orange-500, --green-...),
    with safe fallbacks so the badges read correctly under any theme. */
@@ -662,6 +676,9 @@ function ur_ago(int $deltaSec): string
     wrap.innerHTML = html.trim();
     var card = wrap.firstElementChild;
     document.getElementById('ur-jobs-container').appendChild(card);
+    /* A cloned card defaults to SSH transport, so seed its Connection-required
+     * state to match. */
+    syncAllConnRequired();
   }
 
   function addPair(rowsEl) {
@@ -773,14 +790,43 @@ function ur_ago(int $deltaSec): string
     }
   });
 
-  /* Toggle a job's options block when "use global defaults" changes. */
+  /* Toggle the Connection select's `required` attribute + its visual marker to
+   * match the chosen transport: SSH needs a connection, LOCAL does not. Keeping
+   * the client `required` in lockstep with the server rule (Job::validate) means
+   * a LOCAL job is never blocked and an SSH job without a connection is caught
+   * client-side too. Driven off the transport select (which carries data-conn). */
+  function syncConnRequired(transportSel) {
+    if (!transportSel) { return; }
+    var conn = document.getElementById(transportSel.getAttribute('data-conn'));
+    if (!conn) { return; }
+    var isSsh = (transportSel.value === 'SSH');
+    conn.required = isSsh;
+    /* The marker lives in the same card; find it relative to the connection. */
+    var card = conn.closest ? conn.closest('.ur-job-card') : null;
+    var mark = card ? card.querySelector('.ur-conn-required') : null;
+    if (mark) { mark.style.display = isSsh ? '' : 'none'; }
+  }
+
+  /* Toggle a job's options block when "use global defaults" changes, and keep
+   * the Connection-required state in sync when the transport changes. */
   document.addEventListener('change', function (ev) {
     var t = ev.target;
-    if (t && t.classList && t.classList.contains('ur-use-global')) {
+    if (!t || !t.classList) { return; }
+    if (t.classList.contains('ur-use-global')) {
       var target = document.getElementById(t.getAttribute('data-target'));
       if (target) { target.style.display = t.checked ? 'none' : ''; }
+    } else if (t.classList.contains('ur-transport-select')) {
+      syncConnRequired(t);
     }
   });
+
+  /* Seed the Connection-required state on load for every existing card (the
+   * server already set it for the initial transport, but a JS-cloned new card
+   * starts as SSH and must reflect that). Re-run after a card is added. */
+  function syncAllConnRequired() {
+    var sels = document.querySelectorAll('.ur-transport-select');
+    Array.prototype.forEach.call(sels, syncConnRequired);
+  }
 
   /* Submit via fetch; show validation errors/warnings inline. */
   var form = document.getElementById('ur-jobs-form');
@@ -1077,6 +1123,9 @@ function ur_ago(int $deltaSec): string
       if (ev.target === modal) { closeLogViewer(); }
     });
   }
+
+  /* Seed the Connection-required state for all initially-rendered cards. */
+  syncAllConnRequired();
 
   /* Kick off polling on load only when something is already running (the
    * server-rendered badges tell us, but a cheap initial poll is simplest and

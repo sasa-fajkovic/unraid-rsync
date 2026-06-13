@@ -18,6 +18,7 @@
 
 require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Config.php';
 require_once '/usr/local/emhttp/plugins/unraid.rsync/include/RunState.php';
+require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Rsync.php';
 
 $csrf = '';
 if (isset($GLOBALS['var']) && is_array($GLOBALS['var']) && !empty($GLOBALS['var']['csrf_token'])) {
@@ -43,6 +44,15 @@ try {
 } catch (Throwable $e) {
     $initialRunning = [];
 }
+
+// rsync presence snapshot (FIX 3): rsync ships in Unraid's base OS, so the
+// expected state is "present". We never install it - this is a defensive check
+// surfaced here so a misconfigured system is obvious. Rendered server-side and
+// refreshed once via the getRsyncStatus poller.
+$rsyncAvailable   = Rsync::rsyncAvailable();
+$rsyncPath        = Rsync::rsyncPath();
+$rsyncVersionLine = $rsyncAvailable ? Rsync::rsyncVersionLine() : '';
+$rsyncMissingMsg  = $rsyncAvailable ? '' : Rsync::rsyncMissingMessage();
 ?>
 <style>
 /* Reuse the Jobs-tab badge palette; define it here too so the Status tab is
@@ -54,7 +64,11 @@ try {
 }
 .ur-badge-running { background: #1565c0; animation: ur-pulse 1.3s ease-in-out infinite; }
 .ur-badge-idle    { background: #1c7d3f; }
+.ur-badge-failed  { background: var(--red-800, #b71c1c); }
 @keyframes ur-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.55; } }
+.ur-rsync-status { margin: 8px 0; }
+.ur-rsync-status #ur-rsync-detail { margin-top: 6px; }
+.ur-rsync-status .ur-err { color: var(--red-800, #b71c1c); }
 .ur-status-running-list { list-style: none; padding: 0; margin: 8px 0; }
 .ur-status-running-list li { margin: 4px 0; }
 .ur-status-running-list .ur-job-name { display: inline-block; min-width: 220px; }
@@ -97,6 +111,27 @@ try {
   <?php endforeach; ?>
 </ul>
 <div id="ur-status-result" class="ur-result"></div>
+
+<!-- rsync binary presence (FIX 3: detect, never install) --------------------->
+<div class="title">
+  <span class="left"><i class="fa fa-terminal title"></i>&nbsp;<?=_('rsync binary')?></span>
+</div>
+<div id="ur-rsync-status" class="ur-rsync-status">
+  <span id="ur-rsync-badge" class="ur-badge <?=$rsyncAvailable ? 'ur-badge-idle' : 'ur-badge-failed'?>">
+    <?=$rsyncAvailable ? _('Present') : _('Missing')?>
+  </span>
+  &nbsp;<code id="ur-rsync-path"><?=htmlspecialchars($rsyncPath, ENT_QUOTES, 'UTF-8')?></code>
+  <div id="ur-rsync-detail">
+    <?php if ($rsyncAvailable): ?>
+      <code id="ur-rsync-version"><?=htmlspecialchars($rsyncVersionLine !== '' ? $rsyncVersionLine : _('(version unavailable)'), ENT_QUOTES, 'UTF-8')?></code>
+    <?php else: ?>
+      <span id="ur-rsync-version" class="ur-err"><?=htmlspecialchars($rsyncMissingMsg, ENT_QUOTES, 'UTF-8')?></span>
+    <?php endif; ?>
+  </div>
+  <blockquote class="inline_help"><p>
+    <?=_('rsync is part of the Unraid base OS, so it is normally always present. This plugin does not install rsync; if it is missing your system may be misconfigured')?>.
+  </p></blockquote>
+</div>
 
 <!-- Rolling plugin log viewer ------------------------------------------------>
 <div class="title">
@@ -237,9 +272,40 @@ try {
       });
   });
 
-  /* Poll both every 1s. */
+  /* ---- rsync presence (one-shot; it does not change while the page is open) ---- */
+  var RSYNC_STATUS_URL = HANDLER_URL + '?action=getRsyncStatus';
+  function refreshRsyncStatus() {
+    fetch(RSYNC_STATUS_URL, { credentials: 'same-origin' })
+      .then(function (r) { return r.json(); })
+      .then(function (body) {
+        if (!body || !body.ok) { return; }
+        var badge   = document.getElementById('ur-rsync-badge');
+        var pathEl  = document.getElementById('ur-rsync-path');
+        var verEl   = document.getElementById('ur-rsync-version');
+        if (pathEl && body.path) { pathEl.textContent = body.path; }   // textContent: no XSS
+        if (badge) {
+          badge.className = 'ur-badge ' + (body.available ? 'ur-badge-idle' : 'ur-badge-failed');
+          badge.textContent = body.available ? 'Present' : 'Missing';
+        }
+        if (verEl) {
+          /* textContent only - never innerHTML - so the version/message string
+           * (from the trusted local binary, but escaped defensively) is inert. */
+          if (body.available) {
+            verEl.className = '';
+            verEl.textContent = body.version || '(version unavailable)';
+          } else {
+            verEl.className = 'ur-err';
+            verEl.textContent = body.message || 'rsync not found.';
+          }
+        }
+      })
+      .catch(function () { /* keep the server-rendered snapshot */ });
+  }
+
+  /* Poll status + plugin log every 1s; check rsync presence once. */
   pollStatus();
   pollPluginLog();
+  refreshRsyncStatus();
   setInterval(pollStatus, 1000);
   setInterval(pollPluginLog, 1000);
 })();

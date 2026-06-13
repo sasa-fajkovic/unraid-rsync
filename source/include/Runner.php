@@ -187,6 +187,19 @@ class Runner
                 }
             }
 
+            // 5b. Defensive rsync presence check. rsync ships in Unraid's base OS
+            //     at /usr/bin/rsync, so it should ALWAYS be present; the plugin
+            //     does NOT install it. Guard against a broken system: if the
+            //     binary is missing, fail the run with a clear logged error
+            //     BEFORE any pair runs (postHook still fires via finally). We do
+            //     NOT attempt to install anything.
+            if ($state !== Rsync::STATE_FAILED && !Rsync::rsyncAvailable()) {
+                $state    = Rsync::STATE_FAILED;
+                $exitCode = 1;
+                $reason   = 'rsync-missing';
+                Logger::event($runLog, $jobId, Rsync::rsyncMissingMessage());
+            }
+
             // 6. Pairs: re-enforce guardrails, check abort, build argv, run rsync.
             if ($state !== Rsync::STATE_FAILED) {
                 $global   = (isset($config['global']) && is_array($config['global'])) ? $config['global'] : [];

@@ -186,10 +186,12 @@ final class HandlerCredentialsTest extends TestCase
         // ONE of them. The other must be PRESERVED (deletion is deleteConnection's
         // job, not a side effect of a partial save).
         $seed = Credentials::defaults();
-        $seed['connections'][] = Credentials::mergeConnection(['id' => 'c-1', 'name' => 'one', 'host' => 'h1', 'username' => 'u', 'authMethod' => 'PASSWORD']);
-        $seed['connections'][] = Credentials::mergeConnection(['id' => 'c-2', 'name' => 'two', 'host' => 'h2', 'username' => 'u', 'authMethod' => 'PASSWORD']);
+        $seed['connections'][] = Credentials::mergeConnection(['id' => 'c-1', 'name' => 'one', 'host' => 'h1', 'username' => 'u', 'authMethod' => 'PASSWORD', 'password' => Credentials::obfuscate('pw1')]);
+        $seed['connections'][] = Credentials::mergeConnection(['id' => 'c-2', 'name' => 'two', 'host' => 'h2', 'username' => 'u', 'authMethod' => 'PASSWORD', 'password' => Credentials::obfuscate('pw2')]);
         $this->seedCreds($seed);
 
+        // Leave the password blank on the edit -> the existing password is
+        // preserved (so the password-required rule is still satisfied).
         $_POST = [
             'action' => 'saveCredentials', 'csrf_token' => 'test-token',
             'connections_present' => '1',

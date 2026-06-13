@@ -94,6 +94,17 @@ The plugin **detects it at runtime**: if it is missing, the Credentials tab and
 the connection test say so and point you at the **NerdTools** plugin (install
 it and enable its `sshpass` package). Key auth works regardless.
 
+### rsync binary
+
+`rsync` ships in **Unraid's base OS** at `/usr/bin/rsync`, so it is always
+present on a healthy system. The plugin therefore **does not install rsync** —
+there is no clean Slackware artifact to pin, and a bundled copy would shadow the
+base binary. Instead it performs a **defensive presence check**: before a job
+runs, it verifies the binary is executable, and the **Status** tab shows the
+detected rsync path plus the first line of `rsync --version` (or a clear warning
+if it is somehow absent — a sign your system is misconfigured). This mirrors the
+`sshpass` detect-and-degrade approach, except rsync is expected to be present.
+
 ## Install
 
 > Requires **Unraid 7.0.0 or newer**.

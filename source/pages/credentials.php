@@ -87,21 +87,21 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
     echo '<input type="hidden" name="' . ur_h($p . '[id]') . '" value="' . ur_h($id) . '">';
     echo '<dl>';
 
-    // name
-    echo '<dt><label for="' . ur_h($idb . '_name') . '">' . ur_h(ur_t('Name')) . '</label>:</dt>';
-    echo '<dd><input type="text" id="' . ur_h($idb . '_name') . '" name="' . ur_h($p . '[name]') . '" value="' . ur_h($name) . '"></dd>';
+    // name (required)
+    echo '<dt><label for="' . ur_h($idb . '_name') . '">' . ur_h(ur_t('Name')) . '</label>' . ur_required_mark() . ':</dt>';
+    echo '<dd><input type="text" id="' . ur_h($idb . '_name') . '" name="' . ur_h($p . '[name]') . '" value="' . ur_h($name) . '" required></dd>';
 
-    // host
-    echo '<dt><label for="' . ur_h($idb . '_host') . '">' . ur_h(ur_t('Host')) . '</label>:</dt>';
-    echo '<dd><input type="text" id="' . ur_h($idb . '_host') . '" name="' . ur_h($p . '[host]') . '" value="' . ur_h($host) . '" placeholder="host.example or 10.0.0.5"></dd>';
+    // host (required)
+    echo '<dt><label for="' . ur_h($idb . '_host') . '">' . ur_h(ur_t('Host')) . '</label>' . ur_required_mark() . ':</dt>';
+    echo '<dd><input type="text" id="' . ur_h($idb . '_host') . '" name="' . ur_h($p . '[host]') . '" value="' . ur_h($host) . '" placeholder="host.example or 10.0.0.5" required></dd>';
 
-    // port
-    echo '<dt><label for="' . ur_h($idb . '_port') . '">' . ur_h(ur_t('Port')) . '</label>:</dt>';
-    echo '<dd><input type="text" id="' . ur_h($idb . '_port') . '" name="' . ur_h($p . '[port]') . '" value="' . ur_h($port) . '" placeholder="22"></dd>';
+    // port (required - has a sensible default of 22, but must not be blank)
+    echo '<dt><label for="' . ur_h($idb . '_port') . '">' . ur_h(ur_t('Port')) . '</label>' . ur_required_mark() . ':</dt>';
+    echo '<dd><input type="number" min="1" max="65535" id="' . ur_h($idb . '_port') . '" name="' . ur_h($p . '[port]') . '" value="' . ur_h($port) . '" placeholder="22" required></dd>';
 
-    // username
-    echo '<dt><label for="' . ur_h($idb . '_user') . '">' . ur_h(ur_t('Username')) . '</label>:</dt>';
-    echo '<dd><input type="text" id="' . ur_h($idb . '_user') . '" name="' . ur_h($p . '[username]') . '" value="' . ur_h($username) . '"></dd>';
+    // username (required)
+    echo '<dt><label for="' . ur_h($idb . '_user') . '">' . ur_h(ur_t('Username')) . '</label>' . ur_required_mark() . ':</dt>';
+    echo '<dd><input type="text" id="' . ur_h($idb . '_user') . '" name="' . ur_h($p . '[username]') . '" value="' . ur_h($username) . '" required></dd>';
 
     // auth method
     echo '<dt><label for="' . ur_h($idb . '_auth') . '">' . ur_h(ur_t('Auth method')) . '</label>:</dt>';
@@ -112,11 +112,12 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
     }
     echo '</select></dd>';
 
-    // KEY: key picker (shown when auth=KEY)
-    $keyRowStyle = ($auth === 'KEY') ? '' : ' style="display:none"';
-    echo '<dt class="ur-auth-key" id="' . ur_h($idb . '_keyrow_dt') . '"' . $keyRowStyle . '><label for="' . ur_h($idb . '_key') . '">' . ur_h(ur_t('SSH key')) . '</label>:</dt>';
+    // KEY: key picker (shown + required only when auth=KEY)
+    $isKey       = ($auth === 'KEY');
+    $keyRowStyle = $isKey ? '' : ' style="display:none"';
+    echo '<dt class="ur-auth-key" id="' . ur_h($idb . '_keyrow_dt') . '"' . $keyRowStyle . '><label for="' . ur_h($idb . '_key') . '">' . ur_h(ur_t('SSH key')) . '</label>' . ur_required_mark() . ':</dt>';
     echo '<dd class="ur-auth-key" id="' . ur_h($idb . '_keyrow_dd') . '"' . $keyRowStyle . '>';
-    echo '<select id="' . ur_h($idb . '_key') . '" name="' . ur_h($p . '[keyId]') . '">';
+    echo '<select id="' . ur_h($idb . '_key') . '" name="' . ur_h($p . '[keyId]') . '"' . ($isKey ? ' required' : '') . '>';
     echo '<option value="">' . ur_h(ur_t('(select a key)')) . '</option>';
     $found = false;
     foreach ($keys as $k) {
@@ -136,11 +137,20 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
     echo '<blockquote class="inline_help"><p>' . ur_h(ur_t('Add or generate keys in the SSH Keys section above.')) . '</p></blockquote>';
     echo '</dd>';
 
-    // PASSWORD: write-only field + recoverable-secret warning (shown when auth=PASSWORD)
-    $passRowStyle = ($auth === 'PASSWORD') ? '' : ' style="display:none"';
-    echo '<dt class="ur-auth-pass" id="' . ur_h($idb . '_passrow_dt') . '"' . $passRowStyle . '><label for="' . ur_h($idb . '_pass') . '">' . ur_h(ur_t('Password')) . '</label>:</dt>';
+    // PASSWORD: write-only field + recoverable-secret warning (shown when
+    // auth=PASSWORD). REQUIRED only when PASSWORD auth AND no password is stored
+    // yet: on an edit where a password already exists, leaving the field blank
+    // KEEPS the stored one, so we must NOT force a value there (it would block a
+    // legitimate "edit other fields, keep password" save). The JS toggle mirrors
+    // this exact rule, and the server (Credentials::validateConnection) is the
+    // source of truth: a PASSWORD connection with no password is rejected.
+    $isPass        = ($auth === 'PASSWORD');
+    $passRequired  = $isPass && !$hasPass;
+    $passRowStyle  = $isPass ? '' : ' style="display:none"';
+    echo '<dt class="ur-auth-pass" id="' . ur_h($idb . '_passrow_dt') . '"' . $passRowStyle . '><label for="' . ur_h($idb . '_pass') . '">' . ur_h(ur_t('Password')) . '</label>'
+        . '<abbr class="ur-required ur-pass-required" title="' . ur_h(ur_t('Required')) . '"' . ($passRequired ? '' : ' style="display:none"') . '>*</abbr>:</dt>';
     echo '<dd class="ur-auth-pass" id="' . ur_h($idb . '_passrow_dd') . '"' . $passRowStyle . '>';
-    echo '<input type="password" id="' . ur_h($idb . '_pass') . '" name="' . ur_h($p . '[password]') . '" value="" autocomplete="new-password" placeholder="' . ur_h($hasPass ? ur_t('(unchanged - leave blank to keep)') : ur_t('(not set)')) . '">';
+    echo '<input type="password" id="' . ur_h($idb . '_pass') . '" data-haspass="' . ($hasPass ? '1' : '0') . '" name="' . ur_h($p . '[password]') . '" value="" autocomplete="new-password"' . ($passRequired ? ' required' : '') . ' placeholder="' . ur_h($hasPass ? ur_t('(unchanged - leave blank to keep)') : ur_t('(not set)')) . '">';
     echo ' <span class="ur-pass-state">' . ur_h($hasPass ? ur_t('Password is set') : ur_t('No password set')) . '</span>';
     echo '<blockquote class="inline_help"><p><strong>' . ur_h(ur_t('Warning:')) . '</strong> '
         . ur_h(ur_t('Passwords are stored OBFUSCATED (reversible), not encrypted, on the world-readable USB flash. '
@@ -186,6 +196,12 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
     echo '</div>'; // .ur-conn-card
 }
 ?>
+<style>
+/* The "required" field marker: a red asterisk paired with the HTML5 `required`
+   attribute on the mandatory inputs. text-decoration:none drops the dotted
+   <abbr> underline so it reads as a clean asterisk. */
+.ur-required { color: var(--red-800, #b71c1c); font-weight: bold; text-decoration: none; cursor: help; }
+</style>
 <div class="title">
   <span class="left">
     <i class="fa fa-key title"></i>&nbsp;<?=_('Credentials')?>
@@ -257,8 +273,8 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
      that must be produced server-side); the saveCredentials form below only
      renames/reorders existing keys. -->
 <dl>
-  <dt><label for="ur_key_name"><?=_('New key name')?></label>:</dt>
-  <dd><input type="text" id="ur_key_name" placeholder="<?=_('e.g. backup-ed25519')?>"></dd>
+  <dt><label for="ur_key_name"><?=_('New key name')?></label><?=ur_required_mark()?>:</dt>
+  <dd><input type="text" id="ur_key_name" placeholder="<?=_('e.g. backup-ed25519')?>" required></dd>
   <dt><label for="ur_key_type"><?=_('Type (generate)')?></label>:</dt>
   <dd>
     <select id="ur_key_type">
@@ -270,7 +286,7 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
   <dt><label for="ur_key_import_priv"><?=_('Import private key')?></label>:</dt>
   <dd>
     <textarea id="ur_key_import_priv" rows="4" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" autocomplete="off"></textarea>
-    <blockquote class="inline_help"><p><?=_('The private key must have an EMPTY passphrase (jobs run unattended). The public key and fingerprint are derived automatically')?>.</p></blockquote>
+    <blockquote class="inline_help"><p><?=_('A private key must have an EMPTY passphrase (jobs run unattended); its public key and fingerprint are derived automatically. Provide at least ONE of the private or public key fields — the server enforces this either/or rule')?>.</p></blockquote>
   </dd>
   <dt><label for="ur_key_import_pub"><?=_('Import public key (optional)')?></label>:</dt>
   <dd>
@@ -472,20 +488,55 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
     }
   });
 
-  /* ---- auth-method conditional fields ---- */
+  /* ---- auth-method conditional fields ----
+   * Show/hide AND toggle `required` so the client `required` matches the chosen
+   * auth method and the server rules (Credentials::validateConnection): KEY auth
+   * requires a key, PASSWORD auth requires a password (UNLESS one is already
+   * stored, in which case a blank field keeps it). A hidden field must never be
+   * `required`, so we always clear it on the inactive branch. */
+  function syncAuthRequired(authSel) {
+    if (!authSel || !authSel.getAttribute) { return; }
+    var idb = authSel.getAttribute('data-idb');
+    if (!idb) { return; }
+    var isKey = (authSel.value === 'KEY');
+
+    ['_keyrow_dt', '_keyrow_dd'].forEach(function (s) {
+      var el = document.getElementById(idb + s); if (el) { el.style.display = isKey ? '' : 'none'; }
+    });
+    ['_passrow_dt', '_passrow_dd'].forEach(function (s) {
+      var el = document.getElementById(idb + s); if (el) { el.style.display = isKey ? 'none' : ''; }
+    });
+
+    /* key select: required only on KEY auth. */
+    var keySel = document.getElementById(idb + '_key');
+    if (keySel) { keySel.required = isKey; }
+
+    /* password field: required only on PASSWORD auth AND when none is stored. */
+    var passInput = document.getElementById(idb + '_pass');
+    var passMark  = document.getElementById(idb + '_passrow_dt');
+    passMark = passMark ? passMark.querySelector('.ur-pass-required') : null;
+    if (passInput) {
+      var hasStored = passInput.getAttribute('data-haspass') === '1';
+      var passRequired = (!isKey) && !hasStored;
+      passInput.required = passRequired;
+      if (passMark) { passMark.style.display = passRequired ? '' : 'none'; }
+    }
+  }
+
   document.addEventListener('change', function (ev) {
     var t = ev.target;
     if (t && t.classList && t.classList.contains('ur-conn-auth')) {
-      var idb = t.getAttribute('data-idb');
-      var isKey = (t.value === 'KEY');
-      ['_keyrow_dt', '_keyrow_dd'].forEach(function (s) {
-        var el = document.getElementById(idb + s); if (el) { el.style.display = isKey ? '' : 'none'; }
-      });
-      ['_passrow_dt', '_passrow_dd'].forEach(function (s) {
-        var el = document.getElementById(idb + s); if (el) { el.style.display = isKey ? 'none' : ''; }
-      });
+      syncAuthRequired(t);
     }
   });
+
+  /* Seed the required state for every connection card on load (the server set
+   * the initial values, but a JS-cloned card defaults to KEY auth and must
+   * reflect that). Re-run after adding a card. */
+  function syncAllAuthRequired() {
+    var sels = document.querySelectorAll('.ur-conn-auth');
+    Array.prototype.forEach.call(sels, syncAuthRequired);
+  }
 
   /* ---- discover host key (fills the textarea) ---- */
   function discoverHostKey(btn) {
@@ -542,6 +593,8 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
       wrap.innerHTML = html.trim();
       var card = wrap.firstElementChild;
       document.getElementById('ur-conns-container').appendChild(card);
+      /* A new card defaults to KEY auth; seed its required state to match. */
+      syncAllAuthRequired();
     });
   }
 
@@ -577,5 +630,8 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
   }
   wireForm('ur-keys-form', 'ur-keys-save-result');
   wireForm('ur-conns-form', 'ur-conns-result');
+
+  /* Seed the conditional-required state for all initially-rendered cards. */
+  syncAllAuthRequired();
 })();
 </script>

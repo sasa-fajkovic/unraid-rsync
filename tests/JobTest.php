@@ -35,11 +35,12 @@ final class JobTest extends TestCase
     public function testValidSshJobWithRemotePathPasses(): void
     {
         $job = Job::normalize([
-            'name'      => 'remote',
-            'schedule'  => '15 2 * * 1-5',
-            'transport' => 'SSH',
-            'direction' => 'PUSH',
-            'pairs'     => [['local' => '/mnt/user/docs/', 'remote' => '/srv/backup/docs/']],
+            'name'         => 'remote',
+            'schedule'     => '15 2 * * 1-5',
+            'transport'    => 'SSH',
+            'direction'    => 'PUSH',
+            'connectionId' => 'c-rpi',
+            'pairs'        => [['local' => '/mnt/user/docs/', 'remote' => '/srv/backup/docs/']],
         ]);
         $res = Job::validate($job);
         $this->assertTrue($res['valid'], 'errors: ' . implode(' | ', $res['errors']));
@@ -212,10 +213,11 @@ final class JobTest extends TestCase
     public function testDeleteWithSpecificDestPasses(): void
     {
         $job = Job::normalize([
-            'name'      => 'del',
-            'schedule'  => '0 3 * * *',
-            'transport' => 'SSH',
-            'pairs'     => [['local' => '/mnt/user/a/', 'remote' => '/srv/backup/a/']],
+            'name'         => 'del',
+            'schedule'     => '0 3 * * *',
+            'transport'    => 'SSH',
+            'connectionId' => 'c-rpi',
+            'pairs'        => [['local' => '/mnt/user/a/', 'remote' => '/srv/backup/a/']],
             'rsyncOptions' => ['delete' => true, 'maxDelete' => '100'],
         ]);
         $res = Job::validate($job);
@@ -225,10 +227,11 @@ final class JobTest extends TestCase
     public function testDeleteWithoutMaxDeleteWarns(): void
     {
         $job = Job::normalize([
-            'name'      => 'del',
-            'schedule'  => '0 3 * * *',
-            'transport' => 'SSH',
-            'pairs'     => [['local' => '/mnt/user/a/', 'remote' => '/srv/backup/a/']],
+            'name'         => 'del',
+            'schedule'     => '0 3 * * *',
+            'transport'    => 'SSH',
+            'connectionId' => 'c-rpi',
+            'pairs'        => [['local' => '/mnt/user/a/', 'remote' => '/srv/backup/a/']],
             'rsyncOptions' => ['delete' => true, 'maxDelete' => ''],
         ]);
         $res = Job::validate($job);
@@ -309,11 +312,12 @@ final class JobTest extends TestCase
         // valid local destination with --delete must be accepted - the
         // destination-subpath rule must target the local side, not the remote.
         $job = Job::normalize([
-            'name'      => 'pull-src',
-            'schedule'  => '0 3 * * *',
-            'transport' => 'SSH',
-            'direction' => 'PULL',
-            'pairs'     => [['local' => '/mnt/user/restore/', 'remote' => '/srv/data/']],
+            'name'         => 'pull-src',
+            'schedule'     => '0 3 * * *',
+            'transport'    => 'SSH',
+            'direction'    => 'PULL',
+            'connectionId' => 'c-rpi',
+            'pairs'        => [['local' => '/mnt/user/restore/', 'remote' => '/srv/data/']],
             'rsyncOptions' => ['delete' => true, 'maxDelete' => '10'],
         ]);
         $res = Job::validate($job);
@@ -324,11 +328,12 @@ final class JobTest extends TestCase
     {
         // SSH + PULL into a specific local sub-dir with --delete -> valid.
         $job = Job::normalize([
-            'name'      => 'pull-ok',
-            'schedule'  => '0 3 * * *',
-            'transport' => 'SSH',
-            'direction' => 'PULL',
-            'pairs'     => [['local' => '/mnt/user/restore/data/', 'remote' => '/srv/data/']],
+            'name'         => 'pull-ok',
+            'schedule'     => '0 3 * * *',
+            'transport'    => 'SSH',
+            'direction'    => 'PULL',
+            'connectionId' => 'c-rpi',
+            'pairs'        => [['local' => '/mnt/user/restore/data/', 'remote' => '/srv/data/']],
             'rsyncOptions' => ['delete' => true, 'maxDelete' => '10'],
         ]);
         $res = Job::validate($job);
@@ -389,5 +394,73 @@ final class JobTest extends TestCase
         ]);
         $this->assertCount(1, $pairs);
         $this->assertSame('/mnt/user/a/', $pairs[0]['local']);
+    }
+
+    // --- mandatory connection for SSH jobs ---------------------------------
+
+    public function testSshJobWithoutConnectionRejected(): void
+    {
+        // An SSH job with no connectionId must be rejected (there is no host /
+        // auth to build the transport from).
+        $job = Job::normalize([
+            'name'      => 'ssh-noconn',
+            'schedule'  => '0 3 * * *',
+            'transport' => 'SSH',
+            'direction' => 'PUSH',
+            'pairs'     => [['local' => '/mnt/user/docs/', 'remote' => '/srv/backup/docs/']],
+        ]);
+        $this->assertSame('', $job['connectionId']);
+        $res = Job::validate($job);
+        $this->assertFalse($res['valid']);
+        $this->assertNotEmpty(array_filter($res['errors'], fn($e) => stripos($e, 'connection') !== false));
+    }
+
+    public function testLocalJobWithoutConnectionAllowed(): void
+    {
+        // LOCAL transport never uses a connection, so an empty connectionId is
+        // fine (the rest of the job is valid).
+        $job = $this->validLocalJob();
+        $this->assertSame('', $job['connectionId']);
+        $res = Job::validate($job);
+        $this->assertTrue($res['valid'], 'errors: ' . implode(' | ', $res['errors']));
+    }
+
+    public function testSshJobWithConnectionAccepted(): void
+    {
+        $job = Job::normalize([
+            'name'         => 'ssh-ok',
+            'schedule'     => '0 3 * * *',
+            'transport'    => 'SSH',
+            'direction'    => 'PUSH',
+            'connectionId' => 'c-rpi',
+            'pairs'        => [['local' => '/mnt/user/docs/', 'remote' => '/srv/backup/docs/']],
+        ]);
+        $res = Job::validate($job);
+        $this->assertTrue($res['valid'], 'errors: ' . implode(' | ', $res['errors']));
+    }
+
+    public function testSshJobWithMissingConnectionRejectedWhenCredsSupplied(): void
+    {
+        // When a credentials structure is supplied, a connectionId that does not
+        // reference an existing connection is rejected (server source of truth).
+        $creds = Credentials::defaults();
+        $creds['connections'][] = ['id' => 'c-known', 'name' => 'known'];
+
+        $job = Job::normalize([
+            'name'         => 'ssh-ghost',
+            'schedule'     => '0 3 * * *',
+            'transport'    => 'SSH',
+            'direction'    => 'PUSH',
+            'connectionId' => 'c-ghost',
+            'pairs'        => [['local' => '/mnt/user/docs/', 'remote' => '/srv/backup/docs/']],
+        ]);
+        $res = Job::validate($job, $creds);
+        $this->assertFalse($res['valid']);
+        $this->assertNotEmpty(array_filter($res['errors'], fn($e) => stripos($e, 'does not exist') !== false));
+
+        // ...and the SAME job validates when the connection DOES exist.
+        $job['connectionId'] = 'c-known';
+        $res2 = Job::validate($job, $creds);
+        $this->assertTrue($res2['valid'], 'errors: ' . implode(' | ', $res2['errors']));
     }
 }

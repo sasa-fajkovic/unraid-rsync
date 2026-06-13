@@ -1,29 +1,6 @@
 Menu="OtherSettings"
 Type="xmenu"
 Title="Unraid Rsync"
-Icon="refresh"
 Tabs="true"
-Tag="rsync-backup.png"
+Icon="refresh"
 ---
-<?php
-/* Parent hub page. It has no body of its own: with Type="xmenu", Unraid's
- * PageBuilder gathers every child page whose Menu equals this page's basename
- * ("UnraidRsync") and renders them as tabs (ordered by the ":rank" suffix).
- *
- * MENU PLACEMENT DECISION (Unraid 7.x):
- *   We use Menu="OtherSettings", NOT Menu="Settings".
- *   In the webGui, "Settings" is itself a top-level page (Settings.page,
- *   Menu="Tasks:4"); the section hubs shown UNDER it are pages like
- *   OtherSettings.page ("System Settings", Menu="Settings:1") and
- *   UserPreferences.page (Menu="Settings:3"). Plugins attach to one of those
- *   section hubs. Setting Menu="Settings" would make this hub a sibling of the
- *   Settings tab on the menu bar instead of nesting it under Settings.
- *   Pointing at OtherSettings places "Unraid Rsync" inside the System Settings
- *   section, matching how shipping plugins (recycle.bin -> Utilities,
- *   ca.cleanup.appdata) and dynamix's own settings pages declare themselves.
- *   The .plg's launch="Settings/UnraidRsync" (<TopMenu>/<HubBasename>) keeps
- *   the plugin's deep-link working with this placement.
- *   Verified against unraid/webgui PageBuilder.php find_pages() and
- *   DefaultPageLayout.php xmenu child-gathering.
- */
-?>

@@ -337,11 +337,43 @@ final class HandlerStatusTest extends TestCase
         $this->assertStringContainsString('&amp;', $body['log']);
     }
 
+    // ---- getRsyncStatus (FIX 3: presence check) ---------------------------
+
+    public function testGetRsyncStatusPresent(): void
+    {
+        Rsync::$rsyncPathOverride = PHP_BINARY; // present
+        try {
+            [$body, $code] = $this->runCapture('ur_action_get_rsync_status');
+            $this->assertSame(200, $code);
+            $this->assertTrue($body['ok']);
+            $this->assertTrue($body['available']);
+            $this->assertSame(PHP_BINARY, $body['path']);
+            $this->assertSame('', $body['message']);
+        } finally {
+            Rsync::$rsyncPathOverride = null;
+        }
+    }
+
+    public function testGetRsyncStatusMissing(): void
+    {
+        Rsync::$rsyncPathOverride = '/nonexistent/path/to/rsync';
+        try {
+            [$body, $code] = $this->runCapture('ur_action_get_rsync_status');
+            $this->assertSame(200, $code);
+            $this->assertTrue($body['ok']);
+            $this->assertFalse($body['available']);
+            $this->assertSame('', $body['version']);
+            $this->assertStringContainsString('rsync not found', $body['message']);
+        } finally {
+            Rsync::$rsyncPathOverride = null;
+        }
+    }
+
     // ---- dispatch: GET pollers reject POST --------------------------------
 
     public function testGetPollersRejectPost(): void
     {
-        foreach (['getStatus', 'getJobLog', 'listRuns', 'getPluginLog'] as $action) {
+        foreach (['getStatus', 'getJobLog', 'listRuns', 'getPluginLog', 'getRsyncStatus'] as $action) {
             $_POST = ['action' => $action];
             $_GET  = [];
             $_SERVER['REQUEST_METHOD'] = 'POST';
@@ -360,5 +392,21 @@ final class HandlerStatusTest extends TestCase
         $this->assertSame(200, $code);
         $this->assertTrue($body['ok']);
         $this->assertArrayHasKey($id, $body['jobs']);
+    }
+
+    public function testGetRsyncStatusViaDispatch(): void
+    {
+        Rsync::$rsyncPathOverride = PHP_BINARY;
+        try {
+            $_GET = ['action' => 'getRsyncStatus'];
+            $_POST = [];
+            $_SERVER['REQUEST_METHOD'] = 'GET';
+            [$body, $code] = $this->runCapture('ur_handle_request');
+            $this->assertSame(200, $code);
+            $this->assertTrue($body['ok']);
+            $this->assertTrue($body['available']);
+        } finally {
+            Rsync::$rsyncPathOverride = null;
+        }
     }
 }
