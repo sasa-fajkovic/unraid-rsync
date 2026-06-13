@@ -259,10 +259,52 @@ final class CredentialsTest extends TestCase
 
     public function testValidateConnectionPasswordAuthDoesNotRequireKey(): void
     {
+        // PASSWORD auth needs no keyId; with a password set, it validates.
         $creds = Credentials::defaults();
         $conn = Credentials::mergeConnection([
             'id' => 'c', 'name' => 'n', 'host' => 'h', 'username' => 'u',
-            'authMethod' => 'PASSWORD',
+            'authMethod' => 'PASSWORD', 'password' => 'secret',
+        ]);
+        $res = Credentials::validateConnection($conn, $creds);
+        $this->assertTrue($res['valid'], implode(' | ', $res['errors']));
+        // ...and the keyId requirement is specific to KEY auth, so no key error.
+        $this->assertSame([], array_filter($res['errors'], fn($e) => stripos($e, 'key') !== false));
+    }
+
+    public function testValidateConnectionPasswordAuthRequiresPassword(): void
+    {
+        // A PASSWORD connection with an EMPTY password is rejected (it would
+        // always fail to authenticate at run time).
+        $creds = Credentials::defaults();
+        $conn = Credentials::mergeConnection([
+            'id' => 'c', 'name' => 'n', 'host' => 'h', 'username' => 'u',
+            'authMethod' => 'PASSWORD', 'password' => '',
+        ]);
+        $res = Credentials::validateConnection($conn, $creds);
+        $this->assertFalse($res['valid']);
+        $this->assertNotEmpty(array_filter($res['errors'], fn($e) => stripos($e, 'password') !== false));
+    }
+
+    public function testValidateConnectionPasswordAuthWithPasswordPasses(): void
+    {
+        // A PASSWORD connection WITH a password set is accepted.
+        $creds = Credentials::defaults();
+        $conn = Credentials::mergeConnection([
+            'id' => 'c', 'name' => 'n', 'host' => 'h', 'username' => 'u',
+            'authMethod' => 'PASSWORD', 'password' => 'hunter2',
+        ]);
+        $res = Credentials::validateConnection($conn, $creds);
+        $this->assertTrue($res['valid'], implode(' | ', $res['errors']));
+    }
+
+    public function testValidateConnectionKeyAuthUnaffectedByPasswordRule(): void
+    {
+        // KEY auth must NOT require a password (the password rule is PASSWORD-only).
+        $creds = Credentials::defaults();
+        $creds['keys'][] = ['id' => 'k-1', 'name' => 'kk', 'publicKey' => 'ssh-ed25519 AAAA'];
+        $conn = Credentials::mergeConnection([
+            'id' => 'c', 'name' => 'n', 'host' => 'h', 'username' => 'u',
+            'authMethod' => 'KEY', 'keyId' => 'k-1', 'password' => '',
         ]);
         $res = Credentials::validateConnection($conn, $creds);
         $this->assertTrue($res['valid'], implode(' | ', $res['errors']));

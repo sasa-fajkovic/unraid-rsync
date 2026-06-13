@@ -450,9 +450,16 @@ class Credentials
             } elseif (self::findKey($creds, $keyId) === null) {
                 $errors[] = 'The selected SSH key does not exist.';
             }
+        } elseif ($auth === 'PASSWORD') {
+            // A PASSWORD connection needs a password to authenticate with - an
+            // empty one would always fail at run time, so reject it on save.
+            // The stored password is OBFUSCATED, never trimmed (a password may
+            // legitimately contain leading/trailing whitespace), so we test the
+            // raw stored value for emptiness only.
+            if ((string) ($conn['password'] ?? '') === '') {
+                $errors[] = 'Password-based connections require a password.';
+            }
         }
-        // PASSWORD: an empty password is permitted at save time (the user may
-        // be editing other fields); testConnection surfaces an auth failure.
 
         return ['valid' => count($errors) === 0, 'errors' => $errors];
     }

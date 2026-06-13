@@ -22,6 +22,9 @@
  */
 
 require_once __DIR__ . '/Config.php';
+// Credentials::findConnection is used by validate() to confirm an SSH job's
+// referenced connection exists when a credentials structure is supplied.
+require_once __DIR__ . '/Credentials.php';
 
 class Job
 {
@@ -207,10 +210,15 @@ class Job
      * Errors are hard failures (the save must be rejected); warnings are
      * advisory (e.g. --delete with no max-delete cap) and do not block a save.
      *
-     * @param array<string,mixed> $job   a job already run through normalize()
+     * @param array<string,mixed>      $job   a job already run through normalize()
+     * @param array<string,mixed>|null $creds an optional loaded credentials
+     *        structure. When supplied, an SSH job's connectionId is additionally
+     *        checked to reference a connection that actually exists; when null,
+     *        only the cheap "non-empty connectionId" rule is enforced. The
+     *        server is the source of truth, so the handler passes $creds here.
      * @return array{valid:bool,errors:array<int,string>,warnings:array<int,string>}
      */
-    public static function validate(array $job): array
+    public static function validate(array $job, ?array $creds = null): array
     {
         $errors   = [];
         $warnings = [];
@@ -237,6 +245,21 @@ class Job
         // schedule (5-field cron)
         if (!self::isValidCron((string) ($job['schedule'] ?? ''))) {
             $errors[] = 'Schedule must be a valid 5-field cron expression.';
+        }
+
+        // connection: an SSH job MUST select a Connection (it is the host/auth
+        // the transport is built from; without it there is nowhere to rsync to).
+        // LOCAL transport never uses a connection, so connectionId is optional
+        // there. When the caller passes a loaded credentials structure we ALSO
+        // confirm the referenced connection still exists (cheap in-memory lookup,
+        // mirrors Credentials::validateConnection's keyId existence check).
+        if (($job['transport'] ?? '') === 'SSH') {
+            $connectionId = trim((string) ($job['connectionId'] ?? ''));
+            if ($connectionId === '') {
+                $errors[] = 'An SSH job must select a Connection.';
+            } elseif (is_array($creds) && Credentials::findConnection($creds, $connectionId) === null) {
+                $errors[] = 'The selected Connection does not exist.';
+            }
         }
 
         // pairs: at least one, each side non-empty, each path guardrail-checked

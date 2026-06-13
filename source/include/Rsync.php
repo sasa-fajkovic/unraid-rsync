@@ -94,6 +94,113 @@ class Rsync
         'includes' => '--include',
     ];
 
+    /**
+     * The canonical rsync binary location. rsync ships in Unraid's BASE OS at
+     * /usr/bin/rsync, so it is ALWAYS present on a healthy system - the plugin
+     * deliberately does NOT install rsync (there is no clean Slackware artifact
+     * to pin, and a bundled copy would shadow the base binary). We only guard
+     * against a broken/misconfigured system with a defensive presence check
+     * (rsyncAvailable() below), mirroring how sshpass is detect-and-degrade -
+     * except here the expected state is "present", not "optional".
+     *
+     * Overridable for tests via $rsyncPathOverride so the run path can be driven
+     * with a present/absent binary without touching the real /usr/bin/rsync.
+     */
+    const RSYNC_PATH = '/usr/bin/rsync';
+
+    /**
+     * Optional explicit rsync path override (tests set this; '' simulates a
+     * missing binary). When null, rsyncPath() returns the RSYNC_PATH constant.
+     *
+     * @var string|null
+     */
+    public static $rsyncPathOverride = null;
+
+    /** Resolve the rsync binary path to check/run (honours the test override). */
+    public static function rsyncPath(): string
+    {
+        if (static::$rsyncPathOverride !== null) {
+            return (string) static::$rsyncPathOverride;
+        }
+        return self::RSYNC_PATH;
+    }
+
+    /**
+     * True when the rsync binary is present and executable. rsync is part of
+     * Unraid's base OS, so this should normally always be true; a false here
+     * means the system is misconfigured. PURE-ish: a single is_executable()
+     * stat, no process spawned. Overridable via $rsyncPathOverride / the
+     * isExecutable() seam.
+     */
+    public static function rsyncAvailable(): bool
+    {
+        $path = static::rsyncPath();
+        if ($path === '') {
+            return false;
+        }
+        return static::isExecutable($path);
+    }
+
+    /** The user-facing message logged when rsync is missing from the base OS. */
+    public static function rsyncMissingMessage(): string
+    {
+        return 'rsync not found at ' . static::rsyncPath()
+            . ' - it is normally part of Unraid; your system may be misconfigured.';
+    }
+
+    /**
+     * The first line of `rsync --version` (e.g. "rsync  version 3.2.7 ...") for
+     * display on the Status tab, or '' when rsync is absent / the probe fails.
+     * The version probe is injectable via the runVersionProbe() seam so the UI
+     * helper is testable without spawning a process.
+     */
+    public static function rsyncVersionLine(): string
+    {
+        if (!static::rsyncAvailable()) {
+            return '';
+        }
+        $out = static::runVersionProbe(static::rsyncPath());
+        foreach (preg_split('/\r?\n/', $out) ?: [] as $line) {
+            $line = trim($line);
+            if ($line !== '') {
+                return $line;
+            }
+        }
+        return '';
+    }
+
+    /**
+     * is_executable() seam (overridable in tests). Kept protected so a test
+     * subclass can simulate present/absent without touching the filesystem.
+     */
+    protected static function isExecutable(string $path): bool
+    {
+        return is_executable($path);
+    }
+
+    /**
+     * Run `<rsync> --version` (no shell) and return its combined stdout. Live
+     * implementation uses proc_open with the argv ARRAY. Overridable in tests.
+     */
+    protected static function runVersionProbe(string $rsyncPath): string
+    {
+        $descriptors = [
+            0 => ['file', '/dev/null', 'r'],
+            1 => ['pipe', 'w'],
+            2 => ['pipe', 'w'],
+        ];
+        $pipes = [];
+        $proc = @proc_open([$rsyncPath, '--version'], $descriptors, $pipes);
+        if (!is_resource($proc)) {
+            return '';
+        }
+        $stdout = stream_get_contents($pipes[1]);
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        proc_close($proc);
+        return is_string($stdout) ? $stdout : '';
+    }
+
     // --- TrueNAS-style state names (also used in the run summary on /boot). ---
     const STATE_SUCCESS = 'SUCCESS';
     const STATE_WARNING = 'WARNING';

@@ -279,4 +279,102 @@ final class RsyncTest extends TestCase
             Rsync::$runner = null;
         }
     }
+
+    // --- rsync presence check (FIX 3: detect, never install) ----------------
+
+    public function testRsyncPathDefaultsToBaseOsLocation(): void
+    {
+        $this->assertNull(Rsync::$rsyncPathOverride);
+        $this->assertSame('/usr/bin/rsync', Rsync::rsyncPath());
+        $this->assertSame('/usr/bin/rsync', Rsync::RSYNC_PATH);
+    }
+
+    public function testRsyncPathHonoursOverride(): void
+    {
+        Rsync::$rsyncPathOverride = '/custom/rsync';
+        try {
+            $this->assertSame('/custom/rsync', Rsync::rsyncPath());
+        } finally {
+            Rsync::$rsyncPathOverride = null;
+        }
+    }
+
+    public function testRsyncAvailableTrueForAnExecutable(): void
+    {
+        // Point the path at a binary that always exists in the test env.
+        Rsync::$rsyncPathOverride = PHP_BINARY;
+        try {
+            $this->assertTrue(Rsync::rsyncAvailable());
+        } finally {
+            Rsync::$rsyncPathOverride = null;
+        }
+    }
+
+    public function testRsyncAvailableFalseForMissingBinary(): void
+    {
+        Rsync::$rsyncPathOverride = '/nonexistent/path/to/rsync';
+        try {
+            $this->assertFalse(Rsync::rsyncAvailable());
+        } finally {
+            Rsync::$rsyncPathOverride = null;
+        }
+        // An empty path is also "not available".
+        Rsync::$rsyncPathOverride = '';
+        try {
+            $this->assertFalse(Rsync::rsyncAvailable());
+        } finally {
+            Rsync::$rsyncPathOverride = null;
+        }
+    }
+
+    public function testRsyncMissingMessageIsClearAndInstallFree(): void
+    {
+        Rsync::$rsyncPathOverride = '/usr/bin/rsync';
+        try {
+            $msg = Rsync::rsyncMissingMessage();
+            $this->assertStringContainsString('/usr/bin/rsync', $msg);
+            $this->assertStringContainsString('Unraid', $msg);
+            $this->assertStringContainsString('misconfigured', $msg);
+            // It must NOT promise to install anything.
+            $this->assertStringNotContainsStringIgnoringCase('install', $msg);
+        } finally {
+            Rsync::$rsyncPathOverride = null;
+        }
+    }
+
+    public function testRsyncVersionLineEmptyWhenMissing(): void
+    {
+        Rsync::$rsyncPathOverride = '/nonexistent/path/to/rsync';
+        try {
+            $this->assertSame('', Rsync::rsyncVersionLine());
+        } finally {
+            Rsync::$rsyncPathOverride = null;
+        }
+    }
+
+    public function testRsyncVersionLineReturnsFirstNonEmptyLine(): void
+    {
+        // Use the version-probe stub so we don't depend on a real rsync binary.
+        Rsync::$rsyncPathOverride = PHP_BINARY; // present -> probe is consulted
+        try {
+            $this->assertSame(
+                'rsync  version 3.2.7  protocol version 31',
+                RsyncVersionProbeStub::rsyncVersionLine()
+            );
+        } finally {
+            Rsync::$rsyncPathOverride = null;
+        }
+    }
+}
+
+/**
+ * Test double that overrides the (protected) version-probe seam so
+ * rsyncVersionLine() can be asserted without spawning a process.
+ */
+final class RsyncVersionProbeStub extends Rsync
+{
+    protected static function runVersionProbe(string $rsyncPath): string
+    {
+        return "\nrsync  version 3.2.7  protocol version 31\nCopyright (C) ...\n";
+    }
 }

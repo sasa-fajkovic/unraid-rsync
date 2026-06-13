@@ -41,6 +41,12 @@ final class RunnerTest extends TestCase
             return 12345;
         };
 
+        // Point the rsync presence check at an executable that always exists in
+        // the test environment (the PHP binary), so rsyncAvailable() is true and
+        // the run path proceeds independently of the host's /usr/bin/rsync. The
+        // missing-rsync path is exercised explicitly in testRunFailsWhenRsyncMissing.
+        Rsync::$rsyncPathOverride = PHP_BINARY;
+
         // Reset config to a clean empty install for each test.
         Config::save(Config::defaults());
 
@@ -56,6 +62,7 @@ final class RunnerTest extends TestCase
         Runner::$hookRunner = null;
         Runner::$pidProvider = null;
         Rsync::$runner = null;
+        Rsync::$rsyncPathOverride = null;
     }
 
     /** Build + persist a LOCAL job, returning its id. */
@@ -412,6 +419,53 @@ final class RunnerTest extends TestCase
         );
         // No job.
         $this->assertSame('', ur_runner_parse_args(['runner.php'])['job']);
+    }
+
+    public function testRunFailsWhenRsyncMissing(): void
+    {
+        // Simulate a broken system with no rsync binary: the run must fail
+        // cleanly (FAILED + rsync-missing reason) WITHOUT running any rsync, and
+        // the post-hook still fires.
+        $rsyncCalls = 0;
+        Rsync::$runner = function (array $argv, $onOutput) use (&$rsyncCalls): int {
+            $rsyncCalls++;
+            return 0;
+        };
+        Rsync::$rsyncPathOverride = '/nonexistent/path/to/rsync';
+
+        $id  = $this->saveLocalJob('j-local', ['postHook' => 'POST']);
+        $res = Runner::run($id, false);
+
+        $this->assertSame(Rsync::STATE_FAILED, $res['state']);
+        $this->assertSame('rsync-missing', $res['reason'] ?? '');
+        $this->assertSame(0, $rsyncCalls, 'no rsync runs when the binary is missing');
+        // postHook still ran on this failure path, seeing FAILED.
+        $this->assertContains('hook:POST:FAILED', $this->trace);
+        // The /boot summary records the failure.
+        $this->assertSame(Rsync::STATE_FAILED, Runner::readSummary($id)['state']);
+        // And the run log carries the clear, install-free guidance.
+        $log = @file_get_contents($res['runLog']);
+        $this->assertIsString($log);
+        $this->assertStringContainsString('rsync not found', $log);
+        $this->assertStringContainsString('misconfigured', $log);
+    }
+
+    public function testRunProceedsWhenRsyncPresent(): void
+    {
+        // The companion to the missing case: with rsync present (the setUp
+        // override points at an executable), the run proceeds and rsync runs.
+        $rsyncCalls = 0;
+        Rsync::$runner = function (array $argv, $onOutput) use (&$rsyncCalls): int {
+            $rsyncCalls++;
+            return 0;
+        };
+        $this->assertTrue(Rsync::rsyncAvailable(), 'setUp points rsyncPath at an executable');
+
+        $id  = $this->saveLocalJob('j-local');
+        $res = Runner::run($id, false);
+
+        $this->assertSame(Rsync::STATE_SUCCESS, $res['state']);
+        $this->assertSame(1, $rsyncCalls, 'rsync runs when the binary is present');
     }
 
     public function testRunnerCliExitCodeMapping(): void
