@@ -135,7 +135,7 @@ echo "md5: $hash"
 # project's standard column alignment.
 update_entity() { # $1=entity name  $2=new value
   local name="$1" value="$2"
-  if ! grep -Eq "<!ENTITY[[:space:]]+$name[[:space:]]+\"[^\"]*\">" "$plg_filepath"; then
+  if ! grep -Eq "<!ENTITY[[:space:]]+${name}[[:space:]]+\"[^\"]*\">" "$plg_filepath"; then
     echo "ERROR: could not find <!ENTITY $name ...> in $plg_filepath" >&2
     exit 1
   fi
@@ -143,7 +143,7 @@ update_entity() { # $1=entity name  $2=new value
   # with the rest of the DOCTYPE block regardless of name length.
   local padded
   padded="$(printf '%-15s' "$name")"
-  sed -i -E "s|<!ENTITY[[:space:]]+$name[[:space:]]+\"[^\"]*\">|<!ENTITY $padded\"$value\">|" "$plg_filepath"
+  sed -i -E "s|<!ENTITY[[:space:]]+${name}[[:space:]]+\"[^\"]*\">|<!ENTITY ${padded}\"$value\">|" "$plg_filepath"
 }
 
 update_entity md5 "$hash"
