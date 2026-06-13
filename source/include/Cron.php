@@ -333,9 +333,9 @@ class Cron
      * next whole minute) for a standard 5-field cron expression, or null if the
      * expression is malformed or no match is found within ~5 years.
      *
-     * Fields: minute hour day-of-month month day-of-week. Supports *, */n,
-     * ranges a-b, lists a,b,c, range-steps a-b/n, and named months (jan..dec) /
-     * weekdays (sun..sat). Day-of-week accepts 0 and 7 as Sunday.
+     * Fields: minute hour day-of-month month day-of-week. Supports "*", step
+     * "*\/n", ranges a-b, lists a,b,c, range-steps a-b/n, and named months
+     * (jan..dec) / weekdays (sun..sat). Day-of-week accepts 0 and 7 as Sunday.
      *
      * Standard vixie-cron DOM/DOW OR semantics: when BOTH the day-of-month and
      * day-of-week fields are RESTRICTED (not "*"), a day matches if EITHER field
