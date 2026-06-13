@@ -1,0 +1,66 @@
+name: Release
+
+# Build the Slackware .txz inside aclemons/slackware:15.0, regenerate the .plg
+# (version + md5), commit the regenerated manifest, and publish a GitHub Release
+# with the .txz asset.
+#
+# Triggers:
+#   - pushing a tag shaped like YYYY.MM.DD (the plugin version scheme), or
+#   - manual workflow_dispatch with an explicit version input.
+
+on:
+  push:
+    tags:
+      - "20[0-9][0-9].[0-9][0-9].[0-9][0-9]"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build (YYYY.MM.DD). Defaults to today if blank."
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Determine version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            # Tag push: the tag name is the version (refs/tags/YYYY.MM.DD).
+            version="${GITHUB_REF#refs/tags/}"
+          elif [ -n "${{ github.event.inputs.version }}" ]; then
+            version="${{ github.event.inputs.version }}"
+          else
+            version="$(date +%Y.%m.%d)"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Building version: $version"
+
+      - name: Build .txz inside Slackware container
+        run: |
+          docker run --rm -v "${{ github.workspace }}":/workspace -w /workspace \
+            aclemons/slackware:15.0 \
+            bash -c "./pkg_build.sh -y -V '${{ steps.version.outputs.version }}'"
+          sudo chown -R "$(id -u):$(id -g)" .
+
+      - name: Commit regenerated .plg
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add unraid.rsync.plg
+          git commit -m "Release ${{ steps.version.outputs.version }}" || echo "no changes"
+          git push || true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          files: archive/*.txz
+          generate_release_notes: true

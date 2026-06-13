@@ -1,0 +1,56 @@
+<?xml version="1.0" standalone="yes"?>
+<!DOCTYPE PLUGIN [
+  <!ENTITY repoName        "unraid-rsync">
+  <!ENTITY pluginName      "unraid.rsync">
+  <!ENTITY gitUser         "sasa-fajkovic">
+  <!ENTITY version         "2026.06.13">
+  <!ENTITY gitBranch       "main">
+  <!ENTITY releaseLocation "https://github.com/&gitUser;/&repoName;/releases/download/&version;">
+  <!ENTITY pluginURL       "https://raw.githubusercontent.com/&gitUser;/&repoName;/&gitBranch;/&pluginName;.plg">
+  <!ENTITY plugin          "/boot/config/plugins/&pluginName;">
+  <!ENTITY emhttp          "/usr/local/emhttp/plugins/&pluginName;">
+  <!ENTITY md5             "">
+]>
+<PLUGIN name="&pluginName;" author="sasa-fajkovic" version="&version;"
+        launch="Settings/UnraidRsync" pluginURL="&pluginURL;" icon="refresh"
+        min="7.0.0" support="https://github.com/sasa-fajkovic/unraid-rsync/issues">
+  <CHANGES>
+### 2026.06.13
+- Initial skeleton release.
+  </CHANGES>
+
+  <!-- Remove cached .txz packages from previous versions -->
+  <FILE Run="/bin/bash">
+    <INLINE>
+      rm -f $(ls &plugin;/*.txz 2>/dev/null | grep -v '&version;') 2>/dev/null
+      for p in $(ls /var/log/packages/&pluginName;-* 2>/dev/null | grep -v '&version;'); do
+        removepkg "$p" 2>/dev/null
+      done
+    </INLINE>
+  </FILE>
+
+  <!-- Download + install the package; upgradepkg verifies the MD5 -->
+  <FILE Name="/boot/config/plugins/&pluginName;/&pluginName;-&version;.txz" Run="upgradepkg --install-new">
+    <URL>&releaseLocation;/&pluginName;-&version;.txz</URL>
+    <MD5>&md5;</MD5>
+  </FILE>
+
+  <FILE Run="/bin/bash">
+    <INLINE>
+      echo ""
+      echo "Unraid Rsync &version; installed."
+      echo "Open Settings -> Unraid Rsync to configure."
+      echo ""
+    </INLINE>
+  </FILE>
+
+  <!-- Uninstall: clean both the emhttp runtime tree and the persistent /boot config -->
+  <FILE Run="/bin/bash" Method="remove">
+    <INLINE>
+      removepkg &pluginName;-&version;
+      rm -rf &emhttp;
+      rm -rf &plugin;
+      echo "Unraid Rsync uninstalled."
+    </INLINE>
+  </FILE>
+</PLUGIN>
