@@ -63,6 +63,16 @@
 
   <FILE Run="/bin/bash">
     <INLINE>
+      # Apply any saved per-job schedules to the live crontab immediately on
+      # install/upgrade, so a user who already had jobs configured does not have
+      # to wait for the next array start. This regenerates
+      # /boot/config/plugins/&pluginName;/&pluginName;.cron from config.json and
+      # runs update_cron. Idempotent and non-fatal: the event/started hook
+      # re-applies on every array start anyway (working around the Unraid 7.x
+      # boot-time update_cron bug), so a transient failure here is harmless.
+      if [ -f "&emhttp;/scripts/apply-cron.php" ]; then
+        php "&emhttp;/scripts/apply-cron.php" || true
+      fi
       echo ""
       echo "Unraid Rsync &version; installed."
       echo "Open Settings -> Unraid Rsync to configure."
@@ -76,6 +86,12 @@
       removepkg &pluginName;-&version;
       rm -rf &emhttp;
       rm -rf &plugin;
+      # Removing &plugin; deletes our &pluginName;.cron file; rebuild the live
+      # crontab so our schedules drop out immediately instead of lingering until
+      # the next update_cron. Absolute path; non-fatal.
+      if [ -x /usr/local/sbin/update_cron ]; then
+        /usr/local/sbin/update_cron || true
+      fi
       echo "Unraid Rsync uninstalled."
     </INLINE>
   </FILE>

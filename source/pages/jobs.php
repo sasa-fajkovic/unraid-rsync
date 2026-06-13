@@ -35,6 +35,7 @@ require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Config.php';
 require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Job.php';
 require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Credentials.php';
 require_once '/usr/local/emhttp/plugins/unraid.rsync/include/RunState.php';
+require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Cron.php';
 require_once '/usr/local/emhttp/plugins/unraid.rsync/pages/_options_form.php';
 
 $csrf = '';
@@ -272,6 +273,74 @@ function ur_render_pair_row(string $prefix, $k, string $local, string $remote): 
     echo ' <button type="button" class="ur-pair-del">&minus;</button>';
     echo '</div>';
 }
+
+/**
+ * Build the "Next run" cell label for one job. Returns a plain string (the
+ * caller escapes it). Phase 5 shows the computed next fire time; colored state
+ * badges + last-run are Phase 6.
+ *
+ *   - disabled job                  -> "disabled"
+ *   - enabled, schedule uncomputable-> "—"   (malformed expr; save validation
+ *                                             normally blocks this, but a stored
+ *                                             config could predate validation)
+ *   - enabled, computable           -> absolute local time + relative ("in ...")
+ *
+ * @param array<string,mixed> $job
+ * @param int                 $now reference timestamp (seconds)
+ */
+function ur_next_run_label(array $job, int $now): string
+{
+    if (empty($job['enabled'])) {
+        return ur_t('disabled');
+    }
+    $schedule = trim((string) ($job['schedule'] ?? ''));
+    if ($schedule === '') {
+        return '—';
+    }
+    $next = Cron::nextRun($schedule, $now);
+    if ($next === null) {
+        return '—';
+    }
+    // Absolute local time (matches the timezone crond fires in) + a compact
+    // relative hint so the list reads at a glance.
+    $absolute = date('Y-m-d H:i', $next);
+    $relative = ur_relative_time($next - $now);
+    return $absolute . ' (' . $relative . ')';
+}
+
+/**
+ * Render a small "in 3h 5m" / "in 2d 4h" style relative string for a forward
+ * delta in seconds. Coarse on purpose (two largest non-zero units); used only
+ * for the at-a-glance next-run hint.
+ */
+function ur_relative_time(int $deltaSec): string
+{
+    if ($deltaSec <= 0) {
+        return ur_t('due now');
+    }
+    $units = [
+        ['d', 86400],
+        ['h', 3600],
+        ['m', 60],
+    ];
+    $parts = [];
+    $remaining = $deltaSec;
+    foreach ($units as [$suffix, $size]) {
+        $count = intdiv($remaining, $size);
+        if ($count > 0) {
+            $parts[] = $count . $suffix;
+            $remaining -= $count * $size;
+        }
+        if (count($parts) === 2) {
+            break;
+        }
+    }
+    if (empty($parts)) {
+        // Under a minute away.
+        return ur_t('in less than a minute');
+    }
+    return ur_t('in') . ' ' . implode(' ', $parts);
+}
 ?>
 <div class="title">
   <span class="left">
@@ -292,6 +361,7 @@ function ur_render_pair_row(string $prefix, $k, string $local, string $remote): 
 </p>
 
 <!-- Summary list ------------------------------------------------------------>
+<?php $urNow = time(); ?>
 <table class="tablesorter ur-job-list">
   <thead>
     <tr>
@@ -299,17 +369,19 @@ function ur_render_pair_row(string $prefix, $k, string $local, string $remote): 
       <th><?=_('Enabled')?></th>
       <th><?=_('Transport')?></th>
       <th><?=_('Schedule')?></th>
+      <th><?=_('Next run')?></th>
     </tr>
   </thead>
   <tbody>
     <?php if (empty($jobs)): ?>
-      <tr><td colspan="4"><?=_('No jobs configured yet')?>.</td></tr>
+      <tr><td colspan="5"><?=_('No jobs configured yet')?>.</td></tr>
     <?php else: foreach ($jobs as $job): ?>
       <tr>
         <td><?=htmlspecialchars((string)($job['name'] ?? ''), ENT_QUOTES, 'UTF-8')?></td>
         <td><?=!empty($job['enabled']) ? _('Yes') : _('No')?></td>
         <td><?=htmlspecialchars((string)($job['transport'] ?? ''), ENT_QUOTES, 'UTF-8')?></td>
         <td><?=htmlspecialchars((string)($job['schedule'] ?? ''), ENT_QUOTES, 'UTF-8')?></td>
+        <td><?=htmlspecialchars(ur_next_run_label(is_array($job) ? $job : [], $urNow), ENT_QUOTES, 'UTF-8')?></td>
       </tr>
     <?php endforeach; endif; ?>
   </tbody>

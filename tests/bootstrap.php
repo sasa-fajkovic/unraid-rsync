@@ -80,3 +80,4 @@ require_once __DIR__ . '/../source/include/Rsync.php';
 require_once __DIR__ . '/../source/include/RunState.php';
 require_once __DIR__ . '/../source/include/Logger.php';
 require_once __DIR__ . '/../source/include/Runner.php';
+require_once __DIR__ . '/../source/include/Cron.php';

@@ -4,10 +4,11 @@ A native Unraid webGui plugin for scheduling and monitoring **rsync backup
 jobs** — closer in spirit to TrueNAS's Rsync Tasks than to existing single-
 schedule rsync plugins.
 
-> **Pre-release / work in progress.** This is an early skeleton. It installs a
-> tabbed **Unraid Rsync** page under **Settings**, but the actual backup
-> functionality is not implemented yet — it lands across later phases (see
-> [Roadmap](#roadmap)). Do not rely on it for real backups yet.
+> **Pre-release / work in progress.** Jobs, credentials, the rsync execution
+> engine, and per-job scheduling are in place; the live status UI, per-run log
+> viewer, and notifications are still landing across later phases (see
+> [Roadmap](#roadmap)). Validate with dry-runs before relying on it for real
+> backups.
 
 ## What it will do
 
@@ -34,11 +35,45 @@ What ships today:
 - A two-tier **Credentials** keychain: reusable **SSH Keys** (generate or
   import) + **Connections** (key or password auth), with referential integrity
   and a per-connection **Test connection** probe.
+- A safe rsync **execution engine** (whitelisted flags built as an argv array,
+  path guardrails) with manual **Run / Dry-run / Abort** per job.
+- **Per-job cron scheduling**: each enabled job runs on its own 5-field cron
+  schedule, plus a **Next run** column on the Jobs list.
 - Clean uninstall (removes both the runtime `emhttp` tree and the persistent
-  `/boot` config dir).
+  `/boot` config dir, and clears the plugin's cron lines from the live crontab).
 
-No scheduling, execution, logs, or notifications yet (those land in later
-phases).
+Live status badges, the per-run log viewer, and notifications still land in
+later phases.
+
+### Scheduling (how it works)
+
+Each **enabled** job contributes one line to a single cron file that the plugin
+regenerates from `config.json` on every relevant change:
+
+```
+/boot/config/plugins/unraid.rsync/unraid.rsync.cron
+```
+
+The file lives **directly** in the plugin's flash config dir (not a `cron/`
+subdirectory) because Unraid's `/usr/local/sbin/update_cron` concatenates each
+plugin's cron files with a **non-recursive, top-level `*.cron` glob** — a
+subdirectory would never be scanned. A **single** regenerated file (rather than
+one file per job) means deleting or disabling a job can never leave an orphaned
+schedule behind. Each line invokes the runner directly:
+
+```
+<schedule> php /usr/local/emhttp/plugins/unraid.rsync/scripts/runner.php --job=<id> >/dev/null 2>&1
+```
+
+After rewriting the file (atomically: temp + rename) the plugin runs
+`update_cron` via its absolute path to rebuild the live crontab. Schedules are
+re-applied automatically:
+
+- on **every config change** that affects a job's schedule or enabled state;
+- on **plugin install/upgrade** (the `.plg` runs `scripts/apply-cron.php`), so a
+  configured schedule is live immediately without waiting for a reboot;
+- on **array start** (the `event/started` hook re-applies), which works around a
+  known Unraid 7.x bug where the boot-time `update_cron` may not run.
 
 ### Credential security (read this)
 
@@ -83,7 +118,7 @@ The plugin is delivered in sequential phases, each one PR:
 2. **Config core + Jobs CRUD + Global Settings.**
 3. **Credentials tab (two-tier SSH keys + connections) + secure storage.**
 4. Rsync execution engine (safe argv, path guardrails).
-5. Per-job cron scheduling + next-run display.
+5. **Per-job cron scheduling + next-run display.** ✅
 6. Status/state UI + log viewer + last-run reporting.
 7. Notifications.
 

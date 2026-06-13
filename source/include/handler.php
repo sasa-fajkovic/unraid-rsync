@@ -44,6 +44,32 @@ require_once __DIR__ . '/KeyTools.php';
 require_once __DIR__ . '/Rsync.php';
 require_once __DIR__ . '/RunState.php';
 require_once __DIR__ . '/Logger.php';
+require_once __DIR__ . '/Cron.php';
+
+/**
+ * Re-sync the live crontab to the saved config. This is the single place the
+ * handler re-applies scheduling after a config change that can affect a job's
+ * schedule or enabled state (saveConfig's jobs path; deleteConnection disabling
+ * dependent jobs). Cron::apply() regenerates the one *.cron file from config.json
+ * and invokes update_cron.
+ *
+ * It is best-effort by design: a save has ALREADY succeeded by the time we get
+ * here, so a cron-sync failure must NOT turn into a 5xx that makes the UI think
+ * the save was lost. We return the apply() result (or null on an unexpected
+ * throw) so the caller can surface a non-fatal warning, and never rethrow.
+ *
+ * @param array<string,mixed>|null $config a config already in hand (post-mutation)
+ *                                          to avoid a re-read race; null => load.
+ * @return array<string,mixed>|null the Cron::apply() result, or null if it threw.
+ */
+function ur_resync_cron(?array $config = null): ?array
+{
+    try {
+        return Cron::apply($config);
+    } catch (Throwable $e) {
+        return null;
+    }
+}
 
 /**
  * Emit a JSON success/data response and stop. Sets Content-Type and the HTTP
@@ -249,6 +275,17 @@ function ur_action_save_config(): void
     } catch (Throwable $e) {
         sendError('Failed to save configuration: ' . $e->getMessage(), 500);
         return;
+    }
+
+    // Re-sync the live crontab to the just-saved jobs (per-job schedules /
+    // enabled state). Best-effort: the save already succeeded, so a cron-sync
+    // failure becomes a non-fatal warning rather than a failed save. Pass the
+    // in-hand config so apply() schedules exactly what we persisted.
+    $cron = ur_resync_cron($config);
+    if ($cron !== null && empty($cron['ok'])) {
+        $allWarnings[] = 'Jobs were saved, but updating the schedule failed: '
+            . (string) ($cron['error'] ?? ('update_cron exit ' . ($cron['updateCronCode'] ?? -1)))
+            . '. Schedules will be re-applied on the next array start.';
     }
 
     sendResponse([
@@ -789,10 +826,21 @@ function ur_action_delete_connection(): void
         return;
     }
 
+    // If we disabled any jobs, their schedules must drop out of the live
+    // crontab. Re-sync from the mutated config (best-effort; non-fatal).
+    $cronWarning = '';
+    if (!empty($disabled)) {
+        $cron = ur_resync_cron($config);
+        if ($cron !== null && empty($cron['ok'])) {
+            $cronWarning = ' Note: updating the schedule failed; it will be re-applied on the next array start.';
+        }
+    }
+
     $msg = 'Connection deleted.';
     if (!empty($disabled)) {
         $msg .= ' Disabled ' . count($disabled) . ' dependent job(s): ' . implode(', ', $disabled) . '.';
     }
+    $msg .= $cronWarning;
     sendResponse([
         'ok'             => true,
         'message'        => $msg,
