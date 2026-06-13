@@ -591,7 +591,7 @@ class KeyTools
             $stdout = is_file($outFile) ? (string) @file_get_contents($outFile) : $stdout;
             $stderr = is_file($errFile) ? (string) @file_get_contents($errFile) : $stderr;
             // The temp dir is left for init's child to finish writing into and is
-            // swept opportunistically by sweepStaleTempDirs() on a later call -
+            // swept opportunistically by scheduleTempDirSweep() on a later call -
             // removing it now could race the still-running detached child.
             self::scheduleTempDirSweep();
             return [124, $stdout, $stderr, true]; // 124 == GNU timeout convention
@@ -604,9 +604,10 @@ class KeyTools
 
     /**
      * Best-effort SIGKILL of a detached session's process group, read from the
-     * pgid file runDetached() wrote. Signalling the NEGATIVE pgid hits the whole
-     * group (the inner shell exec'd into the command, so its pid is the group
-     * leader). Never throws and never waits.
+     * pgid file runDetached() wrote (the inner shell's own pid). Under setsid the
+     * inner shell is the session/process-group leader, so signalling the NEGATIVE
+     * pgid hits the whole group - the shell AND the ssh-keyscan child it spawned.
+     * Never throws and never waits.
      */
     private static function killDetachedGroup(string $pgFile): void
     {
