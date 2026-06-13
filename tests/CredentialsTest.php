@@ -167,6 +167,60 @@ final class CredentialsTest extends TestCase
         $this->assertTrue($res['valid'], implode(' | ', $res['errors']));
     }
 
+    /** @dataProvider unsafeSshTokenProvider */
+    public function testValidateConnectionRejectsUnsafeHost(string $host): void
+    {
+        $creds = Credentials::defaults();
+        $conn = Credentials::mergeConnection([
+            'id' => 'c', 'name' => 'n', 'host' => $host, 'username' => 'u',
+            'authMethod' => 'PASSWORD',
+        ]);
+        $res = Credentials::validateConnection($conn, $creds);
+        $this->assertFalse($res['valid'], "host '$host' must be rejected");
+        $this->assertNotEmpty(array_filter($res['errors'], fn($e) => stripos($e, 'host') !== false));
+    }
+
+    /** @dataProvider unsafeSshTokenProvider */
+    public function testValidateConnectionRejectsUnsafeUsername(string $user): void
+    {
+        $creds = Credentials::defaults();
+        $conn = Credentials::mergeConnection([
+            'id' => 'c', 'name' => 'n', 'host' => 'h.example', 'username' => $user,
+            'authMethod' => 'PASSWORD',
+        ]);
+        $res = Credentials::validateConnection($conn, $creds);
+        $this->assertFalse($res['valid'], "username '$user' must be rejected");
+        $this->assertNotEmpty(array_filter($res['errors'], fn($e) => stripos($e, 'username') !== false));
+    }
+
+    public function unsafeSshTokenProvider(): array
+    {
+        return [
+            'leading dash'  => ['-oProxyCommand=evil'],
+            'space'         => ['a b'],
+            'semicolon'     => ['h;id'],
+            'backtick'      => ['h`id`'],
+            'pipe'          => ['h|nc'],
+            'dollar'        => ['h$(id)'],
+        ];
+    }
+
+    public function testIsSafeSshTokenAcceptsNormalValues(): void
+    {
+        $this->assertTrue(Credentials::isSafeSshToken('rpi3b.tempel-drum.ts.net'));
+        $this->assertTrue(Credentials::isSafeSshToken('10.0.0.5'));
+        $this->assertTrue(Credentials::isSafeSshToken('backup-user'));
+        $this->assertFalse(Credentials::isSafeSshToken('-bad'));
+        $this->assertFalse(Credentials::isSafeSshToken(''));
+    }
+
+    public function testUsedByConnectionWithNullConfigReturnsNoJobs(): void
+    {
+        // $config is nullable; a null config must not throw - it means no jobs.
+        $used = Credentials::usedBy(Credentials::defaults(), 'connection', 'c-1', null);
+        $this->assertSame([], $used['jobs']);
+    }
+
     public function testValidateConnectionPasswordAuthDoesNotRequireKey(): void
     {
         $creds = Credentials::defaults();

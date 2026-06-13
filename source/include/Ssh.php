@@ -14,11 +14,14 @@
  *   2. Materialise secrets to a tmpfs runtime dir with tight permissions
  *      immediately before use. credentials.json lives on FAT32 /boot (every
  *      file world-readable) and OpenSSH REFUSES a world-readable private key, so
- *      we copy the referenced key to /tmp/unraid.rsync/keys/<connId> (dir 700,
- *      key 600 - keyed by CONNECTION id, not key id, so each connection has its
- *      own copy and concurrent runs sharing a key never clean up each other's)
- *      and write the connection's pinned remoteHostKey to a per-connection
- *      known_hosts file. cleanupRuntime() removes them again.
+ *      we copy the referenced key to /tmp/unraid.rsync/keys/<token> (dir 700,
+ *      key 600), where <token> is a UNIQUE PER-RUN token (newRuntimeToken():
+ *      connId + pid + random). Keying by a per-run token - not the connection or
+ *      key id - means two concurrent runs, even of the SAME connection, get
+ *      separate files, so one run's cleanupRuntime(token) never removes a
+ *      key/known_hosts another run is still using. We likewise write the
+ *      connection's pinned remoteHostKey to a per-run known_hosts file.
+ *      cleanupRuntime(token) removes that run's files again.
  *
  * AUTH METHODS
  *   KEY:
@@ -143,7 +146,8 @@ class Ssh
 
     /**
      * Resolve the sshpass executable path, or '' when not installed. Honors the
-     * test override. Live detection uses `command -v sshpass` via the run seam.
+     * test override. Live detection scans $PATH for an executable "sshpass"
+     * WITHOUT a shell, via the locateSshpass() seam.
      */
     public static function sshpassPath(): string
     {
@@ -500,11 +504,14 @@ class Ssh
             return ['ok' => false, 'reason' => $reason, 'message' => (string) $mat['error']];
         }
 
-        // Compose the full probe argv: [sshpass-prefix] ssh <opts> user@host true
+        // Compose the full probe argv: [sshpass-prefix] ssh <opts> -- user@host true
+        // The `--` ends ssh option parsing so a host/username starting with '-'
+        // can never be read as an ssh option (option-injection guard, on top of
+        // the validation guard in Credentials::validateConnection).
         $argv = array_merge(
             $mat['sshpassPrefix'],
             $mat['sshArgv'],
-            [$conn['username'] . '@' . $conn['host'], 'true']
+            ['--', $conn['username'] . '@' . $conn['host'], 'true']
         );
 
         $exitCode = self::SSH_EXIT_ERROR;
@@ -555,7 +562,21 @@ class Ssh
             }
         }
 
-        if ($exitCode === self::SSH_EXIT_ERROR || $isPassword) {
+        // Sniff stderr only when the failure is genuinely an ssh-level
+        // connect/auth error (exit 255), or - on the PASSWORD path - one of
+        // sshpass's own internal-error codes (1-4). sshpass otherwise propagates
+        // the WRAPPED ssh / remote-command exit status verbatim, so a non-255
+        // password-path exit (e.g. a remote `true` that somehow exits 2) is a
+        // real remote exit and must NOT be misreported as a connect/auth
+        // failure - that was the bug in keying this branch on `|| $isPassword`.
+        $sshpassInternal = $isPassword && in_array($exitCode, [
+            self::SSHPASS_INVALID_ARGS,
+            self::SSHPASS_CONFLICT,
+            self::SSHPASS_RUNTIME_ERROR,
+            self::SSHPASS_PARSE_ERROR,
+        ], true);
+
+        if ($exitCode === self::SSH_EXIT_ERROR || $sshpassInternal) {
             // ssh failed to connect/authenticate. Split the cause by sniffing
             // its stderr (the most reliable signal we have without a live host).
             $reason = self::sniffStderr($stderr);
@@ -563,7 +584,8 @@ class Ssh
         }
 
         // Any other exit code: ssh connected and the remote `true` returned
-        // non-zero (shouldn't happen). Surface it rather than calling it OK.
+        // non-zero (shouldn't happen for `true`). Surface it rather than calling
+        // it OK - but it is NOT a connect/auth failure.
         return [
             'ok'      => false,
             'reason'  => 'unreachable',

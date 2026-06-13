@@ -432,13 +432,35 @@ final class SshTest extends TestCase
         $this->assertTrue($res['ok'], $res['message']);
         $this->assertSame('ok', $res['reason']);
 
-        // The probe argv ends with user@host and the trivial `true` command.
+        // The probe argv ends with user@host and the trivial `true` command,
+        // with `--` before the destination (option-injection guard).
         $argv = FakeSsh::$lastProbeArgv;
         $this->assertIsArray($argv);
         $this->assertSame('true', end($argv));
-        $this->assertContains('sasa@h.example', $argv);
+        $destIdx = array_search('sasa@h.example', $argv, true);
+        $this->assertNotFalse($destIdx);
+        $this->assertSame('--', $argv[$destIdx - 1], 'destination must be preceded by --');
         // KEY auth: no sshpass prefix in front of ssh.
         $this->assertSame('ssh', $argv[0]);
+    }
+
+    public function testClassifyPasswordNon255RemoteExitIsNotAuthFailure(): void
+    {
+        // sshpass propagates the wrapped ssh/remote exit verbatim. A non-255,
+        // non-sshpass-internal exit on the PASSWORD path is a real remote exit,
+        // NOT a connect/auth failure - it must not be sniffed as 'auth'.
+        $res = Ssh::classifyProbe($this->passConn(), 2, 'some remote stderr');
+        $this->assertFalse($res['ok']);
+        $this->assertSame('unreachable', $res['reason']); // unexpected code, not auth
+    }
+
+    public function testClassifyPasswordSshpassInternalErrorSniffsStderr(): void
+    {
+        // sshpass internal error 3 (runtime) with an ssh host-key message ->
+        // classified via stderr as a host-key problem.
+        $res = Ssh::classifyProbe($this->passConn(), Ssh::SSHPASS_RUNTIME_ERROR, 'Host key verification failed.');
+        $this->assertFalse($res['ok']);
+        $this->assertSame('hostkey', $res['reason']);
     }
 
     public function testTestConnectionPasswordMissingSshpass(): void

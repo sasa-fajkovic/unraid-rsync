@@ -394,11 +394,25 @@ class Credentials
         if (trim((string) ($conn['name'] ?? '')) === '') {
             $errors[] = 'Connection name is required.';
         }
-        if (trim((string) ($conn['host'] ?? '')) === '') {
+
+        // host + username become an `ssh user@host` argv token at run time.
+        // Even though we never build a shell string, a value beginning with '-'
+        // (or carrying whitespace / shell metacharacters) could be parsed by
+        // OpenSSH itself as an OPTION (e.g. -oProxyCommand=...) - an
+        // option-injection vector. Reject unsafe values here (defence in depth
+        // on top of the run-time argv construction).
+        $host = trim((string) ($conn['host'] ?? ''));
+        if ($host === '') {
             $errors[] = 'Host is required.';
+        } elseif (!self::isSafeSshToken($host)) {
+            $errors[] = 'Host contains unsafe characters or begins with "-".';
         }
-        if (trim((string) ($conn['username'] ?? '')) === '') {
+
+        $username = trim((string) ($conn['username'] ?? ''));
+        if ($username === '') {
             $errors[] = 'Username is required.';
+        } elseif (!self::isSafeSshToken($username)) {
+            $errors[] = 'Username contains unsafe characters or begins with "-".';
         }
 
         $port = (int) ($conn['port'] ?? 0);
@@ -426,6 +440,22 @@ class Credentials
         // be editing other fields); testConnection surfaces an auth failure.
 
         return ['valid' => count($errors) === 0, 'errors' => $errors];
+    }
+
+    /**
+     * True when a host/username string is safe to use as part of an ssh argv
+     * token. Rejects a leading '-' (would be read as an option) and any
+     * whitespace or shell metacharacters. PURE.
+     */
+    public static function isSafeSshToken(string $value): bool
+    {
+        $value = trim($value);
+        if ($value === '' || $value[0] === '-') {
+            return false;
+        }
+        // No whitespace or shell metacharacters (defence in depth - we build
+        // argv arrays, but ssh itself parses leading-dash tokens as options).
+        return !preg_match('/[\s;&|`$()<>"\'\\\\]/', $value);
     }
 
     // --- lookups -----------------------------------------------------------
@@ -534,7 +564,11 @@ class Credentials
 
         if ($type === 'connection') {
             $deps = [];
-            $jobs = ($config['jobs'] ?? []);
+            // $config is nullable: a null/absent config means "no jobs to
+            // depend on", not an error.
+            $jobs = (is_array($config) && isset($config['jobs']) && is_array($config['jobs']))
+                ? $config['jobs']
+                : [];
             if (is_array($jobs)) {
                 foreach ($jobs as $job) {
                     if (!is_array($job)) {
