@@ -517,9 +517,10 @@ if (!function_exists('ur_emit_option_help_assets')) {
 
 if (!function_exists('ur_emit_ajax_helpers')) {
     /**
-     * Emit the shared robust-fetch helpers (window.urAjax = { postForm, parseResponse,
-     * show, errText }) exactly once per page, mirroring ur_emit_option_help_assets()'s
-     * once-guard. These centralise the "parse the response body as TEXT, then try
+     * Emit the shared robust-fetch helpers (window.urAjax = { parseResponse, postForm,
+     * postFormElement, show, errText }) exactly once per page, mirroring
+     * ur_emit_option_help_assets()'s once-guard. These centralise the "parse the
+     * response body as TEXT, then try
      * JSON.parse it" pattern so a non-JSON 403/500 from the front controller becomes a
      * VISIBLE error WITH its HTTP status, instead of throwing inside r.json() and
      * landing in a generic .catch as a silent "Network error" (the exact class of

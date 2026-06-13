@@ -985,9 +985,9 @@ ur_emit_ajax_helpers();
   /* The next-run cell label from a getStatus entry, mirroring jobs.php
    * ur_next_run_label(): a disabled job reads "disabled"; an enabled job with no
    * computable next fire reads an em-dash; otherwise absolute local time + an
-   * "in …" hint. getStatus carries nextRun (epoch|null) and the job's enabled
-   * flag is implied by nextRun being present only for enabled+valid schedules,
-   * so we also pass s.enabled when available. */
+   * "in …" hint. getStatus always carries both `enabled` (bool) and `nextRun`
+   * (epoch|null), so we read enabled directly to distinguish "disabled" from an
+   * enabled-but-uncomputable schedule. */
   function nextRunLabel(s, nowEpoch) {
     if (s && s.enabled === false) { return 'disabled'; }
     if (!s || !s.nextRun) { return '—'; }

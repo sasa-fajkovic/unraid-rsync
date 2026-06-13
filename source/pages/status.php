@@ -86,6 +86,15 @@ $rsyncMissingMsg  = $rsyncAvailable ? '' : Rsync::rsyncMissingMessage();
   padding: 10px; border-radius: 4px; font-family: monospace; font-size: 12px;
   white-space: pre-wrap; word-break: break-word; min-height: 280px; max-height: 60vh;
 }
+/* Empty-state hint shown when there are zero jobs. A plain visible callout — NOT
+   blockquote.inline_help, which the dynamix base CSS hides by default
+   (.inline_help { display:none }), so it would be invisible without help mode. */
+.ur-empty-state {
+  margin: 10px 0; padding: 10px 12px; border-radius: 4px;
+  background: var(--blue-100, #d9edf7);
+  border: 1px solid var(--blue-200, #bce8f1);
+  color: var(--blockquote-text-color, #31708f);
+}
 </style>
 
 <div class="title">
@@ -100,10 +109,9 @@ $rsyncMissingMsg  = $rsyncAvailable ? '' : Rsync::rsyncMissingMessage();
 
 <?php if ($jobCount === 0): ?>
 <!-- Empty state: nothing to monitor until a job exists. Point the user at the
-     Jobs tab so the tab is actionable rather than blank. -->
-<blockquote class="inline_help">
-  <p><?=_('No jobs configured yet — add one in the Jobs tab')?>.</p>
-</blockquote>
+     Jobs tab so the tab is actionable rather than blank. A visible .ur-empty-state
+     callout (NOT blockquote.inline_help, which the base CSS hides by default). -->
+<div class="ur-empty-state"><?=_('No jobs configured yet — add one in the Jobs tab')?>.</div>
 <?php endif; ?>
 
 <!-- Overall running/idle indicator + currently-running jobs (with Abort) ------>
