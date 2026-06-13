@@ -287,10 +287,23 @@ function ur_render_pair_row(string $prefix, $k, string $local, string $remote): 
     return max + 1;
   }
 
-  /* Next free pair index within a given pairs container. */
+  /* Next free pair index within a given pairs container: max existing index + 1.
+   * Using the row COUNT would reuse an index after a middle row is deleted,
+   * producing duplicate pairs[<k>] names that PHP would silently collapse. We
+   * parse the [pairs][<k>] index out of each row's first input name instead. */
   function nextPairIndex(rowsEl) {
     var rows = rowsEl.querySelectorAll('.ur-pair-row');
-    return rows.length; // contiguous; gaps are fine for PHP but keep it simple
+    var max = -1;
+    rows.forEach(function (row) {
+      var input = row.querySelector('input[name]');
+      if (!input) { return; }
+      var m = input.name.match(/\[pairs\]\[(\d+)\]/);
+      if (m) {
+        var n = parseInt(m[1], 10);
+        if (!isNaN(n) && n > max) { max = n; }
+      }
+    });
+    return max + 1;
   }
 
   function addJob() {

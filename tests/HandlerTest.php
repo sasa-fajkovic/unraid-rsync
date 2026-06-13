@@ -216,6 +216,101 @@ final class HandlerTest extends TestCase
         $this->assertContains('j-dup-2', $ids);
     }
 
+    public function testSettingsOnlySaveDoesNotWipeJobs(): void
+    {
+        // Seed a config with a job.
+        $seed = Config::defaults();
+        $seed['jobs'][] = Job::normalize([
+            'name' => 'keep', 'schedule' => '0 3 * * *', 'transport' => 'LOCAL',
+            'pairs' => [['local' => '/mnt/user/a/', 'remote' => '/mnt/disk1/a/']],
+        ]);
+        Config::save($seed);
+
+        // Submit ONLY the Global Settings section (no jobs[]).
+        $_POST = [
+            'action'     => 'saveConfig',
+            'csrf_token' => 'test-token',
+            'global'     => ['defaultRsyncOptions' => ['archive' => '0', 'compress' => '1']],
+        ];
+
+        [$body, $code] = $this->runCapture(function () {
+            ur_action_save_config();
+        });
+
+        $this->assertSame(200, $code, json_encode($body));
+        $cfg = Config::load();
+        // The job survives a settings-only save.
+        $this->assertCount(1, $cfg['jobs']);
+        $this->assertSame('keep', $cfg['jobs'][0]['name']);
+        // And the global change landed.
+        $this->assertFalse($cfg['global']['defaultRsyncOptions']['archive']);
+        $this->assertTrue($cfg['global']['defaultRsyncOptions']['compress']);
+    }
+
+    public function testJobsOnlySaveDoesNotWipeGlobalDefaults(): void
+    {
+        // Seed a config with a non-default global option.
+        $seed = Config::defaults();
+        $seed['global']['defaultRsyncOptions']['bwlimit'] = '5000';
+        Config::save($seed);
+
+        // Submit ONLY the jobs section (no global[]).
+        $_POST = [
+            'action'     => 'saveConfig',
+            'csrf_token' => 'test-token',
+            'jobs'       => [
+                0 => ['name' => 'j', 'schedule' => '0 3 * * *', 'transport' => 'LOCAL',
+                      'pairs' => [['local' => '/mnt/user/a/', 'remote' => '/mnt/disk1/a/']]],
+            ],
+        ];
+
+        [$body, $code] = $this->runCapture(function () {
+            ur_action_save_config();
+        });
+
+        $this->assertSame(200, $code, json_encode($body));
+        $cfg = Config::load();
+        // The global default survives a jobs-only save.
+        $this->assertSame('5000', $cfg['global']['defaultRsyncOptions']['bwlimit']);
+        $this->assertCount(1, $cfg['jobs']);
+    }
+
+    public function testSaveRefusedWhenExistingConfigUnreadable(): void
+    {
+        // Newer schema on disk -> Config::load() throws -> save must refuse
+        // rather than overwrite with defaults.
+        file_put_contents(
+            Config::path(),
+            json_encode(['schemaVersion' => Config::SCHEMA_VERSION + 9, 'jobs' => [['x' => 1]]])
+        );
+
+        $_POST = [
+            'action'     => 'saveConfig',
+            'csrf_token' => 'test-token',
+            'jobs'       => [0 => ['name' => 'j', 'schedule' => '0 3 * * *', 'transport' => 'LOCAL',
+                'pairs' => [['local' => '/mnt/user/a/', 'remote' => '/mnt/disk1/a/']]]],
+        ];
+
+        [$body, $code] = $this->runCapture(function () {
+            ur_action_save_config();
+        });
+
+        $this->assertSame(409, $code);
+        $this->assertArrayHasKey('error', $body);
+        // The on-disk (newer) config is untouched.
+        $raw = json_decode(file_get_contents(Config::path()), true);
+        $this->assertSame(Config::SCHEMA_VERSION + 9, $raw['schemaVersion']);
+    }
+
+    public function testSaveWithNeitherSectionRejected(): void
+    {
+        $_POST = ['action' => 'saveConfig', 'csrf_token' => 'test-token'];
+        [, $code] = $this->runCapture(function () {
+            ur_action_save_config();
+        });
+        $this->assertSame(400, $code);
+    }
+
     public function testUnknownActionRejected(): void
     {
         $_POST = ['action' => 'bogus', 'csrf_token' => 'test-token'];

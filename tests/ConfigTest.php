@@ -156,6 +156,23 @@ final class ConfigTest extends TestCase
         Config::load();
     }
 
+    public function testMigrateThrowsOnNewerSchema(): void
+    {
+        // A config from a newer plugin build must NOT be silently downgraded.
+        $this->expectException(RuntimeException::class);
+        Config::migrate(['schemaVersion' => Config::SCHEMA_VERSION + 1, 'jobs' => []]);
+    }
+
+    public function testLoadThrowsOnNewerSchema(): void
+    {
+        file_put_contents(
+            Config::path(),
+            json_encode(['schemaVersion' => Config::SCHEMA_VERSION + 5, 'jobs' => []])
+        );
+        $this->expectException(RuntimeException::class);
+        Config::load();
+    }
+
     public function testSaveIsAtomicNoTempLeftBehind(): void
     {
         $cfg = Config::defaults();

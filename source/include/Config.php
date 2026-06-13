@@ -134,13 +134,22 @@ class Config
 
     /**
      * Load config.json, returning a fully-populated structure. Missing keys are
-     * filled from defaults so callers never have to null-check. If the file is
-     * absent or unreadable, the default (empty-install) config is returned.
-     * Malformed JSON throws so the caller can surface a clear error rather than
-     * silently overwriting a corrupt-but-recoverable file.
+     * filled from defaults so callers never have to null-check.
+     *
+     * Contract:
+     *   - File absent or empty            -> the default (empty-install) config.
+     *   - File present but unreadable     -> the default config (best effort).
+     *   - File present but malformed JSON -> throws RuntimeException.
+     *   - File from a NEWER schemaVersion than this build understands -> throws
+     *     RuntimeException (migrate() refuses to downgrade).
+     *
+     * Callers MUST treat a thrown exception as "do not overwrite": the save
+     * path turns it into a 4xx error rather than falling back to defaults and
+     * clobbering a recoverable file. (The read-only UI pages may catch and
+     * render defaults for display only; they do not persist on load.)
      *
      * @return array<string,mixed>
-     * @throws RuntimeException when the file exists but contains invalid JSON.
+     * @throws RuntimeException on malformed JSON or a newer-than-supported schema.
      */
     public static function load(): array
     {
@@ -224,14 +233,30 @@ class Config
      * knows about version 1, so this currently just stamps the version; future
      * phases add `case` arms that transform the structure step by step.
      *
+     * If the on-disk config carries a schemaVersion NEWER than this build
+     * understands, we refuse to "migrate" it (we cannot downgrade, and
+     * mergeDefaults would drop fields this build doesn't know about, silently
+     * destroying them). Throw instead so the caller can warn and avoid data
+     * loss - e.g. when a user has rolled back to an older plugin version.
+     *
      * @param array<string,mixed> $data
      * @return array<string,mixed>
+     * @throws RuntimeException when $data is from a newer schema version.
      */
     public static function migrate(array $data): array
     {
         $version = isset($data['schemaVersion']) && is_int($data['schemaVersion'])
             ? $data['schemaVersion']
             : 1;
+
+        if ($version > self::SCHEMA_VERSION) {
+            throw new RuntimeException(sprintf(
+                'config.json schemaVersion %d is newer than this plugin supports (%d); '
+                . 'refusing to load to avoid data loss. Update the plugin.',
+                $version,
+                self::SCHEMA_VERSION
+            ));
+        }
 
         // Step the config up one version at a time. Each future arm mutates
         // $data from version N to N+1, then falls through to the next.

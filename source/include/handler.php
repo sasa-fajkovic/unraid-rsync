@@ -100,30 +100,66 @@ function ur_check_csrf(): bool
 function ur_action_save_config(): void
 {
     // Start from the on-disk config so we preserve schemaVersion and any keys
-    // the form does not submit.
+    // the form does not submit. If the existing config can't be loaded (corrupt
+    // JSON, or a NEWER schema this build doesn't understand), we must NOT fall
+    // back to defaults and save - that would silently destroy the user's data.
+    // Refuse the save and let the UI surface the problem instead.
     try {
         $config = Config::load();
     } catch (Throwable $e) {
-        // A corrupt existing file should not block a fresh save; start clean.
-        $config = Config::defaults();
+        sendError(
+            'Existing configuration could not be read, so the save was refused to '
+            . 'avoid overwriting it: ' . $e->getMessage(),
+            409
+        );
+        return;
     }
 
-    // Global default rsync options (the Global Settings tab).
-    $globalIn = (isset($_POST['global']) && is_array($_POST['global'])) ? $_POST['global'] : [];
-    $defaultOptsIn = (isset($globalIn['defaultRsyncOptions']) && is_array($globalIn['defaultRsyncOptions']))
-        ? $globalIn['defaultRsyncOptions']
-        : [];
-    $config['global']['defaultRsyncOptions'] = Job::normalizeRsyncOptions($defaultOptsIn);
+    // The Jobs tab and the Global Settings tab are separate forms that each
+    // submit only their own section. Update a section ONLY when its payload is
+    // present, otherwise saving one tab would wipe the other.
+    $hasGlobal = isset($_POST['global']) && is_array($_POST['global']);
+    $hasJobs   = isset($_POST['jobs'])   && is_array($_POST['jobs']);
 
-    // Jobs.
-    $rawJobs = (isset($_POST['jobs']) && is_array($_POST['jobs'])) ? $_POST['jobs'] : [];
-    $normalized = [];
+    if (!$hasGlobal && !$hasJobs) {
+        sendError('Nothing to save: no jobs or global settings were submitted.', 400);
+        return;
+    }
+
+    // Global default rsync options (the Global Settings tab) - only when sent.
+    if ($hasGlobal) {
+        $globalIn      = $_POST['global'];
+        $defaultOptsIn = (isset($globalIn['defaultRsyncOptions']) && is_array($globalIn['defaultRsyncOptions']))
+            ? $globalIn['defaultRsyncOptions']
+            : [];
+        $config['global']['defaultRsyncOptions'] = Job::normalizeRsyncOptions($defaultOptsIn);
+    }
+
     $allErrors   = [];
     $allWarnings = [];
-    $seenIds     = [];
 
-    // Re-key in case the form submitted a sparse/assoc array.
-    $rawJobs = array_values($rawJobs);
+    // Jobs (the Jobs tab) - only rebuild the jobs list when it was submitted.
+    if (!$hasJobs) {
+        // Settings-only save: persist the (validated-by-load) config with the
+        // updated global section and return.
+        try {
+            Config::save($config);
+        } catch (Throwable $e) {
+            sendError('Failed to save configuration: ' . $e->getMessage(), 500);
+            return;
+        }
+        sendResponse([
+            'ok'       => true,
+            'message'  => 'Configuration saved.',
+            'warnings' => $allWarnings,
+            'jobs'     => count($config['jobs'] ?? []),
+        ], 200);
+        return;
+    }
+
+    $rawJobs    = array_values($_POST['jobs']); // re-key sparse/assoc arrays
+    $normalized = [];
+    $seenIds    = [];
 
     foreach ($rawJobs as $i => $rawJob) {
         if (!is_array($rawJob)) {
