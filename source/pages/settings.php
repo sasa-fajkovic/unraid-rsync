@@ -34,6 +34,14 @@ try {
 $defaultOpts = $config['global']['defaultRsyncOptions'] ?? Config::defaultRsyncOptions();
 $handlerUrl  = '/plugins/unraid.rsync/include/handler.php';
 ?>
+<style>
+/* Clear Unraid's fixed bottom status bar (#footer, "Array Started", ~30-40px tall
+   + z-index:10000) so the Apply button at the foot of the form is never hidden
+   behind it. A bottom buffer on the page wrapper is enough; the footer overlays
+   the viewport, so the content must reserve space below it. */
+.ur-settings-page { padding-bottom: 90px; }
+</style>
+<div class="ur-settings-page">
 <div class="title">
   <span class="left">
     <i class="fa fa-cog title"></i>&nbsp;<?=_('Global Settings')?>
@@ -63,6 +71,7 @@ $handlerUrl  = '/plugins/unraid.rsync/include/handler.php';
 </form>
 
 <div id="ur-settings-result" class="ur-result"></div>
+</div><!-- .ur-settings-page -->
 
 <script type="text/javascript">
 /* Repeatable --exclude/--include rows: add/remove client-side. The template is

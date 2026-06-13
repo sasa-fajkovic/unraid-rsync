@@ -9,13 +9,25 @@
  * no free-form flag string anywhere. Phase 2 only renders + persists these;
  * mapping a key to its rsync argv token is Phase 4.
  *
- * Every option control carries a click-to-read help affordance (a small "?"
- * button next to the label) that reveals a short, plain-English description of
- * what the flag does, the actual rsync flag it maps to, and a caution for the
- * destructive ones. The descriptions live in ur_option_help() so they are
- * unit-testable (one per whitelist key) and the same help appears in BOTH the
- * Global Settings defaults form and the per-job options block, since both
- * include this shared partial.
+ * NATIVE LOOK. The options are laid out in Unraid's native two-column settings
+ * style: every option is a definition-list row (<dl><dt>label</dt><dd>control
+ * </dd></dl>), exactly like DiskSettings/DockerSettings, so the grid columns,
+ * spacing and label alignment come from the inherited dynamix stylesheet
+ * (default-base.css `dl/dt/dd`) and the page blends in with the rest of Unraid.
+ *
+ * NATIVE INLINE HELP. Each row carries a subtle "?" affordance that is hidden
+ * until you hover (or keyboard-focus) the row, mirroring how native settings
+ * pages reveal help. Clicking it toggles a real <blockquote class="inline_help">
+ * blue callout - the same element + class Unraid's Markdown.php emits for a
+ * "> help" line, so it picks up the stock blue box styling (--blue-100 fill,
+ * --blue-200 top/bottom rules) verbatim. The "?" is deliberately NOT a <button>
+ * (the webGui base stylesheet renders every <button> as a big, bordered,
+ * uppercase pill - that is what produced the previous "orange HELP button"); it
+ * is a small inline span with role="button" so it stays a lightweight icon.
+ *
+ * The descriptions live in ur_option_help() so they are unit-testable (one per
+ * whitelist key) and the same help appears in BOTH the Global Settings defaults
+ * form and the per-job options block, since both include this shared partial.
  *
  * Every rendered value is escaped with htmlspecialchars (via the ur_h helper)
  * - no raw interpolation of user data into HTML.
@@ -70,10 +82,10 @@ if (!function_exists('ur_option_help')) {
      *
      * Each entry is one or two short sentences: what the option does, the actual
      * rsync flag it maps to (shown in parentheses, e.g. "(-a)"/"(--delete)"), and
-     * a caution for the destructive ones. These strings are what the click-to-read
-     * "?" affordance reveals next to each control, and they are asserted complete
-     * by OptionsFormHelpTest so a future option added without a description fails
-     * CI.
+     * a caution for the destructive ones. These strings are what the "?" help
+     * affordance reveals in a native blue inline_help box next to each control,
+     * and they are asserted complete by OptionsFormHelpTest so a future option
+     * added without a description fails CI.
      *
      * Kept as a pure function (no output, no webGui dependency) so it is unit
      * testable in isolation. Wrap the returned strings with ur_t() at render time
@@ -147,17 +159,27 @@ if (!function_exists('ur_option_help_for')) {
 
 if (!function_exists('ur_option_help_affordance')) {
     /**
-     * Render the click-to-read help affordance for one option: a small "?" button
-     * the user clicks to toggle a hidden inline_help blockquote that holds the
-     * description. The button also carries the text as a native `title=` tooltip
-     * (additive convenience; the click-to-read text is the actual requirement).
+     * Render the native "?" help affordance for one option: a small question-mark
+     * icon that stays subtle (hidden until the row is hovered or the icon is
+     * focused, exactly like native settings rows) and, on click, toggles the
+     * row's blue inline_help box.
+     *
+     * It is a <span role="button"> rather than a <button> on purpose: the webGui
+     * base stylesheet styles EVERY <button>/<input type=submit> as a large,
+     * bordered, uppercase pill (min-width:86px, border, text-transform:uppercase),
+     * which is what turned the old affordance into a big "orange HELP button".
+     * A span escapes that chrome entirely and renders as a light inline icon while
+     * still being keyboard-operable (tabindex=0 + aria-* + Enter/Space handled by
+     * the shared script). The description is also exposed as a native title=
+     * tooltip for good measure.
      *
      * No-op when the key has no description, so callers can invoke it
      * unconditionally. The toggle behaviour is wired by the small script emitted
-     * once per page by ur_render_rsync_options(); it resolves the help block by
-     * the button's aria-controls id (with a next-sibling scan only as a fallback),
-     * so it works for every layout here and inside JS-cloned job cards. $helpId
-     * must therefore match the id of the ur_option_help_block() for the same key.
+     * once per page by ur_emit_option_help_assets(); it resolves the help block by
+     * the affordance's aria-controls id (with a next-sibling scan only as a
+     * fallback), so it works for every layout here and inside JS-cloned job cards.
+     * $helpId must therefore match the id of the ur_option_help_block() for the
+     * same key.
      *
      * @param string $key    whitelist option key (used only to look up text)
      * @param string $helpId DOM id for the revealed blockquote (aria target)
@@ -168,24 +190,21 @@ if (!function_exists('ur_option_help_affordance')) {
         if ($text === '') {
             return '';
         }
-        // The "?" trigger: a <button> (keyboard-focusable, not a link) styled as a
-        // small badge. aria-expanded/aria-controls keep it accessible; the JS flips
-        // them. type="button" so it never submits the surrounding form.
-        return ' <button type="button" class="ur-help-toggle" aria-expanded="false"'
+        return ' <span class="ur-help" role="button" tabindex="0" aria-expanded="false"'
             . ' aria-controls="' . ur_h($helpId) . '"'
-            . ' title="' . ur_h($text) . '">'
-            . '<i class="fa fa-question-circle" aria-hidden="true"></i>'
-            . '<span class="ur-help-sr">' . ur_h(ur_t('Help')) . '</span>'
-            . '</button>';
+            . ' aria-label="' . ur_h(ur_t('Help')) . '"'
+            . ' title="' . ur_h($text) . '">?</span>';
     }
 }
 
 if (!function_exists('ur_option_help_block')) {
     /**
      * The hidden inline_help blockquote that the "?" affordance reveals. Uses the
-     * native Unraid inline_help/blockquote styling so it matches other settings
-     * pages, and starts collapsed (hidden) so we don't permanently show dozens of
-     * long descriptions. No-op when the key has no description.
+     * native Unraid inline_help/blockquote element + class so it gets the stock
+     * blue callout styling (the same markup Markdown.php emits for a "> help"
+     * line). It starts collapsed via the native `.inline_help { display:none }`
+     * rule, and the shared script reveals it by adding the `ur-open` class. No-op
+     * when the key has no description.
      *
      * @param string $key    whitelist option key
      * @param string $helpId DOM id matching the affordance's aria-controls
@@ -196,7 +215,7 @@ if (!function_exists('ur_option_help_block')) {
         if ($text === '') {
             return '';
         }
-        return '<blockquote class="inline_help ur-help-text" id="' . ur_h($helpId) . '" hidden>'
+        return '<blockquote class="inline_help ur-help-text" id="' . ur_h($helpId) . '">'
             . '<p>' . ur_h($text) . '</p></blockquote>';
     }
 }
@@ -254,7 +273,7 @@ if (!function_exists('ur_render_rsync_options')) {
             'modifyWindow'  => ['Modify window (s)', '--modify-window='],
         ];
 
-        // Emit the toggle CSS + JS exactly once per page, even when several option
+        // Emit the help CSS + JS exactly once per page, even when several option
         // blocks render (Global Settings has one; the Jobs tab has one per card
         // plus the hidden template). Guarding here keeps the help UI self-contained
         // in this partial, so both including pages get it with no extra wiring.
@@ -263,54 +282,25 @@ if (!function_exists('ur_render_rsync_options')) {
         echo '<div class="ur-rsync-options">';
 
         // --- boolean flags -------------------------------------------------
+        // One native dl row per flag: label on the left (<dt>), the checkbox
+        // control on the right (<dd>) with its "?" + collapsible help box.
         echo '<dl>';
-        echo '<dt>' . ur_h(ur_t('rsync flags')) . ':</dt>';
-        echo '<dd>';
         foreach ($bools as $key => [$label, $flag]) {
-            $name    = $prefix . '[' . $key . ']';
-            $id      = $idBase . '_' . $key;
-            $helpId  = $id . '_help';
-            $checked = !empty($opts[$key]) ? ' checked' : '';
-            // Hidden "0" before the checkbox so an unchecked box still submits
-            // a (falsey) value at this name, keeping the stored shape stable.
-            echo '<div class="ur-opt">';
-            echo '<label class="ur-checkbox" for="' . ur_h($id) . '">';
-            echo '<input type="hidden" name="' . ur_h($name) . '" value="0">';
-            echo '<input type="checkbox" id="' . ur_h($id) . '" name="' . ur_h($name) . '" value="1"' . $checked . '> ';
-            echo ur_h(ur_t($label)) . ' <code>' . ur_h($flag) . '</code>';
-            echo '</label>';
-            echo ur_option_help_affordance($key, $helpId);
-            echo ur_option_help_block($key, $helpId);
-            echo '</div>';
+            ur_render_bool_row($prefix, $idBase, $key, $label, $flag, !empty($opts[$key]));
         }
-        echo '</dd>';
         echo '</dl>';
 
-        // --- destructive flags (warned) ------------------------------------
+        // --- destructive flags ---------------------------------------------
+        // Same native rows as the booleans above; the deletion caution lives in
+        // each option's own inline help (the delete / deleteExcluded descriptions
+        // open with a capitalised "DELETE … Destructive:" warning, which
+        // OptionsFormHelpTest::testDestructiveDescriptionsWarn enforces), so no
+        // separate always-on warning element is emitted here.
         echo '<dl>';
-        echo '<dt>' . ur_h(ur_t('destructive flags')) . ':</dt>';
-        echo '<dd>';
         foreach ($destructive as $key => [$label, $flag]) {
-            $name    = $prefix . '[' . $key . ']';
-            $id      = $idBase . '_' . $key;
-            $helpId  = $id . '_help';
-            $checked = !empty($opts[$key]) ? ' checked' : '';
-            echo '<div class="ur-opt">';
-            echo '<label class="ur-checkbox" for="' . ur_h($id) . '">';
-            echo '<input type="hidden" name="' . ur_h($name) . '" value="0">';
-            echo '<input type="checkbox" id="' . ur_h($id) . '" name="' . ur_h($name) . '" value="1"' . $checked . '> ';
-            echo ur_h(ur_t($label)) . ' <code>' . ur_h($flag) . '</code>';
-            echo '</label>';
-            echo ur_option_help_affordance($key, $helpId);
-            echo ur_option_help_block($key, $helpId);
-            echo '</div>';
+            ur_render_bool_row($prefix, $idBase, $key, $label, $flag, !empty($opts[$key]));
         }
-        echo '</dd>';
         echo '</dl>';
-        echo '<blockquote class="inline_help"><p>'
-            . ur_h(ur_t('Delete options remove files on the destination that are no longer on the source. '
-                . 'When enabled, the destination must be a specific sub-directory and a "Max delete" cap is strongly recommended.'))
-            . '</p></blockquote>';
 
         // --- excludes / includes (repeatable rows) -------------------------
         foreach (['excludes' => '--exclude=', 'includes' => '--include='] as $key => $flag) {
@@ -320,10 +310,9 @@ if (!function_exists('ur_render_rsync_options')) {
             $values    = (isset($opts[$key]) && is_array($opts[$key])) ? $opts[$key] : [];
             $labelText = ($key === 'excludes') ? 'Excludes' : 'Includes';
             echo '<dl>';
-            echo '<dt>' . ur_h(ur_t($labelText)) . ' <code>' . ur_h($flag) . '</code>'
-                . ur_option_help_affordance($key, $helpId) . ':</dt>';
+            echo '<dt class="ur-dt">' . ur_h(ur_t($labelText)) . ' <code>' . ur_h($flag) . '</code>'
+                . ur_option_help_affordance($key, $helpId) . '</dt>';
             echo '<dd>';
-            echo ur_option_help_block($key, $helpId);
             echo '<div class="ur-rows" id="' . ur_h($rowsId) . '" data-name="' . ur_h($name) . '">';
             if (empty($values)) {
                 // one empty starter row
@@ -338,6 +327,7 @@ if (!function_exists('ur_render_rsync_options')) {
             echo '</div>';
             echo '<button type="button" class="ur-row-add" data-rows="' . ur_h($rowsId) . '">'
                 . ur_h(ur_t('Add')) . '</button>';
+            echo ur_option_help_block($key, $helpId);
             echo '</dd>';
             echo '</dl>';
         }
@@ -349,8 +339,8 @@ if (!function_exists('ur_render_rsync_options')) {
             $id     = $idBase . '_' . $key;
             $helpId = $id . '_help';
             $val    = isset($opts[$key]) ? (string) $opts[$key] : '';
-            echo '<dt><label for="' . ur_h($id) . '">' . ur_h(ur_t($label)) . ' <code>' . ur_h($flag) . '</code></label>'
-                . ur_option_help_affordance($key, $helpId) . ':</dt>';
+            echo '<dt class="ur-dt"><label for="' . ur_h($id) . '">' . ur_h(ur_t($label)) . ' <code>' . ur_h($flag) . '</code></label>'
+                . ur_option_help_affordance($key, $helpId) . '</dt>';
             echo '<dd><input type="text" id="' . ur_h($id) . '" name="' . ur_h($name) . '" value="' . ur_h($val) . '">';
             echo ur_option_help_block($key, $helpId);
             echo '</dd>';
@@ -361,19 +351,51 @@ if (!function_exists('ur_render_rsync_options')) {
     }
 }
 
+if (!function_exists('ur_render_bool_row')) {
+    /**
+     * Render one boolean-flag option as a native two-column dl row: the label
+     * (with its rsync flag and "?" affordance) in the <dt>, the checkbox control
+     * and its collapsible inline_help box in the <dd>.
+     *
+     * A hidden "0" input precedes the checkbox so an unchecked box still submits a
+     * (falsey) value at the same name, keeping the stored shape stable. The field
+     * name/value/id are unchanged from before so $_POST round-trips identically.
+     */
+    function ur_render_bool_row(string $prefix, string $idBase, string $key, string $label, string $flag, bool $checked): void
+    {
+        $name   = $prefix . '[' . $key . ']';
+        $id     = $idBase . '_' . $key;
+        $helpId = $id . '_help';
+        echo '<dt class="ur-dt"><label for="' . ur_h($id) . '">' . ur_h(ur_t($label)) . ' <code>' . ur_h($flag) . '</code></label>'
+            . ur_option_help_affordance($key, $helpId) . '</dt>';
+        echo '<dd>';
+        echo '<input type="hidden" name="' . ur_h($name) . '" value="0">';
+        echo '<input type="checkbox" id="' . ur_h($id) . '" name="' . ur_h($name) . '" value="1"' . ($checked ? ' checked' : '') . '>';
+        echo ur_option_help_block($key, $helpId);
+        echo '</dd>';
+    }
+}
+
 if (!function_exists('ur_emit_option_help_assets')) {
     /**
-     * Emit the CSS + JS that powers the click-to-read help toggle, exactly once
+     * Emit the CSS + JS that powers the native "?" help affordance, exactly once
      * per page. The first call prints the assets; later calls are no-ops (a static
      * guard), so multiple option blocks on the Jobs tab don't duplicate them.
      *
-     * The script is a single delegated click listener on document, so it also
+     * CSS: the "?" is a small circular icon that is invisible (opacity:0) until
+     * the row is hovered or the icon focused — matching how native settings rows
+     * keep help subtle. The revealed text is a genuine `blockquote.inline_help`,
+     * so it inherits the stock blue callout (--blue-100 fill, --blue-200 rules)
+     * from the inherited dynamix stylesheet; we only flip it from the native
+     * `display:none` to shown via a `.ur-open` class.
+     *
+     * JS: a single delegated click/keydown listener on document, so it also
      * handles affordances inside job cards that are cloned client-side from the
-     * hidden template (their "?" buttons exist in the cloned DOM and need no
-     * per-card wiring). For a clicked "?" it resolves the target .ur-help-text
-     * blockquote by the button's aria-controls id (falling back to a next-sibling
-     * scan), toggles that block's `hidden` attribute and keeps aria-expanded in
-     * sync. All static markup; no user data.
+     * hidden template (their "?" spans exist in the cloned DOM and need no
+     * per-card wiring). For an activated "?" it resolves the target
+     * .ur-help-text blockquote by the icon's aria-controls id (falling back to a
+     * next-sibling scan), toggles that block's `ur-open` class and keeps
+     * aria-expanded in sync. All static markup; no user data.
      */
     function ur_emit_option_help_assets(): void
     {
@@ -384,47 +406,70 @@ if (!function_exists('ur_emit_option_help_assets')) {
         $done = true;
         ?>
 <style>
-/* Click-to-read help affordance for each rsync option. The "?" trigger is a small
-   round badge that matches the native Unraid look; the revealed text reuses the
-   stock .inline_help blockquote styling so it reads like other settings pages. */
-.ur-opt { margin: 1px 0; }
-.ur-help-toggle {
+/* Native two-column rsync options. The dl/dt/dd grid + label alignment come from
+   the inherited dynamix stylesheet; these rules only tune the inline bits. */
+.ur-rsync-options code { font-size: 0.95em; opacity: 0.85; }
+.ur-rsync-options .ur-dt { position: relative; }
+
+/* The "?" help affordance. A small circular icon in the native help-blue, kept
+   subtle (opacity:0) until the row is hovered or the icon focused — mirroring how
+   native settings rows reveal help. Deliberately a <span role=button>, NOT a
+   <button>, so it never inherits the heavy bordered/uppercase webGui button
+   chrome (that produced the old "orange HELP button"). */
+.ur-help {
   display: inline-flex; align-items: center; justify-content: center;
-  margin-left: 6px; padding: 0; border: 0; background: transparent;
-  color: var(--text-color, #2a87d0); cursor: pointer; font-size: 13px;
-  line-height: 1; vertical-align: middle;
+  width: 16px; height: 16px; margin-left: 6px;
+  border-radius: 50%;
+  border: 1px solid var(--blue-200, #bce8f1);
+  background: var(--blue-100, #d9edf7);
+  color: var(--blockquote-text-color, #31708f);
+  font-size: 11px; font-weight: bold; line-height: 1;
+  text-align: center; cursor: help; vertical-align: middle;
+  opacity: 0; transition: opacity .12s ease-in-out;
+  -webkit-user-select: none; -moz-user-select: none; user-select: none;
 }
-.ur-help-toggle:hover, .ur-help-toggle:focus { color: var(--orange-500, #ff8c2f); }
-.ur-help-toggle[aria-expanded="true"] { color: var(--orange-500, #ff8c2f); }
-.ur-help-toggle .fa { pointer-events: none; }
-/* Visually-hidden label so the button is still announced by screen readers when
-   the FontAwesome glyph isn't read out. */
-.ur-help-sr {
-  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
-  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
-}
-/* The revealed description. `hidden` keeps it collapsed until the user clicks. */
-.ur-help-text[hidden] { display: none; }
-.ur-help-text { margin-top: 4px; }
+/* Reveal on hover/focus of the row (dt), and keep it visible while open. */
+.ur-dt:hover .ur-help,
+.ur-help:focus,
+.ur-help[aria-expanded="true"] { opacity: 1; }
+.ur-help:focus { outline: 1px solid var(--blue-200, #bce8f1); outline-offset: 1px; }
+/* Touch devices have no hover: always show the icon there. */
+@media (hover: none) { .ur-help { opacity: 1; } }
+
+/* The revealed description reuses the native blockquote.inline_help blue box.
+   The base stylesheet already ships `.inline_help { display:none }`, but we also
+   hide `.ur-help-text` here so the partial is self-contained and the help never
+   renders expanded if that upstream rule changes or isn't loaded. Reveal by
+   adding the ur-open class. Tighten the native margins so it sits under its row. */
+.ur-help-text { display: none; }
+.ur-help-text.ur-open { display: block; }
+.ur-rsync-options .inline_help { margin: .4rem 0; }
 </style>
 <script type="text/javascript">
-/* Click-to-read help: one delegated listener toggles the description blockquote
- * that follows each "?" button. Works for server-rendered controls and for job
- * cards cloned client-side (the buttons live in the cloned DOM). */
+/* Native-style inline help: one delegated listener toggles the blue
+ * blockquote.inline_help box that belongs to each "?" affordance. Works for
+ * server-rendered controls and for job cards cloned client-side (the spans live
+ * in the cloned DOM, so no per-card wiring is needed). */
 (function () {
   'use strict';
   if (window.urOptionHelpWired) { return; }
   window.urOptionHelpWired = true;
 
-  function findHelp(btn) {
-    /* Prefer the aria-controls target by id; fall back to the next sibling
-     * blockquote so the toggle still works if ids ever collide. */
-    var id = btn.getAttribute('aria-controls');
+  function findHelp(el) {
+    /* Prefer the aria-controls target by id; fall back to a forward scan within
+     * the same row/cell so the toggle still works if ids ever collide. */
+    var id = el.getAttribute('aria-controls');
     if (id) {
       var byId = document.getElementById(id);
       if (byId) { return byId; }
     }
-    var n = btn.nextElementSibling;
+    var dt = el.closest ? el.closest('dt') : null;
+    var dd = dt ? dt.nextElementSibling : null;
+    if (dd && dd.querySelector) {
+      var inDd = dd.querySelector('.ur-help-text');
+      if (inDd) { return inDd; }
+    }
+    var n = el.nextElementSibling;
     while (n) {
       if (n.classList && n.classList.contains('ur-help-text')) { return n; }
       n = n.nextElementSibling;
@@ -432,19 +477,37 @@ if (!function_exists('ur_emit_option_help_assets')) {
     return null;
   }
 
-  document.addEventListener('click', function (ev) {
-    var btn = ev.target;
-    while (btn && btn !== document) {
-      if (btn.classList && btn.classList.contains('ur-help-toggle')) { break; }
-      btn = btn.parentNode;
-    }
-    if (!btn || btn === document) { return; }
-    ev.preventDefault();
-    var help = findHelp(btn);
+  function toggle(el) {
+    var help = findHelp(el);
     if (!help) { return; }
-    var show = help.hasAttribute('hidden');
-    if (show) { help.removeAttribute('hidden'); } else { help.setAttribute('hidden', ''); }
-    btn.setAttribute('aria-expanded', show ? 'true' : 'false');
+    var show = !help.classList.contains('ur-open');
+    if (show) { help.classList.add('ur-open'); } else { help.classList.remove('ur-open'); }
+    el.setAttribute('aria-expanded', show ? 'true' : 'false');
+  }
+
+  function helpFromEvent(target) {
+    var el = target;
+    while (el && el !== document) {
+      if (el.classList && el.classList.contains('ur-help')) { return el; }
+      el = el.parentNode;
+    }
+    return null;
+  }
+
+  document.addEventListener('click', function (ev) {
+    var el = helpFromEvent(ev.target);
+    if (!el) { return; }
+    ev.preventDefault();
+    toggle(el);
+  });
+
+  /* Keyboard: Enter/Space activate the focused "?" (it is a role=button). */
+  document.addEventListener('keydown', function (ev) {
+    if (ev.key !== 'Enter' && ev.key !== ' ' && ev.key !== 'Spacebar') { return; }
+    var el = ev.target;
+    if (!el || !el.classList || !el.classList.contains('ur-help')) { return; }
+    ev.preventDefault();
+    toggle(el);
   });
 })();
 </script>

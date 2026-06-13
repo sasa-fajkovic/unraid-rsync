@@ -463,6 +463,15 @@ function ur_ago(int $deltaSec): string
 ?>
 
 <style>
+/* Clear Unraid's fixed bottom status bar (#footer, "Array Started", ~30-40px tall
+   + z-index:10000) so the per-job Run / Dry-run / Abort / Remove-job row and the
+   Apply button at the foot of the form are never hidden behind it. A bottom
+   buffer on the page wrapper reserves space below the overlaid footer. */
+.ur-jobs-page { padding-bottom: 90px; }
+/* A little breathing room above each job card's action row + the form actions so
+   the bottom buttons sit clear of the buffer's edge. */
+.ur-job-card-actions { margin-top: 8px; }
+
 /* The "required" field marker: a red asterisk paired with the HTML5 `required`
    attribute on the mandatory inputs. text-decoration:none drops the dotted
    <abbr> underline so it reads as a clean asterisk. */
@@ -519,6 +528,7 @@ function ur_ago(int $deltaSec): string
 }
 </style>
 <?php /* (the markup below re-opens output) */ ?>
+<div class="ur-jobs-page">
 <div class="title">
   <span class="left">
     <i class="fa fa-list title"></i>&nbsp;<?=_('Jobs')?>
@@ -620,6 +630,7 @@ function ur_ago(int $deltaSec): string
 </form>
 
 <div id="ur-jobs-result" class="ur-result"></div>
+</div><!-- .ur-jobs-page -->
 
 <!-- Hidden templates for JS cloning. Index placeholders are rewritten on add.
      Rendered with htmlspecialchars too; only the literal placeholders are
