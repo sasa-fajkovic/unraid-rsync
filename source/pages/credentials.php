@@ -557,14 +557,17 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
         .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); })
         .then(function (res) {
           if (res.ok && res.body && res.body.ok) {
+            var hasWarnings = res.body.warnings && res.body.warnings.length;
             var msg = res.body.message || 'Saved.';
-            if (res.body.warnings && res.body.warnings.length) {
+            if (hasWarnings) {
               msg += ' (' + res.body.warnings.join('; ') + ')';
             }
-            // A warning (e.g. sshpass missing for password auth) is shown but
-            // does not block the save; render it as a warning, not an error.
-            show(result, !(res.body.warnings && res.body.warnings.length), msg);
-            setTimeout(function () { window.location.reload(); }, res.body.warnings && res.body.warnings.length ? 2500 : 600);
+            // The save SUCCEEDED - always render as success (ur-ok). Warnings
+            // (e.g. sshpass missing for password auth) are informational, not
+            // blocking; we just append them and give the reader longer to see
+            // them before reloading.
+            show(result, true, msg);
+            setTimeout(function () { window.location.reload(); }, hasWarnings ? 2500 : 600);
           } else {
             show(result, false, errText(res, 'Save failed.'));
           }
