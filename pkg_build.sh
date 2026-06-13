@@ -3,10 +3,8 @@
 # pkg_build.sh - Build the Unraid Rsync Slackware package (.txz) and regenerate
 # the .plg manifest's version + md5 ENTITY values to match.
 #
-# This is modeled on the Easy Rsync plugin's build script, with two corrections:
-#   1. The known missing `then` keyword in Easy Rsync's `if [[ -z "$unraidHost" ]];`
-#      sideload guard is written correctly here.
-#   2. All user-facing strings are about Unraid Rsync (no copy-paste boilerplate).
+# It follows the standard Unraid plugin packaging convention: a .plg manifest that
+# installs a Slackware .txz. All user-facing strings are about Unraid Rsync.
 #
 # Requires a Slackware environment for `makepkg` (that is why CI runs this inside
 # the aclemons/slackware:15.0 container). It will refuse to run if makepkg is
@@ -152,8 +150,7 @@ update_entity version "$version"
 echo "Updated $plg_filepath (version=$version, md5=$hash)"
 
 # --- optional sideload to a live Unraid host (local dev convenience) --------
-# NOTE: the correct shell syntax is `if [[ ... ]]; then` - Easy Rsync's script
-# is missing the `then` keyword here, which is the bug we deliberately avoid.
+# NOTE: the correct shell syntax requires the `then` keyword: `if [[ ... ]]; then`.
 if [[ -z "$unraidHost" ]]; then
   echo "Done."
   exit 0

@@ -94,13 +94,6 @@ See [RELEASING.md](RELEASING.md). In short: builds run inside
 triggers the release workflow, which regenerates the `.plg` (version + md5) and
 publishes a GitHub Release with the `.txz`.
 
-## Acknowledgements
-
-Packaging (the `.plg` / `pkg_build.sh` / GitHub Actions distribution path) is
-modeled on the well-tested [Easy Rsync](https://github.com/Teknicallity/easy-rsync)
-plugin. Unraid Rsync is a new plugin, not a fork — only the proven distribution
-mechanics are mirrored.
-
 ## License
 
 See [LICENSE](LICENSE).
