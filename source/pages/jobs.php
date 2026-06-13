@@ -7,8 +7,9 @@
  *     Transport, Schedule);
  *   - a full add / edit / remove CRUD form. Each job is an editable card with:
  *       name, enable switch, transport (SSH|LOCAL), direction (PUSH|PULL),
- *       connection (empty select + "add in Credentials tab" hint, populated in
- *       Phase 3), per-job cron schedule, add/remove source->dest pair rows,
+ *       connection (populated from the saved Credentials connections; an
+ *       unknown existing connectionId is preserved as an option so edits don't
+ *       drop it), per-job cron schedule, add/remove source->dest pair rows,
  *       a "use global defaults" toggle gating the whitelisted rsync options
  *       block, log-level select, notify-mode select, and pre/post hook
  *       textareas.
@@ -29,6 +30,7 @@
 
 require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Config.php';
 require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Job.php';
+require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Credentials.php';
 require_once '/usr/local/emhttp/plugins/unraid.rsync/pages/_options_form.php';
 
 $csrf = '';
@@ -50,6 +52,18 @@ try {
 $jobs        = (isset($config['jobs']) && is_array($config['jobs'])) ? $config['jobs'] : [];
 $globalOpts  = $config['global']['defaultRsyncOptions'] ?? Config::defaultRsyncOptions();
 $handlerUrl  = '/plugins/unraid.rsync/include/handler.php';
+
+// Load the saved connections so the per-job Connection select can be populated.
+// A credentials read error here is non-fatal for the Jobs tab: we just render
+// an empty connection list (the Credentials tab surfaces the real error).
+$urConnections = [];
+try {
+    $credsForJobs = Credentials::load();
+    $urConnections = (isset($credsForJobs['connections']) && is_array($credsForJobs['connections']))
+        ? $credsForJobs['connections'] : [];
+} catch (Throwable $e) {
+    $urConnections = [];
+}
 
 /**
  * Render one editable job card. $index is either an int (an existing job's row
@@ -118,17 +132,40 @@ function ur_render_job_card($job, $index): void
     echo '<blockquote class="inline_help"><p>' . ur_h(ur_t('Direction only applies to SSH transport.')) . '</p></blockquote>';
     echo '</dd>';
 
-    // connection (empty in Phase 2; populated in Phase 3)
+    // connection (populated from the saved Credentials connections)
+    global $urConnections;
+    $conns = is_array($urConnections) ? $urConnections : [];
     echo '<dt><label for="' . ur_h($idb . '_conn') . '">' . ur_h(ur_t('Connection')) . '</label>:</dt>';
     echo '<dd><select id="' . ur_h($idb . '_conn') . '" name="' . ur_h($p . '[connectionId]') . '">';
     echo '<option value=""' . ($connId === '' ? ' selected' : '') . '>' . ur_h(ur_t('(none)')) . '</option>';
-    // If a job already references a connection id (e.g. created in a later
-    // phase), keep it as an option so editing doesn't silently drop it.
-    if ($connId !== '') {
-        echo '<option value="' . ur_h($connId) . '" selected>' . ur_h($connId) . '</option>';
+    $connFound = false;
+    foreach ($conns as $conn) {
+        if (!is_array($conn)) {
+            continue;
+        }
+        $cId   = (string) ($conn['id'] ?? '');
+        $cName = (string) ($conn['name'] ?? $cId);
+        if ($cId === '') {
+            continue;
+        }
+        $sel = ($cId === $connId) ? ' selected' : '';
+        if ($cId === $connId) {
+            $connFound = true;
+        }
+        echo '<option value="' . ur_h($cId) . '"' . $sel . '>' . ur_h($cName) . '</option>';
+    }
+    // Preserve an existing connectionId that no longer matches a saved
+    // connection (e.g. the connection was deleted) so editing doesn't silently
+    // drop the reference; flag it as missing.
+    if ($connId !== '' && !$connFound) {
+        echo '<option value="' . ur_h($connId) . '" selected>' . ur_h($connId) . ' ' . ur_h(ur_t('(missing)')) . '</option>';
     }
     echo '</select>';
-    echo '<blockquote class="inline_help"><p>' . ur_h(ur_t('Add connections in the Credentials tab.')) . '</p></blockquote>';
+    if (empty($conns)) {
+        echo '<blockquote class="inline_help"><p>' . ur_h(ur_t('Add connections in the Credentials tab.')) . '</p></blockquote>';
+    } else {
+        echo '<blockquote class="inline_help"><p>' . ur_h(ur_t('Used for SSH transport. Manage connections in the Credentials tab.')) . '</p></blockquote>';
+    }
     echo '</dd>';
 
     // schedule (5-field cron)

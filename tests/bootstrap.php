@@ -50,3 +50,6 @@ if (!function_exists('_')) {
 // --- the code under test ---------------------------------------------------
 require_once __DIR__ . '/../source/include/Config.php';
 require_once __DIR__ . '/../source/include/Job.php';
+require_once __DIR__ . '/../source/include/Credentials.php';
+require_once __DIR__ . '/../source/include/KeyTools.php';
+require_once __DIR__ . '/../source/include/Ssh.php';

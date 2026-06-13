@@ -2,13 +2,24 @@
 /**
  * handler.php - the single AJAX/REST endpoint for the Unraid Rsync plugin.
  *
- * Phase 2 implements one action:
- *   POST saveConfig  - validate the submitted jobs + global defaults via
- *                      Job.php and persist via Config::save. CSRF-protected
- *                      using the webGui csrf_token. Returns JSON.
+ * Actions:
+ *   POST saveConfig      (Phase 2) validate + persist jobs + global defaults.
+ *   POST saveCredentials (Phase 3) validate + persist keys + connections
+ *                        (section-aware: keys and connections are separate
+ *                        forms and one never clobbers the other).
+ *   POST generateKey     (Phase 3) ssh-keygen a new key pair (returns
+ *                        fingerprint + public key; NEVER the private key).
+ *   POST importKey       (Phase 3) import a pasted private/public key.
+ *   POST deleteKey       (Phase 3) delete a key; BLOCKED when a connection
+ *                        references it (returns the dependent connection names).
+ *   POST deleteConnection(Phase 3) delete a connection; DISABLES dependent jobs
+ *                        in config.json and reports which were disabled.
+ *   POST discoverHostKey (Phase 3) ssh-keyscan a host -> host key for the form.
+ *   POST testConnection  (Phase 3) probe a connection once and classify the
+ *                        result (auth / host-key / unreachable).
  *
- * More actions (run, dry-run, abort, test-connection, keyscan, status/log
- * polling) are added in later phases.
+ * Every POST action is CSRF-protected with the webGui csrf_token. Secrets
+ * (private keys, passwords) are NEVER echoed back to the browser.
  *
  * The endpoint is reached at:
  *   /plugins/unraid.rsync/include/handler.php
@@ -20,12 +31,16 @@
  *     with hash_equals to avoid timing leaks.
  *   - All responses are JSON with the right Content-Type + status code via the
  *     sendResponse()/sendError() helpers.
- *   - The actual validate/normalise/persist logic lives in Job.php + Config.php
- *     (I/O-free, unit-tested); this file is the thin HTTP shell.
+ *   - The actual validate/normalise/persist logic lives in Job.php / Config.php
+ *     / Credentials.php / Ssh.php / KeyTools.php (I/O-light, unit-tested); this
+ *     file is the thin HTTP shell.
  */
 
 require_once __DIR__ . '/Config.php';
 require_once __DIR__ . '/Job.php';
+require_once __DIR__ . '/Credentials.php';
+require_once __DIR__ . '/Ssh.php';
+require_once __DIR__ . '/KeyTools.php';
 
 /**
  * Emit a JSON success/data response and stop. Sets Content-Type and the HTTP
@@ -241,6 +256,515 @@ function ur_action_save_config(): void
     ], 200);
 }
 
+// =====================================================================
+// Phase 3: Credentials actions
+// =====================================================================
+
+/**
+ * Normalise a raw key submission ($_POST['keys'][i]) into the stored shape.
+ * The privateKey/publicKey/fingerprint are NEVER taken from the browser on a
+ * plain save - they're set only via generateKey / importKey and preserved here
+ * from the existing on-disk key (matched by id). The save form carries only id
+ * + name (rename), so a save can never inject or alter key material.
+ *
+ * @param array<string,mixed> $raw       one raw key row from the form
+ * @param array<string,mixed> $existing  the loaded credentials structure (to
+ *                                        preserve secret material by id)
+ * @return array<string,mixed>
+ */
+function ur_normalize_key_for_save(array $raw, array $existing): array
+{
+    $key  = Credentials::defaultKey();
+    $id   = isset($raw['id']) ? trim((string) $raw['id']) : '';
+    $name = isset($raw['name']) ? trim((string) $raw['name']) : '';
+
+    // Preserve existing secret material; the save form only carries id + name.
+    if ($id !== '') {
+        $prev = Credentials::findKey($existing, $id);
+        if ($prev !== null) {
+            $key['privateKey']  = (string) ($prev['privateKey'] ?? '');
+            $key['publicKey']   = (string) ($prev['publicKey'] ?? '');
+            $key['fingerprint'] = (string) ($prev['fingerprint'] ?? '');
+        }
+    }
+
+    $key['id']   = $id;
+    $key['name'] = $name;
+    return $key;
+}
+
+/**
+ * Normalise a raw connection submission into the stored shape. The password is
+ * special: an empty submitted password PRESERVES the existing stored
+ * (obfuscated) password rather than clearing it (so editing other fields
+ * doesn't wipe a set password); a non-empty submitted password is obfuscated
+ * and replaces it. Switching auth away from PASSWORD clears the stored password.
+ *
+ * @param array<string,mixed> $raw      one raw connection row
+ * @param array<string,mixed> $existing loaded credentials structure
+ * @return array<string,mixed>
+ */
+function ur_normalize_connection_for_save(array $raw, array $existing): array
+{
+    $conn = Credentials::mergeConnection([
+        'id'             => isset($raw['id'])             ? (string) $raw['id']             : '',
+        'name'           => isset($raw['name'])           ? (string) $raw['name']           : '',
+        'host'           => isset($raw['host'])           ? (string) $raw['host']           : '',
+        'port'           => isset($raw['port'])           ? (string) $raw['port']           : 22,
+        'username'       => isset($raw['username'])       ? (string) $raw['username']       : '',
+        'authMethod'     => isset($raw['authMethod'])     ? (string) $raw['authMethod']     : 'KEY',
+        'keyId'          => isset($raw['keyId'])          ? (string) $raw['keyId']          : '',
+        'remoteHostKey'  => isset($raw['remoteHostKey'])  ? (string) $raw['remoteHostKey']  : '',
+        'strictHostKey'  => isset($raw['strictHostKey'])  ? (string) $raw['strictHostKey']  : 'accept-new',
+        'connectTimeout' => isset($raw['connectTimeout']) ? (string) $raw['connectTimeout'] : 10,
+        // password handled below
+    ]);
+
+    $id            = $conn['id'];
+    $submittedPass = isset($raw['password']) ? (string) $raw['password'] : '';
+    $prev          = ($id !== '') ? Credentials::findConnection($existing, $id) : null;
+
+    if ($conn['authMethod'] !== 'PASSWORD') {
+        // KEY auth: never carry a password.
+        $conn['password'] = '';
+    } elseif ($submittedPass !== '') {
+        // New/changed password -> obfuscate and store.
+        $conn['password'] = Credentials::obfuscate($submittedPass);
+    } elseif ($prev !== null) {
+        // Empty submission -> preserve the existing stored (obfuscated) value.
+        $conn['password'] = (string) ($prev['password'] ?? '');
+    } else {
+        $conn['password'] = '';
+    }
+
+    // KEY auth carries no keyId? keep whatever was submitted; validation checks it.
+    if ($conn['authMethod'] !== 'KEY') {
+        $conn['keyId'] = '';
+    }
+
+    return $conn;
+}
+
+/**
+ * POST saveCredentials: rebuild keys and/or connections from the submission and
+ * persist. Section-aware (like saveConfig): the Keys form and the Connections
+ * form each submit only their own section with a *_present sentinel, so saving
+ * one never wipes the other. Refuses (409) when the existing credentials.json
+ * can't be read, to avoid clobbering a recoverable secrets file.
+ */
+function ur_action_save_credentials(): void
+{
+    try {
+        $creds = Credentials::load();
+    } catch (Throwable $e) {
+        sendError(
+            'Existing credentials could not be read, so the save was refused to '
+            . 'avoid overwriting them: ' . $e->getMessage(),
+            409
+        );
+        return;
+    }
+
+    $keysSubmitted  = isset($_POST['keys']) && is_array($_POST['keys']);
+    $keysSentinel   = !empty($_POST['keys_present']);
+    $hasKeys        = $keysSubmitted || $keysSentinel;
+
+    $connsSubmitted = isset($_POST['connections']) && is_array($_POST['connections']);
+    $connsSentinel  = !empty($_POST['connections_present']);
+    $hasConns       = $connsSubmitted || $connsSentinel;
+
+    if (!$hasKeys && !$hasConns) {
+        sendError('Nothing to save: no keys or connections were submitted.', 400);
+        return;
+    }
+
+    $errors = [];
+
+    // --- keys (rename only; material is preserved by id) ---
+    if ($hasKeys) {
+        $rawKeys = $keysSubmitted ? array_values($_POST['keys']) : [];
+        $newKeys = [];
+        $names   = [];
+        foreach ($rawKeys as $rawKey) {
+            if (!is_array($rawKey)) {
+                continue;
+            }
+            $key = ur_normalize_key_for_save($rawKey, $creds);
+            // A row with no id AND no name is an empty template row -> skip.
+            if ($key['id'] === '' && $key['name'] === '') {
+                continue;
+            }
+            // Uniqueness is checked against the names seen so far in this set.
+            $res = Credentials::validateKey($key, $names);
+            foreach ($res['errors'] as $e) {
+                $errors[] = 'Key "' . ($key['name'] !== '' ? $key['name'] : $key['id']) . '": ' . $e;
+            }
+            $names[]   = $key['name'];
+            $newKeys[] = $key;
+        }
+        $creds['keys'] = $newKeys;
+    }
+
+    // --- connections ---
+    if ($hasConns) {
+        $rawConns = $connsSubmitted ? array_values($_POST['connections']) : [];
+        $newConns = [];
+        $seenIds  = [];
+        foreach ($rawConns as $i => $rawConn) {
+            if (!is_array($rawConn)) {
+                continue;
+            }
+            $conn = ur_normalize_connection_for_save($rawConn, $creds);
+            if ($conn['name'] === '' && $conn['host'] === '' && $conn['username'] === '') {
+                continue; // empty template row
+            }
+            // Assign / de-duplicate id.
+            if ($conn['id'] === '') {
+                $conn['id'] = Credentials::generateId($conn['name'], 'c-', array_keys($seenIds));
+            }
+            $baseId = $conn['id'];
+            $id     = $baseId;
+            $n      = 2;
+            while (isset($seenIds[$id])) {
+                $id = $baseId . '-' . $n;
+                $n++;
+            }
+            $conn['id']    = $id;
+            $seenIds[$id]  = true;
+
+            // Validate against the credentials we're about to save (so a KEY
+            // connection's keyId is checked against the just-submitted keys).
+            $res = Credentials::validateConnection($conn, $creds);
+            $label = $conn['name'] !== '' ? $conn['name'] : ('#' . ($i + 1));
+            foreach ($res['errors'] as $e) {
+                $errors[] = 'Connection "' . $label . '": ' . $e;
+            }
+            $newConns[] = $conn;
+        }
+        $creds['connections'] = $newConns;
+    }
+
+    if (!empty($errors)) {
+        sendError('Validation failed.', 422, ['errors' => $errors]);
+        return;
+    }
+
+    try {
+        Credentials::save($creds);
+    } catch (Throwable $e) {
+        sendError('Failed to save credentials: ' . $e->getMessage(), 500);
+        return;
+    }
+
+    sendResponse([
+        'ok'          => true,
+        'message'     => 'Credentials saved.',
+        'keys'        => count($creds['keys']),
+        'connections' => count($creds['connections']),
+    ], 200);
+}
+
+/**
+ * POST generateKey: ssh-keygen a new key pair, store it, and return the
+ * fingerprint + public key (NEVER the private key). The new key is appended to
+ * credentials.json so a subsequent connection can reference it immediately.
+ */
+function ur_action_generate_key(): void
+{
+    try {
+        $creds = Credentials::load();
+    } catch (Throwable $e) {
+        sendError('Existing credentials could not be read: ' . $e->getMessage(), 409);
+        return;
+    }
+
+    $name = isset($_POST['name']) ? trim((string) $_POST['name']) : '';
+    $type = isset($_POST['type']) ? (string) $_POST['type'] : 'ed25519';
+    if ($name === '') {
+        sendError('A key name is required.', 422);
+        return;
+    }
+    // Uniqueness across existing keys.
+    $existingNames = array_map(static fn($k) => (string) ($k['name'] ?? ''), $creds['keys']);
+    if (in_array(strtolower($name), array_map('strtolower', $existingNames), true)) {
+        sendError('A key named "' . $name . '" already exists; names must be unique.', 422);
+        return;
+    }
+
+    $gen = KeyTools::generate($type, $name);
+    if (empty($gen['ok'])) {
+        sendError((string) ($gen['error'] ?? 'Key generation failed.'), 500);
+        return;
+    }
+
+    $id = Credentials::generateId($name, 'k-', array_column($creds['keys'], 'id'));
+    $creds['keys'][] = [
+        'id'          => $id,
+        'name'        => $name,
+        'privateKey'  => (string) $gen['privateKey'],
+        'publicKey'   => (string) $gen['publicKey'],
+        'fingerprint' => (string) $gen['fingerprint'],
+    ];
+
+    try {
+        Credentials::save($creds);
+    } catch (Throwable $e) {
+        sendError('Failed to save the generated key: ' . $e->getMessage(), 500);
+        return;
+    }
+
+    // Return only non-secret material.
+    sendResponse([
+        'ok'          => true,
+        'message'     => 'Key generated.',
+        'id'          => $id,
+        'name'        => $name,
+        'publicKey'   => (string) $gen['publicKey'],
+        'fingerprint' => (string) $gen['fingerprint'],
+    ], 200);
+}
+
+/**
+ * POST importKey: import a pasted private and/or public key. Derives/validates
+ * the public key + fingerprint, stores it, and returns only the non-secret
+ * material.
+ */
+function ur_action_import_key(): void
+{
+    try {
+        $creds = Credentials::load();
+    } catch (Throwable $e) {
+        sendError('Existing credentials could not be read: ' . $e->getMessage(), 409);
+        return;
+    }
+
+    $name    = isset($_POST['name']) ? trim((string) $_POST['name']) : '';
+    $private = isset($_POST['privateKey']) ? (string) $_POST['privateKey'] : '';
+    $public  = isset($_POST['publicKey']) ? (string) $_POST['publicKey'] : '';
+    if ($name === '') {
+        sendError('A key name is required.', 422);
+        return;
+    }
+    $existingNames = array_map(static fn($k) => (string) ($k['name'] ?? ''), $creds['keys']);
+    if (in_array(strtolower($name), array_map('strtolower', $existingNames), true)) {
+        sendError('A key named "' . $name . '" already exists; names must be unique.', 422);
+        return;
+    }
+
+    $imp = KeyTools::import($private, $public);
+    if (empty($imp['ok'])) {
+        sendError((string) ($imp['error'] ?? 'Key import failed.'), 422);
+        return;
+    }
+
+    $id = Credentials::generateId($name, 'k-', array_column($creds['keys'], 'id'));
+    $creds['keys'][] = [
+        'id'          => $id,
+        'name'        => $name,
+        'privateKey'  => (string) $imp['privateKey'],
+        'publicKey'   => (string) $imp['publicKey'],
+        'fingerprint' => (string) $imp['fingerprint'],
+    ];
+
+    try {
+        Credentials::save($creds);
+    } catch (Throwable $e) {
+        sendError('Failed to save the imported key: ' . $e->getMessage(), 500);
+        return;
+    }
+
+    sendResponse([
+        'ok'          => true,
+        'message'     => 'Key imported.',
+        'id'          => $id,
+        'name'        => $name,
+        'publicKey'   => (string) $imp['publicKey'],
+        'fingerprint' => (string) $imp['fingerprint'],
+        // A pasted public-key-only import has no private material to run with.
+        'hasPrivate'  => trim((string) $imp['privateKey']) !== '',
+    ], 200);
+}
+
+/**
+ * POST deleteKey: delete a key by id. BLOCKED (409) when any connection
+ * references it - the response lists the dependent connection names so the user
+ * can repoint/remove them first.
+ */
+function ur_action_delete_key(): void
+{
+    try {
+        $creds = Credentials::load();
+    } catch (Throwable $e) {
+        sendError('Existing credentials could not be read: ' . $e->getMessage(), 409);
+        return;
+    }
+
+    $id = isset($_POST['id']) ? trim((string) $_POST['id']) : '';
+    if ($id === '') {
+        sendError('A key id is required.', 422);
+        return;
+    }
+    if (Credentials::findKey($creds, $id) === null) {
+        sendError('Key not found.', 404);
+        return;
+    }
+
+    $used = Credentials::usedBy($creds, 'key', $id);
+    $deps = $used['connections'] ?? [];
+    if (!empty($deps)) {
+        $names = array_map(static fn($c) => (string) $c['name'], $deps);
+        sendError(
+            'This key is in use and cannot be deleted. Repoint or remove these connections first: '
+            . implode(', ', $names) . '.',
+            409,
+            ['usedBy' => $deps]
+        );
+        return;
+    }
+
+    $creds['keys'] = array_values(array_filter(
+        $creds['keys'],
+        static fn($k) => (string) ($k['id'] ?? '') !== $id
+    ));
+
+    try {
+        Credentials::save($creds);
+    } catch (Throwable $e) {
+        sendError('Failed to delete the key: ' . $e->getMessage(), 500);
+        return;
+    }
+
+    sendResponse(['ok' => true, 'message' => 'Key deleted.'], 200);
+}
+
+/**
+ * POST deleteConnection: delete a connection by id. Jobs in config.json that
+ * reference it are DISABLED (enabled=false) rather than left silently broken;
+ * the response reports which jobs were disabled.
+ */
+function ur_action_delete_connection(): void
+{
+    try {
+        $creds = Credentials::load();
+    } catch (Throwable $e) {
+        sendError('Existing credentials could not be read: ' . $e->getMessage(), 409);
+        return;
+    }
+
+    $id = isset($_POST['id']) ? trim((string) $_POST['id']) : '';
+    if ($id === '') {
+        sendError('A connection id is required.', 422);
+        return;
+    }
+    if (Credentials::findConnection($creds, $id) === null) {
+        sendError('Connection not found.', 404);
+        return;
+    }
+
+    // Load config to find + disable dependent jobs. If config can't be read we
+    // refuse, so we don't delete the connection while leaving the dependency
+    // state unknown.
+    try {
+        $config = Config::load();
+    } catch (Throwable $e) {
+        sendError('Configuration could not be read, so the connection was not deleted: ' . $e->getMessage(), 409);
+        return;
+    }
+
+    $disabled = [];
+    if (isset($config['jobs']) && is_array($config['jobs'])) {
+        foreach ($config['jobs'] as $idx => $job) {
+            if (is_array($job) && (string) ($job['connectionId'] ?? '') === $id && !empty($job['enabled'])) {
+                $config['jobs'][$idx]['enabled'] = false;
+                $disabled[] = (string) ($job['name'] ?? $job['id'] ?? '');
+            }
+        }
+    }
+
+    // Remove the connection.
+    $creds['connections'] = array_values(array_filter(
+        $creds['connections'],
+        static fn($c) => (string) ($c['id'] ?? '') !== $id
+    ));
+
+    // Persist config first (disabling jobs), then credentials. If disabling
+    // jobs is a no-op, skip the config write.
+    try {
+        if (!empty($disabled)) {
+            Config::save($config);
+        }
+        Credentials::save($creds);
+    } catch (Throwable $e) {
+        sendError('Failed to delete the connection: ' . $e->getMessage(), 500);
+        return;
+    }
+
+    $msg = 'Connection deleted.';
+    if (!empty($disabled)) {
+        $msg .= ' Disabled ' . count($disabled) . ' dependent job(s): ' . implode(', ', $disabled) . '.';
+    }
+    sendResponse([
+        'ok'             => true,
+        'message'        => $msg,
+        'disabledJobs'   => $disabled,
+    ], 200);
+}
+
+/**
+ * POST discoverHostKey: ssh-keyscan a host:port and return the host key text
+ * for the connection form to pin. Does NOT persist anything.
+ */
+function ur_action_discover_host_key(): void
+{
+    $host    = isset($_POST['host']) ? trim((string) $_POST['host']) : '';
+    $port    = isset($_POST['port']) ? (int) $_POST['port'] : 22;
+    $timeout = isset($_POST['timeout']) ? (int) $_POST['timeout'] : 10;
+
+    $res = KeyTools::discoverHostKey($host, $port, $timeout);
+    if (empty($res['ok'])) {
+        sendError((string) ($res['error'] ?? 'Host key discovery failed.'), 422);
+        return;
+    }
+    sendResponse([
+        'ok'      => true,
+        'hostKey' => (string) $res['hostKey'],
+    ], 200);
+}
+
+/**
+ * POST testConnection: probe a saved connection by id and classify the result.
+ * Never returns secrets.
+ */
+function ur_action_test_connection(): void
+{
+    try {
+        $creds = Credentials::load();
+    } catch (Throwable $e) {
+        sendError('Existing credentials could not be read: ' . $e->getMessage(), 409);
+        return;
+    }
+
+    $id = isset($_POST['id']) ? trim((string) $_POST['id']) : '';
+    if ($id === '') {
+        sendError('A connection id is required.', 422);
+        return;
+    }
+    if (Credentials::findConnection($creds, $id) === null) {
+        sendError('Connection not found.', 404);
+        return;
+    }
+
+    $res = Ssh::testConnection($creds, $id);
+    // 200 regardless of probe success - the probe RAN; the body carries ok +
+    // the distinct reason. (A 4xx/5xx is reserved for the request itself
+    // failing.)
+    sendResponse([
+        'ok'      => (bool) $res['ok'],
+        'reason'  => (string) $res['reason'],
+        'message' => (string) $res['message'],
+    ], 200);
+}
+
 /**
  * Front-controller dispatch. Skipped when included by the test harness
  * (UR_HANDLER_TESTING defined), which calls the individual functions directly.
@@ -265,6 +789,31 @@ function ur_handle_request(): void
                 return; // ur_check_csrf already responded
             }
             ur_action_save_config();
+            return;
+
+        case 'saveCredentials':
+        case 'generateKey':
+        case 'importKey':
+        case 'deleteKey':
+        case 'deleteConnection':
+        case 'discoverHostKey':
+        case 'testConnection':
+            if ($method !== 'POST') {
+                sendError($action . ' requires POST.', 405);
+                return;
+            }
+            if (!ur_check_csrf()) {
+                return; // ur_check_csrf already responded
+            }
+            switch ($action) {
+                case 'saveCredentials':   ur_action_save_credentials();   return;
+                case 'generateKey':       ur_action_generate_key();       return;
+                case 'importKey':         ur_action_import_key();          return;
+                case 'deleteKey':         ur_action_delete_key();          return;
+                case 'deleteConnection':  ur_action_delete_connection();   return;
+                case 'discoverHostKey':   ur_action_discover_host_key();   return;
+                case 'testConnection':    ur_action_test_connection();     return;
+            }
             return;
 
         default:
