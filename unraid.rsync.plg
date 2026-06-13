@@ -114,8 +114,8 @@
         echo ""
         echo "  The package did not extract: expected files are missing under"
         echo "  &emhttp;"
-        echo "  Check the install output above, and this log for details:"
-        echo "    &plugin;/install.log"
+        echo "  Check the install output above. Setup-step output (if any) is in:"
+        echo "    $log"
         echo "==================================================================="
         echo ""
         exit 1
