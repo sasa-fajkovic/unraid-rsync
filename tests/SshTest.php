@@ -33,6 +33,18 @@ final class FakeSsh extends Ssh
 }
 
 /**
+ * Exposes the REAL (no-shell, PATH-scanning) locateSshpass() so it can be tested
+ * directly against a temp PATH dir without a shell or a real sshpass binary.
+ */
+final class RealLocateSsh extends Ssh
+{
+    public static function publicLocateSshpass(): string
+    {
+        return static::locateSshpass();
+    }
+}
+
+/**
  * Tests for Ssh.php: argv assembly for KEY vs PASSWORD (incl. strictHostKey
  * modes, port, timeout, known_hosts wiring), the rsync -e value, materialise +
  * cleanup against a tmpfs override, sshpass detect-and-degrade, and the probe
@@ -213,9 +225,43 @@ final class SshTest extends TestCase
             $this->assertSame('0600', substr(sprintf('%o', fileperms($mat['keyPath'])), -4));
         }
 
-        Ssh::cleanupRuntime('c-key', 'k-1');
+        // The materialised paths are keyed by the unique per-run token.
+        $this->assertNotEmpty($mat['token']);
+        $this->assertStringContainsString($mat['token'], $mat['keyPath']);
+
+        Ssh::cleanupRuntime($mat['token']);
         $this->assertFileDoesNotExist($mat['keyPath']);
         $this->assertFileDoesNotExist($mat['knownHosts']);
+    }
+
+    public function testConcurrentMaterializeOfSameConnectionUsesDistinctPaths(): void
+    {
+        // Two materialisations of the SAME connection must get different tmpfs
+        // paths (unique per-run token), so one run's cleanup never removes the
+        // other's in-flight key/known_hosts.
+        $creds = Credentials::defaults();
+        $creds['keys'][] = [
+            'id' => 'k-1', 'name' => 'k', 'privateKey' => "KEY\n",
+            'publicKey' => 'ssh-ed25519 AAAA', 'fingerprint' => 'SHA256:x',
+        ];
+        $creds['connections'][] = $this->keyConn(['remoteHostKey' => 'h ssh-ed25519 AAAA']);
+
+        $a = Ssh::materialize($creds, 'c-key');
+        $b = Ssh::materialize($creds, 'c-key');
+        $this->assertTrue($a['ok']);
+        $this->assertTrue($b['ok']);
+        $this->assertNotSame($a['token'], $b['token']);
+        $this->assertNotSame($a['keyPath'], $b['keyPath']);
+        $this->assertNotSame($a['knownHosts'], $b['knownHosts']);
+
+        // Cleaning up run A leaves run B's files intact.
+        Ssh::cleanupRuntime($a['token']);
+        $this->assertFileDoesNotExist($a['keyPath']);
+        $this->assertFileExists($b['keyPath']);
+        $this->assertFileExists($b['knownHosts']);
+
+        Ssh::cleanupRuntime($b['token']);
+        $this->assertFileDoesNotExist($b['keyPath']);
     }
 
     public function testMaterializeKeyMissingKeyFails(): void
@@ -241,7 +287,7 @@ final class SshTest extends TestCase
         $this->assertSame('hunter2', file_get_contents($mat['passFile']));
         $this->assertSame(['/usr/bin/sshpass', '-f', $mat['passFile']], $mat['sshpassPrefix']);
 
-        FakeSsh::cleanupRuntime('c-pw');
+        FakeSsh::cleanupRuntime((string) $mat['token']);
         $this->assertFileDoesNotExist($mat['passFile']);
     }
 
@@ -268,6 +314,44 @@ final class SshTest extends TestCase
     public function testSshpassMissingMessageMentionsNerdTools(): void
     {
         $this->assertStringContainsString('NerdTools', Ssh::sshpassMissingMessage());
+    }
+
+    public function testLocateSshpassFindsExecutableOnPathWithoutShell(): void
+    {
+        if (DIRECTORY_SEPARATOR !== '/') {
+            $this->markTestSkipped('POSIX-only path/exec test');
+        }
+        $origPath = getenv('PATH');
+        $dir = sys_get_temp_dir() . '/ur-path-' . getmypid() . '-' . bin2hex(random_bytes(4));
+        mkdir($dir, 0700, true);
+        try {
+            // Put our temp dir FIRST on PATH and drop an executable "sshpass" in
+            // it. The no-shell scanner must find it at its absolute path. (We
+            // don't assert the negative case because the scanner also probes
+            // standard fallback dirs that may legitimately contain sshpass on
+            // some hosts.)
+            putenv('PATH=' . $dir . PATH_SEPARATOR . ($origPath !== false ? $origPath : ''));
+            $bin = $dir . '/sshpass';
+            file_put_contents($bin, "#!/bin/sh\nexit 0\n");
+            chmod($bin, 0755);
+            $found = RealLocateSsh::publicLocateSshpass();
+            $this->assertSame($bin, $found);
+            $this->assertTrue(is_executable($found));
+
+            // A non-executable file of the same name is ignored (must be +x).
+            unlink($bin);
+            file_put_contents($bin, "not a program\n");
+            chmod($bin, 0644);
+            // It either falls through to a real sshpass elsewhere or returns ''
+            // - in both cases it must NOT return our non-executable file.
+            $this->assertNotSame($bin, RealLocateSsh::publicLocateSshpass());
+        } finally {
+            if ($origPath !== false) {
+                putenv('PATH=' . $origPath);
+            }
+            @unlink($dir . '/sshpass');
+            @rmdir($dir);
+        }
     }
 
     // --- probe classification (pure) ---------------------------------------

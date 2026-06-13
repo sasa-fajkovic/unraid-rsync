@@ -85,6 +85,14 @@ class Ssh
     const SSHPASS_HOSTKEY_CHANGED = 7;  // host public key has changed
 
     // --- runtime paths ------------------------------------------------------
+    //
+    // Every materialised secret is keyed by a unique PER-RUN TOKEN (connId +
+    // pid + random), NOT by connection id alone. This is what makes concurrent
+    // runs safe even when they share the SAME connection (a core feature of the
+    // keychain): each run writes to its own keys/<token>, pass/<token> and
+    // known_hosts/<token>, and cleanupRuntime(token) only ever unlinks that
+    // run's own files - so one run's cleanup can never pull a key/known_hosts
+    // out from under another in-flight ssh.
 
     /** tmpfs dir that holds materialised private keys (mode 700). */
     public static function keysDir(): string
@@ -93,22 +101,31 @@ class Ssh
     }
 
     /**
-     * Path a connection's private key materialises to (mode 600). The file is
-     * keyed by CONNECTION id, not key id, so each connection gets its OWN copy
-     * of the (shared) key material on tmpfs. That makes cleanup isolated: a
-     * connection's cleanupRuntime() only ever unlinks its own file, so two
-     * concurrent runs that reference the same SSH key can never unlink each
-     * other's materialised key out from under an in-flight ssh.
+     * Generate a unique per-run token from a connection id. Includes the pid
+     * and a random suffix so two concurrent runs of the same connection never
+     * collide. The token is also a safe filename segment.
      */
-    public static function keyPath(string $connId): string
+    public static function newRuntimeToken(string $connId): string
     {
-        return static::keysDir() . '/' . self::safeId($connId);
+        return self::safeId($connId) . '-' . getmypid() . '-' . bin2hex(random_bytes(6));
     }
 
-    /** Path the per-connection known_hosts materialises to. */
-    public static function knownHostsPath(string $connId): string
+    /** Path a run's private key materialises to (mode 600), keyed by run token. */
+    public static function keyPath(string $token): string
     {
-        return rtrim(static::$runtimeBase, '/') . '/known_hosts/' . self::safeId($connId);
+        return static::keysDir() . '/' . self::safeId($token);
+    }
+
+    /** Path a run's known_hosts materialises to, keyed by run token. */
+    public static function knownHostsPath(string $token): string
+    {
+        return rtrim(static::$runtimeBase, '/') . '/known_hosts/' . self::safeId($token);
+    }
+
+    /** Path a run's password file materialises to, keyed by run token. */
+    public static function passFilePath(string $token): string
+    {
+        return rtrim(static::$runtimeBase, '/') . '/pass/' . self::safeId($token);
     }
 
     /**
@@ -258,21 +275,26 @@ class Ssh
      * primary entry point for "I have a connectionId, give me what I need to
      * shell out safely."
      *
+     * Each call mints a UNIQUE per-run token (connId + pid + random) and keys
+     * every materialised file by it, so two concurrent runs - even of the SAME
+     * connection - never share a key/pass/known_hosts file. The token is
+     * returned as `token`; the caller MUST pass it to cleanupRuntime($token)
+     * in a finally so only this run's own files are removed.
+     *
      * Steps:
      *   - ensure the tmpfs runtime dirs exist with safe modes (700);
      *   - for KEY auth: write the referenced key's private material to
-     *     keys/<connId> at mode 600 (OpenSSH refuses world-readable keys; keyed
-     *     by connection id so concurrent runs sharing the key don't collide);
+     *     keys/<token> at mode 600 (OpenSSH refuses world-readable keys);
      *   - for PASSWORD auth: write the de-obfuscated password to a 600 passfile
      *     (only when sshpass is available);
-     *   - write the connection's pinned remoteHostKey to a 600 known_hosts file
-     *     (empty file when none pinned - accept-new will then learn it).
+     *   - write the connection's pinned remoteHostKey to a 600 known_hosts file.
      *
      * @param array<string,mixed> $creds loaded credentials structure
      * @param string              $connId
      * @return array{
      *   ok: bool,
      *   error?: string,
+     *   token?: string,
      *   conn?: array<string,mixed>,
      *   sshArgv?: array<int,string>,
      *   sshpassPrefix?: array<int,string>,
@@ -293,7 +315,9 @@ class Ssh
 
         self::ensureRuntimeDirs();
 
-        $knownHosts = static::knownHostsPath($connId);
+        // Unique per-run token: isolates concurrent runs even of the same conn.
+        $token      = static::newRuntimeToken($connId);
+        $knownHosts = static::knownHostsPath($token);
         self::writeKnownHosts($knownHosts, (string) $conn['remoteHostKey']);
 
         $keyPath  = '';
@@ -302,22 +326,22 @@ class Ssh
         if ($conn['authMethod'] === 'KEY') {
             $key = Credentials::findKey($creds, (string) $conn['keyId']);
             if ($key === null) {
+                self::cleanupRuntime($token);
                 return ['ok' => false, 'error' => 'Connection references an SSH key that no longer exists.'];
             }
             $priv = (string) ($key['privateKey'] ?? '');
             if (trim($priv) === '') {
+                self::cleanupRuntime($token);
                 return ['ok' => false, 'error' => 'The referenced SSH key has no private key material.'];
             }
-            // Keyed by CONNECTION id (not key id): each connection gets its own
-            // copy so concurrent runs sharing one SSH key never clean up each
-            // other's materialised key.
-            $keyPath = static::keyPath($connId);
+            $keyPath = static::keyPath($token);
             self::writePrivateKey($keyPath, $priv);
         } else { // PASSWORD
             if (!static::sshpassAvailable()) {
+                self::cleanupRuntime($token);
                 return ['ok' => false, 'error' => static::sshpassMissingMessage()];
             }
-            $passFile = self::writePassFile($connId, Credentials::deobfuscate((string) $conn['password']));
+            $passFile = self::writePassFile($token, Credentials::deobfuscate((string) $conn['password']));
         }
 
         $sshArgv       = self::buildSshArgv($conn, $keyPath, $knownHosts);
@@ -325,6 +349,7 @@ class Ssh
 
         return [
             'ok'            => true,
+            'token'         => $token,
             'conn'          => $conn,
             'sshArgv'       => $sshArgv,
             'sshpassPrefix' => $sshpassPrefix,
@@ -336,24 +361,21 @@ class Ssh
     }
 
     /**
-     * Remove materialised secrets for a connection (best-effort). Phase 4 calls
-     * this in a finally after a run; the Credentials tab's testConnection also
-     * cleans up its own materialisation.
+     * Remove a run's materialised secrets (best-effort), identified by the
+     * per-run token returned from materialize(). Phase 4 calls this in a finally
+     * after a run; the Credentials tab's testConnection cleans up its own token.
      *
-     * Everything a connection materialises - its private key, known_hosts and
-     * password file - is keyed by CONNECTION id, so this only ever unlinks THIS
-     * connection's own files. Two concurrent runs that reference the same SSH
-     * key each have their own copy and clean up independently. (The second
-     * argument is retained for backward compatibility and is no longer needed to
-     * locate the key file.)
+     * Because every file is keyed by the unique run token, this only ever
+     * unlinks THIS run's own private key, known_hosts and password file - a
+     * concurrent run (even of the same connection) has a different token and is
+     * untouched.
      */
-    public static function cleanupRuntime(string $connId, string $keyId = ''): void
+    public static function cleanupRuntime(string $token): void
     {
-        unset($keyId); // key file is keyed by connId; kept for BC of the signature
         $paths = [
-            static::keyPath($connId),
-            static::knownHostsPath($connId),
-            rtrim(static::$runtimeBase, '/') . '/pass/' . self::safeId($connId),
+            static::keyPath($token),
+            static::knownHostsPath($token),
+            static::passFilePath($token),
         ];
         foreach ($paths as $p) {
             if (is_file($p)) {
@@ -391,9 +413,9 @@ class Ssh
     }
 
     /** Write a password to a tmpfs file at mode 600 for `sshpass -f`. */
-    private static function writePassFile(string $connId, string $password): string
+    private static function writePassFile(string $token, string $password): string
     {
-        $path = rtrim(static::$runtimeBase, '/') . '/pass/' . self::safeId($connId);
+        $path = static::passFilePath($token);
         // sshpass -f reads the first line as the password; no trailing newline
         // needed, but a single one is tolerated. Write exactly the password.
         if (@file_put_contents($path, $password) === false) {
@@ -404,9 +426,17 @@ class Ssh
     }
 
     /**
-     * Write the pinned host key to a known_hosts file (mode 600). An empty
-     * pinned value writes an empty file; with StrictHostKeyChecking=accept-new
-     * ssh then learns and pins the key on first connect.
+     * Write the pinned host key to a per-run known_hosts file (mode 600). An
+     * empty pinned value writes an empty file.
+     *
+     * NOTE: this known_hosts file is per-RUN tmpfs and is deleted by
+     * cleanupRuntime() after the run. With StrictHostKeyChecking=accept-new ssh
+     * will accept an unknown host key for the duration of THIS run, but because
+     * the file does not persist, nothing is pinned for future runs - persistent
+     * pinning happens only when the user clicks "Discover host key" and SAVES
+     * the resulting remoteHostKey into the connection (which is then written
+     * here on every subsequent run). The UI/docs reflect this; accept-new is a
+     * convenience, not a durable trust-on-first-use store.
      */
     private static function writeKnownHosts(string $path, string $hostKey): void
     {
@@ -482,7 +512,7 @@ class Ssh
         try {
             [$exitCode, $stderr] = static::runProbe($argv);
         } finally {
-            self::cleanupRuntime($connId, (string) $conn['keyId']);
+            self::cleanupRuntime((string) $mat['token']);
         }
 
         return self::classifyProbe($conn, (int) $exitCode, (string) $stderr);
@@ -619,14 +649,35 @@ class Ssh
     // --- live-system seams (overridden in tests) ----------------------------
 
     /**
-     * Locate sshpass on PATH. Live implementation: `command -v sshpass`.
-     * Returns the absolute path or '' when not found. Overridable in tests.
+     * Locate sshpass WITHOUT invoking a shell. Scans the directories on $PATH
+     * (plus the common sbin/usr locations) for an executable file named
+     * "sshpass" and returns its absolute path, or '' when not found. This avoids
+     * shell_exec / a shell builtin entirely, matching the no-shell design used
+     * for every other invocation. Overridable in tests.
      */
     protected static function locateSshpass(): string
     {
-        $out = @shell_exec('command -v sshpass 2>/dev/null');
-        $out = is_string($out) ? trim($out) : '';
-        return $out;
+        $pathEnv = getenv('PATH');
+        $dirs = ($pathEnv !== false && $pathEnv !== '')
+            ? explode(PATH_SEPARATOR, $pathEnv)
+            : [];
+        // Defensive fallbacks for Unraid/Slackware where PATH may be minimal in
+        // the webGui context.
+        foreach (['/usr/bin', '/bin', '/usr/local/bin', '/usr/sbin', '/sbin'] as $extra) {
+            if (!in_array($extra, $dirs, true)) {
+                $dirs[] = $extra;
+            }
+        }
+        foreach ($dirs as $dir) {
+            if ($dir === '') {
+                continue;
+            }
+            $candidate = rtrim($dir, '/') . '/sshpass';
+            if (is_file($candidate) && is_executable($candidate)) {
+                return $candidate;
+            }
+        }
+        return '';
     }
 
     /**
