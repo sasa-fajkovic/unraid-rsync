@@ -528,6 +528,16 @@ function ur_ago(int $deltaSec): string
 }
 </style>
 <?php /* (the markup below re-opens output) */ ?>
+<?php
+/* Emit the option help CSS/JS once, in LIVE page-body context, BEFORE any
+ * <script type="text/html"> template renders below. On a fresh install (no
+ * live job cards) the first ur_render_rsync_options() call would otherwise be
+ * the one INSIDE the hidden #ur-job-template, trapping these assets as inert
+ * text and leaving the "?" help dead page-wide. Emitting here makes the assets
+ * deterministically active; the static guard inside the function then makes the
+ * template's and Global Settings' later calls no-ops. */
+ur_emit_option_help_assets();
+?>
 <div class="ur-jobs-page">
 <div class="title">
   <span class="left">
