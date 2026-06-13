@@ -354,6 +354,38 @@ final class SshTest extends TestCase
         }
     }
 
+    public function testLocateSshpassIgnoresRelativePathEntries(): void
+    {
+        if (DIRECTORY_SEPARATOR !== '/') {
+            $this->markTestSkipped('POSIX-only path/exec test');
+        }
+        $origPath = getenv('PATH');
+        $origCwd  = getcwd();
+        $dir = sys_get_temp_dir() . '/ur-relpath-' . getmypid() . '-' . bin2hex(random_bytes(4));
+        mkdir($dir, 0700, true);
+        try {
+            // Drop an executable "sshpass" in the cwd, and put a RELATIVE "."
+            // entry on PATH. The scanner must ignore non-absolute PATH entries,
+            // so it must NOT return "./sshpass".
+            chdir($dir);
+            $rogue = $dir . '/sshpass';
+            file_put_contents($rogue, "#!/bin/sh\nexit 0\n");
+            chmod($rogue, 0755);
+            putenv('PATH=.');
+            $this->assertNotSame('./sshpass', RealLocateSsh::publicLocateSshpass());
+            $this->assertNotSame($rogue, RealLocateSsh::publicLocateSshpass());
+        } finally {
+            if ($origCwd !== false) {
+                chdir($origCwd);
+            }
+            if ($origPath !== false) {
+                putenv('PATH=' . $origPath);
+            }
+            @unlink($dir . '/sshpass');
+            @rmdir($dir);
+        }
+    }
+
     // --- probe classification (pure) ---------------------------------------
 
     public function testClassifySuccess(): void

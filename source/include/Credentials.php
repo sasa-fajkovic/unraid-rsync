@@ -453,6 +453,12 @@ class Credentials
         if ($value === '' || $value[0] === '-') {
             return false;
         }
+        // Reject '@' explicitly: the SSH destination is built as "user@host", so
+        // an '@' inside either component makes it ambiguous (user@evil@host) and
+        // could connect to an unintended user/host.
+        if (strpos($value, '@') !== false) {
+            return false;
+        }
         // No whitespace or shell metacharacters (defence in depth - we build
         // argv arrays, but ssh itself parses leading-dash tokens as options).
         return !preg_match('/[\s;&|`$()<>"\'\\\\]/', $value);

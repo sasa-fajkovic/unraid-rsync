@@ -202,6 +202,7 @@ final class CredentialsTest extends TestCase
             'backtick'      => ['h`id`'],
             'pipe'          => ['h|nc'],
             'dollar'        => ['h$(id)'],
+            'at sign'       => ['user@evil'],
         ];
     }
 
@@ -212,6 +213,8 @@ final class CredentialsTest extends TestCase
         $this->assertTrue(Credentials::isSafeSshToken('backup-user'));
         $this->assertFalse(Credentials::isSafeSshToken('-bad'));
         $this->assertFalse(Credentials::isSafeSshToken(''));
+        // '@' is rejected: the destination is built as user@host.
+        $this->assertFalse(Credentials::isSafeSshToken('user@host'));
     }
 
     public function testUsedByConnectionWithNullConfigReturnsNoJobs(): void

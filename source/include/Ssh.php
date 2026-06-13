@@ -691,7 +691,10 @@ class Ssh
             }
         }
         foreach ($dirs as $dir) {
-            if ($dir === '') {
+            // Ignore empty and NON-ABSOLUTE PATH entries (e.g. "." or a relative
+            // dir): a relative entry could let an attacker-controlled directory
+            // supply a rogue "sshpass". Only trust absolute directories.
+            if ($dir === '' || $dir[0] !== '/') {
                 continue;
             }
             $candidate = rtrim($dir, '/') . '/sshpass';
