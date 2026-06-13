@@ -38,8 +38,25 @@ function sendResponse(array $payload, int $code = 200): void
     if (!headers_sent()) {
         header('Content-Type: application/json');
     }
+
+    // User-supplied strings (e.g. preHook/postHook) may contain invalid UTF-8,
+    // which makes json_encode() return false. Substitute the bad bytes so we
+    // always emit a valid JSON body rather than an empty one under a JSON
+    // content-type. If even that fails, fall back to a minimal error envelope.
+    $json = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
+    if ($json === false) {
+        $code = 500;
+        $json = json_encode(
+            ['error' => 'Internal error: response could not be encoded.'],
+            JSON_UNESCAPED_SLASHES
+        );
+        if ($json === false) {
+            $json = '{"error":"Internal error."}';
+        }
+    }
+
     http_response_code($code);
-    echo json_encode($payload, JSON_UNESCAPED_SLASHES);
+    echo $json;
     // In the live webGui this is the request end. exit keeps anything appended
     // by the front controller from corrupting the JSON body.
     if (!defined('UR_HANDLER_TESTING')) {
@@ -118,8 +135,15 @@ function ur_action_save_config(): void
     // The Jobs tab and the Global Settings tab are separate forms that each
     // submit only their own section. Update a section ONLY when its payload is
     // present, otherwise saving one tab would wipe the other.
+    //
+    // The Jobs form carries a hidden `jobs_present=1` sentinel so that an
+    // intentional "clear all jobs" (the user deleted every card -> no jobs[]
+    // fields) is distinguishable from "the Jobs tab wasn't submitted at all".
+    // When the sentinel is set we rebuild the jobs list even if it's empty.
     $hasGlobal = isset($_POST['global']) && is_array($_POST['global']);
-    $hasJobs   = isset($_POST['jobs'])   && is_array($_POST['jobs']);
+    $jobsSubmitted = isset($_POST['jobs']) && is_array($_POST['jobs']);
+    $jobsSentinel  = !empty($_POST['jobs_present']);
+    $hasJobs       = $jobsSubmitted || $jobsSentinel;
 
     if (!$hasGlobal && !$hasJobs) {
         sendError('Nothing to save: no jobs or global settings were submitted.', 400);
@@ -157,7 +181,9 @@ function ur_action_save_config(): void
         return;
     }
 
-    $rawJobs    = array_values($_POST['jobs']); // re-key sparse/assoc arrays
+    // $rawJobs is conditional: an explicit clear-all (sentinel set, no jobs[])
+    // yields an empty array cleanly without a notice.
+    $rawJobs    = $jobsSubmitted ? array_values($_POST['jobs']) : []; // re-key sparse/assoc arrays
     $normalized = [];
     $seenIds    = [];
 

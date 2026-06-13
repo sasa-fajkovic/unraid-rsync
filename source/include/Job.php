@@ -88,7 +88,12 @@ class Job
 
         $job['name']     = isset($raw['name']) ? trim((string) $raw['name']) : '';
         $job['enabled']  = self::toBool($raw['enabled'] ?? true);
-        $job['schedule'] = isset($raw['schedule']) ? trim((string) $raw['schedule']) : '';
+        // Only override the default schedule when one was actually supplied; an
+        // omitted schedule keeps the sensible default rather than becoming the
+        // always-invalid empty string.
+        if (isset($raw['schedule'])) {
+            $job['schedule'] = trim((string) $raw['schedule']);
+        }
 
         $transport = strtoupper(trim((string) ($raw['transport'] ?? 'SSH')));
         $job['transport'] = in_array($transport, self::TRANSPORTS, true) ? $transport : 'SSH';

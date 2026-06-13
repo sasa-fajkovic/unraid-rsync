@@ -138,18 +138,19 @@ class Config
      *
      * Contract:
      *   - File absent or empty            -> the default (empty-install) config.
-     *   - File present but unreadable     -> the default config (best effort).
-     *   - File present but malformed JSON -> throws RuntimeException.
+     *   - File present but unreadable      -> throws RuntimeException.
+     *   - File present but malformed JSON  -> throws RuntimeException.
      *   - File from a NEWER schemaVersion than this build understands -> throws
      *     RuntimeException (migrate() refuses to downgrade).
      *
      * Callers MUST treat a thrown exception as "do not overwrite": the save
-     * path turns it into a 4xx error rather than falling back to defaults and
-     * clobbering a recoverable file. (The read-only UI pages may catch and
+     * path turns it into a 4xx/5xx error rather than falling back to defaults
+     * and clobbering a recoverable file. (The read-only UI pages may catch and
      * render defaults for display only; they do not persist on load.)
      *
      * @return array<string,mixed>
-     * @throws RuntimeException on malformed JSON or a newer-than-supported schema.
+     * @throws RuntimeException when the file exists but is unreadable, contains
+     *                          malformed JSON, or is from a newer schema.
      */
     public static function load(): array
     {
@@ -160,8 +161,11 @@ class Config
 
         $raw = @file_get_contents($path);
         if ($raw === false) {
-            // Unreadable - treat as empty rather than crashing the UI.
-            return self::defaults();
+            // The file exists but can't be read (permissions / transient I/O).
+            // Treat this as a hard error like malformed JSON: returning defaults
+            // here would let the save path overwrite a recoverable file with a
+            // fresh empty config, silently clobbering it.
+            throw new RuntimeException("config.json exists but could not be read: $path");
         }
         $raw = trim($raw);
         if ($raw === '') {

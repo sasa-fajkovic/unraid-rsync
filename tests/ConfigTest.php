@@ -173,6 +173,25 @@ final class ConfigTest extends TestCase
         Config::load();
     }
 
+    public function testLoadThrowsWhenExistingFileUnreadable(): void
+    {
+        $path = Config::path();
+        file_put_contents($path, json_encode(Config::defaults()));
+        // Make it unreadable. Skip if the running user can read it anyway
+        // (e.g. root in some CI containers ignores file mode bits).
+        chmod($path, 0000);
+        if (is_readable($path)) {
+            chmod($path, 0644);
+            $this->markTestSkipped('cannot make file unreadable as the current user');
+        }
+        try {
+            $this->expectException(RuntimeException::class);
+            Config::load();
+        } finally {
+            chmod($path, 0644); // restore so setUp/shutdown can clean up
+        }
+    }
+
     public function testSaveIsAtomicNoTempLeftBehind(): void
     {
         $cfg = Config::defaults();

@@ -51,6 +51,17 @@ final class JobTest extends TestCase
         $this->assertSame('j-my-music', $job['id']);
     }
 
+    public function testOmittedScheduleKeepsDefault(): void
+    {
+        // A minimal job that omits schedule should keep the sensible default,
+        // not become the always-invalid empty string.
+        $job = Job::normalize(['name' => 'minimal']);
+        $this->assertSame('0 3 * * *', $job['schedule']);
+        // ...and a job with an explicit schedule keeps it.
+        $job2 = Job::normalize(['name' => 'x', 'schedule' => '15 4 * * 0']);
+        $this->assertSame('15 4 * * 0', $job2['schedule']);
+    }
+
     // --- required-field validation ----------------------------------------
 
     public function testMissingNameRejected(): void

@@ -311,6 +311,44 @@ final class HandlerTest extends TestCase
         $this->assertSame(400, $code);
     }
 
+    public function testEmptyJobsSentinelClearsJobsList(): void
+    {
+        // Seed a config with a job.
+        $seed = Config::defaults();
+        $seed['jobs'][] = Job::normalize([
+            'name' => 'old', 'schedule' => '0 3 * * *', 'transport' => 'LOCAL',
+            'pairs' => [['local' => '/mnt/user/a/', 'remote' => '/mnt/disk1/a/']],
+        ]);
+        Config::save($seed);
+
+        // Submit the Jobs tab with the sentinel but NO jobs[] (user deleted all).
+        $_POST = [
+            'action'       => 'saveConfig',
+            'csrf_token'   => 'test-token',
+            'jobs_present' => '1',
+        ];
+
+        [$body, $code] = $this->runCapture(function () {
+            ur_action_save_config();
+        });
+
+        $this->assertSame(200, $code, json_encode($body));
+        $cfg = Config::load();
+        $this->assertSame([], $cfg['jobs'], 'sentinel should allow clearing all jobs');
+    }
+
+    public function testSendResponseHandlesInvalidUtf8(): void
+    {
+        // An invalid UTF-8 byte sequence in a string would make a naive
+        // json_encode() return false; the helper must still emit valid JSON.
+        [$body, $code] = $this->runCapture(function () {
+            sendResponse(['ok' => true, 'note' => "bad\xB1utf8"], 200);
+        });
+        $this->assertSame(200, $code);
+        $this->assertIsArray($body, 'response body must be valid JSON');
+        $this->assertTrue($body['ok']);
+    }
+
     public function testUnknownActionRejected(): void
     {
         $_POST = ['action' => 'bogus', 'csrf_token' => 'test-token'];

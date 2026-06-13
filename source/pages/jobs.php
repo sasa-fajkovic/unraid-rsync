@@ -246,6 +246,10 @@ function ur_render_pair_row(string $prefix, $k, string $local, string $remote): 
 <form markdown="1" method="POST" action="<?=htmlspecialchars($handlerUrl, ENT_QUOTES, 'UTF-8')?>" id="ur-jobs-form">
   <input type="hidden" name="action" value="saveConfig">
   <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf, ENT_QUOTES, 'UTF-8')?>">
+  <!-- Sentinel: marks this as a Jobs-tab submission so the handler rebuilds the
+       jobs list even when the user has deleted every card (an intentional
+       "clear all jobs"), instead of treating it as "Jobs not submitted". -->
+  <input type="hidden" name="jobs_present" value="1">
 
   <div id="ur-jobs-container">
     <?php foreach ($jobs as $i => $job) {
