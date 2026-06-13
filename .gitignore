@@ -12,3 +12,8 @@
 
 # Sublime SFTP config sometimes used when sideloading to a live Unraid box
 sftp-config.json
+
+# PHP / PHPUnit (tests are run in CI; deps + caches are not committed)
+/vendor/
+/.phpunit.cache/
+.phpunit.result.cache

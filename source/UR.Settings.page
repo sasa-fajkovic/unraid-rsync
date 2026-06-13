@@ -1,0 +1,5 @@
+Menu="UnraidRsync:3"
+Title="Global Settings"
+Tag="cog"
+---
+<?php include "/usr/local/emhttp/plugins/unraid.rsync/pages/settings.php"; ?>
