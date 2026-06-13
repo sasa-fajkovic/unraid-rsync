@@ -293,7 +293,10 @@ class RunState
                 return true;
             }
             $errno = function_exists('posix_get_last_error') ? posix_get_last_error() : 0;
-            $eperm = defined('PCNTL_EPERM') ? PCNTL_EPERM : 1; // EPERM is 1 on Linux.
+            // EPERM means the process exists but is owned by another user -> still
+            // "alive". Use the posix errno constant (POSIX_EPERM) when available,
+            // falling back to its Linux numeric value (1).
+            $eperm = defined('POSIX_EPERM') ? POSIX_EPERM : 1;
             return $errno === $eperm;
         }
         return is_dir('/proc/' . $pid);

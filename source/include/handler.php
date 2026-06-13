@@ -992,8 +992,31 @@ function ur_action_abort_job(): void
         return;
     }
 
-    // Always set the flag first - the runner polls it between pairs, so this
-    // alone guarantees a stop even if the pid is gone / signalling fails.
+    // Refuse an unknown id BEFORE touching the filesystem: otherwise a
+    // CSRF-authenticated request could create an arbitrary
+    // <runtime>/state/<id>.abort file (and leave a stale flag that poisons a
+    // future run if the id is later reused). We accept the abort only when the
+    // id is a configured job OR a run state file already exists for it (an
+    // in-flight run whose job row may have just been edited away).
+    $known = false;
+    try {
+        $config = Config::load();
+        foreach (($config['jobs'] ?? []) as $job) {
+            if (is_array($job) && (string) ($job['id'] ?? '') === $jobId) {
+                $known = true;
+                break;
+            }
+        }
+    } catch (Throwable $e) {
+        // Config unreadable: fall back to the state-file check below.
+    }
+    if (!$known && RunState::read($jobId) === null) {
+        sendError('Job not found.', 404);
+        return;
+    }
+
+    // Set the flag first - the runner polls it between pairs, so this alone
+    // guarantees a stop even if the pid is gone / signalling fails.
     RunState::requestAbort($jobId);
 
     // Only signal a pid we have VERIFIED is this job's live runner. isRunning()

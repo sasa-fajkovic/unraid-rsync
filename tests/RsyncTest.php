@@ -85,11 +85,13 @@ final class RsyncTest extends TestCase
         $this->assertContains('--max-delete=50', $tokens);
         $this->assertContains('--chmod=D2755,F644', $tokens);
 
-        // Empty scalar => omitted.
+        // Empty scalar => omitted: no token begins with the scalar's flag stem.
         $empty = $this->emptyOpts();
-        $this->assertNotContains('--bwlimit=', Rsync::optionTokens($empty));
         foreach (Rsync::optionTokens($empty) as $tok) {
-            $this->assertStringStartsNotWith('--bwlimit', $tok);
+            $this->assertFalse(
+                str_starts_with($tok, '--bwlimit'),
+                "no token should start with --bwlimit when bwlimit is empty (got: $tok)"
+            );
         }
     }
 
