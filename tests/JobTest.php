@@ -249,6 +249,66 @@ final class JobTest extends TestCase
         $this->assertFalse($res['valid']);
     }
 
+    public function testLocalTransportCoercesDirectionToPush(): void
+    {
+        // Direction only applies to SSH; a LOCAL job must persist PUSH.
+        $job = Job::normalize([
+            'name'      => 'local-pull',
+            'transport' => 'LOCAL',
+            'direction' => 'PULL',
+            'pairs'     => [['local' => '/mnt/user/a/', 'remote' => '/mnt/disk1/a/']],
+        ]);
+        $this->assertSame('PUSH', $job['direction']);
+    }
+
+    public function testPushDeleteToRemoteRootRejected(): void
+    {
+        // SSH + PUSH: destination is the remote side. --delete to a remote root
+        // must be rejected (the destination-subpath rule targets the remote).
+        $job = Job::normalize([
+            'name'      => 'push-del',
+            'schedule'  => '0 3 * * *',
+            'transport' => 'SSH',
+            'direction' => 'PUSH',
+            'pairs'     => [['local' => '/mnt/user/a/', 'remote' => '/']],
+            'rsyncOptions' => ['delete' => true, 'maxDelete' => '10'],
+        ]);
+        $res = Job::validate($job);
+        $this->assertFalse($res['valid']);
+    }
+
+    public function testPullDeleteDoesNotFlagRemoteSourceAsDestination(): void
+    {
+        // SSH + PULL: the remote side is the SOURCE. A valid remote source +
+        // valid local destination with --delete must be accepted - the
+        // destination-subpath rule must target the local side, not the remote.
+        $job = Job::normalize([
+            'name'      => 'pull-src',
+            'schedule'  => '0 3 * * *',
+            'transport' => 'SSH',
+            'direction' => 'PULL',
+            'pairs'     => [['local' => '/mnt/user/restore/', 'remote' => '/srv/data/']],
+            'rsyncOptions' => ['delete' => true, 'maxDelete' => '10'],
+        ]);
+        $res = Job::validate($job);
+        $this->assertTrue($res['valid'], 'errors: ' . implode(' | ', $res['errors']));
+    }
+
+    public function testPullDeleteWithSpecificLocalDestPasses(): void
+    {
+        // SSH + PULL into a specific local sub-dir with --delete -> valid.
+        $job = Job::normalize([
+            'name'      => 'pull-ok',
+            'schedule'  => '0 3 * * *',
+            'transport' => 'SSH',
+            'direction' => 'PULL',
+            'pairs'     => [['local' => '/mnt/user/restore/data/', 'remote' => '/srv/data/']],
+            'rsyncOptions' => ['delete' => true, 'maxDelete' => '10'],
+        ]);
+        $res = Job::validate($job);
+        $this->assertTrue($res['valid'], 'errors: ' . implode(' | ', $res['errors']));
+    }
+
     // --- WHITELIST -> stored shape -----------------------------------------
 
     public function testNonWhitelistedOptionsDropped(): void

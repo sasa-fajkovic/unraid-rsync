@@ -102,6 +102,12 @@ class Job
 
         $direction = strtoupper(trim((string) ($raw['direction'] ?? 'PUSH')));
         $job['direction'] = in_array($direction, self::DIRECTIONS, true) ? $direction : 'PUSH';
+        // Direction only applies to SSH (data flows to/from a remote host). For
+        // LOCAL transport both sides are on this box, so persist a canonical
+        // PUSH rather than letting a stored PULL contradict the UI.
+        if ($job['transport'] === 'LOCAL') {
+            $job['direction'] = 'PUSH';
+        }
 
         $job['useGlobalDefaults'] = self::toBool($raw['useGlobalDefaults'] ?? false);
 
@@ -243,41 +249,54 @@ class Job
         $deleteOn    = !empty($opts['delete']) || !empty($opts['deleteExcluded']);
         $maxDelete   = trim((string) ($opts['maxDelete'] ?? ''));
         $transport   = $job['transport'] ?? 'SSH';
+        $direction   = $job['direction'] ?? 'PUSH';
+
+        // The `local` field is ALWAYS a path on this Unraid box; the `remote`
+        // field is on the other host (SSH) or also on this box (LOCAL). Which
+        // side is the destination depends on direction: PUSH writes to remote,
+        // PULL writes to local. The destructive --delete check must target the
+        // destination side.
+        $destIsRemote = ($direction !== 'PULL'); // PUSH (and LOCAL, coerced to PUSH)
 
         foreach ($pairs as $i => $pair) {
             $n      = $i + 1;
             $local  = trim((string) ($pair['local']  ?? ''));
             $remote = trim((string) ($pair['remote'] ?? ''));
 
+            // `local` field: always a local path on this box -> local guardrails.
             if ($local === '') {
-                $errors[] = "Pair #$n: source (local) path is required.";
+                $errors[] = "Pair #$n: local path is required.";
             } else {
-                foreach (self::checkLocalPath($local, "Pair #$n source") as $e) {
+                $localLabel = $destIsRemote ? "Pair #$n source (local)" : "Pair #$n destination (local)";
+                foreach (self::checkLocalPath($local, $localLabel) as $e) {
                     $errors[] = $e;
                 }
             }
 
+            // `remote` field: local guardrails under LOCAL transport, otherwise
+            // a non-root remote sub-path.
             if ($remote === '') {
-                $errors[] = "Pair #$n: destination (remote) path is required.";
+                $errors[] = "Pair #$n: remote path is required.";
             } else {
-                // For LOCAL transport the "remote" side is also a local path on
-                // this box and must pass the same local guardrails. For SSH it
-                // is a path on the remote host: still required to be a non-root
-                // sub-path, but not bound to /mnt.
+                $remoteLabel = $destIsRemote ? "Pair #$n destination (remote)" : "Pair #$n source (remote)";
                 if ($transport === 'LOCAL') {
-                    foreach (self::checkLocalPath($remote, "Pair #$n destination") as $e) {
+                    foreach (self::checkLocalPath($remote, $remoteLabel) as $e) {
                         $errors[] = $e;
                     }
                 } else {
-                    foreach (self::checkRemotePath($remote, "Pair #$n destination") as $e) {
+                    foreach (self::checkRemotePath($remote, $remoteLabel) as $e) {
                         $errors[] = $e;
                     }
                 }
+            }
 
-                // When --delete is on, the destination must be a specific
-                // sub-directory (defence in depth on top of the root checks).
-                if ($deleteOn && !self::isSpecificSubPath($remote)) {
-                    $errors[] = "Pair #$n: --delete is enabled, so the destination must be a specific sub-directory, not a root.";
+            // When --delete is on, the DESTINATION must be a specific
+            // sub-directory (defence in depth on top of the root checks). The
+            // destination is `remote` for PUSH and `local` for PULL.
+            if ($deleteOn) {
+                $destPath = $destIsRemote ? $remote : $local;
+                if ($destPath !== '' && !self::isSpecificSubPath($destPath)) {
+                    $errors[] = "Pair #$n: a delete option is enabled, so the destination must be a specific sub-directory, not a root.";
                 }
             }
         }
