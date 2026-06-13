@@ -126,7 +126,12 @@ if [[ -z "$unraidHost" ]]; then
 fi
 
 echo "Sideloading to $unraidHost ..."
-scp "$archive_file" "root@$unraidHost:/boot/config/plugins/$plugin_name/"
-# shellcheck disable=SC2029
-ssh "root@$unraidHost" "upgradepkg --install-new /boot/config/plugins/$plugin_name/$plugin_name-${version}.txz"
+remote_dir="/boot/config/plugins/$plugin_name"
+# Ensure the destination exists on the host: on a box that has never had the
+# plugin installed the dir is absent, and scp would fail (aborting under set -e).
+# shellcheck disable=SC2029  # we intend $remote_dir to expand locally
+ssh "root@$unraidHost" "mkdir -p '$remote_dir'"
+scp "$archive_file" "root@$unraidHost:$remote_dir/"
+# shellcheck disable=SC2029  # we intend the paths to expand locally
+ssh "root@$unraidHost" "upgradepkg --install-new '$remote_dir/$plugin_name-${version}.txz'"
 echo "Sideload complete."
