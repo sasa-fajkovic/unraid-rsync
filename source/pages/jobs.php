@@ -227,11 +227,17 @@ function ur_render_job_card($job, $index): void
     }
     echo '</select></dd>';
 
-    // pre/post hooks
+    // pre/post hooks. Both run as ROOT via `bash -c` and their stdout/stderr is
+    // captured into the per-run log, which is rendered in the browser. Surface
+    // that privilege/leak surface inline next to each textarea so the user does
+    // not echo secrets into a browser-visible, root-written log.
+    $hookHelp = ur_t('Runs as root, before/after the transfer. Output is captured into the run log (visible in the UI) — do not echo secrets here.');
     echo '<dt><label for="' . ur_h($idb . '_pre') . '">' . ur_h(ur_t('Pre-run hook')) . '</label>:</dt>';
-    echo '<dd><textarea id="' . ur_h($idb . '_pre') . '" name="' . ur_h($p . '[preHook]') . '" rows="2">' . ur_h($preHook) . '</textarea></dd>';
+    echo '<dd><textarea id="' . ur_h($idb . '_pre') . '" name="' . ur_h($p . '[preHook]') . '" rows="2">' . ur_h($preHook) . '</textarea>';
+    echo '<blockquote class="inline_help"><p>' . ur_h($hookHelp) . '</p></blockquote></dd>';
     echo '<dt><label for="' . ur_h($idb . '_post') . '">' . ur_h(ur_t('Post-run hook')) . '</label>:</dt>';
-    echo '<dd><textarea id="' . ur_h($idb . '_post') . '" name="' . ur_h($p . '[postHook]') . '" rows="2">' . ur_h($postHook) . '</textarea></dd>';
+    echo '<dd><textarea id="' . ur_h($idb . '_post') . '" name="' . ur_h($p . '[postHook]') . '" rows="2">' . ur_h($postHook) . '</textarea>';
+    echo '<blockquote class="inline_help"><p>' . ur_h($hookHelp) . '</p></blockquote></dd>';
 
     echo '</dl>';
 

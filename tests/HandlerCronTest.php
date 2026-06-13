@@ -32,7 +32,10 @@ final class HandlerCronTest extends TestCase
     {
         $_POST = [];
         $_GET  = [];
-        http_response_code(200);
+        // Reset the handler's intended-status-code test seam instead of calling
+        // http_response_code(200), which warns under CLI/PHP 8.4 once output has
+        // begun (failOnWarning would fail the test). See sendResponse.
+        $GLOBALS['ur_last_response_code'] = 200;
         $GLOBALS['var'] = ['csrf_token' => 'test-token'];
 
         foreach ([Config::path(), Credentials::path(), Cron::cronFilePath()] as $p) {
@@ -60,7 +63,7 @@ final class HandlerCronTest extends TestCase
         ob_start();
         $fn();
         $out = ob_get_clean();
-        return [json_decode($out, true), http_response_code()];
+        return [json_decode($out, true), (int) ($GLOBALS['ur_last_response_code'] ?? 200)];
     }
 
     public function testSaveConfigAppliesCron(): void

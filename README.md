@@ -94,6 +94,11 @@ The plugin **detects it at runtime**: if it is missing, the Credentials tab and
 the connection test say so and point you at the **NerdTools** plugin (install
 it and enable its `sshpass` package). Key auth works regardless.
 
+- **Pre/post hooks run as `root`** (via `bash -c`) before/after the transfer,
+  and their stdout/stderr is **captured into the per-run log, which is rendered
+  in the browser**. Do **not** echo secrets in a hook — they would land in a
+  root-written, browser-visible log.
+
 ### rsync binary
 
 `rsync` ships in **Unraid's base OS** at `/usr/bin/rsync`, so it is always

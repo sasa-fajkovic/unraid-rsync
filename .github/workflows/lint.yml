@@ -41,7 +41,7 @@ jobs:
       - name: Set up PHP
         uses: shivammathur/setup-php@v2
         with:
-          php-version: "8.2"
+          php-version: "8.4"
 
       - name: php -l on PHP files and .page bodies
         run: |
@@ -73,7 +73,7 @@ jobs:
       - name: Set up PHP
         uses: shivammathur/setup-php@v2
         with:
-          php-version: "8.2"
+          php-version: "8.4"
           tools: composer
 
       - name: Install dependencies

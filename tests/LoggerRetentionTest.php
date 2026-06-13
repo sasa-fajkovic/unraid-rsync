@@ -220,4 +220,26 @@ final class LoggerRetentionTest extends TestCase
         // No runs -> ''.
         $this->assertSame('', Logger::latestRunLogPath('j-none'));
     }
+
+    /**
+     * F5 (confinement symmetry): latestRunLogPath must route the newest run id
+     * through the SAME runLogPathById confinement helper, so the "latest" and
+     * "by id" paths resolve identically (one hardened resolver, not two code
+     * paths). Assert latest === runLogPathById(newest-id).
+     */
+    public function testLatestRunLogPathSharesConfinementResolver(): void
+    {
+        $jobId = 'j-sym';
+        $paths = $this->seedRuns($jobId, 3, 1750000000);
+        $newestId = basename($paths[2]); // run-<startTs+120>.log
+
+        $latest = Logger::latestRunLogPath($jobId);
+        $viaHelper = Logger::runLogPathById($jobId, $newestId);
+
+        $this->assertNotNull($viaHelper);
+        $this->assertNotSame('', $latest);
+        // Both resolve to the same (realpath-confined) location.
+        $this->assertSame($viaHelper, $latest, 'latest must go through runLogPathById');
+        $this->assertSame(realpath($paths[2]), realpath($latest));
+    }
 }

@@ -36,7 +36,10 @@ final class HandlerStatusTest extends TestCase
         // REQUEST_METHOD is a global mutated by the dispatch tests; reset it each
         // test so a leftover value can't make a later ur_handle_request() flaky.
         $_SERVER['REQUEST_METHOD'] = 'GET';
-        http_response_code(200);
+        // Reset the handler's intended-status-code test seam instead of calling
+        // http_response_code(200), which warns under CLI/PHP 8.4 once output has
+        // begun (failOnWarning would fail the test). See sendResponse.
+        $GLOBALS['ur_last_response_code'] = 200;
         $GLOBALS['var'] = ['csrf_token' => 'test-token'];
 
         $this->rtBase = sys_get_temp_dir() . '/ur-hstatus-' . getmypid() . '-' . bin2hex(random_bytes(4));
@@ -72,7 +75,7 @@ final class HandlerStatusTest extends TestCase
         ob_start();
         $fn();
         $out = ob_get_clean();
-        return [json_decode($out, true), http_response_code()];
+        return [json_decode($out, true), (int) ($GLOBALS['ur_last_response_code'] ?? 200)];
     }
 
     /** Seed config with a job (LOCAL, enabled, valid cron) and return its id. */
