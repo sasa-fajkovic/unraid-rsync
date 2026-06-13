@@ -380,68 +380,132 @@ function ur_action_save_credentials(): void
 
     $errors = [];
 
-    // --- keys (rename only; material is preserved by id) ---
+    // IMPORTANT: saveCredentials is UPDATE-AND-APPEND ONLY. It never deletes a
+    // key or connection by omission - deletion goes EXCLUSIVELY through the
+    // deleteKey / deleteConnection actions, which enforce referential integrity
+    // (usedBy block on keys; disable dependent jobs on connections). A submitted
+    // row with a known id UPDATES that entry; a row with no id and some content
+    // APPENDS a new entry; any existing entry NOT present in the submission is
+    // PRESERVED. This stops a cleared field (or a malformed/partial POST) from
+    // silently orphaning jobs or leaving connections pointing at a missing key.
+
+    // --- keys (rename existing by id; preserve omitted; append new) ---
     if ($hasKeys) {
         $rawKeys = $keysSubmitted ? array_values($_POST['keys']) : [];
-        $newKeys = [];
-        $names   = [];
+
+        // Index the submitted rows by their (existing) id.
+        $submittedById = [];
+        $appended      = [];
         foreach ($rawKeys as $rawKey) {
             if (!is_array($rawKey)) {
                 continue;
             }
             $key = ur_normalize_key_for_save($rawKey, $creds);
-            // A row with no id AND no name is an empty template row -> skip.
-            if ($key['id'] === '' && $key['name'] === '') {
-                continue;
+            if ($key['id'] !== '') {
+                $submittedById[$key['id']] = $key;     // an edit of an existing key
+            } elseif ($key['name'] !== '') {
+                $appended[] = $key;                     // a brand-new key row
             }
-            // Uniqueness is checked against the names seen so far in this set.
+            // (no id AND no name -> empty template row, ignored)
+        }
+
+        // Start from the existing keys, applying any submitted rename; keep keys
+        // that weren't submitted untouched (no delete-by-omission).
+        $resultKeys = [];
+        foreach ($creds['keys'] as $existing) {
+            $eid = (string) ($existing['id'] ?? '');
+            if ($eid !== '' && isset($submittedById[$eid])) {
+                // Preserve secret material (ur_normalize_key_for_save already
+                // copied it by id) and apply the new name.
+                $resultKeys[] = $submittedById[$eid];
+            } else {
+                $resultKeys[] = Credentials::mergeKey(is_array($existing) ? $existing : []);
+            }
+        }
+        // Append genuinely-new key rows (rare via this form; keys are normally
+        // created through generate/import).
+        foreach ($appended as $key) {
+            if ($key['id'] === '') {
+                $key['id'] = Credentials::generateId(
+                    $key['name'],
+                    'k-',
+                    array_column($resultKeys, 'id')
+                );
+            }
+            $resultKeys[] = $key;
+        }
+
+        // Validate names (uniqueness across the whole resulting set). Each key
+        // is checked against the names already seen, so a key is never compared
+        // against itself and a genuine duplicate is reported once.
+        $names = [];
+        foreach ($resultKeys as $key) {
             $res = Credentials::validateKey($key, $names);
             foreach ($res['errors'] as $e) {
                 $errors[] = 'Key "' . ($key['name'] !== '' ? $key['name'] : $key['id']) . '": ' . $e;
             }
-            $names[]   = $key['name'];
-            $newKeys[] = $key;
+            $names[] = $key['name'];
         }
-        $creds['keys'] = $newKeys;
+
+        $creds['keys'] = $resultKeys;
     }
 
-    // --- connections ---
+    // --- connections (update existing by id; preserve omitted; append new) ---
     if ($hasConns) {
         $rawConns = $connsSubmitted ? array_values($_POST['connections']) : [];
-        $newConns = [];
-        $seenIds  = [];
-        foreach ($rawConns as $i => $rawConn) {
+
+        $submittedById = [];
+        $appended      = [];
+        foreach ($rawConns as $rawConn) {
             if (!is_array($rawConn)) {
                 continue;
             }
             $conn = ur_normalize_connection_for_save($rawConn, $creds);
-            if ($conn['name'] === '' && $conn['host'] === '' && $conn['username'] === '') {
-                continue; // empty template row
-            }
-            // Assign / de-duplicate id.
-            if ($conn['id'] === '') {
-                $conn['id'] = Credentials::generateId($conn['name'], 'c-', array_keys($seenIds));
-            }
-            $baseId = $conn['id'];
-            $id     = $baseId;
-            $n      = 2;
-            while (isset($seenIds[$id])) {
-                $id = $baseId . '-' . $n;
-                $n++;
-            }
-            $conn['id']    = $id;
-            $seenIds[$id]  = true;
+            $hasContent = !($conn['name'] === '' && $conn['host'] === '' && $conn['username'] === '');
 
-            // Validate against the credentials we're about to save (so a KEY
-            // connection's keyId is checked against the just-submitted keys).
-            $res = Credentials::validateConnection($conn, $creds);
-            $label = $conn['name'] !== '' ? $conn['name'] : ('#' . ($i + 1));
+            if ($conn['id'] !== '') {
+                // An edit of an existing connection. Even if all visible fields
+                // were cleared we keep it as an (invalid) edit so validation
+                // surfaces the problem - we never silently drop a row that
+                // carries an id (that path is deleteConnection's job).
+                $submittedById[$conn['id']] = $conn;
+            } elseif ($hasContent) {
+                $appended[] = $conn;                    // a brand-new connection
+            }
+            // (no id AND empty -> blank template card, ignored)
+        }
+
+        // Apply edits onto existing connections; preserve omitted ones.
+        $resultConns = [];
+        foreach ($creds['connections'] as $existing) {
+            $eid = (string) ($existing['id'] ?? '');
+            if ($eid !== '' && isset($submittedById[$eid])) {
+                $resultConns[] = $submittedById[$eid];
+            } else {
+                $resultConns[] = Credentials::mergeConnection(is_array($existing) ? $existing : []);
+            }
+        }
+        // Append new connections, assigning unique ids.
+        foreach ($appended as $conn) {
+            $conn['id'] = Credentials::generateId(
+                $conn['name'],
+                'c-',
+                array_column($resultConns, 'id')
+            );
+            $resultConns[] = $conn;
+        }
+
+        // Validate the whole resulting set (KEY connections' keyId is checked
+        // against the keys we're about to save).
+        foreach ($resultConns as $i => $conn) {
+            $res   = Credentials::validateConnection($conn, $creds);
+            $label = $conn['name'] !== '' ? $conn['name'] : ($conn['id'] !== '' ? $conn['id'] : ('#' . ($i + 1)));
             foreach ($res['errors'] as $e) {
                 $errors[] = 'Connection "' . $label . '": ' . $e;
             }
-            $newConns[] = $conn;
         }
-        $creds['connections'] = $newConns;
+
+        $creds['connections'] = $resultConns;
     }
 
     if (!empty($errors)) {

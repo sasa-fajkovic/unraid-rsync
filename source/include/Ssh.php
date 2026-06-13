@@ -14,8 +14,10 @@
  *   2. Materialise secrets to a tmpfs runtime dir with tight permissions
  *      immediately before use. credentials.json lives on FAT32 /boot (every
  *      file world-readable) and OpenSSH REFUSES a world-readable private key, so
- *      we copy the referenced key to /tmp/unraid.rsync/keys/<keyid> (dir 700,
- *      key 600) and write the connection's pinned remoteHostKey to a per-run
+ *      we copy the referenced key to /tmp/unraid.rsync/keys/<connId> (dir 700,
+ *      key 600 - keyed by CONNECTION id, not key id, so each connection has its
+ *      own copy and concurrent runs sharing a key never clean up each other's)
+ *      and write the connection's pinned remoteHostKey to a per-connection
  *      known_hosts file. cleanupRuntime() removes them again.
  *
  * AUTH METHODS
@@ -194,6 +196,13 @@ class Ssh
         $argv[] = 'StrictHostKeyChecking=' . $mode;
         $argv[] = '-o';
         $argv[] = 'UserKnownHostsFile=' . $knownHosts;
+        // Pin host-key verification to ONLY our per-connection known_hosts file.
+        // Without this, ssh would also consult the system-wide
+        // GlobalKnownHostsFile (/etc/ssh/ssh_known_hosts), so StrictHostKeyChecking=yes
+        // could succeed against a system entry we never pinned - breaking the UI
+        // promise that "yes" requires the connection's own pinned host key.
+        $argv[] = '-o';
+        $argv[] = 'GlobalKnownHostsFile=/dev/null';
         $argv[] = '-o';
         $argv[] = 'ConnectTimeout=' . $timeout;
         $argv[] = '-p';
@@ -252,7 +261,8 @@ class Ssh
      * Steps:
      *   - ensure the tmpfs runtime dirs exist with safe modes (700);
      *   - for KEY auth: write the referenced key's private material to
-     *     keys/<keyId> at mode 600 (OpenSSH refuses world-readable keys);
+     *     keys/<connId> at mode 600 (OpenSSH refuses world-readable keys; keyed
+     *     by connection id so concurrent runs sharing the key don't collide);
      *   - for PASSWORD auth: write the de-obfuscated password to a 600 passfile
      *     (only when sshpass is available);
      *   - write the connection's pinned remoteHostKey to a 600 known_hosts file

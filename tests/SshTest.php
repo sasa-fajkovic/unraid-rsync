@@ -113,6 +113,8 @@ final class SshTest extends TestCase
         $this->assertContains('BatchMode=yes', $argv);
         $this->assertContains('StrictHostKeyChecking=yes', $argv);
         $this->assertContains('UserKnownHostsFile=/tmp/kh', $argv);
+        // Host-key verification is pinned to our file only (system known_hosts disabled).
+        $this->assertContains('GlobalKnownHostsFile=/dev/null', $argv);
         $this->assertContains('ConnectTimeout=30', $argv);
         // -p <port>
         $p = array_search('-p', $argv, true);
@@ -151,6 +153,7 @@ final class SshTest extends TestCase
         $this->assertNotContains('-i', $argv);
         $this->assertContains('StrictHostKeyChecking=no', $argv);
         $this->assertContains('UserKnownHostsFile=/tmp/kh', $argv);
+        $this->assertContains('GlobalKnownHostsFile=/dev/null', $argv);
         $this->assertContains('ConnectTimeout=15', $argv);
         $p = array_search('-p', $argv, true);
         $this->assertSame('2200', $argv[$p + 1]);

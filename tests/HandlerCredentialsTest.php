@@ -180,6 +180,82 @@ final class HandlerCredentialsTest extends TestCase
         $this->assertSame('', $creds['connections'][0]['password']);
     }
 
+    public function testSaveConnectionsDoesNotDeleteOmittedConnectionByOmission(): void
+    {
+        // Two saved connections; the Connections form submits an edit of only
+        // ONE of them. The other must be PRESERVED (deletion is deleteConnection's
+        // job, not a side effect of a partial save).
+        $seed = Credentials::defaults();
+        $seed['connections'][] = Credentials::mergeConnection(['id' => 'c-1', 'name' => 'one', 'host' => 'h1', 'username' => 'u', 'authMethod' => 'PASSWORD']);
+        $seed['connections'][] = Credentials::mergeConnection(['id' => 'c-2', 'name' => 'two', 'host' => 'h2', 'username' => 'u', 'authMethod' => 'PASSWORD']);
+        $this->seedCreds($seed);
+
+        $_POST = [
+            'action' => 'saveCredentials', 'csrf_token' => 'test-token',
+            'connections_present' => '1',
+            'connections' => [0 => ['id' => 'c-1', 'name' => 'one-edited', 'host' => 'h1', 'username' => 'u', 'authMethod' => 'PASSWORD', 'password' => '']],
+        ];
+        [$body, $code] = $this->runCapture(fn() => ur_action_save_credentials());
+        $this->assertSame(200, $code, json_encode($body));
+
+        $creds = Credentials::load();
+        $byId = [];
+        foreach ($creds['connections'] as $c) {
+            $byId[$c['id']] = $c['name'];
+        }
+        $this->assertSame('one-edited', $byId['c-1'] ?? null); // edited
+        $this->assertSame('two', $byId['c-2'] ?? null);        // preserved, not deleted
+    }
+
+    public function testSaveConnectionsClearingFieldsDoesNotSilentlyDeleteSavedRow(): void
+    {
+        // Clearing a saved connection's visible fields must NOT silently drop it
+        // (a row carrying an id is an edit, not an empty template) - it surfaces
+        // a validation error instead, so the user cannot orphan jobs this way.
+        $seed = Credentials::defaults();
+        $seed['connections'][] = Credentials::mergeConnection(['id' => 'c-1', 'name' => 'keep', 'host' => 'h', 'username' => 'u', 'authMethod' => 'PASSWORD']);
+        $this->seedCreds($seed);
+
+        $_POST = [
+            'action' => 'saveCredentials', 'csrf_token' => 'test-token',
+            'connections_present' => '1',
+            'connections' => [0 => ['id' => 'c-1', 'name' => '', 'host' => '', 'username' => '', 'authMethod' => 'PASSWORD', 'password' => '']],
+        ];
+        [$body, $code] = $this->runCapture(fn() => ur_action_save_credentials());
+        $this->assertSame(422, $code, json_encode($body));
+        // The connection is still on disk, untouched.
+        $this->assertNotNull(Credentials::findConnection(Credentials::load(), 'c-1'));
+    }
+
+    public function testSaveKeysDoesNotDeleteOmittedKeyByOmission(): void
+    {
+        // The keys form submits only one of two keys; the other is preserved
+        // (deletion is deleteKey's job, which enforces the usedBy block).
+        $seed = Credentials::defaults();
+        $seed['keys'][] = ['id' => 'k-1', 'name' => 'one', 'publicKey' => 'P1', 'privateKey' => 'X1', 'fingerprint' => 'SHA256:1'];
+        $seed['keys'][] = ['id' => 'k-2', 'name' => 'two', 'publicKey' => 'P2', 'privateKey' => 'X2', 'fingerprint' => 'SHA256:2'];
+        $this->seedCreds($seed);
+
+        $_POST = [
+            'action' => 'saveCredentials', 'csrf_token' => 'test-token',
+            'keys_present' => '1',
+            'keys' => [0 => ['id' => 'k-1', 'name' => 'one-renamed']],
+        ];
+        [$body, $code] = $this->runCapture(fn() => ur_action_save_credentials());
+        $this->assertSame(200, $code, json_encode($body));
+
+        $creds = Credentials::load();
+        $byId = [];
+        foreach ($creds['keys'] as $k) {
+            $byId[$k['id']] = $k;
+        }
+        $this->assertSame('one-renamed', $byId['k-1']['name']);
+        $this->assertSame('X1', $byId['k-1']['privateKey']);   // material preserved
+        $this->assertArrayHasKey('k-2', $byId);                // NOT deleted by omission
+        $this->assertSame('two', $byId['k-2']['name']);
+        $this->assertSame('X2', $byId['k-2']['privateKey']);
+    }
+
     public function testSaveCredentialsRejectsInvalidConnection(): void
     {
         $_POST = [
