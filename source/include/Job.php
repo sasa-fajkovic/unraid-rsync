@@ -258,27 +258,34 @@ class Job
         // destination side.
         $destIsRemote = ($direction !== 'PULL'); // PUSH (and LOCAL, coerced to PUSH)
 
+        // The `remote` field is on another host only for SSH transport; under
+        // LOCAL transport it is a second path on this same box. Qualify labels
+        // accordingly so a LOCAL job's errors don't say "(remote)".
+        $remoteQualifier = ($transport === 'LOCAL') ? 'local' : 'remote';
+
         foreach ($pairs as $i => $pair) {
             $n      = $i + 1;
             $local  = trim((string) ($pair['local']  ?? ''));
             $remote = trim((string) ($pair['remote'] ?? ''));
 
+            $localRole  = $destIsRemote ? 'source' : 'destination';
+            $remoteRole = $destIsRemote ? 'destination' : 'source';
+
             // `local` field: always a local path on this box -> local guardrails.
             if ($local === '') {
-                $errors[] = "Pair #$n: local path is required.";
+                $errors[] = "Pair #$n: $localRole (local) path is required.";
             } else {
-                $localLabel = $destIsRemote ? "Pair #$n source (local)" : "Pair #$n destination (local)";
-                foreach (self::checkLocalPath($local, $localLabel) as $e) {
+                foreach (self::checkLocalPath($local, "Pair #$n $localRole (local)") as $e) {
                     $errors[] = $e;
                 }
             }
 
             // `remote` field: local guardrails under LOCAL transport, otherwise
             // a non-root remote sub-path.
+            $remoteLabel = "Pair #$n $remoteRole ($remoteQualifier)";
             if ($remote === '') {
-                $errors[] = "Pair #$n: remote path is required.";
+                $errors[] = "Pair #$n: $remoteRole ($remoteQualifier) path is required.";
             } else {
-                $remoteLabel = $destIsRemote ? "Pair #$n destination (remote)" : "Pair #$n source (remote)";
                 if ($transport === 'LOCAL') {
                     foreach (self::checkLocalPath($remote, $remoteLabel) as $e) {
                         $errors[] = $e;
@@ -344,7 +351,7 @@ class Job
         // Must live under /mnt (so /etc, /boot, / etc. that aren't in the exact
         // list above are still rejected for being outside the allowed root).
         if ($norm !== self::ALLOWED_LOCAL_ROOT && strpos($norm . '/', self::ALLOWED_LOCAL_ROOT . '/') !== 0) {
-            $errors[] = "$label '$path' must be under " . self::ALLOWED_LOCAL_ROOT . '/.';
+            $errors[] = "$label '$path' must be a sub-directory of " . self::ALLOWED_LOCAL_ROOT . " (for example /mnt/user/share/...).";
             return $errors;
         }
 

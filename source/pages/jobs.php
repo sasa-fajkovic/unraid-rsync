@@ -280,9 +280,15 @@ function ur_render_pair_row(string $prefix, $k, string $local, string $remote): 
 
 <!-- Hidden templates for JS cloning. Index placeholders are rewritten on add.
      Rendered with htmlspecialchars too; only the literal placeholders are
-     swapped client-side. -->
+     swapped client-side. The new-job template is seeded from the user's saved
+     Global Settings (global.defaultRsyncOptions) so a new job starts from the
+     configured defaults, not the built-in ones. -->
 <script type="text/html" id="ur-job-template">
-<?php ur_render_job_card(Config::defaultJob(), '__IDX__'); ?>
+<?php
+    $templateJob = Config::defaultJob();
+    $templateJob['rsyncOptions'] = $globalOpts; // seed from Global Settings
+    ur_render_job_card($templateJob, '__IDX__');
+?>
 </script>
 <script type="text/html" id="ur-pair-template">
 <?php ur_render_pair_row('jobs[__IDX__]', '__PIDX__', '', ''); ?>

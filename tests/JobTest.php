@@ -249,6 +249,32 @@ final class JobTest extends TestCase
         $this->assertFalse($res['valid']);
     }
 
+    public function testLocalTransportErrorLabelsAreNotRemote(): void
+    {
+        // A LOCAL job whose second path is invalid should NOT describe it as
+        // "(remote)" - both paths are on this box.
+        $job = Job::normalize([
+            'name'      => 'local',
+            'schedule'  => '0 3 * * *',
+            'transport' => 'LOCAL',
+            'pairs'     => [['local' => '/mnt/user/a/', 'remote' => '/boot']],
+        ]);
+        $res = Job::validate($job);
+        $this->assertFalse($res['valid']);
+        $joined = implode(' | ', $res['errors']);
+        $this->assertStringNotContainsString('(remote)', $joined);
+        $this->assertStringContainsString('(local)', $joined);
+    }
+
+    public function testLocalPathOutsideMntMessageIsClean(): void
+    {
+        // The "outside /mnt" message must not read like a "/." typo.
+        $errs = Job::checkLocalPath('/srv/data/x/', 'Test path');
+        $this->assertNotEmpty($errs);
+        $this->assertStringNotContainsString('/mnt/.', $errs[0]);
+        $this->assertStringContainsString('sub-directory of /mnt', $errs[0]);
+    }
+
     public function testLocalTransportCoercesDirectionToPush(): void
     {
         // Direction only applies to SSH; a LOCAL job must persist PUSH.
