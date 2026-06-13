@@ -557,8 +557,14 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
         .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); })
         .then(function (res) {
           if (res.ok && res.body && res.body.ok) {
-            show(result, true, res.body.message || 'Saved.');
-            setTimeout(function () { window.location.reload(); }, 600);
+            var msg = res.body.message || 'Saved.';
+            if (res.body.warnings && res.body.warnings.length) {
+              msg += ' (' + res.body.warnings.join('; ') + ')';
+            }
+            // A warning (e.g. sshpass missing for password auth) is shown but
+            // does not block the save; render it as a warning, not an error.
+            show(result, !(res.body.warnings && res.body.warnings.length), msg);
+            setTimeout(function () { window.location.reload(); }, res.body.warnings && res.body.warnings.length ? 2500 : 600);
           } else {
             show(result, false, errText(res, 'Save failed.'));
           }

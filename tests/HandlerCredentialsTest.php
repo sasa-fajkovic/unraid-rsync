@@ -372,6 +372,48 @@ final class HandlerCredentialsTest extends TestCase
         $this->assertSame([], $body['disabledJobs']);
     }
 
+    public function testSaveCredentialsWarnsWhenPasswordConnAndSshpassMissing(): void
+    {
+        // Saving a PASSWORD connection while sshpass is unavailable still
+        // succeeds, but the response carries a clear warning so the user knows
+        // password auth won't work yet.
+        Ssh::$sshpassPathOverride = ''; // simulate "sshpass not installed"
+        try {
+            $_POST = [
+                'action' => 'saveCredentials', 'csrf_token' => 'test-token',
+                'connections_present' => '1',
+                'connections' => [0 => ['id' => '', 'name' => 'pw', 'host' => 'h.example', 'username' => 'u', 'authMethod' => 'PASSWORD', 'password' => 'secret']],
+            ];
+            [$body, $code] = $this->runCapture(fn() => ur_action_save_credentials());
+            $this->assertSame(200, $code, json_encode($body));
+            $this->assertTrue($body['ok']);
+            $this->assertNotEmpty($body['warnings']);
+            $this->assertNotEmpty(array_filter($body['warnings'], fn($w) => stripos($w, 'sshpass') !== false));
+        } finally {
+            Ssh::$sshpassPathOverride = null;
+        }
+    }
+
+    public function testSaveCredentialsKeyOnlyHasNoSshpassWarning(): void
+    {
+        Ssh::$sshpassPathOverride = '';
+        try {
+            $seed = Credentials::defaults();
+            $seed['keys'][] = ['id' => 'k-1', 'name' => 'kk', 'publicKey' => 'p'];
+            $this->seedCreds($seed);
+            $_POST = [
+                'action' => 'saveCredentials', 'csrf_token' => 'test-token',
+                'connections_present' => '1',
+                'connections' => [0 => ['id' => '', 'name' => 'web', 'host' => 'h', 'username' => 'u', 'authMethod' => 'KEY', 'keyId' => 'k-1']],
+            ];
+            [$body, $code] = $this->runCapture(fn() => ur_action_save_credentials());
+            $this->assertSame(200, $code, json_encode($body));
+            $this->assertSame([], $body['warnings']); // KEY auth -> no sshpass warning
+        } finally {
+            Ssh::$sshpassPathOverride = null;
+        }
+    }
+
     // --- generateKey input validation (no ssh-keygen needed) ---------------
 
     public function testGenerateKeyRejectsUnsupportedTypeWith422(): void

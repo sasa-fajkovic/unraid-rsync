@@ -264,6 +264,34 @@ final class SshTest extends TestCase
         $this->assertFileDoesNotExist($b['keyPath']);
     }
 
+    public function testMaterializeRefusesSymlinkedRuntimeDir(): void
+    {
+        if (DIRECTORY_SEPARATOR !== '/') {
+            $this->markTestSkipped('POSIX-only symlink test');
+        }
+        // Pre-create the keys dir as a SYMLINK (the /tmp symlink-attack scenario).
+        // ensureRuntimeDirs() must refuse to use it rather than follow it.
+        mkdir($this->rtBase, 0700, true);
+        $target = $this->rtBase . '/evil-target';
+        mkdir($target, 0700, true);
+        symlink($target, $this->rtBase . '/keys');
+
+        $creds = Credentials::defaults();
+        $creds['keys'][] = ['id' => 'k-1', 'name' => 'k', 'privateKey' => "KEY\n", 'publicKey' => 'p', 'fingerprint' => 'f'];
+        $creds['connections'][] = $this->keyConn();
+
+        $threw = false;
+        try {
+            Ssh::materialize($creds, 'c-key');
+        } catch (RuntimeException $e) {
+            $threw = true;
+            $this->assertStringContainsString('symlink', strtolower($e->getMessage()));
+        }
+        $this->assertTrue($threw, 'materialize must refuse a symlinked runtime dir');
+        // The symlink target was not written into.
+        $this->assertSame([], glob($target . '/*') ?: []);
+    }
+
     public function testMaterializeKeyMissingKeyFails(): void
     {
         $creds = Credentials::defaults();

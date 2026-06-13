@@ -520,9 +520,25 @@ function ur_action_save_credentials(): void
         return;
     }
 
+    // If any saved connection uses PASSWORD auth but sshpass isn't available,
+    // warn now (not just in the UI / testConnection) so the user knows password
+    // auth won't work until sshpass is installed - the save still succeeds.
+    $warnings = [];
+    $hasPasswordConn = false;
+    foreach ($creds['connections'] as $c) {
+        if (($c['authMethod'] ?? '') === 'PASSWORD') {
+            $hasPasswordConn = true;
+            break;
+        }
+    }
+    if ($hasPasswordConn && !Ssh::sshpassAvailable()) {
+        $warnings[] = Ssh::sshpassMissingMessage();
+    }
+
     sendResponse([
         'ok'          => true,
         'message'     => 'Credentials saved.',
+        'warnings'    => $warnings,
         'keys'        => count($creds['keys']),
         'connections' => count($creds['connections']),
     ], 200);

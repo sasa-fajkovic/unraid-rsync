@@ -388,7 +388,16 @@ class Ssh
         }
     }
 
-    /** Ensure the tmpfs runtime dirs exist with restrictive (700) modes. */
+    /**
+     * Ensure the tmpfs runtime dirs exist with restrictive (700) modes.
+     *
+     * The runtime base lives under world-writable /tmp, so we defend against a
+     * symlink attack: an unprivileged local user could pre-create one of these
+     * paths as a SYMLINK (e.g. /tmp/unraid.rsync/keys -> /etc) so that a later
+     * file_put_contents() of a secret would follow it and clobber an arbitrary
+     * file as the (root) webGui user. We therefore REFUSE any runtime path that
+     * already exists as a symlink or as a non-directory, before writing anything.
+     */
     private static function ensureRuntimeDirs(): void
     {
         foreach ([
@@ -397,11 +406,45 @@ class Ssh
             rtrim(static::$runtimeBase, '/') . '/known_hosts',
             rtrim(static::$runtimeBase, '/') . '/pass',
         ] as $dir) {
+            // Reject a symlink at this path outright (do NOT follow it).
+            if (is_link($dir)) {
+                throw new RuntimeException("Refusing to use a symlinked runtime dir: $dir");
+            }
+            if (file_exists($dir) && !is_dir($dir)) {
+                throw new RuntimeException("Runtime path exists but is not a directory: $dir");
+            }
             if (!is_dir($dir) && !@mkdir($dir, 0700, true) && !is_dir($dir)) {
                 throw new RuntimeException("Unable to create runtime dir: $dir");
             }
+            // Re-check after creation: a race could have swapped it for a symlink.
+            if (is_link($dir)) {
+                throw new RuntimeException("Refusing to use a symlinked runtime dir: $dir");
+            }
             @chmod($dir, 0700);
         }
+    }
+
+    /**
+     * Write a secret to a tmpfs file at mode 600, refusing to follow a symlink.
+     * The runtime base is under world-writable /tmp, so an attacker could plant
+     * a symlink at the target file path to redirect the write; we reject any
+     * pre-existing symlink (and unlink a stale regular file first so the new
+     * file is created fresh with our perms).
+     */
+    private static function safeWriteSecret(string $path, string $body, string $label): void
+    {
+        if (is_link($path)) {
+            throw new RuntimeException("Refusing to write $label to a symlink: $path");
+        }
+        if (file_exists($path)) {
+            // A stale per-run file (token collision is astronomically unlikely,
+            // but be tidy) - remove it so the write starts from a clean inode.
+            @unlink($path);
+        }
+        if (@file_put_contents($path, $body) === false) {
+            throw new RuntimeException("Unable to materialise $label: $path");
+        }
+        @chmod($path, 0600);
     }
 
     /** Write a private key to tmpfs at mode 600 (OpenSSH requires it). */
@@ -409,11 +452,7 @@ class Ssh
     {
         // Normalise to exactly one trailing newline - OpenSSH is picky about a
         // missing final newline on some key formats.
-        $body = rtrim($privateKey, "\r\n") . "\n";
-        if (@file_put_contents($path, $body) === false) {
-            throw new RuntimeException("Unable to materialise private key: $path");
-        }
-        @chmod($path, 0600);
+        self::safeWriteSecret($path, rtrim($privateKey, "\r\n") . "\n", 'private key');
     }
 
     /** Write a password to a tmpfs file at mode 600 for `sshpass -f`. */
@@ -422,10 +461,7 @@ class Ssh
         $path = static::passFilePath($token);
         // sshpass -f reads the first line as the password; no trailing newline
         // needed, but a single one is tolerated. Write exactly the password.
-        if (@file_put_contents($path, $password) === false) {
-            throw new RuntimeException("Unable to materialise password file: $path");
-        }
-        @chmod($path, 0600);
+        self::safeWriteSecret($path, $password, 'password file');
         return $path;
     }
 
@@ -448,10 +484,7 @@ class Ssh
         if ($body !== '') {
             $body .= "\n";
         }
-        if (@file_put_contents($path, $body) === false) {
-            throw new RuntimeException("Unable to materialise known_hosts: $path");
-        }
-        @chmod($path, 0600);
+        self::safeWriteSecret($path, $body, 'known_hosts');
     }
 
     // --- test connection ----------------------------------------------------
