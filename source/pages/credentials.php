@@ -230,6 +230,17 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
    attribute on the mandatory inputs. text-decoration:none drops the dotted
    <abbr> underline so it reads as a clean asterisk. */
 .ur-required { color: var(--red-800, #b71c1c); font-weight: bold; text-decoration: none; cursor: help; }
+
+/* "Discover host key" progress: a thin determinate bar that fills toward the
+   30s server cap plus a live countdown label, so the user sees it working and
+   how long it can take. Hidden until a discovery is in flight (set inline by JS).
+   Colours fall back to sane defaults when the webGui theme vars are absent. */
+.ur-discover-progress { display: none; align-items: center; gap: 8px; margin-top: 6px; font-size: 0.85em; }
+.ur-discover-bar { flex: 0 0 160px; height: 8px; border-radius: 4px; overflow: hidden;
+  background: var(--color-tablebody, #e0e0e0); }
+.ur-discover-bar-fill { width: 0%; height: 100%; border-radius: 4px;
+  background: var(--blue-500, #2196f3); transition: width 0.1s linear; }
+.ur-discover-label { color: var(--color-text-secondary, #777); white-space: nowrap; }
 </style>
 <div class="title">
   <span class="left">
@@ -442,21 +453,43 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
    *                a clear "server returned a non-JSON response (HTTP <status>)"
    *                message instead of silently doing nothing.
    * This never rejects: a genuine network failure resolves with status 0 so the
-   * UI is ALWAYS updated and an action can never leave a stuck "Generating…". */
-  function postForm(fields) {
+   * UI is ALWAYS updated and an action can never leave a stuck "Generating…".
+   *
+   * opts.timeoutMs (optional): abort the fetch after this many ms via an
+   * AbortController, so the browser never waits forever if the backend stalls.
+   * An abort resolves with { aborted: true, status: 0 } so the caller can show a
+   * distinct "timed out" message rather than a generic network error. */
+  function postForm(fields, opts) {
+    opts = opts || {};
     var fd = new FormData();
     fd.append('csrf_token', CSRF);
     Object.keys(fields).forEach(function (k) { fd.append(k, fields[k]); });
-    return fetch(HANDLER, { method: 'POST', body: fd, credentials: 'same-origin' })
+
+    var init = { method: 'POST', body: fd, credentials: 'same-origin' };
+    var controller = null, timer = null;
+    if (opts.timeoutMs && typeof AbortController !== 'undefined') {
+      controller = new AbortController();
+      init.signal = controller.signal;
+      timer = setTimeout(function () { controller.abort(); }, opts.timeoutMs);
+    }
+    var clearTimer = function () { if (timer) { clearTimeout(timer); timer = null; } };
+
+    return fetch(HANDLER, init)
       .then(function (r) {
         return r.text().then(function (text) {
+          clearTimer();
           var body = null, parseError = false;
           try { body = JSON.parse(text); } catch (e) { parseError = (text !== ''); }
           return { ok: r.ok, status: r.status, body: body, parseError: parseError };
         });
       })
-      .catch(function () {
-        /* Could not reach the server at all (offline / connection reset). */
+      .catch(function (e) {
+        clearTimer();
+        /* An AbortError is our own client-side timeout; everything else is a
+           genuine "could not reach the server" (offline / connection reset). */
+        if (e && e.name === 'AbortError') {
+          return { ok: false, status: 0, body: null, parseError: false, aborted: true };
+        }
         return { ok: false, status: 0, body: null, parseError: false, networkError: true };
       });
   }
@@ -470,6 +503,9 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
   /* Build a clear failure message from a postForm result, ALWAYS including the
    * HTTP status (or a network/parse hint), so a failure is never silent. */
   function errText(res, fallback) {
+    if (res.aborted) {
+      return (fallback || 'Request failed') + ': timed out (no response in time).';
+    }
     if (res.networkError || res.status === 0) {
       return (fallback || 'Request failed') + ': could not reach the server (network error).';
     }
@@ -640,23 +676,76 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
     Array.prototype.forEach.call(sels, syncAuthRequired);
   }
 
-  /* ---- discover host key (fills the textarea) ---- */
+  /* ---- discover host key (fills the textarea) ----
+   * Time-bounded to the server's hard cap (30s): the button is disabled and a
+   * progress bar + countdown advance toward 30s so the user knows it is working
+   * and roughly how long it can take. The fetch is itself aborted client-side at
+   * 32s (just above the server cap) via AbortController, so a stalled backend can
+   * never leave the UI spinning forever; a timeout/error shows a clear inline
+   * message and re-enables the button. */
+  var DISCOVER_MAX_SECONDS = 30;          // mirrors KeyTools::DISCOVER_TIMEOUT_MAX
+  var DISCOVER_CLIENT_ABORT_MS = 32000;   // ~2s above the server cap
+
   function discoverHostKey(btn) {
     var idb = btn.getAttribute('data-idb');
     var host = (document.getElementById(idb + '_host').value || '').trim();
     var port = (document.getElementById(idb + '_port').value || '22').trim();
     var ta = document.getElementById(idb + '_hostkey');
     if (!host) { window.alert('Enter a host first.'); return; }
-    var old = btn.textContent; btn.textContent = 'Discovering…'; btn.disabled = true;
-    postForm({ action: 'discoverHostKey', host: host, port: port }).then(function (res) {
-      btn.textContent = old; btn.disabled = false;
+
+    /* Locate (or build) the progress UI that lives next to this button. */
+    var wrap = btn.parentNode;
+    var prog = wrap ? wrap.querySelector('.ur-discover-progress') : null;
+    if (!prog && wrap) {
+      prog = document.createElement('div');
+      prog.className = 'ur-discover-progress';
+      prog.innerHTML =
+        '<div class="ur-discover-bar"><div class="ur-discover-bar-fill"></div></div>'
+        + '<span class="ur-discover-label"></span>';
+      wrap.appendChild(prog);
+    }
+    var fill  = prog ? prog.querySelector('.ur-discover-bar-fill') : null;
+    var label = prog ? prog.querySelector('.ur-discover-label') : null;
+
+    var old = btn.textContent;
+    btn.disabled = true; btn.textContent = 'Discovering…';
+    if (prog) { prog.style.display = 'flex'; }
+
+    /* A 100ms ticker advances the bar/countdown toward the 30s cap. It does NOT
+       cancel the request (the AbortController does that at 32s); it only conveys
+       progress, so it caps the fill at 100% and keeps showing the max. */
+    var started = Date.now();
+    var ticker = setInterval(function () {
+      var elapsed = (Date.now() - started) / 1000;
+      var pct = Math.min(100, (elapsed / DISCOVER_MAX_SECONDS) * 100);
+      var remaining = Math.max(0, Math.ceil(DISCOVER_MAX_SECONDS - elapsed));
+      if (fill)  { fill.style.width = pct.toFixed(1) + '%'; }
+      if (label) {
+        label.textContent = remaining > 0
+          ? ('Discovering host key… (up to ' + remaining + 's)')
+          : 'Finishing up…';
+      }
+    }, 100);
+
+    function done() {
+      clearInterval(ticker);
+      btn.disabled = false; btn.textContent = old;
+      if (prog) { prog.style.display = 'none'; }
+      if (fill) { fill.style.width = '0%'; }
+    }
+
+    postForm(
+      { action: 'discoverHostKey', host: host, port: port, timeout: DISCOVER_MAX_SECONDS },
+      { timeoutMs: DISCOVER_CLIENT_ABORT_MS }
+    ).then(function (res) {
+      done();
       if (res.ok && res.body && res.body.ok) {
         if (ta) { ta.value = res.body.hostKey || ''; }
       } else {
         window.alert(errText(res, 'Host key discovery failed.'));
       }
     }).catch(function (e) {
-      btn.textContent = old; btn.disabled = false;
+      done();
       window.alert('Unexpected error: ' + (e && e.message ? e.message : e));
     });
   }

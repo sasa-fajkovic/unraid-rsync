@@ -25,6 +25,22 @@ class KeyTools
     /** Supported key types for generation. */
     const KEY_TYPES = ['ed25519', 'rsa'];
 
+    /**
+     * Hard upper bound (seconds) on host-key discovery. ssh-keyscan's own -T
+     * per-host wait is clamped to this, AND the PHP side enforces a wall-clock
+     * deadline of this many seconds so a stalled/hanging child can never make
+     * the request hang past it (the child is proc_terminate'd, then SIGKILL'd).
+     * Overridable for tests via the UR_KEYSCAN_TIMEOUT_MAX constant (a small
+     * value lets a test assert the wall-clock kill fires without itself hanging).
+     */
+    const DISCOVER_TIMEOUT_MAX = 30;
+
+    /** A small grace added to the ssh-keyscan -T value to get the PHP wall-clock
+     * deadline, so we let ssh-keyscan time out and report cleanly on its own
+     * before we forcibly kill it; still clamped so the total never exceeds the
+     * hard cap meaningfully. */
+    const DISCOVER_TIMEOUT_GRACE = 2;
+
     // --- generation ---------------------------------------------------------
 
     /**
@@ -233,14 +249,39 @@ class KeyTools
     // --- host-key discovery -------------------------------------------------
 
     /**
+     * The hard upper bound (seconds) on host-key discovery, read from the
+     * UR_KEYSCAN_TIMEOUT_MAX override when defined (so a test can shrink it to a
+     * sub-second value), else DISCOVER_TIMEOUT_MAX. Clamped to >= 1.
+     */
+    public static function discoverTimeoutMax(): int
+    {
+        $max = (defined('UR_KEYSCAN_TIMEOUT_MAX') && (int) UR_KEYSCAN_TIMEOUT_MAX > 0)
+            ? (int) UR_KEYSCAN_TIMEOUT_MAX
+            : self::DISCOVER_TIMEOUT_MAX;
+        return max(1, $max);
+    }
+
+    /**
      * Discover a host's public key via
      *   ssh-keyscan -p <port> -T <timeout> <host>
-     * Returns { ok, error?, hostKey? }. The hostKey is the raw ssh-keyscan
-     * output (one or more "host keytype base64" lines), ready to pin into a
-     * connection's remoteHostKey and materialise to known_hosts. Comment lines
-     * (starting with '#') are stripped.
+     * Returns { ok, error?, timedOut?, hostKey? }. The hostKey is the raw
+     * ssh-keyscan output (one or more "host keytype base64" lines), ready to pin
+     * into a connection's remoteHostKey and materialise to known_hosts. Comment
+     * lines (starting with '#') are stripped.
      *
-     * @return array{ok:bool,error?:string,hostKey?:string}
+     * TIME-BOUNDED (max DISCOVER_TIMEOUT_MAX seconds, 30 by default):
+     *   - ssh-keyscan's -T is clamped to min($timeout, max) so it bounds its own
+     *     per-host wait; but we DO NOT rely on that alone.
+     *   - the PHP side enforces a wall-clock deadline (the -T value + a small
+     *     grace, still clamped at the hard cap): if the child is still running at
+     *     the deadline it is proc_terminate'd, then SIGKILL'd. The request can
+     *     therefore never hang past ~30s even if ssh-keyscan ignores -T or the
+     *     network stalls mid-read.
+     *
+     * On a wall-clock timeout the result carries timedOut=true and a clear
+     * message; the handler maps that to a 504.
+     *
+     * @return array{ok:bool,error?:string,timedOut?:bool,hostKey?:string}
      */
     public static function discoverHostKey(string $host, int $port = 22, int $timeout = 10): array
     {
@@ -260,9 +301,29 @@ class KeyTools
             $timeout = 10;
         }
 
-        [$code, $stdout, $stderr] = static::runKeyscan([
-            'ssh-keyscan', '-p', (string) $port, '-T', (string) $timeout, '--', $host,
-        ]);
+        // Clamp the ssh-keyscan -T per-host wait to the hard cap, and derive the
+        // PHP wall-clock deadline from it. A small grace lets ssh-keyscan report
+        // its own timeout cleanly before we forcibly kill it, but the grace can
+        // never exceed the cap (so an overridden tiny cap stays tiny in tests),
+        // and the deadline never exceeds the hard cap meaningfully.
+        $max          = static::discoverTimeoutMax();
+        $keyscanT     = max(1, min($timeout, $max));
+        $grace        = (float) min(self::DISCOVER_TIMEOUT_GRACE, $max);
+        $wallDeadline = (float) min($max + $grace, $keyscanT + $grace);
+
+        [$code, $stdout, $stderr, $timedOut] = static::runKeyscan(
+            ['ssh-keyscan', '-p', (string) $port, '-T', (string) $keyscanT, '--', $host],
+            $wallDeadline
+        );
+
+        if ($timedOut) {
+            return [
+                'ok'       => false,
+                'timedOut' => true,
+                'error'    => 'Host key discovery timed out after ' . $max
+                    . 's — check the host/port is reachable.',
+            ];
+        }
 
         $hostKey = self::filterKeyscanOutput(is_string($stdout) ? $stdout : '');
         if ($hostKey === '') {
@@ -377,11 +438,14 @@ class KeyTools
 
     /**
      * Run ssh-keygen with the given argv ARRAY (no shell). Returns
-     * [exitCode, stdout, stderr]. Overridable in tests so the parsing/flow is
-     * exercised against canned ssh-keygen output without ssh-keygen installed.
+     * [exitCode, stdout, stderr, timedOut]. Overridable in tests so the
+     * parsing/flow is exercised against canned ssh-keygen output without
+     * ssh-keygen installed. ssh-keygen runs are not time-bounded (they are
+     * local, fast, and already deadlock-safe via /dev/null stdin); the 4th
+     * element is always false here.
      *
      * @param array<int,string> $argv
-     * @return array{0:int,1:string,2:string}
+     * @return array{0:int,1:string,2:string,3:bool}
      */
     protected static function runKeygen(array $argv): array
     {
@@ -389,15 +453,18 @@ class KeyTools
     }
 
     /**
-     * Run ssh-keyscan with the given argv ARRAY (no shell). Same contract /
-     * override seam as runKeygen.
+     * Run ssh-keyscan with the given argv ARRAY (no shell). Same override seam
+     * as runKeygen, but TIME-BOUNDED: $deadlineSec is the wall-clock budget;
+     * when the child is still running at the deadline runArgv terminates it
+     * (proc_terminate, then SIGKILL) and returns timedOut=true (the 4th tuple
+     * element). A null deadline means unbounded.
      *
      * @param array<int,string> $argv
-     * @return array{0:int,1:string,2:string}
+     * @return array{0:int,1:string,2:string,3:bool} [code, stdout, stderr, timedOut]
      */
-    protected static function runKeyscan(array $argv): array
+    protected static function runKeyscan(array $argv, ?float $deadlineSec = null): array
     {
-        return self::runArgv($argv);
+        return self::runArgv($argv, $deadlineSec);
     }
 
     /**
@@ -412,10 +479,21 @@ class KeyTools
      * hangs forever (and vice versa) - the "stuck on Generating…" symptom. The
      * concurrent drain bounds memory and never blocks on the wrong pipe.
      *
+     * TIME-BOUNDED (optional): when $deadlineSec is non-null the drain loop also
+     * enforces an overall wall-clock deadline. ssh-keyscan can hang well past its
+     * own -T (DNS stalls, a half-open TCP connection that never sends a banner),
+     * which would otherwise hold the whole request open; the deadline guarantees
+     * the request returns. On expiry the child is proc_terminate'd (SIGTERM) and,
+     * if it has not exited within a short grace, SIGKILL'd, then reaped - so no
+     * zombie is left and the pipes are always closed. The partial output drained
+     * so far is returned with timedOut=true. A null deadline is unbounded
+     * (ssh-keygen's local, fast runs).
+     *
      * @param array<int,string> $argv
-     * @return array{0:int,1:string,2:string}
+     * @param float|null         $deadlineSec wall-clock budget, or null = unbounded
+     * @return array{0:int,1:string,2:string,3:bool} [code, stdout, stderr, timedOut]
      */
-    private static function runArgv(array $argv): array
+    private static function runArgv(array $argv, ?float $deadlineSec = null): array
     {
         $descriptors = [
             0 => ['file', '/dev/null', 'r'],
@@ -425,24 +503,44 @@ class KeyTools
         $pipes = [];
         $proc = @proc_open($argv, $descriptors, $pipes);
         if (!is_resource($proc)) {
-            return [127, '', 'Failed to start ' . ($argv[0] ?? 'command') . '.'];
+            return [127, '', 'Failed to start ' . ($argv[0] ?? 'command') . '.', false];
         }
+
+        $endAt = ($deadlineSec !== null) ? (microtime(true) + max(0.0, $deadlineSec)) : null;
 
         // Drain stdout (fd 1) and stderr (fd 2) concurrently, non-blocking.
         stream_set_blocking($pipes[1], false);
         stream_set_blocking($pipes[2], false);
-        $buf  = [1 => '', 2 => ''];
-        $open = [1 => $pipes[1], 2 => $pipes[2]];
+        $buf      = [1 => '', 2 => ''];
+        $open     = [1 => $pipes[1], 2 => $pipes[2]];
+        $timedOut = false;
         while (!empty($open)) {
+            // Bound each select wait so the deadline is honoured even when the
+            // child is silent (produces no output, no EOF) - the case a fixed
+            // 1s tick alone would still catch, but computing the remaining budget
+            // makes us return promptly at the deadline rather than up to 1s late.
+            $waitSec = 1;
+            if ($endAt !== null) {
+                $remaining = $endAt - microtime(true);
+                if ($remaining <= 0) {
+                    $timedOut = true;
+                    break;
+                }
+                $waitSec = ($remaining < 1) ? $remaining : 1;
+            }
+
             $read   = array_values($open);
             $write  = null;
             $except = null;
-            $n = @stream_select($read, $write, $except, 1);
+            // stream_select takes whole seconds + microseconds; split $waitSec.
+            $tvSec  = (int) $waitSec;
+            $tvUsec = (int) (($waitSec - $tvSec) * 1000000);
+            $n = @stream_select($read, $write, $except, $tvSec, $tvUsec);
             if ($n === false) {
                 break; // interrupted/error - stop draining and reap below
             }
             if ($n === 0) {
-                continue; // timeout tick; keep waiting for output / EOF
+                continue; // timeout tick; re-check the deadline at loop top
             }
             foreach ($open as $fd => $stream) {
                 if (!in_array($stream, $read, true)) {
@@ -459,14 +557,63 @@ class KeyTools
                 $buf[$fd] .= $chunk;
             }
         }
-        // Close any pipe stream_select left open (e.g. on a select error).
+        // Close any pipe stream_select left open (e.g. on a select error or a
+        // timeout that broke out with pipes still open).
         foreach ($open as $stream) {
             if (is_resource($stream)) {
                 fclose($stream);
             }
         }
 
+        if ($timedOut) {
+            // The child is (probably) still running and would otherwise hold the
+            // request open. Terminate it, escalate to SIGKILL if it lingers, then
+            // reap so no zombie remains.
+            self::terminateProc($proc);
+            proc_close($proc);
+            return [124, $buf[1], $buf[2], true]; // 124 == GNU timeout's convention
+        }
+
         $code = proc_close($proc);
-        return [(int) $code, $buf[1], $buf[2]];
+        return [(int) $code, $buf[1], $buf[2], false];
+    }
+
+    /**
+     * Terminate a still-running child from proc_open: SIGTERM first, and if it
+     * does not exit within a short grace, SIGKILL. Best-effort and bounded - it
+     * polls proc_get_status for up to ~1s before the hard kill so a well-behaved
+     * child that exits on SIGTERM is reaped cleanly, while a wedged one is forced
+     * down. Leaves the actual reaping (proc_close) to the caller.
+     *
+     * @param resource $proc
+     */
+    private static function terminateProc($proc): void
+    {
+        if (!is_resource($proc)) {
+            return;
+        }
+        $status = proc_get_status($proc);
+        if (empty($status['running'])) {
+            return; // already exited
+        }
+
+        // SIGTERM (proc_terminate's default) - polite stop.
+        @proc_terminate($proc, defined('SIGTERM') ? SIGTERM : 15);
+
+        // Give it up to ~1s to exit, polling in short slices.
+        $killBy = microtime(true) + 1.0;
+        while (microtime(true) < $killBy) {
+            $status = proc_get_status($proc);
+            if (empty($status['running'])) {
+                return;
+            }
+            usleep(50000); // 50ms
+        }
+
+        // Still alive - escalate to SIGKILL.
+        $status = proc_get_status($proc);
+        if (!empty($status['running'])) {
+            @proc_terminate($proc, defined('SIGKILL') ? SIGKILL : 9);
+        }
     }
 }

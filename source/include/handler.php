@@ -950,8 +950,27 @@ function ur_action_delete_connection(): void
 }
 
 /**
+ * The KeyTools class the handler delegates host-key discovery to. Normally
+ * KeyTools; overridable via the UR_KEYTOOLS_CLASS constant so a test can inject
+ * a double that returns a programmed result (e.g. a wall-clock timeout) without
+ * a live ssh-keyscan binary. The override must be a KeyTools subclass.
+ */
+function ur_keytools_class(): string
+{
+    if (defined('UR_KEYTOOLS_CLASS') && is_string(UR_KEYTOOLS_CLASS) && is_subclass_of(UR_KEYTOOLS_CLASS, KeyTools::class)) {
+        return UR_KEYTOOLS_CLASS;
+    }
+    return KeyTools::class;
+}
+
+/**
  * POST discoverHostKey: ssh-keyscan a host:port and return the host key text
  * for the connection form to pin. Does NOT persist anything.
+ *
+ * Time-bounded: KeyTools::discoverHostKey caps the work at ~30s (ssh-keyscan -T
+ * plus a PHP wall-clock deadline that kills a hanging child). A wall-clock
+ * timeout is surfaced here as a 504 with a clear message; a "host unreachable /
+ * no key" validation failure stays a 422. The body is always clean JSON.
  */
 function ur_action_discover_host_key(): void
 {
@@ -959,9 +978,14 @@ function ur_action_discover_host_key(): void
     $port    = isset($_POST['port']) ? (int) $_POST['port'] : 22;
     $timeout = isset($_POST['timeout']) ? (int) $_POST['timeout'] : 10;
 
-    $res = KeyTools::discoverHostKey($host, $port, $timeout);
+    $cls = ur_keytools_class();
+    $res = $cls::discoverHostKey($host, $port, $timeout);
     if (empty($res['ok'])) {
-        sendError((string) ($res['error'] ?? 'Host key discovery failed.'), 422);
+        // A wall-clock timeout is distinct from a "host unreachable / no key"
+        // validation failure: surface it as a 504 (Gateway Timeout) so the UI
+        // can show the elapsed-time message. The body is still clean JSON.
+        $code = !empty($res['timedOut']) ? 504 : 422;
+        sendError((string) ($res['error'] ?? 'Host key discovery failed.'), $code);
         return;
     }
     sendResponse([
