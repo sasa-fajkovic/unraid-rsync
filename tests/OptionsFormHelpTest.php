@@ -312,27 +312,44 @@ final class OptionsFormHelpTest extends TestCase
      * (/usr/local/emhttp/plugins/unraid.rsync/...), which don't exist under the
      * test harness — and the include/ classes plus the shared partial are already
      * loaded by the bootstrap chain. We strip only those install-path requires
-     * (keeping the rest of the body verbatim) and eval the remainder, so the test
-     * exercises the genuine page render ORDER (the thing the bug is about) without
-     * a live webGui or the install directory.
+     * (keeping the rest of the body verbatim) and include the remainder, so the
+     * test exercises the genuine page render ORDER (the thing the bug is about)
+     * without a live webGui or the install directory.
+     *
+     * The transformed source is written to a temp .php file and include()d rather
+     * than eval()'d: include keeps PHP parsing behaviour identical to a real file,
+     * gives readable file/line numbers if the body ever errors, and sidesteps any
+     * null-on-failure surprises from preg_replace().
      */
     private function renderPageBody(string $pageFile): string
     {
         require_once __DIR__ . '/../source/pages/_options_form.php';
 
         $src = file_get_contents($pageFile);
-        $this->assertNotFalse($src, "could not read page body: $pageFile");
-        // Drop the leading <?php so eval()'d code starts in PHP mode, and remove
-        // the install-path require_once lines (already satisfied by bootstrap).
-        $src = preg_replace('/^<\?php\b/', '', $src, 1);
+        $this->assertIsString($src, "could not read page body: $pageFile");
+        // Remove the install-path require_once lines (already satisfied by
+        // bootstrap). Keep the leading <?php so the temp file parses as a normal
+        // PHP file. assertIsString guards against preg_replace() returning null.
         $src = preg_replace(
             "#^\\s*require_once\\s+'/usr/local/emhttp/plugins/unraid\\.rsync/[^']+';\\s*$#m",
             '',
             $src
         );
+        $this->assertIsString($src, 'preg_replace() failed transforming page body.');
 
-        ob_start();
-        eval($src);
-        return (string) ob_get_clean();
+        // tempnam() makes a unique base file; give the include a .php name and
+        // clean up BOTH the base and the .php variant in the finally.
+        $base = tempnam(sys_get_temp_dir(), 'ur_page_');
+        $this->assertIsString($base, 'could not create temp file for page body.');
+        $tmp = $base . '.php';
+        $this->assertNotFalse(file_put_contents($tmp, $src), "could not write temp page body: $tmp");
+        try {
+            ob_start();
+            include $tmp;
+            return (string) ob_get_clean();
+        } finally {
+            @unlink($tmp);
+            @unlink($base);
+        }
     }
 }
