@@ -29,8 +29,8 @@ What ships today:
 
 - An installable `.plg` packaged in the standard Unraid way (a Slackware `.txz`
   built by `pkg_build.sh`, released via GitHub Actions).
-- A tabbed **Unraid Rsync** page under **Settings** with **Jobs**,
-  **Credentials**, **Global Settings** and **Status** tabs.
+- A tabbed **Unraid Rsync** page under **Settings → User Utilities** with
+  **Jobs**, **Credentials**, **Global Settings** and **Status** tabs.
 - Jobs CRUD + Global Settings (config persisted to `config.json`).
 - A two-tier **Credentials** keychain: reusable **SSH Keys** (generate or
   import) + **Connections** (key or password auth), with referential integrity
@@ -120,7 +120,8 @@ if it is somehow absent — a sign your system is misconfigured). This mirrors t
    version + md5 for the newest published `.txz`, and it is also the URL the
    installed plugin checks for updates.
 
-3. Click **Install**. When it finishes, open **Settings -> Unraid Rsync**.
+3. Click **Install**. When it finishes, open
+   **Settings → User Utilities → Unraid Rsync**.
 
 To remove it: **Plugins -> Installed Plugins -> Unraid Rsync -> Remove**.
 

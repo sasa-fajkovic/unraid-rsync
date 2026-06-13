@@ -1,4 +1,4 @@
-Menu="OtherSettings"
+Menu="Utilities"
 Type="xmenu"
 Title="Unraid Rsync"
 Tabs="true"
