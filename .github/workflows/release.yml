@@ -87,7 +87,7 @@ jobs:
         run: |
           docker run --rm -e VERSION -v "${{ github.workspace }}":/workspace -w /workspace \
             aclemons/slackware:15.0 \
-            bash -c './pkg_build.sh -y -V "$VERSION"'
+            bash -c 'bash pkg_build.sh -y -V "$VERSION"'
           sudo chown -R "$(id -u):$(id -g)" .
 
       - name: Commit regenerated .plg to the default branch
