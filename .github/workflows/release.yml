@@ -28,6 +28,13 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          # On a tag push, the default checkout is the tag in detached HEAD,
+          # so a later `git commit`/`git push` of the regenerated .plg would not
+          # land on the default branch. Always check out the default branch so
+          # the committed manifest (with its real version+md5) reaches the raw
+          # .plg URL users install from.
+          ref: ${{ github.event.repository.default_branch }}
 
       - name: Determine version
         id: version
@@ -55,8 +62,15 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add unraid.rsync.plg
-          git commit -m "Release ${{ steps.version.outputs.version }}" || echo "no changes"
-          git push || true
+          if git diff --cached --quiet; then
+            echo "No manifest changes to commit."
+            exit 0
+          fi
+          git commit -m "Release ${{ steps.version.outputs.version }}"
+          # Push to the default branch explicitly. If this fails the workflow
+          # MUST fail: the raw .plg URL users install from depends on the
+          # regenerated manifest (real version+md5) reaching the branch.
+          git push origin "HEAD:${{ github.event.repository.default_branch }}"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
