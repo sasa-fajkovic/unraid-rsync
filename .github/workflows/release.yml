@@ -111,7 +111,8 @@ jobs:
               next_index=$((max_index + 1))
               if [ "$next_index" -gt 26 ]; then
                 echo "ERROR: ran out of same-day suffixes for $today (max is ${today}z)." >&2
-                echo "       Cut tomorrow's date instead, or tag a version manually via workflow_dispatch." >&2
+                echo "       Wait for tomorrow's date, or set an explicit version via the" >&2
+                echo "       Release workflow's workflow_dispatch 'version' input." >&2
                 exit 1
               fi
               # next_index 1..26 -> a..z (the Nth letter of the alphabet).
