@@ -47,9 +47,36 @@ if (!function_exists('_')) {
     }
 }
 
+// A separate tmpfs RUNTIME base (state + logs) so RunState/Logger never write to
+// /tmp/unraid.rsync during tests. Defined before requiring those classes.
+$urRuntimeBase = sys_get_temp_dir() . '/unraid-rsync-rt-' . getmypid() . '-' . bin2hex(random_bytes(4));
+@mkdir($urRuntimeBase, 0777, true);
+define('UR_RUNTIME_BASE', $urRuntimeBase);
+
+register_shutdown_function(static function () use ($urRuntimeBase) {
+    if (is_dir($urRuntimeBase)) {
+        $it = new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator($urRuntimeBase, FilesystemIterator::SKIP_DOTS),
+            RecursiveIteratorIterator::CHILD_FIRST
+        );
+        foreach ($it as $f) {
+            if ($f->isDir()) {
+                @rmdir($f->getPathname());
+            } else {
+                @unlink($f->getPathname());
+            }
+        }
+        @rmdir($urRuntimeBase);
+    }
+});
+
 // --- the code under test ---------------------------------------------------
 require_once __DIR__ . '/../source/include/Config.php';
 require_once __DIR__ . '/../source/include/Job.php';
 require_once __DIR__ . '/../source/include/Credentials.php';
 require_once __DIR__ . '/../source/include/KeyTools.php';
 require_once __DIR__ . '/../source/include/Ssh.php';
+require_once __DIR__ . '/../source/include/Rsync.php';
+require_once __DIR__ . '/../source/include/RunState.php';
+require_once __DIR__ . '/../source/include/Logger.php';
+require_once __DIR__ . '/../source/include/Runner.php';

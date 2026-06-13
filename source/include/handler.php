@@ -41,6 +41,9 @@ require_once __DIR__ . '/Job.php';
 require_once __DIR__ . '/Credentials.php';
 require_once __DIR__ . '/Ssh.php';
 require_once __DIR__ . '/KeyTools.php';
+require_once __DIR__ . '/Rsync.php';
+require_once __DIR__ . '/RunState.php';
+require_once __DIR__ . '/Logger.php';
 
 /**
  * Emit a JSON success/data response and stop. Sets Content-Type and the HTTP
@@ -852,6 +855,219 @@ function ur_action_test_connection(): void
     ], 200);
 }
 
+// =====================================================================
+// Phase 4: execution actions (runJob / dryRunJob / abortJob)
+// =====================================================================
+
+/**
+ * Resolve the absolute path to the runner CLI. On a live box the plugin lives
+ * at /usr/local/emhttp/plugins/unraid.rsync; handler.php is in include/, so the
+ * runner is ../scripts/runner.php from here. Overridable via UR_RUNNER_PATH for
+ * tests / alternate installs.
+ */
+function ur_runner_script_path(): string
+{
+    if (defined('UR_RUNNER_PATH')) {
+        return (string) UR_RUNNER_PATH;
+    }
+    return dirname(__DIR__) . '/scripts/runner.php';
+}
+
+/**
+ * Locate a `php` interpreter to launch the detached runner with. Prefers the
+ * currently-running binary (PHP_BINARY) so the runner uses the same PHP as the
+ * webGui; falls back to a bare "php" on PATH.
+ */
+function ur_php_binary(): string
+{
+    if (defined('PHP_BINARY') && PHP_BINARY !== '' && is_executable(PHP_BINARY)) {
+        return PHP_BINARY;
+    }
+    return 'php';
+}
+
+/**
+ * Launch the runner DETACHED for a job, optionally dry-run. The detached launch
+ * MUST redirect stdout+stderr to /dev/null and background with `&` or the AJAX
+ * request would block until the (potentially very long) rsync finishes.
+ *
+ * We deliberately use a shell HERE - the one place a shell command line is
+ * built in the request path - but every interpolated value is escapeshellarg-
+ * quoted: the php binary, the runner script path, and the job id. The job id is
+ * additionally constrained to a slug shape before it ever reaches this point.
+ * Nothing user-controlled is passed unquoted.
+ *
+ * Returns true when the launch shell reported success (exit 0). The run itself
+ * is detached, so a true result means "the background launch was dispatched",
+ * not that rsync succeeded - but a FALSE result (missing runner script, shell
+ * failure) is surfaced to the caller so the UI doesn't claim "Run started" when
+ * nothing actually detached.
+ */
+function ur_launch_runner(string $jobId, bool $dryRun): bool
+{
+    $script = ur_runner_script_path();
+    // Don't claim a launch when the runner script isn't even present.
+    if (!is_file($script)) {
+        return false;
+    }
+    $php = ur_php_binary();
+
+    $cmd = escapeshellarg($php) . ' ' . escapeshellarg($script)
+        . ' --job=' . escapeshellarg($jobId);
+    if ($dryRun) {
+        $cmd .= ' --dry-run';
+    }
+    // MANDATORY: redirect both streams to /dev/null and background, else the
+    // request hangs waiting on the child. setsid (when available) detaches the
+    // runner into its own session/process group so abort can SIGTERM the whole
+    // group (reaping the rsync child); when setsid is absent the launch still
+    // works - abort then falls back to signalling the bare runner pid and the
+    // abort flag still stops the run between pairs - so it is best-effort, not
+    // required for correctness.
+    $setsid = '';
+    foreach (['/usr/bin/setsid', '/bin/setsid'] as $cand) {
+        if (is_executable($cand)) {
+            $setsid = $cand . ' ';
+            break;
+        }
+    }
+    $full = $setsid . $cmd . ' >/dev/null 2>&1 &';
+
+    // exec returns immediately because the command backgrounds itself; capture
+    // the launching shell's exit so a failed dispatch is reported as such.
+    $output = [];
+    $code   = 0;
+    @exec($full, $output, $code);
+    return $code === 0;
+}
+
+/**
+ * POST runJob / dryRunJob: validate the job id, refuse if already running, then
+ * launch the runner detached. Returns a fire-and-confirm response (the live
+ * outcome is observed via the run log / state in Phase 6).
+ */
+function ur_action_run_job(bool $dryRun): void
+{
+    $jobId = isset($_POST['id']) ? trim((string) $_POST['id']) : '';
+    if ($jobId === '') {
+        sendError('A job id is required.', 422);
+        return;
+    }
+
+    // Resolve the job so we never launch the runner for an id that isn't ours
+    // (and so a disabled/missing job is reported clearly).
+    try {
+        $config = Config::load();
+    } catch (Throwable $e) {
+        sendError('Configuration could not be read: ' . $e->getMessage(), 409);
+        return;
+    }
+    $found = null;
+    foreach (($config['jobs'] ?? []) as $job) {
+        if (is_array($job) && (string) ($job['id'] ?? '') === $jobId) {
+            $found = $job;
+            break;
+        }
+    }
+    if ($found === null) {
+        sendError('Job not found.', 404);
+        return;
+    }
+
+    // Concurrency guard (PID-reuse-safe).
+    if (RunState::isRunning($jobId)) {
+        sendError('This job is already running.', 409, ['running' => true]);
+        return;
+    }
+
+    if (!ur_launch_runner($jobId, $dryRun)) {
+        // The detached launch failed to dispatch (missing runner script / shell
+        // failure). Report it rather than misleading the UI into "Run started".
+        sendError('Failed to launch the runner process.', 500, ['running' => false]);
+        return;
+    }
+
+    sendResponse([
+        'ok'      => true,
+        'message' => $dryRun ? 'Dry-run started.' : 'Run started.',
+        'jobId'   => $jobId,
+        'dryRun'  => $dryRun,
+        'running' => true,
+    ], 200);
+}
+
+/**
+ * POST abortJob: request an abort for a running job. Touches the abort flag AND
+ * SIGTERMs the captured runner pid + its process group (so the rsync child is
+ * reaped, not just the PHP parent). The runner also polls the flag between
+ * pairs, so even if signalling races, the next pair boundary stops the run.
+ */
+function ur_action_abort_job(): void
+{
+    $jobId = isset($_POST['id']) ? trim((string) $_POST['id']) : '';
+    if ($jobId === '') {
+        sendError('A job id is required.', 422);
+        return;
+    }
+
+    // Refuse an unknown id BEFORE touching the filesystem: otherwise a
+    // CSRF-authenticated request could create an arbitrary
+    // <runtime>/state/<id>.abort file (and leave a stale flag that poisons a
+    // future run if the id is later reused). We accept the abort only when the
+    // id is a configured job OR a run state file already exists for it (an
+    // in-flight run whose job row may have just been edited away).
+    $known = false;
+    try {
+        $config = Config::load();
+        foreach (($config['jobs'] ?? []) as $job) {
+            if (is_array($job) && (string) ($job['id'] ?? '') === $jobId) {
+                $known = true;
+                break;
+            }
+        }
+    } catch (Throwable $e) {
+        // Config unreadable: fall back to the state-file check below.
+    }
+    if (!$known && RunState::read($jobId) === null) {
+        sendError('Job not found.', 404);
+        return;
+    }
+
+    // Set the flag first - the runner polls it between pairs, so this alone
+    // guarantees a stop even if the pid is gone / signalling fails.
+    RunState::requestAbort($jobId);
+
+    // Only signal a pid we have VERIFIED is this job's live runner. isRunning()
+    // is PID-reuse-safe (running flag + posix_kill + cmdline match), so this
+    // guards against SIGTERMing an unrelated process whose pid was reused after
+    // a stale state file. If the runner isn't (or is no longer) running, the
+    // abort flag alone is sufficient and we skip signalling.
+    $signalled = false;
+    if (RunState::isRunning($jobId) && function_exists('posix_kill')) {
+        $state = RunState::read($jobId);
+        $pid   = ($state !== null) ? (int) $state['pid'] : 0;
+        if ($pid > 0) {
+            // SIGTERM the whole process group (negative pid) so the rsync CHILD
+            // is killed too - the runner was launched via setsid into its own
+            // group, whose pgid equals the runner pid. Fall back to the bare pid
+            // if the group signal isn't permitted.
+            $sig = defined('SIGTERM') ? SIGTERM : 15;
+            if (@posix_kill(-$pid, $sig)) {
+                $signalled = true;
+            } elseif (@posix_kill($pid, $sig)) {
+                $signalled = true;
+            }
+        }
+    }
+
+    sendResponse([
+        'ok'        => true,
+        'message'   => 'Abort requested.',
+        'jobId'     => $jobId,
+        'signalled' => $signalled,
+    ], 200);
+}
+
 /**
  * Front-controller dispatch. Skipped when included by the test harness
  * (UR_HANDLER_TESTING defined), which calls the individual functions directly.
@@ -885,6 +1101,9 @@ function ur_handle_request(): void
         case 'deleteConnection':
         case 'discoverHostKey':
         case 'testConnection':
+        case 'runJob':
+        case 'dryRunJob':
+        case 'abortJob':
             if ($method !== 'POST') {
                 sendError($action . ' requires POST.', 405);
                 return;
@@ -900,6 +1119,9 @@ function ur_handle_request(): void
                 case 'deleteConnection':  ur_action_delete_connection();   return;
                 case 'discoverHostKey':   ur_action_discover_host_key();   return;
                 case 'testConnection':    ur_action_test_connection();     return;
+                case 'runJob':            ur_action_run_job(false);        return;
+                case 'dryRunJob':         ur_action_run_job(true);         return;
+                case 'abortJob':          ur_action_abort_job();           return;
             }
             return;
 
