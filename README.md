@@ -19,7 +19,8 @@ The goal is multiple **independent** rsync jobs, each with:
 - explicit source -> destination pairs (one rsync per pair, not a cartesian product);
 - pre/post hooks, per-job log level, live state and per-run logs;
 - a reusable, TrueNAS-style **Credentials** keychain (SSH keys + connections)
-  that jobs reference by name, supporting key and password auth.
+  that jobs reference by connection id (shown by name in the UI), supporting
+  key and password auth.
 
 ## Status
 

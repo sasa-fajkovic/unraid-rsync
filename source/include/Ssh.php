@@ -90,10 +90,17 @@ class Ssh
         return rtrim(static::$runtimeBase, '/') . '/keys';
     }
 
-    /** Path a given key id materialises to (mode 600). */
-    public static function keyPath(string $keyId): string
+    /**
+     * Path a connection's private key materialises to (mode 600). The file is
+     * keyed by CONNECTION id, not key id, so each connection gets its OWN copy
+     * of the (shared) key material on tmpfs. That makes cleanup isolated: a
+     * connection's cleanupRuntime() only ever unlinks its own file, so two
+     * concurrent runs that reference the same SSH key can never unlink each
+     * other's materialised key out from under an in-flight ssh.
+     */
+    public static function keyPath(string $connId): string
     {
-        return static::keysDir() . '/' . self::safeId($keyId);
+        return static::keysDir() . '/' . self::safeId($connId);
     }
 
     /** Path the per-connection known_hosts materialises to. */
@@ -291,7 +298,10 @@ class Ssh
             if (trim($priv) === '') {
                 return ['ok' => false, 'error' => 'The referenced SSH key has no private key material.'];
             }
-            $keyPath = static::keyPath((string) $conn['keyId']);
+            // Keyed by CONNECTION id (not key id): each connection gets its own
+            // copy so concurrent runs sharing one SSH key never clean up each
+            // other's materialised key.
+            $keyPath = static::keyPath($connId);
             self::writePrivateKey($keyPath, $priv);
         } else { // PASSWORD
             if (!static::sshpassAvailable()) {
@@ -319,16 +329,22 @@ class Ssh
      * Remove materialised secrets for a connection (best-effort). Phase 4 calls
      * this in a finally after a run; the Credentials tab's testConnection also
      * cleans up its own materialisation.
+     *
+     * Everything a connection materialises - its private key, known_hosts and
+     * password file - is keyed by CONNECTION id, so this only ever unlinks THIS
+     * connection's own files. Two concurrent runs that reference the same SSH
+     * key each have their own copy and clean up independently. (The second
+     * argument is retained for backward compatibility and is no longer needed to
+     * locate the key file.)
      */
     public static function cleanupRuntime(string $connId, string $keyId = ''): void
     {
+        unset($keyId); // key file is keyed by connId; kept for BC of the signature
         $paths = [
+            static::keyPath($connId),
             static::knownHostsPath($connId),
             rtrim(static::$runtimeBase, '/') . '/pass/' . self::safeId($connId),
         ];
-        if ($keyId !== '') {
-            $paths[] = static::keyPath($keyId);
-        }
         foreach ($paths as $p) {
             if (is_file($p)) {
                 @unlink($p);

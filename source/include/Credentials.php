@@ -40,8 +40,9 @@
  *
  * SECURITY NOTE: this class NEVER builds an ssh/rsync command line and never
  * touches the network. Generating/importing keys and discovering host keys (the
- * thin ssh-keygen / ssh-keyscan wrappers) live in Ssh.php so the persistence
- * logic here stays pure and unit-testable offline. Password obfuscation here is
+ * thin ssh-keygen / ssh-keyscan wrappers) live in KeyTools.php, and the ssh
+ * transport/materialisation lives in Ssh.php, so the persistence logic here
+ * stays pure and unit-testable offline. Password obfuscation here is
  * deliberately reversible and is NOT a security boundary.
  */
 

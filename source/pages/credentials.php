@@ -154,7 +154,7 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
     // strict host key
     echo '<dt><label for="' . ur_h($idb . '_strict') . '">' . ur_h(ur_t('Strict host key checking')) . '</label>:</dt>';
     echo '<dd><select id="' . ur_h($idb . '_strict') . '" name="' . ur_h($p . '[strictHostKey]') . '">';
-    foreach (['accept-new' => 'accept-new (trust on first use, pin after)', 'yes' => 'yes (require a pinned host key)', 'no' => 'no (do not verify - insecure)'] as $val => $lbl) {
+    foreach (['accept-new' => 'accept-new (accept an unknown host key on connect)', 'yes' => 'yes (require a pinned host key)', 'no' => 'no (do not verify - insecure)'] as $val => $lbl) {
         $sel = ($strict === $val) ? ' selected' : '';
         echo '<option value="' . ur_h($val) . '"' . $sel . '>' . ur_h(ur_t($lbl)) . '</option>';
     }
@@ -200,7 +200,7 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
 <?php endif; ?>
 
 <p>
-  <?=_('Reusable SSH keys and connections that jobs reference by name (TrueNAS-style keychain). Define a connection once and point any number of jobs at it')?>.
+  <?=_('Reusable SSH keys and connections (TrueNAS-style keychain). Jobs reference a connection by its id (shown here by name); define a connection once and point any number of jobs at it')?>.
 </p>
 
 <blockquote class="inline_help">
