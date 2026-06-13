@@ -9,18 +9,24 @@ use PHPUnit\Framework\TestCase;
  */
 final class FakeKeyTools extends KeyTools
 {
-    /** @var array<string,array{0:int,1:string,2:string}> programmed responses */
+    /** @var array<string,array{0:int,1:string,2:string,3?:bool}> programmed responses (a legacy 3-tuple is normalised to a 4-tuple in runKeygen) */
     public static $keygenResponses = [];
-    /** @var array{0:int,1:string,2:string} */
-    public static $keyscanResponse = [0, '', ''];
+    /** @var array{0:int,1:string,2:string,3?:bool} */
+    public static $keyscanResponse = [0, '', '', false];
     /** @var array<int,array<int,string>> recorded keygen argvs */
     public static $keygenCalls = [];
+    /** @var array<int,array<int,string>> recorded keyscan argvs */
+    public static $keyscanCalls = [];
+    /** @var array<int,float|null> recorded keyscan wall-clock deadlines */
+    public static $keyscanDeadlines = [];
 
     public static function reset(): void
     {
-        self::$keygenResponses = [];
-        self::$keyscanResponse = [0, '', ''];
-        self::$keygenCalls = [];
+        self::$keygenResponses  = [];
+        self::$keyscanResponse  = [0, '', '', false];
+        self::$keygenCalls      = [];
+        self::$keyscanCalls     = [];
+        self::$keyscanDeadlines = [];
     }
 
     protected static function runKeygen(array $argv): array
@@ -29,25 +35,39 @@ final class FakeKeyTools extends KeyTools
 
         // -y derives a public key from a private key.
         if (in_array('-y', $argv, true)) {
-            return self::$keygenResponses['-y'] ?? [0, "ssh-ed25519 AAAAderived comment\n", ''];
-        }
+            $r = self::$keygenResponses['-y'] ?? [0, "ssh-ed25519 AAAAderived comment\n", '', false];
         // -l lists a fingerprint.
-        if (in_array('-lf', $argv, true)) {
-            return self::$keygenResponses['-lf'] ?? [0, "256 SHA256:SAMPLEFINGERPRINT user@host (ED25519)\n", ''];
+        } elseif (in_array('-lf', $argv, true)) {
+            $r = self::$keygenResponses['-lf'] ?? [0, "256 SHA256:SAMPLEFINGERPRINT user@host (ED25519)\n", '', false];
+        } else {
+            // generation: write fake key files where -f points, then return ok.
+            $fi = array_search('-f', $argv, true);
+            if ($fi !== false && isset($argv[$fi + 1])) {
+                $keyFile = $argv[$fi + 1];
+                @file_put_contents($keyFile, "-----BEGIN OPENSSH PRIVATE KEY-----\nFAKE\n-----END OPENSSH PRIVATE KEY-----\n");
+                @file_put_contents($keyFile . '.pub', "ssh-ed25519 AAAAgenerated comment\n");
+            }
+            $r = self::$keygenResponses['gen'] ?? [0, '', '', false];
         }
-        // generation: write fake key files where -f points, then return ok.
-        $fi = array_search('-f', $argv, true);
-        if ($fi !== false && isset($argv[$fi + 1])) {
-            $keyFile = $argv[$fi + 1];
-            @file_put_contents($keyFile, "-----BEGIN OPENSSH PRIVATE KEY-----\nFAKE\n-----END OPENSSH PRIVATE KEY-----\n");
-            @file_put_contents($keyFile . '.pub', "ssh-ed25519 AAAAgenerated comment\n");
+        // Normalise to a 4-tuple so callers can always read the timedOut element,
+        // even when a test programs a legacy 3-tuple [code, stdout, stderr]
+        // (mirrors runKeyscan).
+        if (!array_key_exists(3, $r)) {
+            $r[3] = false;
         }
-        return self::$keygenResponses['gen'] ?? [0, '', ''];
+        return $r;
     }
 
-    protected static function runKeyscan(array $argv): array
+    protected static function runKeyscan(array $argv, ?float $deadlineSec = null): array
     {
-        return self::$keyscanResponse;
+        self::$keyscanCalls[]     = $argv;
+        self::$keyscanDeadlines[] = $deadlineSec;
+        // Normalise to a 4-tuple so callers can always read the timedOut element.
+        $r = self::$keyscanResponse;
+        if (!array_key_exists(3, $r)) {
+            $r[3] = false;
+        }
+        return $r;
     }
 }
 
@@ -58,10 +78,67 @@ final class FakeKeyTools extends KeyTools
  */
 final class RealRunKeyTools extends KeyTools
 {
-    /** @return array{0:int,1:string,2:string} */
+    /** @return array{0:int,1:string,2:string,3:bool} */
     public static function publicRunKeygen(array $argv): array
     {
         return static::runKeygen($argv);
+    }
+
+    /**
+     * Run the REAL, time-bounded runKeyscan seam (-> private runArgv) against a
+     * real subprocess with an explicit wall-clock deadline, so the timeout +
+     * child-kill path can be exercised end-to-end with a TINY deadline (the test
+     * itself never hangs).
+     *
+     * @return array{0:int,1:string,2:string,3:bool}
+     */
+    public static function publicRunKeyscan(array $argv, ?float $deadlineSec): array
+    {
+        return static::runKeyscan($argv, $deadlineSec);
+    }
+}
+
+/**
+ * A KeyTools whose runKeyscan seam runs a REAL hanging child against a tiny
+ * wall-clock deadline, so discoverHostKey()'s timeout mapping (timedOut=true +
+ * the "timed out after Ns" message) can be asserted end-to-end without the test
+ * hanging and without ssh-keyscan installed. The argv is replaced with a php
+ * sleep so the timeout - not the (absent) ssh-keyscan binary - is what fires.
+ */
+final class HangingKeyscanKeyTools extends KeyTools
+{
+    /** @var array<int,float|null> the wall-clock deadlines discoverHostKey passed in */
+    public static $deadlines = [];
+    /** @var array<int,array<int,string>> the argv discoverHostKey built (to assert -T) */
+    public static $argvs = [];
+
+    public static function reset(): void
+    {
+        self::$deadlines = [];
+        self::$argvs = [];
+    }
+
+    /** Shrink the hard cap to 1s for this test subclass (late-static-bound from
+     * discoverHostKey) so the wall-clock deadline is ~2s, not 30s. */
+    public static function discoverTimeoutMax(): int
+    {
+        return 1;
+    }
+
+    protected static function runKeyscan(array $argv, ?float $deadlineSec = null): array
+    {
+        self::$argvs[]     = $argv;
+        self::$deadlines[] = $deadlineSec;
+        // Ignore the real ssh-keyscan argv; run a child that sleeps far longer
+        // than the (tiny) deadline so the wall-clock kill is what ends it.
+        $sleeper = [PHP_BINARY, '-r', 'usleep(5000000);']; // 5s
+        return static::runKeyscan_real($sleeper, $deadlineSec);
+    }
+
+    /** Reach the real (private) runArgv via the parent's seam, unstubbed. */
+    private static function runKeyscan_real(array $argv, ?float $deadlineSec): array
+    {
+        return parent::runKeyscan($argv, $deadlineSec);
     }
 }
 
@@ -243,6 +320,91 @@ final class KeyToolsTest extends TestCase
         $this->assertStringContainsString('Invalid host', $res['error']);
     }
 
+    // --- discover host key: time-bounding ----------------------------------
+
+    /**
+     * The ssh-keyscan argv always carries a bounded -T <= the hard cap (30),
+     * even when a larger connect timeout is requested. The PHP wall-clock
+     * deadline passed to the keyscan seam is non-null and also bounded.
+     */
+    public function testDiscoverHostKeyArgvHasBoundedTimeout(): void
+    {
+        FakeKeyTools::$keyscanResponse = [0, "h.example ssh-ed25519 AAAAk\n", '', false];
+        // Request a 60s timeout (a valid connect timeout, > the 30s cap); it must
+        // be clamped to 30 in the argv.
+        $res = FakeKeyTools::discoverHostKey('h.example', 22, 60);
+        $this->assertTrue($res['ok'], $res['error'] ?? '');
+
+        $argv = FakeKeyTools::$keyscanCalls[0];
+        $ti = array_search('-T', $argv, true);
+        $this->assertNotFalse($ti, '-T must be present');
+        $tval = (int) $argv[$ti + 1];
+        $this->assertGreaterThanOrEqual(1, $tval);
+        $this->assertLessThanOrEqual(KeyTools::DISCOVER_TIMEOUT_MAX, $tval, '-T must be <= 30');
+        $this->assertSame(30, $tval, 'a 60s request clamps to the 30s cap');
+
+        // A wall-clock deadline was supplied to the seam (not unbounded).
+        $deadline = FakeKeyTools::$keyscanDeadlines[0];
+        $this->assertNotNull($deadline);
+        $this->assertLessThanOrEqual(
+            KeyTools::DISCOVER_TIMEOUT_MAX + KeyTools::DISCOVER_TIMEOUT_GRACE,
+            $deadline
+        );
+    }
+
+    /**
+     * A smaller requested timeout is used as-is for -T (min(connectTimeout, 30)).
+     */
+    public function testDiscoverHostKeyArgvUsesSmallerRequestedTimeout(): void
+    {
+        FakeKeyTools::$keyscanResponse = [0, "h.example ssh-ed25519 AAAAk\n", '', false];
+        FakeKeyTools::discoverHostKey('h.example', 22, 5);
+        $argv = FakeKeyTools::$keyscanCalls[0];
+        $ti = array_search('-T', $argv, true);
+        $this->assertSame(5, (int) $argv[$ti + 1]);
+    }
+
+    /**
+     * When the keyscan seam reports a wall-clock timeout (4th tuple element),
+     * discoverHostKey() returns ok=false, timedOut=true, and a clear "timed out
+     * after Ns" message - never a stuck/empty result.
+     */
+    public function testDiscoverHostKeyTimeoutMappedToTimedOut(): void
+    {
+        FakeKeyTools::$keyscanResponse = [124, '', '', true]; // timedOut=true
+        $res = FakeKeyTools::discoverHostKey('h.example', 22, 10);
+        $this->assertFalse($res['ok']);
+        $this->assertTrue($res['timedOut']);
+        $this->assertStringContainsString('timed out', $res['error']);
+        $this->assertStringContainsString((string) KeyTools::DISCOVER_TIMEOUT_MAX, $res['error']);
+    }
+
+    /**
+     * End-to-end: a REAL hanging child (a php sleep) against a tiny injected cap
+     * makes the wall-clock deadline fire, the child is killed, and discoverHostKey
+     * returns the timeout result WITHOUT the test hanging. HangingKeyscanKeyTools
+     * overrides discoverTimeoutMax() to 1 so the deadline is ~2s, not 30s.
+     */
+    public function testDiscoverHostKeyRealWallClockTimeoutFires(): void
+    {
+        HangingKeyscanKeyTools::reset();
+        $start = microtime(true);
+        $res   = HangingKeyscanKeyTools::discoverHostKey('h.example', 22, 10);
+        $elapsed = microtime(true) - $start;
+
+        $this->assertFalse($res['ok']);
+        $this->assertTrue($res['timedOut'], 'a hanging child must be reported as timedOut');
+        $this->assertStringContainsString('timed out', $res['error']);
+        // The injected cap (UR_KEYSCAN_TIMEOUT_MAX) is tiny, so the whole call
+        // returns in a few seconds - well under the child's 5s sleep, proving the
+        // wall-clock kill (not the child exiting) ended it.
+        $this->assertLessThan(5.0, $elapsed, 'must return before the 5s child sleep');
+
+        // The deadline discoverHostKey computed was bounded by the tiny cap.
+        $this->assertNotEmpty(HangingKeyscanKeyTools::$deadlines);
+        $this->assertNotNull(HangingKeyscanKeyTools::$deadlines[0]);
+    }
+
     // --- runArgv deadlock-safety -------------------------------------------
 
     /**
@@ -295,5 +457,37 @@ final class KeyToolsTest extends TestCase
         [$code, $stdout, $stderr] = RealRunKeyTools::publicRunKeygen(['/nonexistent/ur-no-such-binary-xyz']);
         $this->assertNotSame(0, $code);
         $this->assertSame('', $stdout);
+    }
+
+    /**
+     * runArgv enforces the wall-clock deadline on a child that would otherwise
+     * run far longer: a php sleep(5s) against a 0.3s deadline must be killed and
+     * return promptly with timedOut=true (exit 124). This exercises the
+     * proc_terminate -> reap path directly, sub-second, so the suite never hangs.
+     */
+    public function testRunArgvKillsChildPastDeadline(): void
+    {
+        $sleeper = [PHP_BINARY, '-r', 'usleep(5000000);']; // 5s
+        $start = microtime(true);
+        [$code, $stdout, $stderr, $timedOut] = RealRunKeyTools::publicRunKeyscan($sleeper, 0.3);
+        $elapsed = microtime(true) - $start;
+
+        $this->assertTrue($timedOut, 'a child past the deadline must be flagged timedOut');
+        $this->assertSame(124, $code, 'timeout uses exit code 124');
+        // Killed near the 0.3s deadline (+ up to ~1s SIGTERM grace), well under 5s.
+        $this->assertLessThan(4.0, $elapsed, 'the child must be killed, not waited out');
+        $this->assertSame('', $stdout);
+    }
+
+    /**
+     * A fast child that finishes well within the deadline returns normally with
+     * timedOut=false (the deadline path must not false-positive on quick exits).
+     */
+    public function testRunArgvWithDeadlineDoesNotFalseTimeoutFastChild(): void
+    {
+        [$code, $stdout, $stderr, $timedOut] = RealRunKeyTools::publicRunKeyscan(self::emitArgv(3, 0), 10.0);
+        $this->assertFalse($timedOut);
+        $this->assertSame(0, $code);
+        $this->assertSame('OOO', $stdout);
     }
 }
