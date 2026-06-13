@@ -70,22 +70,41 @@ final class NotifyTest extends TestCase
     {
         // A malicious "job name" baked into the subject/description must NOT be
         // able to break out into a second command. escapeshellarg wraps it in a
-        // single-quoted token, so the `;` and `$()` are inert.
-        $evil = 'music"; rm -rf / ; echo $(whoami) `id` #';
-        $cmd  = Notify::buildCommand([
+        // single-quoted token, so the `;`, `$()` and backticks are inert.
+        $evil    = 'music"; rm -rf / ; echo $(whoami) `id` #';
+        $subject = 'Unraid Rsync: ' . $evil . ' FAILED';
+        $desc    = 'Job "' . $evil . '" failed.';
+        $cmd     = Notify::buildCommand([
             'event'       => 'Unraid Rsync',
-            'subject'     => 'Unraid Rsync: ' . $evil . ' FAILED',
-            'description' => 'Job "' . $evil . '" failed.',
+            'subject'     => $subject,
+            'description' => $desc,
             'importance'  => 'alert',
             'link'        => '/Settings/UnraidRsync',
         ]);
 
         // The dangerous payload only ever appears inside an escapeshellarg token.
-        $this->assertStringContainsString(escapeshellarg('Unraid Rsync: ' . $evil . ' FAILED'), $cmd);
-        // No UNQUOTED command separator leaked out. After escaping, every single
-        // quote in the payload is represented as the '\'' sequence and the rest
-        // is inside single quotes - so there is no bare "; rm -rf" in the string.
-        $this->assertStringNotContainsString('; rm -rf / ;', $cmd);
+        $this->assertStringContainsString(escapeshellarg($subject), $cmd);
+        $this->assertStringContainsString(escapeshellarg($desc), $cmd);
+
+        // The command is EXACTLY a space-join of escapeshellarg'd tokens - nothing
+        // is concatenated un-quoted. We reconstruct the expected command from the
+        // same escaping primitive and assert equality; this proves the payload is
+        // fully contained in single-quoted tokens (where shell metacharacters are
+        // literal) rather than spilling onto the command line.
+        $expected = implode(' ', array_map('escapeshellarg', [
+            $this->fakeBin,
+            '-e', 'Unraid Rsync',
+            '-s', $subject,
+            '-d', $desc,
+            '-i', 'alert',
+            '-l', '/Settings/UnraidRsync',
+        ]));
+        $this->assertSame($expected, $cmd);
+
+        // Defensive: the only single-quote runs in the command come from
+        // escapeshellarg's own quoting, so the evil payload cannot have opened an
+        // unbalanced quote - the number of single quotes is even.
+        $this->assertSame(0, substr_count($cmd, "'") % 2, 'single quotes must be balanced');
     }
 
     public function testBuildCommandOmitsEmptyOptionalFields(): void
