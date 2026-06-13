@@ -8,9 +8,10 @@
  *     without waiting for the next array start).
  *
  * It is a THIN shell: it loads config.json and calls Cron::apply(), which writes
- * <UR_CONFIG_BASE>/unraid.rsync.cron (one line per enabled job) atomically and
- * invokes /usr/local/sbin/update_cron via an argv array. All the logic lives in
- * the unit-tested Cron class; this file just wires it up for the command line.
+ * <UR_CONFIG_BASE>/unraid.rsync.cron (one line per SCHEDULABLE job - enabled,
+ * with a safe id and a well-formed schedule) atomically and invokes
+ * /usr/local/sbin/update_cron via an argv array. All the logic lives in the
+ * unit-tested Cron class; this file just wires it up for the command line.
  *
  * Exit code: 0 when apply() reported success (cron file synced AND update_cron
  * returned 0), 1 otherwise, so a caller (the .plg, a manual run) can tell. The
@@ -23,7 +24,7 @@ if (PHP_SAPI === 'cli' && !defined('UR_APPLY_CRON_TESTING')) {
     $result = Cron::apply();
     if (!empty($result['ok'])) {
         fwrite(STDOUT, sprintf(
-            "Unraid Rsync: cron applied (%d enabled job(s)).\n",
+            "Unraid Rsync: cron applied (%d scheduled job(s)).\n",
             (int) ($result['enabledJobs'] ?? 0)
         ));
         exit(0);
