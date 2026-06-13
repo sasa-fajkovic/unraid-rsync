@@ -680,11 +680,14 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
    * Time-bounded to the server's hard cap (30s): the button is disabled and a
    * progress bar + countdown advance toward 30s so the user knows it is working
    * and roughly how long it can take. The fetch is itself aborted client-side at
-   * 32s (just above the server cap) via AbortController, so a stalled backend can
-   * never leave the UI spinning forever; a timeout/error shows a clear inline
-   * message and re-enables the button. */
+   * 35s via AbortController, so a stalled backend can never leave the UI spinning
+   * forever; a timeout/error shows a clear inline message and re-enables the
+   * button. The abort budget sits ABOVE the server's worst-case response time
+   * (DISCOVER_TIMEOUT_MAX 30s + DISCOVER_TIMEOUT_GRACE 2s + up to ~1s for SIGKILL
+   * ≈ 33s) so that, whenever possible, the user gets the server's structured
+   * timeout (504) message rather than a generic client-side abort. */
   var DISCOVER_MAX_SECONDS = 30;          // mirrors KeyTools::DISCOVER_TIMEOUT_MAX
-  var DISCOVER_CLIENT_ABORT_MS = 32000;   // ~2s above the server cap
+  var DISCOVER_CLIENT_ABORT_MS = 35000;   // > server worst-case (~33s) so the 504 wins
 
   function discoverHostKey(btn) {
     var idb = btn.getAttribute('data-idb');

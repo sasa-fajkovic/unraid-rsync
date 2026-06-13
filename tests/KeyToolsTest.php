@@ -9,7 +9,7 @@ use PHPUnit\Framework\TestCase;
  */
 final class FakeKeyTools extends KeyTools
 {
-    /** @var array<string,array{0:int,1:string,2:string}> programmed responses */
+    /** @var array<string,array{0:int,1:string,2:string,3?:bool}> programmed responses (a legacy 3-tuple is normalised to a 4-tuple in runKeygen) */
     public static $keygenResponses = [];
     /** @var array{0:int,1:string,2:string,3?:bool} */
     public static $keyscanResponse = [0, '', '', false];
@@ -35,20 +35,27 @@ final class FakeKeyTools extends KeyTools
 
         // -y derives a public key from a private key.
         if (in_array('-y', $argv, true)) {
-            return self::$keygenResponses['-y'] ?? [0, "ssh-ed25519 AAAAderived comment\n", '', false];
-        }
+            $r = self::$keygenResponses['-y'] ?? [0, "ssh-ed25519 AAAAderived comment\n", '', false];
         // -l lists a fingerprint.
-        if (in_array('-lf', $argv, true)) {
-            return self::$keygenResponses['-lf'] ?? [0, "256 SHA256:SAMPLEFINGERPRINT user@host (ED25519)\n", '', false];
+        } elseif (in_array('-lf', $argv, true)) {
+            $r = self::$keygenResponses['-lf'] ?? [0, "256 SHA256:SAMPLEFINGERPRINT user@host (ED25519)\n", '', false];
+        } else {
+            // generation: write fake key files where -f points, then return ok.
+            $fi = array_search('-f', $argv, true);
+            if ($fi !== false && isset($argv[$fi + 1])) {
+                $keyFile = $argv[$fi + 1];
+                @file_put_contents($keyFile, "-----BEGIN OPENSSH PRIVATE KEY-----\nFAKE\n-----END OPENSSH PRIVATE KEY-----\n");
+                @file_put_contents($keyFile . '.pub', "ssh-ed25519 AAAAgenerated comment\n");
+            }
+            $r = self::$keygenResponses['gen'] ?? [0, '', '', false];
         }
-        // generation: write fake key files where -f points, then return ok.
-        $fi = array_search('-f', $argv, true);
-        if ($fi !== false && isset($argv[$fi + 1])) {
-            $keyFile = $argv[$fi + 1];
-            @file_put_contents($keyFile, "-----BEGIN OPENSSH PRIVATE KEY-----\nFAKE\n-----END OPENSSH PRIVATE KEY-----\n");
-            @file_put_contents($keyFile . '.pub', "ssh-ed25519 AAAAgenerated comment\n");
+        // Normalise to a 4-tuple so callers can always read the timedOut element,
+        // even when a test programs a legacy 3-tuple [code, stdout, stderr]
+        // (mirrors runKeyscan).
+        if (!array_key_exists(3, $r)) {
+            $r[3] = false;
         }
-        return self::$keygenResponses['gen'] ?? [0, '', '', false];
+        return $r;
     }
 
     protected static function runKeyscan(array $argv, ?float $deadlineSec = null): array

@@ -251,14 +251,17 @@ class KeyTools
     /**
      * The hard upper bound (seconds) on host-key discovery, read from the
      * UR_KEYSCAN_TIMEOUT_MAX override when defined (so a test can shrink it to a
-     * sub-second value), else DISCOVER_TIMEOUT_MAX. Clamped to >= 1.
+     * sub-second value), else DISCOVER_TIMEOUT_MAX. The override may only SHRINK
+     * the cap; it can never raise it above the hard DISCOVER_TIMEOUT_MAX bound,
+     * so the result is always clamped to the range [1, DISCOVER_TIMEOUT_MAX]
+     * (keeping it in step with the UI's fixed 30s expectation).
      */
     public static function discoverTimeoutMax(): int
     {
         $max = (defined('UR_KEYSCAN_TIMEOUT_MAX') && (int) UR_KEYSCAN_TIMEOUT_MAX > 0)
             ? (int) UR_KEYSCAN_TIMEOUT_MAX
             : self::DISCOVER_TIMEOUT_MAX;
-        return max(1, $max);
+        return max(1, min($max, self::DISCOVER_TIMEOUT_MAX));
     }
 
     /**
