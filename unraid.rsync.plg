@@ -3,7 +3,7 @@
   <!ENTITY repoName        "unraid-rsync">
   <!ENTITY pluginName      "unraid.rsync">
   <!ENTITY gitUser         "sasa-fajkovic">
-  <!ENTITY version        "2026.06.13a">
+  <!ENTITY version        "2026.06.13b">
   <!ENTITY gitBranch       "main">
   <!ENTITY releaseLocation "https://github.com/&gitUser;/&repoName;/releases/download/&version;">
   <!ENTITY pluginURL       "https://raw.githubusercontent.com/&gitUser;/&repoName;/&gitBranch;/&pluginName;.plg">
@@ -15,7 +15,7 @@
        .plg back to the default branch, so the raw .plg URL users install from
        always carries a real md5 that matches the released package. Never
        hand-edit version/md5 - they must change together. -->
-  <!ENTITY md5            "74e4a71ba659def7d44d920fdc8da32f">
+  <!ENTITY md5            "de35dad106eb4e06cf45f3f8f9c41823">
 ]>
 <PLUGIN name="&pluginName;" author="sasa-fajkovic" version="&version;"
         launch="Settings/UnraidRsync" pluginURL="&pluginURL;" icon="refresh"
