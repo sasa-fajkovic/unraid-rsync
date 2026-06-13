@@ -35,6 +35,8 @@ require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Config.php';
 require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Job.php';
 require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Credentials.php';
 require_once '/usr/local/emhttp/plugins/unraid.rsync/include/RunState.php';
+require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Runner.php';
+require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Logger.php';
 require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Cron.php';
 require_once '/usr/local/emhttp/plugins/unraid.rsync/pages/_options_form.php';
 
@@ -341,7 +343,163 @@ function ur_relative_time(int $deltaSec): string
     }
     return ur_t('in') . ' ' . implode(' ', $parts);
 }
+
+/**
+ * The CSS modifier class for a state badge. Kept in PHP so the initial
+ * server-rendered badge and the JS-updated badge use the same vocabulary.
+ * RUNNING is animated (blue); SUCCESS green; WARNING/PARTIAL/TIMEOUT orange;
+ * FAILED red; ABORTED grey-red; PENDING grey. Unknown -> grey.
+ */
+function ur_state_badge_class(string $state): string
+{
+    switch (strtoupper($state)) {
+        case 'RUNNING': return 'ur-badge-running';
+        case 'SUCCESS': return 'ur-badge-success';
+        case 'WARNING':
+        case 'PARTIAL':
+        case 'TIMEOUT': return 'ur-badge-warning';
+        case 'FAILED':  return 'ur-badge-failed';
+        case 'ABORTED': return 'ur-badge-aborted';
+        case 'PENDING':
+        default:        return 'ur-badge-pending';
+    }
+}
+
+/**
+ * Human label for a state badge (RUNNING / Success / ... ). Pending reads as
+ * "Never run" which is friendlier than the vocabulary token.
+ */
+function ur_state_label(string $state): string
+{
+    switch (strtoupper($state)) {
+        case 'RUNNING': return ur_t('Running');
+        case 'SUCCESS': return ur_t('Success');
+        case 'WARNING': return ur_t('Warning');
+        case 'PARTIAL': return ur_t('Partial');
+        case 'TIMEOUT': return ur_t('Timeout');
+        case 'FAILED':  return ur_t('Failed');
+        case 'ABORTED': return ur_t('Aborted');
+        case 'PENDING':
+        default:        return ur_t('Never run');
+    }
+}
+
+/**
+ * Derive a job's display state from its live running flag + last-run summary.
+ * RUNNING (live) overrides the summary; otherwise the summary state; PENDING
+ * when there is no summary (never run). Mirrors the handler's ur_derive_state.
+ *
+ * @param array<string,mixed>|null $summary
+ */
+function ur_job_state(bool $running, $summary): string
+{
+    if ($running) {
+        return 'RUNNING';
+    }
+    if (is_array($summary) && !empty($summary['state'])) {
+        return (string) $summary['state'];
+    }
+    return 'PENDING';
+}
+
+/**
+ * The "Last run" cell label: a relative "x ago" using the summary finishedAt,
+ * or an em-dash when there is no summary. Returns plain text (caller escapes).
+ *
+ * @param array<string,mixed>|null $summary
+ */
+function ur_last_run_label($summary, int $now): string
+{
+    if (!is_array($summary) || empty($summary['finishedAt'])) {
+        return '—';
+    }
+    $dt = DateTime::createFromFormat('Y-m-d\TH:i:s\Z', (string) $summary['finishedAt'], new DateTimeZone('UTC'));
+    if ($dt === false) {
+        return '—';
+    }
+    $ts    = (int) $dt->getTimestamp();
+    $delta = $now - $ts;
+    if ($delta < 0) {
+        $delta = 0;
+    }
+    return date('Y-m-d H:i', $ts) . ' (' . ur_ago($delta) . ')';
+}
+
+/** "x ago" coarse relative string for a past delta in seconds. */
+function ur_ago(int $deltaSec): string
+{
+    if ($deltaSec < 60) {
+        return ur_t('just now');
+    }
+    $units = [['d', 86400], ['h', 3600], ['m', 60]];
+    $parts = [];
+    $remaining = $deltaSec;
+    foreach ($units as [$suffix, $size]) {
+        $count = intdiv($remaining, $size);
+        if ($count > 0) {
+            $parts[] = $count . $suffix;
+            $remaining -= $count * $size;
+        }
+        if (count($parts) === 2) {
+            break;
+        }
+    }
+    return implode(' ', $parts) . ' ' . ur_t('ago');
+}
 ?>
+
+<style>
+/* TrueNAS-style colored state badges + the per-run log viewer. Colors pull from
+   the inherited dynamix palette where available (--orange-500, --green-...),
+   with safe fallbacks so the badges read correctly under any theme. */
+.ur-badge {
+  display: inline-block;
+  min-width: 64px;
+  padding: 2px 10px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: bold;
+  text-align: center;
+  color: #fff;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+.ur-badge-success  { background: #1c7d3f; }                 /* green  */
+.ur-badge-warning  { background: var(--orange-500, #ff8c2f); }
+.ur-badge-failed   { background: var(--red-800, #b71c1c); } /* red    */
+.ur-badge-aborted  { background: #6b6b6b; }                 /* grey   */
+.ur-badge-pending  { background: #9aa0a6; }                 /* grey   */
+.ur-badge-running  { background: #1565c0; animation: ur-pulse 1.3s ease-in-out infinite; }
+@keyframes ur-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.55; } }
+
+.ur-log-modal {
+  position: fixed; inset: 0; z-index: 1000;
+  background: rgba(0,0,0,0.5);
+  display: none;
+}
+.ur-log-modal.ur-open { display: block; }
+.ur-log-modal-inner {
+  position: absolute; top: 6%; left: 50%; transform: translateX(-50%);
+  width: 80%; max-width: 1000px; max-height: 84%;
+  background: var(--background-color, #1c1c1c);
+  border: 1px solid var(--border-color, #444);
+  border-radius: 6px;
+  padding: 14px 18px;
+  display: flex; flex-direction: column;
+  box-shadow: 0 8px 30px rgba(0,0,0,0.4);
+}
+.ur-log-modal-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.ur-log-modal-head .ur-log-title { font-weight: bold; flex: 1; }
+.ur-log-pre {
+  flex: 1; overflow: auto; margin: 0;
+  background: #000; color: #d0d0d0;
+  padding: 10px; border-radius: 4px;
+  font-family: monospace; font-size: 12px;
+  white-space: pre-wrap; word-break: break-word;
+  min-height: 240px; max-height: 60vh;
+}
+</style>
+<?php /* (the markup below re-opens output) */ ?>
 <div class="title">
   <span class="left">
     <i class="fa fa-list title"></i>&nbsp;<?=_('Jobs')?>
@@ -358,7 +516,7 @@ function ur_relative_time(int $deltaSec): string
 <p>
   <?=_('Define independent rsync backup jobs. Each job has its own schedule and runs one rsync per source -> destination pair (no cartesian product)')?>.
   <?=_('Enabled jobs run automatically on their cron schedule; the Next run column shows when each will fire. You can also Run or Dry-run a job on demand')?>.
-  <?=_('Live status, per-run logs and notifications arrive in later releases')?>.
+  <?=_('The State column shows each job\'s live status (updated automatically while a job runs); use the Logs button to view per-run output. Notifications arrive in a later release')?>.
 </p>
 
 <!-- Summary list ------------------------------------------------------------>
@@ -367,26 +525,59 @@ function ur_relative_time(int $deltaSec): string
   <thead>
     <tr>
       <th><?=_('Name')?></th>
+      <th><?=_('State')?></th>
       <th><?=_('Enabled')?></th>
       <th><?=_('Transport')?></th>
       <th><?=_('Schedule')?></th>
+      <th><?=_('Last run')?></th>
       <th><?=_('Next run')?></th>
     </tr>
   </thead>
   <tbody>
     <?php if (empty($jobs)): ?>
-      <tr><td colspan="5"><?=_('No jobs configured yet')?>.</td></tr>
-    <?php else: foreach ($jobs as $job): ?>
-      <tr>
+      <tr><td colspan="7"><?=_('No jobs configured yet')?>.</td></tr>
+    <?php else: foreach ($jobs as $job):
+        $job     = is_array($job) ? $job : [];
+        $jid     = (string) ($job['id'] ?? '');
+        $running = ($jid !== '') ? RunState::isRunning($jid) : false;
+        $summary = ($jid !== '') ? Runner::readSummary($jid) : null;
+        $state   = ur_job_state($running, $summary);
+    ?>
+      <tr data-jobid="<?=htmlspecialchars($jid, ENT_QUOTES, 'UTF-8')?>">
         <td><?=htmlspecialchars((string)($job['name'] ?? ''), ENT_QUOTES, 'UTF-8')?></td>
+        <td>
+          <span class="ur-badge ur-state-badge <?=htmlspecialchars(ur_state_badge_class($state), ENT_QUOTES, 'UTF-8')?>"
+                data-jobid="<?=htmlspecialchars($jid, ENT_QUOTES, 'UTF-8')?>"><?=htmlspecialchars(ur_state_label($state), ENT_QUOTES, 'UTF-8')?></span>
+          <?php if ($jid !== ''): ?>
+            <button type="button" class="ur-job-viewlog" data-jobid="<?=htmlspecialchars($jid, ENT_QUOTES, 'UTF-8')?>" data-jobname="<?=htmlspecialchars((string)($job['name'] ?? $jid), ENT_QUOTES, 'UTF-8')?>"><?=_('Logs')?></button>
+          <?php endif; ?>
+        </td>
         <td><?=!empty($job['enabled']) ? _('Yes') : _('No')?></td>
         <td><?=htmlspecialchars((string)($job['transport'] ?? ''), ENT_QUOTES, 'UTF-8')?></td>
         <td><?=htmlspecialchars((string)($job['schedule'] ?? ''), ENT_QUOTES, 'UTF-8')?></td>
-        <td><?=htmlspecialchars(ur_next_run_label(is_array($job) ? $job : [], $urNow), ENT_QUOTES, 'UTF-8')?></td>
+        <td class="ur-last-run-cell"><?=htmlspecialchars(ur_last_run_label($summary, $urNow), ENT_QUOTES, 'UTF-8')?></td>
+        <td><?=htmlspecialchars(ur_next_run_label($job, $urNow), ENT_QUOTES, 'UTF-8')?></td>
       </tr>
     <?php endforeach; endif; ?>
   </tbody>
 </table>
+
+<!-- Per-job run log viewer (modal). A run selector (filled from listRuns) + a
+     scrollable <pre> fed by getJobLog. The log text is ALREADY HTML-escaped by
+     the handler; we inject it with textContent / as-escaped HTML and never build
+     raw innerHTML from unescaped bytes. -->
+<div id="ur-log-modal" class="ur-log-modal" aria-hidden="true">
+  <div class="ur-log-modal-inner">
+    <div class="ur-log-modal-head">
+      <span class="ur-log-title" id="ur-log-title"><?=_('Run log')?></span>
+      <label for="ur-log-run-select"><?=_('Run')?>:</label>
+      <select id="ur-log-run-select"></select>
+      <span id="ur-log-live" class="ur-badge ur-badge-running" style="display:none"><?=_('Live')?></span>
+      <button type="button" id="ur-log-close"><?=_('Close')?></button>
+    </div>
+    <pre id="ur-log-pre" class="ur-log-pre"></pre>
+  </div>
+</div>
 
 <!-- CRUD form ---------------------------------------------------------------->
 <form markdown="1" method="POST" action="<?=htmlspecialchars($handlerUrl, ENT_QUOTES, 'UTF-8')?>" id="ur-jobs-form">
@@ -511,9 +702,9 @@ function ur_relative_time(int $deltaSec): string
   var CSRF_TOKEN  = <?=json_encode($csrf)?>;
 
   /* Fire a run/dry-run/abort action for a job and show the result inline next
-   * to its card. Fire-and-confirm: the response just acknowledges the launch;
-   * live status + the log viewer are Phase 6. On a successful run/dry launch we
-   * reload after a beat so the buttons reflect the now-running state. */
+   * to its card. Fire-and-confirm: the response just acknowledges the launch.
+   * Instead of a full page reload, we kick the 1s status poll so badges and the
+   * Run/Dry/Abort enable state update live. */
   function postJobAction(action, jobId, btn) {
     if (!jobId) { return; }
     var card = btn && btn.closest ? btn.closest('.ur-job-card') : null;
@@ -535,12 +726,10 @@ function ur_relative_time(int $deltaSec): string
             result.textContent = (res.body && res.body.error) ? res.body.error : 'Action failed.';
           }
         }
-        /* Reload so the Run/Abort enable state tracks the new running state. */
-        if (res.ok && res.body && res.body.ok) {
-          setTimeout(function () { window.location.reload(); }, 700);
-        } else if (btn) {
-          btn.disabled = false;
-        }
+        /* Resume polling so the badge + buttons reflect the new running state
+         * immediately (poll re-derives the enable state from getStatus). */
+        ensurePolling();
+        pollStatusOnce();
       })
       .catch(function () {
         if (result) {
@@ -569,6 +758,10 @@ function ur_relative_time(int $deltaSec): string
       postJobAction('dryRunJob', t.getAttribute('data-jobid'), t);
     } else if (t.classList.contains('ur-job-abort')) {
       postJobAction('abortJob', t.getAttribute('data-jobid'), t);
+    } else if (t.classList.contains('ur-job-viewlog')) {
+      openLogViewer(t.getAttribute('data-jobid'), t.getAttribute('data-jobname') || t.getAttribute('data-jobid'));
+    } else if (t.id === 'ur-log-close') {
+      closeLogViewer();
     } else if (t.classList.contains('ur-job-del')) {
       var card = t.closest ? t.closest('.ur-job-card') : null;
       if (card && card.parentNode) { card.parentNode.removeChild(card); }
@@ -622,5 +815,274 @@ function ur_relative_time(int $deltaSec): string
         });
     });
   }
+
+  /* ===================================================================
+   * Phase 6: live status polling + per-run log viewer.
+   * =================================================================== */
+
+  var STATUS_URL = HANDLER_URL + '?action=getStatus';
+
+  /* Badge class + label vocabulary - kept in lockstep with jobs.php
+   * (ur_state_badge_class / ur_state_label) so a JS-updated badge matches a
+   * server-rendered one. */
+  var BADGE_CLASSES = [
+    'ur-badge-running', 'ur-badge-success', 'ur-badge-warning',
+    'ur-badge-failed', 'ur-badge-aborted', 'ur-badge-pending'
+  ];
+  function badgeClassFor(state) {
+    switch ((state || '').toUpperCase()) {
+      case 'RUNNING': return 'ur-badge-running';
+      case 'SUCCESS': return 'ur-badge-success';
+      case 'WARNING':
+      case 'PARTIAL':
+      case 'TIMEOUT': return 'ur-badge-warning';
+      case 'FAILED':  return 'ur-badge-failed';
+      case 'ABORTED': return 'ur-badge-aborted';
+      default:        return 'ur-badge-pending';
+    }
+  }
+  function badgeLabelFor(state) {
+    switch ((state || '').toUpperCase()) {
+      case 'RUNNING': return 'Running';
+      case 'SUCCESS': return 'Success';
+      case 'WARNING': return 'Warning';
+      case 'PARTIAL': return 'Partial';
+      case 'TIMEOUT': return 'Timeout';
+      case 'FAILED':  return 'Failed';
+      case 'ABORTED': return 'Aborted';
+      default:        return 'Never run';
+    }
+  }
+
+  /* Coarse "x ago" relative label for a past epoch (seconds). */
+  function agoLabel(finishedEpoch, nowEpoch) {
+    if (!finishedEpoch) { return '—'; }
+    var delta = Math.max(0, nowEpoch - finishedEpoch);
+    if (delta < 60) { return 'just now'; }
+    var units = [['d', 86400], ['h', 3600], ['m', 60]];
+    var parts = [];
+    var rem = delta;
+    for (var i = 0; i < units.length && parts.length < 2; i++) {
+      var c = Math.floor(rem / units[i][1]);
+      if (c > 0) { parts.push(c + units[i][0]); rem -= c * units[i][1]; }
+    }
+    return parts.join(' ') + ' ago';
+  }
+  function fmtLocal(epoch) {
+    var d = new Date(epoch * 1000);
+    function p(n) { return (n < 10 ? '0' : '') + n; }
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate())
+      + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+  }
+
+  /* Apply a getStatus payload: update each job's badge, last-run cell, and the
+   * Run/Dry/Abort enable state on its card. Returns true if ANY job is running
+   * (so the caller can decide whether to keep polling). */
+  function applyStatus(payload) {
+    if (!payload || !payload.jobs) { return false; }
+    var now = payload.now || Math.floor(Date.now() / 1000);
+    var anyRunning = false;
+
+    Object.keys(payload.jobs).forEach(function (jobId) {
+      var s = payload.jobs[jobId];
+      if (!s) { return; }
+      if (s.running) { anyRunning = true; }
+
+      /* Badge (there can be one in the table row + nowhere else; update all
+       * badges carrying this job id). */
+      var badges = document.querySelectorAll('.ur-state-badge[data-jobid="' + cssEsc(jobId) + '"]');
+      badges.forEach(function (b) {
+        BADGE_CLASSES.forEach(function (c) { b.classList.remove(c); });
+        b.classList.add(badgeClassFor(s.state));
+        b.textContent = badgeLabelFor(s.state);
+      });
+
+      /* Last-run cell in the summary row. */
+      var row = document.querySelector('tr[data-jobid="' + cssEsc(jobId) + '"]');
+      if (row) {
+        var cell = row.querySelector('.ur-last-run-cell');
+        if (cell) {
+          if (s.lastRun && s.lastRun.finishedAt) {
+            var fin = isoToEpoch(s.lastRun.finishedAt);
+            cell.textContent = fin ? (fmtLocal(fin) + ' (' + agoLabel(fin, now) + ')') : '—';
+          } else {
+            cell.textContent = '—';
+          }
+        }
+      }
+
+      /* Run/Dry/Abort enable state on the edit card (if present). */
+      var run   = document.querySelector('.ur-job-run[data-jobid="' + cssEsc(jobId) + '"]');
+      var dry   = document.querySelector('.ur-job-dry[data-jobid="' + cssEsc(jobId) + '"]');
+      var abort = document.querySelector('.ur-job-abort[data-jobid="' + cssEsc(jobId) + '"]');
+      if (run)   { run.disabled = !!s.running; }
+      if (dry)   { dry.disabled = !!s.running; }
+      if (abort) { abort.disabled = !s.running; }
+    });
+
+    return anyRunning;
+  }
+
+  /* Minimal CSS attribute-value escaper for our slug-shaped ids. */
+  function cssEsc(v) { return String(v).replace(/["\\]/g, '\\$&'); }
+
+  /* Parse an ISO-8601 UTC "Y-m-dTH:i:sZ" string to an epoch (0 on failure). */
+  function isoToEpoch(iso) {
+    var t = Date.parse(iso);
+    return isNaN(t) ? 0 : Math.floor(t / 1000);
+  }
+
+  var statusTimer = null;
+  function pollStatusOnce() {
+    return fetch(STATUS_URL, { credentials: 'same-origin' })
+      .then(function (r) { return r.json(); })
+      .then(function (body) {
+        var anyRunning = applyStatus(body);
+        /* Stop polling once nothing is running (and the viewer isn't tailing a
+         * running job); a user action re-arms it via ensurePolling(). */
+        if (!anyRunning && !viewerTailing()) { stopPolling(); }
+      })
+      .catch(function () { /* transient; keep the timer */ });
+  }
+  function ensurePolling() {
+    if (statusTimer === null) {
+      statusTimer = setInterval(pollStatusOnce, 1000);
+    }
+  }
+  function stopPolling() {
+    if (statusTimer !== null) { clearInterval(statusTimer); statusTimer = null; }
+  }
+
+  /* ---- per-run log viewer ---- */
+  var viewer = {
+    jobId: '', run: '', running: false, timer: null
+  };
+  var modal      = document.getElementById('ur-log-modal');
+  var modalTitle = document.getElementById('ur-log-title');
+  var modalPre   = document.getElementById('ur-log-pre');
+  var modalSel   = document.getElementById('ur-log-run-select');
+  var modalLive  = document.getElementById('ur-log-live');
+
+  function viewerTailing() { return viewer.timer !== null && viewer.running; }
+
+  function openLogViewer(jobId, jobName) {
+    if (!jobId || !modal) { return; }
+    viewer.jobId = jobId;
+    viewer.run = '';
+    if (modalTitle) { modalTitle.textContent = 'Run log — ' + jobName; }
+    if (modalPre) { modalPre.textContent = 'Loading…'; }
+    modal.classList.add('ur-open');
+    modal.setAttribute('aria-hidden', 'false');
+    refreshRunList(function () {
+      fetchJobLog();        // load the latest/selected run
+      startLogTail();
+    });
+  }
+  function closeLogViewer() {
+    if (modal) {
+      modal.classList.remove('ur-open');
+      modal.setAttribute('aria-hidden', 'true');
+    }
+    stopLogTail();
+    viewer.jobId = '';
+  }
+
+  function refreshRunList(cb) {
+    fetch(HANDLER_URL + '?action=listRuns&id=' + encodeURIComponent(viewer.jobId) + '&limit=10',
+      { credentials: 'same-origin' })
+      .then(function (r) { return r.json(); })
+      .then(function (body) {
+        if (!modalSel) { if (cb) { cb(); } return; }
+        var prev = viewer.run;
+        modalSel.innerHTML = '';
+        var runs = (body && body.runs) ? body.runs : [];
+        runs.forEach(function (run, idx) {
+          var opt = document.createElement('option');
+          opt.value = run.id;            // run-<stamp>.log (server-whitelisted)
+          var lbl = run.id.replace(/^run-/, '').replace(/\.log$/, '');
+          if (run.state) { lbl += '  [' + run.state + ']'; }
+          if (idx === 0) { lbl += '  (latest)'; }
+          opt.textContent = lbl;          // textContent: never raw innerHTML
+          modalSel.appendChild(opt);
+        });
+        /* Default to the latest run unless the user had picked one still listed. */
+        if (prev && Array.prototype.some.call(modalSel.options, function (o) { return o.value === prev; })) {
+          modalSel.value = prev;
+        } else if (modalSel.options.length) {
+          modalSel.selectedIndex = 0;
+          viewer.run = '';              // '' => server serves latest
+        }
+        if (cb) { cb(); }
+      })
+      .catch(function () { if (cb) { cb(); } });
+  }
+
+  function fetchJobLog() {
+    if (!viewer.jobId) { return Promise.resolve(); }
+    var sel = (modalSel && modalSel.options.length && modalSel.selectedIndex > 0)
+      ? modalSel.value : '';
+    var url = HANDLER_URL + '?action=getJobLog&id=' + encodeURIComponent(viewer.jobId);
+    if (sel) { url += '&run=' + encodeURIComponent(sel); }
+    return fetch(url, { credentials: 'same-origin' })
+      .then(function (r) { return r.json(); })
+      .then(function (body) {
+        if (!body || !body.ok) { return; }
+        viewer.running = !!body.running;
+        if (modalLive) { modalLive.style.display = body.running ? '' : 'none'; }
+        if (modalPre) {
+          /* body.log is ALREADY HTML-escaped server-side (Logger::tail). Inject
+           * it as escaped HTML so a <pre> renders it verbatim; we DO NOT build
+           * innerHTML from unescaped bytes. */
+          var atBottom = (modalPre.scrollTop + modalPre.clientHeight) >= (modalPre.scrollHeight - 20);
+          modalPre.innerHTML = body.log || '';
+          if (atBottom) { modalPre.scrollTop = modalPre.scrollHeight; }
+        }
+      })
+      .catch(function () { /* transient */ });
+  }
+
+  function startLogTail() {
+    stopLogTail();
+    /* Auto-tail every 1s while THIS run is running. We always fetch once
+     * (already done by openLogViewer) then poll; the poll stops itself when the
+     * run is no longer running. */
+    viewer.timer = setInterval(function () {
+      if (!viewer.jobId) { stopLogTail(); return; }
+      fetchJobLog().then(function () {
+        if (!viewer.running) {
+          /* The run finished: do one final refresh of the run list (state may
+           * have landed) and stop tailing. */
+          refreshRunList();
+          stopLogTail();
+        }
+      });
+    }, 1000);
+  }
+  function stopLogTail() {
+    if (viewer.timer !== null) { clearInterval(viewer.timer); viewer.timer = null; }
+  }
+
+  if (modalSel) {
+    modalSel.addEventListener('change', function () {
+      viewer.run = (modalSel.selectedIndex > 0) ? modalSel.value : '';
+      if (modalPre) { modalPre.textContent = 'Loading…'; }
+      fetchJobLog().then(function () {
+        /* Re-arm tailing only when viewing a running run (the latest). */
+        if (viewer.running) { startLogTail(); } else { stopLogTail(); }
+      });
+    });
+  }
+  /* Close the modal on backdrop click (but not when clicking inside it). */
+  if (modal) {
+    modal.addEventListener('click', function (ev) {
+      if (ev.target === modal) { closeLogViewer(); }
+    });
+  }
+
+  /* Kick off polling on load only when something is already running (the
+   * server-rendered badges tell us, but a cheap initial poll is simplest and
+   * self-stops if everything is idle). */
+  ensurePolling();
+  pollStatusOnce();
 })();
 </script>

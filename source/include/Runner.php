@@ -118,6 +118,10 @@ class Runner
         $startedAt   = gmdate('Y-m-d\TH:i:s\Z', $startedAtTs);
         try {
             $runLog = Logger::openRun($jobId, $startedAtTs);
+            // Retention: prune this job's older run logs to the last N (newest
+            // kept) NOW that the new run log exists, so tmpfs use stays bounded.
+            // Best-effort - a prune failure must never fail the run.
+            Logger::pruneRuns($jobId);
             RunState::clearAbort($jobId);
             RunState::write($jobId, [
                 'pid'        => self::pid(),
