@@ -1,0 +1,5 @@
+Menu="UnraidRsync:1"
+Title="Jobs"
+Tag="list"
+---
+<?php include "/usr/local/emhttp/plugins/unraid.rsync/pages/jobs.php"; ?>
