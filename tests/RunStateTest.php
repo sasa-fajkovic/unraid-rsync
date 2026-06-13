@@ -113,11 +113,30 @@ final class RunStateTest extends TestCase
     {
         $this->assertTrue(RunState::cmdlineMatchesJob("php\0/x/scripts/runner.php\0--job=j-music", 'j-music'));
         $this->assertTrue(RunState::cmdlineMatchesJob('php /x/scripts/runner.php --job=j-music --dry-run', 'j-music'));
+        // Trailing --job at the very end of the cmdline (boundary = end-of-string).
+        $this->assertTrue(RunState::cmdlineMatchesJob('php runner.php --job=j-music', 'j-music'));
         // Wrong job id.
         $this->assertFalse(RunState::cmdlineMatchesJob('php runner.php --job=j-other', 'j-music'));
         // Not our runner at all.
         $this->assertFalse(RunState::cmdlineMatchesJob('sleep 9999', 'j-music'));
         $this->assertFalse(RunState::cmdlineMatchesJob('', 'j-music'));
+        $this->assertFalse(RunState::cmdlineMatchesJob('php runner.php --job=j-music', ''));
+    }
+
+    public function testCmdlineMatchesJobIsNotPrefixMatched(): void
+    {
+        // job id "j-a" must NOT match a runner of the LONGER id "j-a-b": the
+        // token boundary stops a prefix collision (which would mis-report which
+        // job is running and break PID-reuse safety).
+        $this->assertFalse(
+            RunState::cmdlineMatchesJob("php\0runner.php\0--job=j-a-b", 'j-a'),
+            '"j-a" must not match "--job=j-a-b"'
+        );
+        $this->assertFalse(
+            RunState::cmdlineMatchesJob('php runner.php --job=j-a-b --dry-run', 'j-a')
+        );
+        // The longer id still matches itself.
+        $this->assertTrue(RunState::cmdlineMatchesJob("php\0runner.php\0--job=j-a-b", 'j-a-b'));
     }
 
     public function testIsRunningTrueWhenAliveAndCmdlineMatches(): void

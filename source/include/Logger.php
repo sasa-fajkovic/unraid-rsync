@@ -187,7 +187,11 @@ class Logger
             $data = "[... earlier output truncated ...]\n" . $data;
         }
 
-        // ESCAPE before returning - the caller renders this verbatim.
-        return htmlspecialchars($data, ENT_QUOTES, 'UTF-8');
+        // ESCAPE before returning - the caller renders this verbatim. Log files
+        // hold arbitrary bytes (rsync output, non-UTF-8 filenames); ENT_SUBSTITUTE
+        // replaces invalid UTF-8 sequences with the Unicode replacement char
+        // rather than letting htmlspecialchars() return '' / emit a warning, so
+        // the viewer stays reliable on binary-ish output.
+        return htmlspecialchars($data, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
     }
 }

@@ -222,21 +222,31 @@ class RunState
 
     /**
      * True when a process command line is our runner for the given job id. We
-     * look for "runner.php" and the exact "--job=<jobid>" token. The cmdline
-     * from /proc is NUL-separated; we accept either NUL or space separation.
+     * require "runner.php" AND the EXACT "--job=<jobid>" token (terminated at a
+     * token boundary). The cmdline from /proc is NUL-separated; we normalise to
+     * spaces so the check works regardless of source.
+     *
+     * The token must end at a boundary (whitespace or end-of-string) so a job id
+     * is never matched as a PREFIX of another - e.g. id "j-a" must NOT match a
+     * runner of "j-a-b" (--job=j-a-b). Without the boundary, isRunning() could
+     * report the wrong job as running (mis-disabling Run / mis-enabling Abort)
+     * and undermine PID-reuse safety.
      */
     public static function cmdlineMatchesJob(string $cmdline, string $jobId): bool
     {
-        if ($cmdline === '') {
+        if ($cmdline === '' || $jobId === '') {
             return false;
         }
         // /proc/<pid>/cmdline uses NUL separators; normalise to spaces so a
-        // substring check works regardless of source.
+        // boundary-anchored search works regardless of source.
         $normalized = str_replace("\0", ' ', $cmdline);
         if (strpos($normalized, 'runner.php') === false) {
             return false;
         }
-        return strpos($normalized, '--job=' . $jobId) !== false;
+        // Match "--job=<id>" only when followed by whitespace or the string end,
+        // so the id is a whole token, not a prefix of a longer one.
+        $pattern = '/--job=' . preg_quote($jobId, '/') . '(\s|$)/';
+        return preg_match($pattern, $normalized) === 1;
     }
 
     /** Has an abort been requested for this job? (the flag file exists) */

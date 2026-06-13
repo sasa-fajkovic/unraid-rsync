@@ -75,6 +75,22 @@ final class LoggerTest extends TestCase
         $this->assertStringContainsString('&quot;', $tail);
     }
 
+    public function testTailHandlesInvalidUtf8Bytes(): void
+    {
+        // rsync output / non-UTF-8 filenames can contain invalid byte sequences.
+        // tail() must still return a non-empty, escaped string (ENT_SUBSTITUTE),
+        // not '' or a warning.
+        $path = Logger::openRun('j-x', 1750000000);
+        // 0xFF is never valid UTF-8; mix it with a real tag to confirm escaping.
+        file_put_contents($path, "before \xFF\xFE <tag> after\n");
+        $tail = Logger::tail($path);
+        $this->assertNotSame('', $tail, 'invalid UTF-8 must not blank the tail');
+        $this->assertStringContainsString('before', $tail);
+        $this->assertStringContainsString('after', $tail);
+        $this->assertStringContainsString('&lt;tag&gt;', $tail, 'still HTML-escaped');
+        $this->assertStringNotContainsString('<tag>', $tail);
+    }
+
     public function testTailMissingFileReturnsEmpty(): void
     {
         $this->assertSame('', Logger::tail($this->rtBase . '/nope.log'));

@@ -240,6 +240,30 @@ final class RunnerTest extends TestCase
         $this->assertSame('/mnt/user/m/', $pull['dest']);
     }
 
+    public function testGuardrailDeleteDestForLocalUsesRemoteSideRegardlessOfDirection(): void
+    {
+        // A hand-edited LOCAL job with direction=PULL must still treat the
+        // `remote` field as the destination (resolvePair coerces LOCAL to PUSH),
+        // so the --delete sub-dir check targets the side rsync actually writes.
+        $job = Config::defaultJob();
+        $job['transport'] = 'LOCAL';
+        $job['direction'] = 'PULL'; // spurious for LOCAL
+        $opts = Config::mergeRsyncOptions(['delete' => true]);
+
+        // remote dest "/" -> should be flagged (it is the real destination).
+        $errors = Runner::guardrailErrors(
+            $job,
+            ['local' => '/mnt/user/src/', 'remote' => '/'],
+            'LOCAL',
+            $opts
+        );
+        // "/" also fails checkLocalPath, but the delete-subdir message must be
+        // among the errors targeting the REMOTE (dest) side, not the local side.
+        $joined = implode(' ', $errors);
+        $this->assertNotEmpty($errors);
+        $this->assertStringContainsString('sub-directory', $joined);
+    }
+
     public function testResolvePairLocalIgnoresDirection(): void
     {
         $job = Config::defaultJob();

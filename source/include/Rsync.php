@@ -440,14 +440,27 @@ class Rsync
             }
         }
 
-        $code = proc_close($proc);
-        // proc_close returns -1 if the status was already reaped; a signalled
-        // exit comes through as the raw status on some PHP builds. Normalise a
-        // negative/odd value to a sane non-zero so it maps to FAILED, and keep
-        // 143 (SIGTERM) intact when present.
-        if ($code < 0) {
-            return 1;
+        // Capture the final status BEFORE proc_close. proc_close only returns
+        // the exit CODE and gives -1 once the child has already been reaped, so
+        // a process killed by a signal (our SIGTERM abort) would otherwise be
+        // lost. proc_get_status reports `signaled` + `termsig`, which we encode
+        // as 128+signal (the shell convention) so SIGTERM(15) -> 143 -> ABORTED.
+        $status = @proc_get_status($proc);
+        $code   = proc_close($proc);
+
+        if (is_array($status)) {
+            if (!empty($status['signaled']) && isset($status['termsig'])) {
+                return 128 + (int) $status['termsig'];
+            }
+            // While `running` is false the reported exitcode is authoritative;
+            // proc_close may already have returned -1 by the time we get here.
+            if (array_key_exists('exitcode', $status) && (int) $status['exitcode'] >= 0) {
+                return (int) $status['exitcode'];
+            }
         }
-        return $code;
+
+        // Fallback to proc_close's value; a negative (already-reaped) result has
+        // no usable code, so treat it as a generic failure.
+        return $code < 0 ? 1 : $code;
     }
 }

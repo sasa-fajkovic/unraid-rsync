@@ -100,19 +100,25 @@ class Runner
             return self::hardFail($jobId, "Job is already running: $jobId", 'already-running');
         }
 
-        // 3. Open the run log + write RunState (running=true).
+        // 3. Open the run log + write RunState (running=true). A filesystem
+        //    failure here (e.g. the tmpfs runtime dir is not writable) must NOT
+        //    escape - it would contradict the contract (no structured result, no
+        //    postHook/summary/markStopped). Catch it and hard-fail cleanly.
         $startedAtTs = time();
         $startedAt   = gmdate('Y-m-d\TH:i:s\Z', $startedAtTs);
-        $runLog      = Logger::openRun($jobId, $startedAtTs);
-
-        RunState::clearAbort($jobId);
-        RunState::write($jobId, [
-            'pid'        => self::pid(),
-            'running'    => true,
-            'dryRun'     => $dryRun,
-            'startedAt'  => $startedAt,
-            'currentLog' => $runLog,
-        ]);
+        try {
+            $runLog = Logger::openRun($jobId, $startedAtTs);
+            RunState::clearAbort($jobId);
+            RunState::write($jobId, [
+                'pid'        => self::pid(),
+                'running'    => true,
+                'dryRun'     => $dryRun,
+                'startedAt'  => $startedAt,
+                'currentLog' => $runLog,
+            ]);
+        } catch (Throwable $e) {
+            return self::hardFail($jobId, 'Could not initialise run state/log: ' . $e->getMessage());
+        }
 
         Logger::event($runLog, $jobId, sprintf(
             'Run started for job "%s" (%s)%s.',
@@ -465,11 +471,14 @@ class Runner
             }
         }
 
-        // --delete destination must be a specific sub-dir.
+        // --delete destination must be a specific sub-dir. Determine which side
+        // is the destination EXACTLY as resolvePair() does: for LOCAL transport
+        // direction is coerced to PUSH (dest = `remote`), so we must not let a
+        // hand-edited direction=PULL on a LOCAL job check the wrong side. Only
+        // for SSH does PULL flip the destination to the `local` side.
         $deleteOn = !empty($opts['delete']) || !empty($opts['deleteExcluded']);
         if ($deleteOn) {
-            // LOCAL is coerced to PUSH, so dest is the `remote` field there too.
-            $destIsRemote = ($direction !== 'PULL');
+            $destIsRemote = ($transport !== 'SSH') ? true : ($direction !== 'PULL');
             $destPath = $destIsRemote ? $remote : $local;
             if ($destPath !== '' && !Job::isSpecificSubPath($destPath)) {
                 $errors[] = 'a delete option is enabled, so the destination must be a specific sub-directory, not a root.';
