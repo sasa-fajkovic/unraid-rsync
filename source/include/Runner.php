@@ -162,10 +162,27 @@ class Runner
                     Logger::event($runLog, $jobId, 'SSH transport could not be prepared: ' . $matResult['message']);
                 } else {
                     $token     = (string) $matResult['token'];
+                    $mat       = $matResult['mat'];
                     $sshPieces = [
-                        'dashE'         => (string) $matResult['mat']['dashE'],
-                        'sshpassPrefix' => (array) $matResult['mat']['sshpassPrefix'],
+                        'dashE'         => (string) $mat['dashE'],
+                        'sshpassPrefix' => (array) $mat['sshpassPrefix'],
                     ];
+                    // F1: arm secret-path redaction BEFORE any captured rsync/ssh
+                    // output reaches the log. At `debug` level rsync echoes the
+                    // remote-shell command (-e "ssh -i <tmpfs-keypath> ... -p N"),
+                    // exposing the per-run tmpfs key/passfile/known_hosts PATHS
+                    // into the root-written, browser-visible log. Scrub them (and,
+                    // defensively, anything under this run's per-token secret
+                    // dirs) on every write until the finally clears it.
+                    Logger::setRedaction(
+                        [
+                            (string) ($mat['keyPath'] ?? ''),
+                            (string) ($mat['passFile'] ?? ''),
+                            (string) ($mat['knownHosts'] ?? ''),
+                        ],
+                        Ssh::$runtimeBase,
+                        $token
+                    );
                 }
             }
 
@@ -256,9 +273,10 @@ class Runner
                         $dryRun
                     );
 
-                    $pairExit = Rsync::run($argv, static function (string $chunk) use ($runLog): void {
-                        @file_put_contents($runLog, $chunk, FILE_APPEND | LOCK_EX);
-                    });
+                    // Stream rsync's captured stdout/stderr through Logger::sink,
+                    // which REDACTS armed per-run secret paths (F1) and enforces
+                    // the per-run-log byte cap (F3) before bytes hit the log.
+                    $pairExit = Rsync::run($argv, Logger::sink($runLog));
                     $exitCodes[] = $pairExit;
                     Logger::event($runLog, $jobId, "Pair #$n rsync exited with code $pairExit (" . Rsync::exitToState($pairExit) . ').');
                 }
@@ -294,10 +312,12 @@ class Runner
                 }
             }
 
-            // 8. Cleanup the SSH runtime secrets for THIS run's token.
+            // 8. Cleanup the SSH runtime secrets for THIS run's token, and disarm
+            //    the secret-path redaction armed at materialisation (F1).
             if ($token !== '') {
                 Ssh::cleanupRuntime($token);
             }
+            Logger::clearRedaction();
 
             // 9. Persist the last-run summary to /boot + clear running state.
             $finishedAtTs = time();
@@ -742,9 +762,9 @@ class Runner
      */
     private static function runHook(string $hook, array $env, string $runLog): int
     {
-        $sink = static function (string $chunk) use ($runLog): void {
-            @file_put_contents($runLog, $chunk, FILE_APPEND | LOCK_EX);
-        };
+        // Hook stdout/stderr (captured + browser-visible) flows through the same
+        // redacting, size-capped sink as rsync output (F1 + F3).
+        $sink = Logger::sink($runLog);
 
         if (self::$hookRunner !== null) {
             return (int) (self::$hookRunner)($hook, $env, $sink);

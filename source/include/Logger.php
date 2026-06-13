@@ -29,10 +29,155 @@ if (!defined('UR_RUNTIME_BASE')) {
     define('UR_RUNTIME_BASE', '/tmp/unraid.rsync');
 }
 
+// Max bytes a single in-progress RUN log may grow to before further captured
+// output is dropped. The run log lives in RAM (tmpfs), so an unbounded
+// verbose/debug run over a huge tree - or a chatty hook - could otherwise
+// exhaust RAM (pruneRuns bounds the COUNT of logs and tail() bounds READS, but
+// neither caps a single live log). Overridable for tests / a future Global
+// Setting via the define; defaults to 16 MiB.
+if (!defined('UR_MAX_RUN_LOG_BYTES')) {
+    define('UR_MAX_RUN_LOG_BYTES', 16 * 1024 * 1024); // 16 MiB
+}
+
 class Logger
 {
     /** Max bytes tail() will read off the END of a log (bounds memory + DoS). */
     const TAIL_MAX_BYTES = 256 * 1024; // 256 KiB
+
+    /**
+     * Exact secret strings (per-run materialised tmpfs paths) that MUST be
+     * scrubbed from any captured rsync/ssh/hook output before it is written to a
+     * run log or plugin.log. Threaded in by the Runner via setRedaction() at run
+     * start (from Ssh::materialize's keyPath/passFile/knownHosts) and cleared in
+     * its finally. On an SSH job at `debug` level rsync echoes the remote-shell
+     * command it execs - the `-e "ssh -i <tmpfs-keypath> ... -p N"` line - which
+     * would otherwise expose the tmpfs key/passfile/known_hosts PATHS (not the
+     * key bytes or password) into a root-written, browser-visible log.
+     *
+     * @var array<int,string>
+     */
+    public static $redactStrings = [];
+
+    /**
+     * Per-run runtime secret DIRECTORIES to redact defensively: any path under
+     * these (e.g. a key/passfile/known_hosts for this run's token) is scrubbed
+     * even if its exact filename differs from what setRedaction() was given.
+     * Each entry is an absolute dir prefix WITHOUT a trailing slash.
+     *
+     * @var array<int,string>
+     */
+    public static $redactDirs = [];
+
+    /** The placeholder a redacted secret path is replaced with in the log. */
+    const REDACT_PLACEHOLDER = '[redacted]';
+
+    /** The size-cap marker written ONCE when a run log hits the byte cap. */
+    const TRUNCATE_MARKER_PREFIX = '[log truncated';
+
+    /**
+     * Run logs that have already had their size-cap marker written, so the
+     * marker is emitted exactly once per file even across many append() calls.
+     * Keyed by absolute path => true.
+     *
+     * @var array<string,bool>
+     */
+    private static $capped = [];
+
+    /**
+     * Arm per-run secret-path redaction for everything subsequently appended to
+     * a log (the run log AND plugin.log). Pass the per-run materialised secret
+     * paths (Ssh::materialize's keyPath/passFile/knownHosts) and the runtime base
+     * + token so paths under this run's keys/<token>, pass/<token> and
+     * known_hosts/<token> dirs are scrubbed too, even if a path's exact filename
+     * differs. Empty strings are ignored. Call clearRedaction() in a finally.
+     *
+     * @param array<int,string> $paths exact secret path strings to redact
+     * @param string            $runtimeBase the tmpfs base (Ssh::$runtimeBase)
+     * @param string            $token       the per-run token (for the per-token dirs)
+     */
+    public static function setRedaction(array $paths, string $runtimeBase = '', string $token = ''): void
+    {
+        $exact = [];
+        foreach ($paths as $p) {
+            $p = (string) $p;
+            if ($p !== '') {
+                $exact[] = $p;
+            }
+        }
+        // Longest first so a contained path is replaced as part of its longer
+        // sibling rather than leaving a dangling suffix.
+        usort($exact, static function (string $a, string $b): int {
+            return strlen($b) <=> strlen($a);
+        });
+        self::$redactStrings = $exact;
+
+        $dirs = [];
+        $base = rtrim($runtimeBase, '/');
+        if ($base !== '' && $token !== '') {
+            foreach (['keys', 'pass', 'known_hosts'] as $sub) {
+                $dirs[] = $base . '/' . $sub . '/' . $token;
+            }
+        }
+        self::$redactDirs = $dirs;
+    }
+
+    /** Disarm per-run secret-path redaction (call in the Runner's finally). */
+    public static function clearRedaction(): void
+    {
+        self::$redactStrings = [];
+        self::$redactDirs    = [];
+    }
+
+    /**
+     * Scrub the currently-armed per-run secret paths out of $text, replacing each
+     * occurrence with REDACT_PLACEHOLDER. Replaces both the exact materialised
+     * paths and any path under this run's per-token secret dirs. PURE w.r.t. the
+     * armed state; returns $text unchanged when nothing is armed.
+     */
+    public static function redact(string $text): string
+    {
+        if ($text === '') {
+            return $text;
+        }
+        foreach (self::$redactStrings as $secret) {
+            if ($secret !== '' && strpos($text, $secret) !== false) {
+                $text = str_replace($secret, self::REDACT_PLACEHOLDER, $text);
+            }
+        }
+        // Defensive: scrub any remaining path under a per-run secret dir (e.g. a
+        // tempnam scratch file). Match "<dir>" plus an optional "/<segment>".
+        foreach (self::$redactDirs as $dir) {
+            if ($dir === '' || strpos($text, $dir) === false) {
+                continue;
+            }
+            $text = preg_replace(
+                '#' . preg_quote($dir, '#') . '(/[^\s"\']*)?#',
+                self::REDACT_PLACEHOLDER,
+                $text
+            ) ?? $text;
+        }
+        return $text;
+    }
+
+    /**
+     * Per-run-log byte cap override. null => use the UR_MAX_RUN_LOG_BYTES
+     * constant. A value < 1 is treated as "unset". Set this static (e.g. from a
+     * future Global Setting, or a test) to change the cap at runtime, mirroring
+     * the $retention / $baseOverride seam pattern.
+     *
+     * @var int|null
+     */
+    public static $maxRunLogBytesOverride = null;
+
+    /** The per-run-log byte cap (override > UR_MAX_RUN_LOG_BYTES > 16 MiB). */
+    public static function maxRunLogBytes(): int
+    {
+        if (self::$maxRunLogBytesOverride !== null && (int) self::$maxRunLogBytesOverride > 0) {
+            return (int) self::$maxRunLogBytesOverride;
+        }
+        $n = (int) UR_MAX_RUN_LOG_BYTES;
+        return $n > 0 ? $n : 16 * 1024 * 1024;
+    }
 
     /**
      * Default number of per-job run logs to keep. On every run start the oldest
@@ -131,6 +276,9 @@ class Logger
             throw new RuntimeException("Unable to create run log: $path");
         }
         @chmod($path, 0600);
+        // A fresh log starts below the size cap; clear any stale "already capped"
+        // marker for this exact path (a re-used path in a long-lived process/test).
+        unset(self::$capped[$path]);
         return $path;
     }
 
@@ -138,6 +286,15 @@ class Logger
      * Append a line (a trailing newline is added if absent) to an arbitrary log
      * file, creating its directory if needed. Used by the runner for its
      * preamble/epilogue lines around rsync's own --log-file output.
+     *
+     * Two security/robustness invariants are enforced here, the single write
+     * primitive, so EVERYTHING logged (event lines AND captured rsync/ssh/hook
+     * output via sink()) is covered:
+     *   - secret-path REDACTION (F1): any currently-armed per-run tmpfs secret
+     *     path is scrubbed before the bytes touch disk;
+     *   - per-run-log SIZE CAP (F3): an in-progress RUN log is never grown past
+     *     maxRunLogBytes(); once it hits the cap, further content is dropped and
+     *     a single truncation marker is written.
      */
     public static function append(string $path, string $line): void
     {
@@ -145,7 +302,85 @@ class Logger
         if ($line === '' || substr($line, -1) !== "\n") {
             $line .= "\n";
         }
-        @file_put_contents($path, $line, FILE_APPEND | LOCK_EX);
+        $line = self::redact($line);
+        self::appendCapped($path, $line);
+    }
+
+    /**
+     * Append already-newline-terminated, already-redacted $data to $path,
+     * enforcing the per-run-log byte cap. Only RUN logs (basename matching
+     * RUN_FILE_REGEX) are capped; plugin.log and the runner's own preamble go
+     * uncapped (plugin.log is the rolling cross-job log, bounded on READ by
+     * tail()). Once a run log reaches the cap we stop appending and write a
+     * single "[log truncated - exceeded N MiB]" marker.
+     */
+    private static function appendCapped(string $path, string $data): void
+    {
+        if ($data === '') {
+            return;
+        }
+        if (!self::isRunLogPath($path)) {
+            @file_put_contents($path, $data, FILE_APPEND | LOCK_EX);
+            return;
+        }
+
+        $cap  = self::maxRunLogBytes();
+        $size = @filesize($path);
+        $size = ($size === false) ? 0 : (int) $size;
+
+        if ($size >= $cap) {
+            self::writeTruncationMarker($path, $cap);
+            return;
+        }
+        // Writing this chunk would cross the cap: write what fits (up to the
+        // cap), then the marker. We don't split mid-chunk to a byte boundary
+        // beyond the cap - we simply stop once at/over the limit.
+        if ($size + strlen($data) > $cap) {
+            $room = $cap - $size;
+            if ($room > 0) {
+                @file_put_contents($path, substr($data, 0, $room), FILE_APPEND | LOCK_EX);
+            }
+            self::writeTruncationMarker($path, $cap);
+            return;
+        }
+        @file_put_contents($path, $data, FILE_APPEND | LOCK_EX);
+    }
+
+    /** Write the size-cap marker exactly once per run-log path. */
+    private static function writeTruncationMarker(string $path, int $cap): void
+    {
+        if (!empty(self::$capped[$path])) {
+            return;
+        }
+        self::$capped[$path] = true;
+        $mib    = (int) round($cap / (1024 * 1024));
+        $marker = self::TRUNCATE_MARKER_PREFIX . ' - exceeded ' . $mib . " MiB]\n";
+        @file_put_contents($path, $marker, FILE_APPEND | LOCK_EX);
+    }
+
+    /** True when $path's basename is a run log (run-<UTCts>.log), not plugin.log. */
+    private static function isRunLogPath(string $path): bool
+    {
+        return (bool) preg_match(self::RUN_FILE_REGEX, basename($path));
+    }
+
+    /**
+     * A redacting, size-capped output sink for captured child-process output.
+     * Returns a callable `fn(string $chunk): void` the Runner hands to
+     * Rsync::run / its hook runner, so streamed rsync/ssh/hook output is scrubbed
+     * of per-run secret paths and bounded to the run-log cap on the SAME path the
+     * event() lines use. Replaces the runner's previous raw file_put_contents.
+     *
+     * @return callable(string):void
+     */
+    public static function sink(string $path): callable
+    {
+        return static function (string $chunk) use ($path): void {
+            if ($chunk === '') {
+                return;
+            }
+            self::appendCapped($path, self::redact($chunk));
+        };
     }
 
     /**
@@ -371,7 +606,15 @@ class Logger
         if (empty($runs)) {
             return '';
         }
-        return self::jobLogDir($jobId) . '/' . $runs[0]['id'];
+        // F5 (confinement symmetry): resolve the "latest" run id through the SAME
+        // strict-regex + realpath confinement helper that runLogPathById enforces,
+        // so the "latest" and "by id" paths share one hardened resolver rather
+        // than this one concatenating jobLogDir + id directly. The id always
+        // matches the run-file pattern by construction, but routing it through the
+        // helper keeps the two paths symmetric and defends against any future
+        // change to how listRuns derives the id.
+        $path = self::runLogPathById($jobId, (string) $runs[0]['id']);
+        return $path ?? '';
     }
 
     /**

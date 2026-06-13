@@ -109,7 +109,21 @@ function sendResponse(array $payload, int $code = 200): void
         }
     }
 
-    http_response_code($code);
+    // Only set the status code while headers are still open. On PHP 8.4+
+    // http_response_code() emits an E_WARNING ("Cannot set response code -
+    // headers already sent") once output has begun; guarding it (symmetric with
+    // the header() guard above) avoids that warning if anything was emitted
+    // before us, rather than silencing it.
+    if (!headers_sent()) {
+        http_response_code($code);
+    }
+    // Test seam (gated, like the exit below): record the intended status code so
+    // tests can assert it without depending on SAPI state. Under CLI + PHP 8.4
+    // http_response_code() does not track a code once output has begun (and the
+    // setter is guarded above anyway), so the getter is unreliable in tests.
+    if (defined('UR_HANDLER_TESTING')) {
+        $GLOBALS['ur_last_response_code'] = $code;
+    }
     echo $json;
     // In the live webGui this is the request end. exit keeps anything appended
     // by the front controller from corrupting the JSON body.

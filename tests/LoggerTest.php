@@ -21,6 +21,8 @@ final class LoggerTest extends TestCase
     protected function tearDown(): void
     {
         Logger::$baseOverride = null;
+        Logger::$maxRunLogBytesOverride = null;
+        Logger::clearRedaction();
         if (is_dir($this->rtBase)) {
             $it = new RecursiveIteratorIterator(
                 new RecursiveDirectoryIterator($this->rtBase, FilesystemIterator::SKIP_DOTS),
@@ -125,5 +127,116 @@ final class LoggerTest extends TestCase
     {
         $path = Logger::newRunLogPath('j-x', 0); // epoch -> 19700101T000000Z
         $this->assertStringContainsString('run-19700101T000000Z.log', $path);
+    }
+
+    // --- F1: secret-path redaction before bytes reach the log ----------------
+
+    public function testRedactionScrubsSecretPathsFromCapturedOutput(): void
+    {
+        // The realistic leak: an SSH job at `debug` level makes rsync echo the
+        // remote-shell command it execs - the `-e "ssh -i <tmpfs-keypath> ...
+        // -p N"` line - into its captured stderr, which the runner streams to the
+        // run log. With redaction armed (as the Runner does at materialisation),
+        // the tmpfs key/passfile/known_hosts PATHS must NOT reach the log.
+        $base    = '/tmp/unraid.rsync';
+        $token   = 'c-rpi-12345-deadbeef';
+        $keyPath = $base . '/keys/' . $token;
+        $passDir = $base . '/pass/' . $token;
+        $khPath  = $base . '/known_hosts/' . $token;
+
+        Logger::setRedaction([$keyPath, $passDir, $khPath], $base, $token);
+
+        $path = Logger::openRun('j-ssh', 1750000000);
+        $sink = Logger::sink($path);
+        // A representative debug-level rsync line exposing the -e command.
+        $sink('opening connection using: ssh -i ' . $keyPath
+            . ' -o UserKnownHostsFile=' . $khPath . ' -p 22 sasa@rpi rsync --server\n');
+        // And an event line goes through the same redacting append() path.
+        Logger::event($path, 'j-ssh', 'transport key at ' . $keyPath);
+
+        $log = file_get_contents($path);
+        $this->assertStringNotContainsString($keyPath, $log, 'key path must be redacted');
+        $this->assertStringNotContainsString($khPath, $log, 'known_hosts path must be redacted');
+        $this->assertStringContainsString(Logger::REDACT_PLACEHOLDER, $log);
+        // The non-secret parts of the line survive (only the paths are scrubbed).
+        $this->assertStringContainsString('opening connection using: ssh -i', $log);
+        $this->assertStringContainsString('sasa@rpi', $log);
+
+        // plugin.log (also browser-visible) must be scrubbed too.
+        $plugin = file_get_contents(Logger::pluginLogPath());
+        $this->assertStringNotContainsString($keyPath, $plugin);
+        $this->assertStringContainsString(Logger::REDACT_PLACEHOLDER, $plugin);
+    }
+
+    public function testRedactionDefensivelyScrubsPathsUnderPerRunSecretDirs(): void
+    {
+        // Even a path we did not pass explicitly - e.g. a tempnam scratch file
+        // under this run's per-token secret dir - is scrubbed via $redactDirs.
+        $base  = '/tmp/unraid.rsync';
+        $token = 'c-x-999-abc123';
+        Logger::setRedaction([], $base, $token);
+
+        $path  = Logger::openRun('j-ssh2', 1750000000);
+        $scratch = $base . '/keys/' . $token . '/.ur-secret.AB12';
+        Logger::sink($path)('wrote ' . $scratch . ' then renamed\n');
+
+        $log = file_get_contents($path);
+        $this->assertStringNotContainsString($scratch, $log);
+        $this->assertStringNotContainsString($base . '/keys/' . $token, $log);
+        $this->assertStringContainsString(Logger::REDACT_PLACEHOLDER, $log);
+    }
+
+    public function testRedactionNoOpWhenNothingArmed(): void
+    {
+        Logger::clearRedaction();
+        $this->assertSame('plain line', Logger::redact('plain line'));
+    }
+
+    // --- F3: per-run-log size cap --------------------------------------------
+
+    public function testRunLogIsCappedAndMarkerWrittenOnce(): void
+    {
+        // Drive the cap small via the override seam so the test is fast and
+        // deterministic (the production default is 16 MiB; see
+        // UR_MAX_RUN_LOG_BYTES). Write well past it and assert the file stays
+        // bounded with the marker present exactly once.
+        $cap = 4096;
+        Logger::$maxRunLogBytesOverride = $cap;
+
+        $path = Logger::openRun('j-big', 1750000000);
+        $sink = Logger::sink($path);
+
+        // Write well past the cap in chunks (a chatty hook / huge verbose run).
+        for ($i = 0; $i < 50; $i++) {
+            $sink(str_repeat('A', 512) . "\n"); // 50 * 513 bytes >> 4 KiB cap
+        }
+        // Further writes after the cap must be dropped (not appended).
+        $sink("this must not appear after the cap\n");
+        $sink("nor this\n");
+
+        $size   = filesize($path);
+        $marker = Logger::TRUNCATE_MARKER_PREFIX;
+
+        // File stays at or below the cap plus the single marker line.
+        $this->assertLessThanOrEqual($cap + 64, $size, 'run log must stay bounded by the cap (+ marker)');
+
+        $contents = file_get_contents($path);
+        $this->assertStringContainsString($marker, $contents, 'truncation marker present');
+        // Marker written EXACTLY once.
+        $this->assertSame(1, substr_count($contents, $marker), 'marker written only once');
+        // Content fed AFTER the cap was hit is absent.
+        $this->assertStringNotContainsString('this must not appear after the cap', $contents);
+        $this->assertStringNotContainsString('nor this', $contents);
+    }
+
+    public function testPluginLogIsNotSizeCapped(): void
+    {
+        // The cap applies only to per-run logs; plugin.log is the rolling
+        // cross-job log (bounded on READ by tail()), so appendCapped must pass it
+        // through. append() creates the dir itself. A 1 MiB line must land in
+        // full (the run-log cap must NOT bound plugin.log).
+        $big = str_repeat('p', 1024 * 1024); // 1 MiB
+        Logger::append(Logger::pluginLogPath(), $big);
+        $this->assertGreaterThanOrEqual(1024 * 1024, filesize(Logger::pluginLogPath()));
     }
 }

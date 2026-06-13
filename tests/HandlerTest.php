@@ -25,7 +25,12 @@ final class HandlerTest extends TestCase
     {
         $_POST = [];
         $_GET  = [];
-        http_response_code(200);
+        // Reset the handler's intended-status-code test seam. We do NOT call
+        // http_response_code(200) here: under CLI on PHP 8.4+ that emits an
+        // E_WARNING ("headers already sent") once PHPUnit has printed, which
+        // failOnWarning would turn into an error. sendResponse records the code
+        // it intended via $GLOBALS['ur_last_response_code'] instead.
+        $GLOBALS['ur_last_response_code'] = 200;
         $GLOBALS['var'] = ['csrf_token' => 'test-token'];
         $path = Config::path();
         if (is_file($path)) {
@@ -35,7 +40,10 @@ final class HandlerTest extends TestCase
 
     /**
      * Run a handler callable, capturing its echoed JSON and the HTTP status it
-     * set. Returns [decodedBody, statusCode].
+     * set. Returns [decodedBody, statusCode]. The status comes from the handler's
+     * test seam ($GLOBALS['ur_last_response_code']) rather than
+     * http_response_code(), which is unreliable under CLI/PHP 8.4 once output has
+     * begun (see setUp).
      */
     private function runCapture(callable $fn): array
     {
@@ -43,7 +51,7 @@ final class HandlerTest extends TestCase
         $fn();
         $out = ob_get_clean();
         $body = json_decode($out, true);
-        return [$body, http_response_code()];
+        return [$body, (int) ($GLOBALS['ur_last_response_code'] ?? 200)];
     }
 
     public function testSendResponseSetsBodyAndCode(): void
