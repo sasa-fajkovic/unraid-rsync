@@ -372,6 +372,27 @@ final class HandlerCredentialsTest extends TestCase
         $this->assertSame([], $body['disabledJobs']);
     }
 
+    // --- generateKey input validation (no ssh-keygen needed) ---------------
+
+    public function testGenerateKeyRejectsUnsupportedTypeWith422(): void
+    {
+        // An unsupported key type is client input -> 422 BEFORE any ssh-keygen
+        // call, so this is testable without the binary. (It must NOT be a 500.)
+        $_POST = ['action' => 'generateKey', 'csrf_token' => 'test-token', 'name' => 'k', 'type' => 'dsa'];
+        [$body, $code] = $this->runCapture(fn() => ur_action_generate_key());
+        $this->assertSame(422, $code, json_encode($body));
+        $this->assertStringContainsString('Unsupported key type', $body['error']);
+        // Nothing persisted.
+        $this->assertFalse(is_file(Credentials::path()));
+    }
+
+    public function testGenerateKeyRejectsEmptyNameWith422(): void
+    {
+        $_POST = ['action' => 'generateKey', 'csrf_token' => 'test-token', 'name' => '', 'type' => 'ed25519'];
+        [, $code] = $this->runCapture(fn() => ur_action_generate_key());
+        $this->assertSame(422, $code);
+    }
+
     // --- CSRF on the new actions -------------------------------------------
 
     public function testCsrfEnforcedOnSaveCredentials(): void

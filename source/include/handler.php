@@ -543,9 +543,14 @@ function ur_action_generate_key(): void
     }
 
     $name = isset($_POST['name']) ? trim((string) $_POST['name']) : '';
-    $type = isset($_POST['type']) ? (string) $_POST['type'] : 'ed25519';
+    $type = isset($_POST['type']) ? strtolower(trim((string) $_POST['type'])) : 'ed25519';
     if ($name === '') {
         sendError('A key name is required.', 422);
+        return;
+    }
+    // An unsupported key type is CLIENT input -> 422, not a server error.
+    if (!in_array($type, KeyTools::KEY_TYPES, true)) {
+        sendError('Unsupported key type: ' . $type . '. Choose ed25519 or rsa.', 422);
         return;
     }
     // Uniqueness across existing keys.
@@ -557,6 +562,8 @@ function ur_action_generate_key(): void
 
     $gen = KeyTools::generate($type, $name);
     if (empty($gen['ok'])) {
+        // The type is already validated above, so any failure here is a genuine
+        // runtime error (ssh-keygen missing / failed) -> 500.
         sendError((string) ($gen['error'] ?? 'Key generation failed.'), 500);
         return;
     }
