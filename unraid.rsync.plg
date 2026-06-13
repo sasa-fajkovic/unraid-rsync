@@ -37,18 +37,19 @@
         ! -name '&pluginName;-&version;.txz' -delete 2>/dev/null
       # Remove any installed package whose version differs from this one.
       # removepkg expects a package NAME (the basename in /var/log/packages),
-      # not a full path. Slackware package basenames look like
-      # NAME-VERSION-ARCH-BUILD, so we keep entries whose name starts with the
-      # exact "NAME-VERSION-" prefix (note the trailing dash) and remove the
-      # rest. The trailing dash is what stops a different version that merely
-      # shares this one as a prefix - e.g. a same-day respin ending in a letter
-      # vs the current plain version - from being mistakenly skipped.
+      # not a full path. Our package installs as exactly "NAME-VERSION" (the
+      # .txz is named NAME-VERSION.txz with no ARCH-BUILD suffix), so the keep
+      # patterns are "NAME-VERSION" and, defensively, "NAME-VERSION-*" in case a
+      # future build ever adds an arch/build suffix. Matching the version with a
+      # delimiter on BOTH sides (start-of-name and end/dash) is what stops a
+      # different version that merely shares this one as a prefix - e.g. a
+      # same-day respin "NAME-VERSIONa" - from being mistakenly kept.
       for p in /var/log/packages/&pluginName;-*; do
         [ -e "$p" ] || continue
         name="$(basename "$p")"
         case "$name" in
-          &pluginName;-&version;-*) ;;          # current version: keep
-          *) removepkg "$name" 2>/dev/null ;;   # any other version: remove
+          &pluginName;-&version;|&pluginName;-&version;-*) ;;  # current version: keep
+          *) removepkg "$name" 2>/dev/null ;;                 # any other version: remove
         esac
       done
     </INLINE>
