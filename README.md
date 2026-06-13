@@ -110,15 +110,30 @@ if it is somehow absent — a sign your system is misconfigured). This mirrors t
 > Requires **Unraid 7.0.0 or newer**.
 
 1. In the Unraid webGui go to **Plugins -> Install Plugin**.
-2. Paste the raw `.plg` URL:
+2. Paste the `.plg` URL:
 
    ```
-   https://raw.githubusercontent.com/sasa-fajkovic/unraid-rsync/main/unraid.rsync.plg
+   https://github.com/sasa-fajkovic/unraid-rsync/releases/latest/download/unraid.rsync.plg
    ```
+
+   This is the **latest release's** manifest. It always carries the correct
+   version + md5 for the newest published `.txz`, and it is also the URL the
+   installed plugin checks for updates.
 
 3. Click **Install**. When it finishes, open **Settings -> Unraid Rsync**.
 
 To remove it: **Plugins -> Installed Plugins -> Unraid Rsync -> Remove**.
+
+### Updating
+
+Updates are automatic: **Plugins -> Check for Updates** compares your installed
+version against the manifest at the `releases/latest` URL above and offers an
+**Update** when a newer release has been published.
+
+> **Migration (one-time):** if you installed an older build whose update URL
+> pointed at the raw `.plg` on `main`, **re-install once** from the
+> `releases/latest` URL above to switch to the new auto-update source. After
+> that single re-install, updates are picked up automatically as before.
 
 ## Roadmap
 
@@ -135,10 +150,28 @@ The plugin is delivered in sequential phases, each one PR:
 
 ## Building / releasing
 
-See [RELEASING.md](RELEASING.md). In short: builds run inside
-`aclemons/slackware:15.0` via `pkg_build.sh`, and tagging a `YYYY.MM.DD` version
-triggers the release workflow, which regenerates the `.plg` (version + md5) and
-publishes a GitHub Release with the `.txz`.
+See [RELEASING.md](RELEASING.md) for the full pipeline. In short:
+
+- **CI** runs on every PR (and is **required** by branch protection on `main`):
+  - **`lint`** — `xmllint` on the `.plg`, `bash -n` + `shellcheck` on
+    `pkg_build.sh`, and `php -l` on every PHP file and `.page` body;
+  - **`PHPUnit`** — the unit-test suite.
+
+  A PR cannot merge until both checks are green.
+
+- **Releasing is automatic.** Merging to `main` builds the `.txz` inside
+  `aclemons/slackware:15.0` via `pkg_build.sh` (which rewrites the `.plg`'s
+  version + md5 to match the package), then publishes a versioned GitHub Release
+  with both the `.txz` and the regenerated `.plg` attached and marks it
+  `latest`. The version is auto-computed (`YYYY.MM.DD`, with a same-day
+  lowercase suffix for additional releases on the same day).
+
+- **Updates** are served from `releases/latest`: the installed plugin's
+  `pluginURL` points at
+  `https://github.com/sasa-fajkovic/unraid-rsync/releases/latest/download/unraid.rsync.plg`,
+  so **Plugins -> Check for Updates -> Update** always sees the newest release.
+  The repo's `.plg` is the source template and is **not** synced back on
+  release — the GitHub Release asset is the authoritative manifest.
 
 ## License
 

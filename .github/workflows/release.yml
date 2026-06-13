@@ -1,40 +1,45 @@
 name: Release
 
-# Build the Slackware .txz inside aclemons/slackware:15.0, regenerate the .plg
-# (version + md5), publish a GitHub Release with BOTH the .txz and the
-# regenerated .plg attached, and sync the regenerated .plg onto the default
-# branch via an auto-merged PR.
+# Auto-publish a versioned GitHub Release on every merge to `main`.
 #
-# Why a PR instead of a direct push: `main` is a protected branch ("changes must
-# be made through a pull request"), so the github-actions bot cannot push to it
-# directly. With 0 required approvals and no required status checks, a CI-opened
-# PR merges immediately. The Release (with the .plg attached) is published FIRST,
-# so the plugin is installable even if the branch sync hits a snag.
+# Flow: build the Slackware .txz inside aclemons/slackware:15.0 (which also
+# rewrites the .plg's version + md5 ENTITYs to match the freshly built package),
+# then publish a GitHub Release with BOTH the .txz and the regenerated .plg
+# attached, and mark it `latest`. The published .plg is the AUTHORITATIVE
+# manifest: installed plugins check
+#   https://github.com/<user>/<repo>/releases/latest/download/unraid.rsync.plg
+# (the `pluginURL` ENTITY) for updates, so there is no need to sync the
+# regenerated .plg back to `main` - the repo .plg is just the source template.
+# That means NO commit-back, NO sync PR, and therefore no release->commit loop.
 #
 # Triggers:
-#   - pushing a tag shaped like YYYY.MM.DD with an optional same-day suffix
-#     letter (e.g. 2026.06.13 or 2026.06.13a - see RELEASING.md), or
-#   - manual workflow_dispatch with an explicit version input.
+#   - push to `main` (i.e. a merge): auto-computes the next version for today, or
+#   - manual workflow_dispatch with an optional explicit version input.
+# A PR's `pull_request` event does NOT match `push: [main]`, so opening/updating
+# a PR never cuts a release - only the merge to `main` does.
 #
-# Reproducibility: on a tag push the .txz is built from the TAGGED commit (not
-# the branch tip), so the published artifact always matches the code at the tag.
+# Concurrency: overlapping `main` pushes serialize (cancel-in-progress: false) so
+# two runs never race to compute the same same-day version.
+#
+# NOTE: softprops/action-gh-release@v2 currently emits a non-blocking Node20
+# deprecation warning in Actions logs; it is harmless and intentionally left.
 
 on:
   push:
-    tags:
-      # YYYY.MM.DD plus an optional trailing lowercase letter for same-day respins.
-      - "20[0-9][0-9].[0-9][0-9].[0-9][0-9]"
-      - "20[0-9][0-9].[0-9][0-9].[0-9][0-9][a-z]"
+    branches: [main]
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to build (YYYY.MM.DD). Defaults to today if blank."
+        description: "Explicit version (YYYY.MM.DD[x]). Blank => auto-compute next same-day version."
         required: false
         default: ""
 
 permissions:
   contents: write
-  pull-requests: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
   release:
@@ -42,47 +47,89 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
-        with:
-          # Full history so both the tag ref (to build from) and the default
-          # branch (to sync the regenerated .plg to) are available locally.
-          fetch-depth: 0
 
       - name: Determine version + build ref
         id: version
         # The dispatch input is user-controlled, so it is passed via env (never
         # interpolated into the shell with ${{ }}) and then format-validated
         # before use. This avoids shell injection in a workflow that has
-        # contents: write.
+        # contents: write. GH_TOKEN lets `gh release list` enumerate existing
+        # same-day tags for the auto-bump path.
         env:
           EVENT_NAME: ${{ github.event_name }}
           INPUT_VERSION: ${{ github.event.inputs.version }}
           GIT_SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          if [ "$EVENT_NAME" = "push" ]; then
-            # Tag push: the tag name is the version (refs/tags/<version>).
-            version="${GITHUB_REF#refs/tags/}"
-            build_ref="$version"            # build from the tagged commit
-          elif [ -n "$INPUT_VERSION" ]; then
+
+          # build_ref is always the commit this run is for (the merge commit on
+          # main, or the dispatch commit). The artifact is built from it.
+          build_ref="$GIT_SHA"
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ -n "$INPUT_VERSION" ]; then
+            # Explicit manual version: validate the user-supplied value, use as-is.
             version="$INPUT_VERSION"
-            build_ref="$GIT_SHA"            # dispatch: build from the commit it ran on
+            if ! printf '%s' "$version" | grep -Eq '^[0-9]{4}\.[0-9]{2}\.[0-9]{2}[a-z]?$'; then
+              echo "ERROR: invalid version '$version' (expected YYYY.MM.DD or YYYY.MM.DDx)." >&2
+              exit 1
+            fi
           else
-            version="$(date +%Y.%m.%d)"
-            build_ref="$GIT_SHA"
+            # Auto-compute the next version for today (push to main, or a blank
+            # dispatch). Same-day sequence is strcmp-monotonic so Unraid's
+            # update detection (lexicographic version compare) always sees a
+            # strictly greater version: <today> (index 0), then <today>a (1),
+            # <today>b (2), ... <today>z (26).
+            today="$(date +%Y.%m.%d)"
+            # Escape the dots so the regex matches literally, not "any char".
+            today_re="$(printf '%s' "$today" | sed 's/\./\\./g')"
+
+            # Highest same-day index seen so far. -1 means none exist yet.
+            max_index=-1
+            while IFS= read -r tag; do
+              [ -n "$tag" ] || continue
+              # Keep only tags for today: bare date or date + single a-z suffix.
+              if ! printf '%s' "$tag" | grep -Eq "^${today_re}[a-z]?$"; then
+                continue
+              fi
+              suffix="${tag#"$today"}"   # "" for the bare date, else one letter
+              if [ -z "$suffix" ]; then
+                index=0
+              else
+                # Map a->1 ... z->26 via its position in the alphabet.
+                index=$(printf '%s' "abcdefghijklmnopqrstuvwxyz" | awk -v c="$suffix" '{print index($0, c)}')
+              fi
+              if [ "$index" -gt "$max_index" ]; then
+                max_index="$index"
+              fi
+            done < <(gh release list --limit 200 --json tagName -q '.[].tagName')
+
+            if [ "$max_index" -lt 0 ]; then
+              # No release for today yet -> use the bare date.
+              version="$today"
+            else
+              next_index=$((max_index + 1))
+              if [ "$next_index" -gt 26 ]; then
+                echo "ERROR: ran out of same-day suffixes for $today (max is ${today}z)." >&2
+                echo "       Wait for tomorrow's date, or set an explicit version via the" >&2
+                echo "       Release workflow's workflow_dispatch 'version' input." >&2
+                exit 1
+              fi
+              # next_index 1..26 -> a..z (the Nth letter of the alphabet).
+              letter="$(printf '%s' "abcdefghijklmnopqrstuvwxyz" | cut -c "$next_index")"
+              version="${today}${letter}"
+            fi
           fi
-          # Validate against the documented scheme (YYYY.MM.DD[suffix-letter]).
+
+          # Final defensive validation (also covers the auto-computed value).
           if ! printf '%s' "$version" | grep -Eq '^[0-9]{4}\.[0-9]{2}\.[0-9]{2}[a-z]?$'; then
-            echo "ERROR: invalid version '$version' (expected YYYY.MM.DD or YYYY.MM.DDx)." >&2
+            echo "ERROR: computed invalid version '$version'." >&2
             exit 1
           fi
+
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "build_ref=$build_ref" >> "$GITHUB_OUTPUT"
           echo "Building version $version from ref $build_ref"
-
-      - name: Check out the build ref (so artifacts match the tag)
-        env:
-          BUILD_REF: ${{ steps.version.outputs.build_ref }}
-        run: git checkout --quiet "$BUILD_REF"
 
       - name: Build .txz inside Slackware container
         # VERSION (validated above) is passed into the container via -e and
@@ -92,73 +139,29 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          docker run --rm -e VERSION -v "${{ github.workspace }}":/workspace -w /workspace \
+          docker run --rm -e VERSION -v "$PWD":/workspace -w /workspace \
             aclemons/slackware:15.0 \
             bash -c 'bash pkg_build.sh -y -V "$VERSION"'
           sudo chown -R "$(id -u):$(id -g)" .
 
       - name: Stage the regenerated .plg alongside the .txz
-        # pkg_build.sh rewrote unraid.rsync.plg (real version+md5) at the build
-        # ref. Attach it to the Release too, so the plugin is installable from
-        # the Release .plg URL even independently of the default-branch sync.
+        # pkg_build.sh rewrote unraid.rsync.plg (real version+md5). Attach it to
+        # the Release as the authoritative manifest that `releases/latest`
+        # serves for install + auto-update.
         run: cp unraid.rsync.plg archive/unraid.rsync.plg
 
       - name: Create GitHub Release (.txz + .plg)
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.version }}
-          # On workflow_dispatch the tag does not exist yet; pin it to build_ref
-          # (the commit the .txz was built from) so tag/release match the artifact.
-          # On a tag push the tag already exists and this is a harmless no-op.
+          # The tag does not exist yet (no tag trigger anymore); pin it to
+          # build_ref - the commit the .txz was built from - so tag/release
+          # match the artifact.
           target_commitish: ${{ steps.version.outputs.build_ref }}
+          # Always point releases/latest here so the latest-download redirect
+          # the plugin's pluginURL relies on resolves to this release's .plg.
+          make_latest: true
           files: |
             archive/*.txz
             archive/unraid.rsync.plg
           generate_release_notes: true
-
-      - name: Sync regenerated .plg to the default branch (via PR)
-        # `main` is protected (PRs required); the bot cannot push directly. Open
-        # a short-lived branch + PR and merge it. 0 required approvals + no
-        # required checks => it merges immediately. A small retry covers the
-        # brief window while GitHub computes mergeability. This runs AFTER the
-        # Release is published, so install never depends on it succeeding.
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          set -euo pipefail
-          default_branch="${{ github.event.repository.default_branch }}"
-          cp unraid.rsync.plg /tmp/unraid.rsync.plg.built
-          # Discard build-ref working-tree changes, move onto the branch, apply.
-          git checkout --quiet -- . || true
-          git checkout --quiet "$default_branch"
-          cp /tmp/unraid.rsync.plg.built unraid.rsync.plg
-          if git diff --quiet -- unraid.rsync.plg; then
-            echo "Manifest already in sync on $default_branch; nothing to do."
-            exit 0
-          fi
-          branch="release/plg-$VERSION"
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git checkout -B "$branch"
-          git add unraid.rsync.plg
-          git commit -m "Release $VERSION (sync .plg version+md5)"
-          git push -f origin "$branch"
-          gh pr create --base "$default_branch" --head "$branch" \
-            --title "Release $VERSION (.plg sync)" \
-            --body "Automated: sync \`unraid.rsync.plg\` version+md5 to match the \`$VERSION\` release artifact." \
-            || echo "PR may already exist; continuing to merge."
-          merged=""
-          for attempt in 1 2 3 4 5 6; do
-            if gh pr merge "$branch" --squash --delete-branch; then
-              merged="yes"; break
-            fi
-            echo "merge attempt $attempt not ready; retrying in 5s..."
-            sleep 5
-          done
-          if [ -z "$merged" ]; then
-            echo "WARNING: could not auto-merge the .plg sync PR for $branch." >&2
-            echo "The Release (with the .plg attached) is published and installable;" >&2
-            echo "merge the open PR manually to sync the default-branch manifest." >&2
-            exit 1
-          fi
