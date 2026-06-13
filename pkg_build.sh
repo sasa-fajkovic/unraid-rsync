@@ -159,15 +159,23 @@ if [[ -z "$unraidHost" ]]; then
   exit 0
 fi
 
-echo "Sideloading to $unraidHost ..."
+# Accept either "host" (defaults to the root user, as Unraid uses) or an
+# explicit "user@host". Only prefix root@ when no user was given, so a value
+# like "user@host" doesn't become "root@user@host".
+case "$unraidHost" in
+  *@*) ssh_target="$unraidHost" ;;
+  *)   ssh_target="root@$unraidHost" ;;
+esac
+
+echo "Sideloading to $ssh_target ..."
 remote_dir="/boot/config/plugins/$plugin_name"
 # `--` ends option parsing so the destination can never be read as a flag, and
 # the host was validated above (no leading '-', restricted charset).
 # Ensure the destination exists on the host: on a box that has never had the
 # plugin installed the dir is absent, and scp would fail (aborting under set -e).
 # shellcheck disable=SC2029  # we intend $remote_dir to expand locally
-ssh -- "root@$unraidHost" "mkdir -p '$remote_dir'"
-scp -- "$archive_file" "root@$unraidHost:$remote_dir/"
+ssh -- "$ssh_target" "mkdir -p '$remote_dir'"
+scp -- "$archive_file" "$ssh_target:$remote_dir/"
 # shellcheck disable=SC2029  # we intend the paths to expand locally
-ssh -- "root@$unraidHost" "upgradepkg --install-new '$remote_dir/$plugin_name-${version}.txz'"
+ssh -- "$ssh_target" "upgradepkg --install-new '$remote_dir/$plugin_name-${version}.txz'"
 echo "Sideload complete."

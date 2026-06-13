@@ -25,7 +25,7 @@ The goal is multiple **independent** rsync jobs, each with:
 
 What ships today:
 
-- An installable `.plg` packaged the standard Unraid way (a Slackware `.txz`
+- An installable `.plg` packaged in the standard Unraid way (a Slackware `.txz`
   built by `pkg_build.sh`, released via GitHub Actions).
 - A tabbed **Unraid Rsync** page under **Settings** with one placeholder
   **Status** tab that loads cleanly.
