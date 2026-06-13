@@ -1267,6 +1267,7 @@ function ur_action_get_status(): void
         }
 
         $out[$id] = [
+            'name'    => (string) ($job['name'] ?? $id),
             'running' => $running,
             'state'   => ur_derive_state($running, $summary),
             'lastRun' => ur_last_run_shape($summary),
@@ -1304,14 +1305,28 @@ function ur_action_get_job_log(): void
         $path = Logger::latestRunLogPath($jobId);
     }
 
-    $running = RunState::isRunning($jobId);
+    // The `running` flag must describe whether the LOG BEING RETURNED is still
+    // being written, not merely whether the job is running - otherwise selecting
+    // an older run while a new one is in flight would mark the stale log "live"
+    // and keep tailing it. The job is running AND the served log is the live one
+    // only when the served run matches the current run's log (RunState.currentLog).
+    $jobRunning = RunState::isRunning($jobId);
+    $servedRun  = ($path !== '') ? Logger::runIdFromPath($path) : '';
+    $running    = false;
+    if ($jobRunning && $servedRun !== '') {
+        $state      = RunState::read($jobId);
+        $currentLog = ($state !== null) ? (string) ($state['currentLog'] ?? '') : '';
+        // currentLog is an absolute path; compare on its basename (the run id).
+        $running = ($currentLog !== '' && basename($currentLog) === $servedRun);
+    }
+
     // tail() returns '' for a missing/empty file and is ALREADY HTML-escaped.
     $log = ($path !== '') ? Logger::tail($path, UR_GET_LOG_TAIL_BYTES) : '';
 
     sendResponse([
         'ok'      => true,
         'jobId'   => $jobId,
-        'run'     => ($path !== '') ? Logger::runIdFromPath($path) : '',
+        'run'     => $servedRun,
         'log'     => $log,
         'running' => $running,
     ], 200);

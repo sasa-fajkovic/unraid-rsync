@@ -36,7 +36,6 @@ require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Job.php';
 require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Credentials.php';
 require_once '/usr/local/emhttp/plugins/unraid.rsync/include/RunState.php';
 require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Runner.php';
-require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Logger.php';
 require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Cron.php';
 require_once '/usr/local/emhttp/plugins/unraid.rsync/pages/_options_form.php';
 

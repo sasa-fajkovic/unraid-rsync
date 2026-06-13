@@ -18,8 +18,6 @@
 
 require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Config.php';
 require_once '/usr/local/emhttp/plugins/unraid.rsync/include/RunState.php';
-require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Runner.php';
-require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Logger.php';
 
 $csrf = '';
 if (isset($GLOBALS['var']) && is_array($GLOBALS['var']) && !empty($GLOBALS['var']['csrf_token'])) {
@@ -130,9 +128,9 @@ try {
       if (jobs[jobId] && jobs[jobId].running) { running.push(jobId); }
     });
 
-    /* Rebuild the running list from scratch each poll (it is small). Job names
-     * aren't in getStatus, so reuse an existing rendered name when present, else
-     * fall back to the id. */
+    /* Rebuild the running list from scratch each poll (it is small). getStatus
+     * carries the job name; fall back to a previously-rendered name, then the
+     * id, so a newly-started job still shows a human-friendly label. */
     var existingNames = {};
     Array.prototype.forEach.call(list.querySelectorAll('li[data-jobid]'), function (li) {
       var nm = li.querySelector('.ur-job-name');
@@ -145,7 +143,8 @@ try {
       li.setAttribute('data-jobid', jobId);
       var name = document.createElement('span');
       name.className = 'ur-job-name';
-      name.textContent = existingNames[jobId] || jobId;   // textContent: no XSS
+      var label = (jobs[jobId] && jobs[jobId].name) || existingNames[jobId] || jobId;
+      name.textContent = label;                           // textContent: no XSS
       var b = document.createElement('span');
       b.className = 'ur-badge ur-badge-running';
       b.textContent = 'Running';
@@ -213,8 +212,9 @@ try {
     fetch(HANDLER_URL, { method: 'POST', body: fd, credentials: 'same-origin' })
       .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); })
       .then(function (res) {
+        var ok = res.ok && res.body && res.body.ok;
         if (result) {
-          if (res.ok && res.body && res.body.ok) {
+          if (ok) {
             result.className = 'ur-result ur-ok';
             result.textContent = res.body.message || 'Abort requested.';
           } else {
@@ -222,6 +222,10 @@ try {
             result.textContent = (res.body && res.body.error) ? res.body.error : 'Abort failed.';
           }
         }
+        /* On an application-level failure the abort didn't take, so re-enable the
+         * button. On success the next poll rebuilds the list and the button goes
+         * away with its row. */
+        if (!ok) { t.disabled = false; }
         pollStatus();
       })
       .catch(function () {

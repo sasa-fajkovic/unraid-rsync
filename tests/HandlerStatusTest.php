@@ -33,6 +33,9 @@ final class HandlerStatusTest extends TestCase
     {
         $_POST = [];
         $_GET  = [];
+        // REQUEST_METHOD is a global mutated by the dispatch tests; reset it each
+        // test so a leftover value can't make a later ur_handle_request() flaky.
+        $_SERVER['REQUEST_METHOD'] = 'GET';
         http_response_code(200);
         $GLOBALS['var'] = ['csrf_token' => 'test-token'];
 
@@ -151,6 +154,7 @@ final class HandlerStatusTest extends TestCase
         $this->assertTrue($body['ok']);
         $this->assertArrayHasKey($id, $body['jobs']);
         $entry = $body['jobs'][$id];
+        $this->assertSame('Photos', $entry['name']); // name surfaced for the UI
         $this->assertFalse($entry['running']);
         $this->assertSame('PENDING', $entry['state']);
         $this->assertNull($entry['lastRun']);
@@ -243,6 +247,28 @@ final class HandlerStatusTest extends TestCase
         [$body2] = $this->runCapture('ur_action_get_job_log');
         $this->assertStringContainsString('OLD-RUN-MARKER', $body2['log']);
         $this->assertSame(basename($old), $body2['run']);
+        // The job isn't running, so the served (older) log is never "live".
+        $this->assertFalse($body2['running']);
+    }
+
+    public function testGetJobLogNotLiveForNonRunningJob(): void
+    {
+        // Even with a stale state file naming a currentLog, a job that isn't
+        // actually running must report running=false for its served log (the
+        // log being returned is not being written).
+        $id = $this->seedJob('Stale');
+        $path = Logger::openRun($id, 1750000000);
+        RunState::write($id, [
+            'pid'        => 999999, // not our runner -> isRunning() self-heals to false
+            'running'    => true,
+            'dryRun'     => false,
+            'startedAt'  => '2025-01-01T00:00:00Z',
+            'currentLog' => $path,
+        ]);
+        $_GET = ['id' => $id];
+        [$body] = $this->runCapture('ur_action_get_job_log');
+        $this->assertFalse($body['running']);
+        RunState::clear($id);
     }
 
     public function testGetJobLogRejectsTraversalRunId(): void
