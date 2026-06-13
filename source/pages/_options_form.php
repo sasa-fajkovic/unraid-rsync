@@ -129,10 +129,18 @@ if (!function_exists('ur_option_help_for')) {
     /**
      * The translated help string for a single option key, or '' when the key has
      * no description. Centralises the ur_t() wrap so the renderer stays terse.
+     *
+     * The renderer calls this twice per option (affordance + block) and the Jobs
+     * tab renders many cards, so the (immutable) help map is built once per
+     * request and cached in a static rather than rebuilt on every call; only the
+     * cheap ur_t() lookup runs per call.
      */
     function ur_option_help_for(string $key): string
     {
-        $map = ur_option_help();
+        static $map = null;
+        if ($map === null) {
+            $map = ur_option_help();
+        }
         return isset($map[$key]) ? ur_t($map[$key]) : '';
     }
 }
@@ -146,8 +154,10 @@ if (!function_exists('ur_option_help_affordance')) {
      *
      * No-op when the key has no description, so callers can invoke it
      * unconditionally. The toggle behaviour is wired by the small script emitted
-     * once per page by ur_render_rsync_options(); it is plain DOM (a sibling
-     * lookup), so it works without per-control IDs and inside JS-cloned job cards.
+     * once per page by ur_render_rsync_options(); it resolves the help block by
+     * the button's aria-controls id (with a next-sibling scan only as a fallback),
+     * so it works for every layout here and inside JS-cloned job cards. $helpId
+     * must therefore match the id of the ur_option_help_block() for the same key.
      *
      * @param string $key    whitelist option key (used only to look up text)
      * @param string $helpId DOM id for the revealed blockquote (aria target)
@@ -360,8 +370,10 @@ if (!function_exists('ur_emit_option_help_assets')) {
      * The script is a single delegated click listener on document, so it also
      * handles affordances inside job cards that are cloned client-side from the
      * hidden template (their "?" buttons exist in the cloned DOM and need no
-     * per-card wiring). It toggles the sibling .ur-help-text blockquote's `hidden`
-     * attribute and keeps aria-expanded in sync. All static markup; no user data.
+     * per-card wiring). For a clicked "?" it resolves the target .ur-help-text
+     * blockquote by the button's aria-controls id (falling back to a next-sibling
+     * scan), toggles that block's `hidden` attribute and keeps aria-expanded in
+     * sync. All static markup; no user data.
      */
     function ur_emit_option_help_assets(): void
     {

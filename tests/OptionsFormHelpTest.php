@@ -164,10 +164,19 @@ final class OptionsFormHelpTest extends TestCase
         ur_render_rsync_options(Config::defaultRsyncOptions(), 'jobs[1][rsyncOptions]', 'ur_p2');
         $html = (string) ob_get_clean();
 
-        $this->assertSame(1, substr_count($html, 'window.urOptionHelpWired = true'),
-            'Help toggle JS must be emitted exactly once per page.');
-        $this->assertSame(1, substr_count($html, '.ur-help-toggle {'),
-            'Help toggle CSS must be emitted exactly once per page.');
+        // Count via whitespace-tolerant patterns so reformatting the emitted
+        // CSS/JS (indentation, spacing around tokens) can't break the test as long
+        // as the assets are still emitted exactly once.
+        $this->assertSame(
+            1,
+            preg_match_all('/window\s*\.\s*urOptionHelpWired\s*=\s*true/', $html),
+            'Help toggle JS must be emitted exactly once per page.'
+        );
+        $this->assertSame(
+            1,
+            preg_match_all('/\.ur-help-toggle\s*\{/', $html),
+            'Help toggle CSS must be emitted exactly once per page.'
+        );
     }
 
     /**
