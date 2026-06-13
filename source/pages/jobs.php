@@ -24,13 +24,17 @@
  * rewriting the row index placeholders, so the indices stay contiguous and the
  * names round-trip. Every rendered value is htmlspecialchars-escaped.
  *
- * Phase 2 is config only: NO Run / Dry-run / Abort buttons, NO runner, NO cron
- * writing, NO credentials backend. Those land in later phases.
+ * Phase 4 adds per-job Run / Dry-run / Abort buttons that POST to the handler
+ * (CSRF-checked) to launch / stop the detached runner; Run/Dry-run are disabled
+ * while a job is running (RunState::isRunning), Abort while it is idle. Live
+ * status badges, the per-run log viewer, and 1s polling are Phase 6 - here the
+ * buttons just fire-and-confirm and reload to refresh their enabled state.
  */
 
 require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Config.php';
 require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Job.php';
 require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Credentials.php';
+require_once '/usr/local/emhttp/plugins/unraid.rsync/include/RunState.php';
 require_once '/usr/local/emhttp/plugins/unraid.rsync/pages/_options_form.php';
 
 $csrf = '';
@@ -228,7 +232,26 @@ function ur_render_job_card($job, $index): void
     ur_render_rsync_options($opts, $p . '[rsyncOptions]', $idb . '_opts_fields');
     echo '</div>';
 
-    echo '<div class="ur-job-card-actions"><button type="button" class="ur-job-del">' . ur_h(ur_t('Remove job')) . '</button></div>';
+    // Run / Dry-run / Abort actions. These are only meaningful for a saved job
+    // (one with an id); the JS-cloned template card has the literal "__IDX__"
+    // placeholder and no real id, so its run controls are rendered disabled and
+    // the user must save first. A job currently running has Run/Dry-run disabled
+    // and Abort enabled (and vice versa); state comes from RunState::isRunning,
+    // PID-reuse-safe. Live status badges + polling are Phase 6.
+    $hasId   = ($id !== '' && strpos($id, '__IDX__') === false);
+    $running = $hasId && RunState::isRunning($id);
+    $runDis  = (!$hasId || $running) ? ' disabled' : '';
+    $abortDis = (!$hasId || !$running) ? ' disabled' : '';
+    echo '<div class="ur-job-card-actions">';
+    echo '<button type="button" class="ur-job-run" data-jobid="' . ur_h($id) . '"' . $runDis . '>' . ur_h(ur_t('Run')) . '</button> ';
+    echo '<button type="button" class="ur-job-dry" data-jobid="' . ur_h($id) . '"' . $runDis . '>' . ur_h(ur_t('Dry-run')) . '</button> ';
+    echo '<button type="button" class="ur-job-abort" data-jobid="' . ur_h($id) . '"' . $abortDis . '>' . ur_h(ur_t('Abort')) . '</button> ';
+    echo '<button type="button" class="ur-job-del">' . ur_h(ur_t('Remove job')) . '</button>';
+    echo '</div>';
+    if (!$hasId) {
+        echo '<blockquote class="inline_help"><p>' . ur_h(ur_t('Save the job before running it.')) . '</p></blockquote>';
+    }
+    echo '<div class="ur-job-run-result ur-result" data-jobid="' . ur_h($id) . '"></div>';
 
     echo '</div>'; // .ur-job-card
 }
@@ -411,6 +434,50 @@ function ur_render_pair_row(string $prefix, $k, string $local, string $remote): 
     rowsEl.appendChild(row);
   }
 
+  var HANDLER_URL = <?=json_encode($handlerUrl)?>;
+  var CSRF_TOKEN  = <?=json_encode($csrf)?>;
+
+  /* Fire a run/dry-run/abort action for a job and show the result inline next
+   * to its card. Fire-and-confirm: the response just acknowledges the launch;
+   * live status + the log viewer are Phase 6. On a successful run/dry launch we
+   * reload after a beat so the buttons reflect the now-running state. */
+  function postJobAction(action, jobId, btn) {
+    if (!jobId) { return; }
+    var card = btn && btn.closest ? btn.closest('.ur-job-card') : null;
+    var result = card ? card.querySelector('.ur-job-run-result') : null;
+    var fd = new FormData();
+    fd.append('action', action);
+    fd.append('csrf_token', CSRF_TOKEN);
+    fd.append('id', jobId);
+    if (btn) { btn.disabled = true; }
+    fetch(HANDLER_URL, { method: 'POST', body: fd, credentials: 'same-origin' })
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); })
+      .then(function (res) {
+        if (result) {
+          if (res.ok && res.body && res.body.ok) {
+            result.className = 'ur-job-run-result ur-result ur-ok';
+            result.textContent = res.body.message || 'Done.';
+          } else {
+            result.className = 'ur-job-run-result ur-result ur-err';
+            result.textContent = (res.body && res.body.error) ? res.body.error : 'Action failed.';
+          }
+        }
+        /* Reload so the Run/Abort enable state tracks the new running state. */
+        if (res.ok && res.body && res.body.ok) {
+          setTimeout(function () { window.location.reload(); }, 700);
+        } else if (btn) {
+          btn.disabled = false;
+        }
+      })
+      .catch(function () {
+        if (result) {
+          result.className = 'ur-job-run-result ur-result ur-err';
+          result.textContent = 'Network error.';
+        }
+        if (btn) { btn.disabled = false; }
+      });
+  }
+
   document.addEventListener('click', function (ev) {
     var t = ev.target;
     if (!t || !t.classList) { return; }
@@ -423,6 +490,12 @@ function ur_render_pair_row(string $prefix, $k, string $local, string $remote): 
     } else if (t.classList.contains('ur-pair-del')) {
       var prow = t.closest ? t.closest('.ur-pair-row') : null;
       if (prow && prow.parentNode) { prow.parentNode.removeChild(prow); }
+    } else if (t.classList.contains('ur-job-run')) {
+      postJobAction('runJob', t.getAttribute('data-jobid'), t);
+    } else if (t.classList.contains('ur-job-dry')) {
+      postJobAction('dryRunJob', t.getAttribute('data-jobid'), t);
+    } else if (t.classList.contains('ur-job-abort')) {
+      postJobAction('abortJob', t.getAttribute('data-jobid'), t);
     } else if (t.classList.contains('ur-job-del')) {
       var card = t.closest ? t.closest('.ur-job-card') : null;
       if (card && card.parentNode) { card.parentNode.removeChild(card); }
