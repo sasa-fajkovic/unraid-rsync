@@ -245,6 +245,21 @@ final class KeyToolsTest extends TestCase
 
     // --- runArgv deadlock-safety -------------------------------------------
 
+    /**
+     * Build a portable child-process argv that writes $outLen bytes of 'O' to
+     * STDOUT and $errLen bytes of 'E' to STDERR, using the SAME php binary the
+     * suite runs under (always present; no shell-$0/printf portability quirks
+     * between macOS sh and Ubuntu dash, which broke an earlier sh-based probe).
+     *
+     * @return array<int,string>
+     */
+    private static function emitArgv(int $outLen, int $errLen): array
+    {
+        $code = 'fwrite(STDOUT, str_repeat("O", ' . $outLen . '));'
+              . 'fwrite(STDERR, str_repeat("E", ' . $errLen . '));';
+        return [PHP_BINARY, '-d', 'error_reporting=0', '-r', $code];
+    }
+
     public function testRunArgvDrainsLargeStderrWithoutDeadlock(): void
     {
         // A child that floods STDERR with > the ~64 KiB pipe buffer while STDOUT
@@ -253,36 +268,25 @@ final class KeyToolsTest extends TestCase
         // stdout, forever. The concurrent stream_select drain must complete and
         // return BOTH streams in full. Bounded by PHPUnit's per-test timeout so a
         // regression hangs the test (a clear failure) rather than passing.
-        if (DIRECTORY_SEPARATOR !== '/' || !is_executable('/bin/sh')) {
-            $this->markTestSkipped('POSIX shell required for the deadlock probe');
-        }
-
-        // ~256 KiB to stderr (well past the pipe buffer), a short line to stdout.
-        $bigStderr = str_repeat('E', 256 * 1024);
-        $argv = ['/bin/sh', '-c', 'printf OUT; printf %s "$0" 1>&2', $bigStderr];
-
-        [$code, $stdout, $stderr] = RealRunKeyTools::publicRunKeygen($argv);
+        $errLen = 256 * 1024; // well past the pipe buffer
+        [$code, $stdout, $stderr] = RealRunKeyTools::publicRunKeygen(self::emitArgv(3, $errLen));
 
         $this->assertSame(0, $code);
-        $this->assertSame('OUT', $stdout);
-        $this->assertSame(strlen($bigStderr), strlen($stderr), 'all stderr must be drained');
-        $this->assertSame($bigStderr, $stderr);
+        $this->assertSame('OOO', $stdout);
+        $this->assertSame($errLen, strlen($stderr), 'all stderr must be drained');
+        $this->assertSame(str_repeat('E', $errLen), $stderr);
     }
 
     public function testRunArgvHandlesLargeStdout(): void
     {
         // The mirror case: a large STDOUT with small stderr must also drain fully.
-        if (DIRECTORY_SEPARATOR !== '/' || !is_executable('/bin/sh')) {
-            $this->markTestSkipped('POSIX shell required for the drain probe');
-        }
-        $bigStdout = str_repeat('O', 256 * 1024);
-        $argv = ['/bin/sh', '-c', 'printf %s "$0"; printf ERR 1>&2', $bigStdout];
-
-        [$code, $stdout, $stderr] = RealRunKeyTools::publicRunKeygen($argv);
+        $outLen = 256 * 1024;
+        [$code, $stdout, $stderr] = RealRunKeyTools::publicRunKeygen(self::emitArgv($outLen, 3));
 
         $this->assertSame(0, $code);
-        $this->assertSame(strlen($bigStdout), strlen($stdout), 'all stdout must be drained');
-        $this->assertSame('ERR', $stderr);
+        $this->assertSame($outLen, strlen($stdout), 'all stdout must be drained');
+        $this->assertSame(str_repeat('O', $outLen), $stdout);
+        $this->assertSame('EEE', $stderr);
     }
 
     public function testRunArgvMissingBinaryReturns127(): void
