@@ -43,30 +43,51 @@ jobs:
 
       - name: Determine version + build ref
         id: version
+        # The dispatch input is user-controlled, so it is passed via env (never
+        # interpolated into the shell with ${{ }}) and then format-validated
+        # before use. This avoids shell injection in a workflow that has
+        # contents: write.
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          GIT_SHA: ${{ github.sha }}
         run: |
-          if [ "${{ github.event_name }}" = "push" ]; then
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "push" ]; then
             # Tag push: the tag name is the version (refs/tags/<version>).
             version="${GITHUB_REF#refs/tags/}"
             build_ref="$version"            # build from the tagged commit
-          elif [ -n "${{ github.event.inputs.version }}" ]; then
-            version="${{ github.event.inputs.version }}"
-            build_ref="${{ github.sha }}"   # dispatch: build from the commit it ran on
+          elif [ -n "$INPUT_VERSION" ]; then
+            version="$INPUT_VERSION"
+            build_ref="$GIT_SHA"            # dispatch: build from the commit it ran on
           else
             version="$(date +%Y.%m.%d)"
-            build_ref="${{ github.sha }}"
+            build_ref="$GIT_SHA"
+          fi
+          # Validate against the documented scheme (YYYY.MM.DD[suffix-letter]).
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]{4}\.[0-9]{2}\.[0-9]{2}[a-z]?$'; then
+            echo "ERROR: invalid version '$version' (expected YYYY.MM.DD or YYYY.MM.DDx)." >&2
+            exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "build_ref=$build_ref" >> "$GITHUB_OUTPUT"
           echo "Building version $version from ref $build_ref"
 
       - name: Check out the build ref (so artifacts match the tag)
-        run: git checkout --quiet "${{ steps.version.outputs.build_ref }}"
+        env:
+          BUILD_REF: ${{ steps.version.outputs.build_ref }}
+        run: git checkout --quiet "$BUILD_REF"
 
       - name: Build .txz inside Slackware container
+        # VERSION (validated above) is passed into the container via -e and
+        # referenced as a shell variable rather than interpolated with ${{ }},
+        # so it cannot break out of the shell command.
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          docker run --rm -v "${{ github.workspace }}":/workspace -w /workspace \
+          docker run --rm -e VERSION -v "${{ github.workspace }}":/workspace -w /workspace \
             aclemons/slackware:15.0 \
-            bash -c "./pkg_build.sh -y -V '${{ steps.version.outputs.version }}'"
+            bash -c './pkg_build.sh -y -V "$VERSION"'
           sudo chown -R "$(id -u):$(id -g)" .
 
       - name: Commit regenerated .plg to the default branch

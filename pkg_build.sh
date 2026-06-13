@@ -50,6 +50,24 @@ while getopts ":V:yu:" opt; do
   esac
 done
 
+# --- input validation -------------------------------------------------------
+# version is used to build filesystem paths (the archive filename) and is
+# sed-substituted into the .plg, so constrain it to the documented scheme
+# (YYYY.MM.DD with an optional same-day suffix letter). This rejects values
+# containing slashes, quotes, or other metacharacters before they can write
+# outside archive/ or corrupt the .plg rewrite.
+if ! [[ "$version" =~ ^[0-9]{4}\.[0-9]{2}\.[0-9]{2}[a-z]?$ ]]; then
+  echo "ERROR: invalid version '$version' (expected YYYY.MM.DD or YYYY.MM.DDx)." >&2
+  exit 2
+fi
+
+# A -u host beginning with '-' would be parsed as an option by ssh/scp
+# (option-injection); require a plausible host/user@host token.
+if [[ -n "$unraidHost" ]] && ! [[ "$unraidHost" =~ ^[A-Za-z0-9._@-]+$ && "$unraidHost" != -* ]]; then
+  echo "ERROR: invalid -u host '$unraidHost'." >&2
+  exit 2
+fi
+
 # --- preflight --------------------------------------------------------------
 if ! command -v makepkg >/dev/null 2>&1; then
   echo "ERROR: makepkg not found. This script must run in a Slackware environment" >&2
@@ -127,11 +145,13 @@ fi
 
 echo "Sideloading to $unraidHost ..."
 remote_dir="/boot/config/plugins/$plugin_name"
+# `--` ends option parsing so the destination can never be read as a flag, and
+# the host was validated above (no leading '-', restricted charset).
 # Ensure the destination exists on the host: on a box that has never had the
 # plugin installed the dir is absent, and scp would fail (aborting under set -e).
 # shellcheck disable=SC2029  # we intend $remote_dir to expand locally
-ssh "root@$unraidHost" "mkdir -p '$remote_dir'"
-scp "$archive_file" "root@$unraidHost:$remote_dir/"
+ssh -- "root@$unraidHost" "mkdir -p '$remote_dir'"
+scp -- "$archive_file" "root@$unraidHost:$remote_dir/"
 # shellcheck disable=SC2029  # we intend the paths to expand locally
-ssh "root@$unraidHost" "upgradepkg --install-new '$remote_dir/$plugin_name-${version}.txz'"
+ssh -- "root@$unraidHost" "upgradepkg --install-new '$remote_dir/$plugin_name-${version}.txz'"
 echo "Sideload complete."
