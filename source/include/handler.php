@@ -55,19 +55,29 @@ require_once __DIR__ . '/Cron.php';
  *
  * It is best-effort by design: a save has ALREADY succeeded by the time we get
  * here, so a cron-sync failure must NOT turn into a 5xx that makes the UI think
- * the save was lost. We return the apply() result (or null on an unexpected
- * throw) so the caller can surface a non-fatal warning, and never rethrow.
+ * the save was lost. It ALWAYS returns a structured result (never null and never
+ * rethrows): an unexpected Throwable from apply() is folded into an ok=false
+ * result with the message, so a caller can uniformly surface a non-fatal warning
+ * by checking `ok` alone - the failure is never silently swallowed.
  *
  * @param array<string,mixed>|null $config a config already in hand (post-mutation)
  *                                          to avoid a re-read race; null => load.
- * @return array<string,mixed>|null the Cron::apply() result, or null if it threw.
+ * @return array{ok:bool,error?:string,updateCronCode?:int} the apply() result, or
+ *                                          a synthesised ok=false on a throw.
  */
-function ur_resync_cron(?array $config = null): ?array
+function ur_resync_cron(?array $config = null): array
 {
     try {
         return Cron::apply($config);
     } catch (Throwable $e) {
-        return null;
+        return [
+            'ok'             => false,
+            'enabledJobs'    => 0,
+            'wrote'          => false,
+            'removed'        => false,
+            'updateCronCode' => -1,
+            'error'          => 'Unexpected error applying schedule: ' . $e->getMessage(),
+        ];
     }
 }
 
@@ -282,7 +292,7 @@ function ur_action_save_config(): void
     // failure becomes a non-fatal warning rather than a failed save. Pass the
     // in-hand config so apply() schedules exactly what we persisted.
     $cron = ur_resync_cron($config);
-    if ($cron !== null && empty($cron['ok'])) {
+    if (empty($cron['ok'])) {
         $allWarnings[] = 'Jobs were saved, but updating the schedule failed: '
             . (string) ($cron['error'] ?? ('update_cron exit ' . ($cron['updateCronCode'] ?? -1)))
             . '. Schedules will be re-applied on the next array start.';
@@ -831,7 +841,7 @@ function ur_action_delete_connection(): void
     $cronWarning = '';
     if (!empty($disabled)) {
         $cron = ur_resync_cron($config);
-        if ($cron !== null && empty($cron['ok'])) {
+        if (empty($cron['ok'])) {
             $cronWarning = ' Note: updating the schedule failed; it will be re-applied on the next array start.';
         }
     }
