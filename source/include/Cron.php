@@ -51,6 +51,7 @@
  */
 
 require_once __DIR__ . '/Config.php';
+require_once __DIR__ . '/Job.php';
 
 // The installed plugin/dir basename. The cron file is <base>/<UR_PLUGIN_NAME>.cron
 // so update_cron's top-level *.cron glob picks it up. Overridable for tests.
@@ -69,6 +70,17 @@ class Cron
 {
     /** Header line written at the top of the generated cron file. */
     const HEADER = '# Unraid Rsync';
+
+    /**
+     * A job id is only emitted into a cron command line when it is a single safe
+     * token: ASCII letters, digits, dot, underscore, hyphen. Job::generateId()
+     * always produces "j-<slug>" which satisfies this, but a hand-edited or
+     * legacy config.json could carry an id with shell metacharacters - and the
+     * cron line is ultimately executed by /bin/sh, so an id like
+     * "j-a; rm -rf /" would be command injection. We refuse to emit such a line
+     * rather than trust upstream validation (defence in depth).
+     */
+    const SAFE_ID_PATTERN = '/^[A-Za-z0-9._-]+$/';
 
     /**
      * Injectable update_cron runner: fn(array $argv): int (the process exit
@@ -110,11 +122,17 @@ class Cron
 
     /**
      * Build the cron file CONTENT from a config array: a header comment plus one
-     * line per ENABLED job that has a non-empty schedule. Disabled jobs and jobs
-     * with an empty/whitespace schedule are skipped (a job with a malformed
-     * schedule is still emitted - update_cron / crond will reject the bad line
-     * rather than us silently dropping it, matching the validate-on-save model;
-     * but an EMPTY schedule would yield a token-shifted line, so we skip those).
+     * line per ENABLED job. A job is skipped (no line emitted) when it is
+     * disabled, or its id is missing / not a single safe token
+     * (SAFE_ID_PATTERN), or its schedule is missing / not a well-formed 5-field
+     * cron expression.
+     *
+     * This is defence in depth: the cron file is concatenated into the system
+     * crontab and each line is run by /bin/sh, so an id with shell
+     * metacharacters would be command injection and a malformed schedule would
+     * shift the command tokens. We do not trust that upstream validation already
+     * cleaned the stored config (it could be hand-edited or from an older build),
+     * so we re-check here and refuse to emit an unsafe line.
      *
      * The exact per-job line:
      *   <schedule> php <UR_CRON_RUNNER_PATH> --job=<id> >/dev/null 2>&1
@@ -138,6 +156,17 @@ class Cron
             $id       = trim((string) ($job['id'] ?? ''));
             $schedule = trim((string) ($job['schedule'] ?? ''));
             if ($id === '' || $schedule === '') {
+                continue;
+            }
+            // The id becomes part of a shell-executed cron line: refuse anything
+            // that isn't a single safe token (prevents command injection from a
+            // crafted/legacy id like "j-a; rm -rf /").
+            if (!preg_match(self::SAFE_ID_PATTERN, $id)) {
+                continue;
+            }
+            // A malformed schedule would shift the command tokens (or be a junk
+            // crontab line); only emit well-formed 5-field expressions.
+            if (!Job::isValidCron($schedule)) {
                 continue;
             }
             // Collapse any internal whitespace in the schedule to single spaces

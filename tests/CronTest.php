@@ -188,6 +188,54 @@ final class CronTest extends TestCase
         );
     }
 
+    public function testApplySkipsJobWithUnsafeId(): void
+    {
+        // A crafted/legacy id with shell metacharacters must NEVER be emitted -
+        // the cron line is run by /bin/sh, so this would be command injection.
+        $config = $this->configWith([
+            $this->job('j-ok', '0 3 * * *', true),
+            $this->job('j-a; rm -rf /', '0 4 * * *', true),
+            $this->job('j-b && curl evil', '0 5 * * *', true),
+            $this->job('j-c$(whoami)', '0 6 * * *', true),
+        ]);
+        $res = Cron::apply($config);
+
+        $this->assertSame(1, $res['enabledJobs']); // only the safe one
+        $content = file_get_contents(Cron::cronFilePath());
+        $this->assertStringContainsString('--job=j-ok', $content);
+        $this->assertStringNotContainsString('rm -rf', $content);
+        $this->assertStringNotContainsString('curl evil', $content);
+        $this->assertStringNotContainsString('whoami', $content);
+    }
+
+    public function testApplyAcceptsSafeIdCharacters(): void
+    {
+        // Dots, underscores, hyphens, digits and letters are all allowed.
+        $config = $this->configWith([$this->job('j-My_job.2-3', '0 3 * * *', true)]);
+        $res = Cron::apply($config);
+        $this->assertSame(1, $res['enabledJobs']);
+        $this->assertStringContainsString('--job=j-My_job.2-3', file_get_contents(Cron::cronFilePath()));
+    }
+
+    public function testApplySkipsJobWithMalformedSchedule(): void
+    {
+        // A malformed schedule would shift the command tokens / be a junk crontab
+        // line; only well-formed 5-field expressions are emitted.
+        $config = $this->configWith([
+            $this->job('j-ok', '0 3 * * *', true),
+            $this->job('j-bad', 'not a cron', true),
+            $this->job('j-short', '0 3 * *', true),    // only 4 fields
+            $this->job('j-range', '99 3 * * *', true), // minute out of range
+        ]);
+        $res = Cron::apply($config);
+        $this->assertSame(1, $res['enabledJobs']);
+        $content = file_get_contents(Cron::cronFilePath());
+        $this->assertStringContainsString('--job=j-ok', $content);
+        $this->assertStringNotContainsString('j-bad', $content);
+        $this->assertStringNotContainsString('j-short', $content);
+        $this->assertStringNotContainsString('j-range', $content);
+    }
+
     public function testApplyReportsUpdateCronFailure(): void
     {
         Cron::$updateCronRunner = fn(array $argv): int => 3; // non-zero
