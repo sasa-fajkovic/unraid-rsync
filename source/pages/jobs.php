@@ -357,7 +357,8 @@ function ur_relative_time(int $deltaSec): string
 
 <p>
   <?=_('Define independent rsync backup jobs. Each job has its own schedule and runs one rsync per source -> destination pair (no cartesian product)')?>.
-  <?=_('Nothing runs yet — execution, scheduling and credentials arrive in later releases')?>.
+  <?=_('Enabled jobs run automatically on their cron schedule; the Next run column shows when each will fire. You can also Run or Dry-run a job on demand')?>.
+  <?=_('Live status, per-run logs and notifications arrive in later releases')?>.
 </p>
 
 <!-- Summary list ------------------------------------------------------------>
