@@ -623,6 +623,13 @@ class Ssh
         $exitCode = self::SSH_EXIT_ERROR;
         $stderr   = '';
         try {
+            // REDACTION NOTE: buildSshArgv() composes this probe WITHOUT ssh's -v
+            // (verbose) flag, so the captured stderr we surface via firstLine()
+            // below (in classifyProbe/sniffStderr) never echoes the materialised
+            // tmpfs key path or any secret — only OpenSSH's plain connect/auth
+            // diagnostics. If anyone ever adds -v here, ssh WILL log the identity
+            // file path (and more), so the stderr must then be redacted (see
+            // Logger::setRedaction) before it is returned to the browser.
             [$exitCode, $stderr] = static::runProbe($argv);
         } finally {
             self::cleanupRuntime((string) $mat['token']);

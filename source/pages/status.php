@@ -30,12 +30,17 @@ $handlerUrl = '/plugins/unraid.rsync/include/handler.php';
 // before the first poll completes. A config read error is non-fatal here - the
 // poller will surface it; we just render an empty list.
 $initialRunning = [];
+// Total configured jobs, so the tab can show an actionable empty state when none
+// are defined yet (a config read error leaves this at 0, which only suppresses
+// the empty-state hint — never a false "no jobs" when some exist).
+$jobCount = 0;
 try {
     $config = Config::load();
     foreach (($config['jobs'] ?? []) as $job) {
         if (!is_array($job)) {
             continue;
         }
+        $jobCount++;
         $jid = (string) ($job['id'] ?? '');
         if ($jid !== '' && RunState::isRunning($jid)) {
             $initialRunning[$jid] = (string) ($job['name'] ?? $jid);
@@ -43,6 +48,7 @@ try {
     }
 } catch (Throwable $e) {
     $initialRunning = [];
+    $jobCount = 0;
 }
 
 // rsync presence snapshot (FIX 3): rsync ships in Unraid's base OS, so the
@@ -64,6 +70,9 @@ $rsyncMissingMsg  = $rsyncAvailable ? '' : Rsync::rsyncMissingMessage();
 }
 .ur-badge-running { background: #1565c0; animation: ur-pulse 1.3s ease-in-out infinite; }
 .ur-badge-idle    { background: #1c7d3f; }
+/* Warning badge: dark text on a darkened orange for WCAG AA contrast — kept in
+   lockstep with the Jobs tab's .ur-badge-warning. */
+.ur-badge-warning { background: #b15c00; color: #1a1a1a; }
 .ur-badge-failed  { background: var(--red-800, #b71c1c); }
 @keyframes ur-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.55; } }
 .ur-rsync-status { margin: 8px 0; }
@@ -88,6 +97,14 @@ $rsyncMissingMsg  = $rsyncAvailable ? '' : Rsync::rsyncMissingMessage();
 <p>
   <?=_('Live status of all rsync jobs and the rolling plugin log. This page updates automatically while a job is running')?>.
 </p>
+
+<?php if ($jobCount === 0): ?>
+<!-- Empty state: nothing to monitor until a job exists. Point the user at the
+     Jobs tab so the tab is actionable rather than blank. -->
+<blockquote class="inline_help">
+  <p><?=_('No jobs configured yet — add one in the Jobs tab')?>.</p>
+</blockquote>
+<?php endif; ?>
 
 <!-- Overall running/idle indicator + currently-running jobs (with Abort) ------>
 <div class="ur-status-overall">

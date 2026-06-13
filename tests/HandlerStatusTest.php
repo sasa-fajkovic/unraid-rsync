@@ -158,12 +158,25 @@ final class HandlerStatusTest extends TestCase
         $this->assertArrayHasKey($id, $body['jobs']);
         $entry = $body['jobs'][$id];
         $this->assertSame('Photos', $entry['name']); // name surfaced for the UI
+        $this->assertTrue($entry['enabled']);         // enabled flag surfaced for the Next-run cell
         $this->assertFalse($entry['running']);
         $this->assertSame('PENDING', $entry['state']);
         $this->assertNull($entry['lastRun']);
         // Enabled job with a valid cron -> a numeric nextRun epoch.
         $this->assertIsInt($entry['nextRun']);
         $this->assertGreaterThan(time(), $entry['nextRun']);
+    }
+
+    public function testGetStatusCarriesEnabledFlag(): void
+    {
+        // The UI renders "disabled" in the Next-run cell off this flag (distinct
+        // from an enabled job whose nextRun is null), so it must be present and
+        // accurate for both enabled and disabled jobs.
+        $onId  = $this->seedJob('On');
+        $offId = $this->seedJob('Off', ['enabled' => false]);
+        [$body] = $this->runCapture('ur_action_get_status');
+        $this->assertTrue($body['jobs'][$onId]['enabled']);
+        $this->assertFalse($body['jobs'][$offId]['enabled']);
     }
 
     public function testGetStatusReflectsLastRunSummary(): void
@@ -411,5 +424,61 @@ final class HandlerStatusTest extends TestCase
         } finally {
             Rsync::$rsyncPathOverride = null;
         }
+    }
+
+    // ---- run/abort POST id confinement (ur_safe_job_id) --------------------
+    // The POST run/abort handlers now route the id through ur_safe_job_id() first
+    // (symmetry with the GET pollers + early rejection), so a malformed/tampered
+    // id is rejected as "A job id is required." (422) before any config or
+    // filesystem lookup — it can never reach the exact-match step at all.
+
+    /**
+     * @dataProvider unsafeRunAbortIds
+     */
+    public function testRunJobRejectsUnsafeId(string $bad): void
+    {
+        $_POST = ['id' => $bad];
+        [$body, $code] = $this->runCapture(function () { ur_action_run_job(false); });
+        $this->assertSame(422, $code, json_encode($body));
+        $this->assertArrayHasKey('error', $body);
+    }
+
+    /**
+     * @dataProvider unsafeRunAbortIds
+     */
+    public function testAbortJobRejectsUnsafeId(string $bad): void
+    {
+        $_POST = ['id' => $bad];
+        [$body, $code] = $this->runCapture('ur_action_abort_job');
+        $this->assertSame(422, $code, json_encode($body));
+        $this->assertArrayHasKey('error', $body);
+    }
+
+    public static function unsafeRunAbortIds(): array
+    {
+        return [
+            'traversal' => ['../../etc/passwd'],
+            'slash'     => ['j/music'],
+            'nul'       => ["j-music\0"],
+            'dotdot'    => ['..'],
+            'empty'     => [''],
+        ];
+    }
+
+    public function testRunJobValidIdStillReachesNotFound(): void
+    {
+        // A well-formed id that is not a configured job must pass the ur_safe_job_id
+        // gate and fail at the exact-match step (404) — confirming the safe-id
+        // routing did not break the real authority (exact match against config).
+        $_POST = ['id' => 'j-does-not-exist'];
+        [$body, $code] = $this->runCapture(function () { ur_action_run_job(false); });
+        $this->assertSame(404, $code, json_encode($body));
+    }
+
+    public function testAbortJobValidUnknownIdReachesNotFound(): void
+    {
+        $_POST = ['id' => 'j-does-not-exist'];
+        [$body, $code] = $this->runCapture('ur_action_abort_job');
+        $this->assertSame(404, $code, json_encode($body));
     }
 }

@@ -1168,7 +1168,11 @@ function ur_launch_runner(string $jobId, bool $dryRun): bool
  */
 function ur_action_run_job(bool $dryRun): void
 {
-    $jobId = isset($_POST['id']) ? trim((string) $_POST['id']) : '';
+    // Route the POST id through the same confinement gate the GET pollers use, so
+    // a malformed/tampered id (path separators, control bytes, etc.) is rejected
+    // early and symmetrically. The exact-match-against-config-id below is still
+    // the real authority — this just normalises + early-rejects junk first.
+    $jobId = ur_safe_job_id(isset($_POST['id']) ? (string) $_POST['id'] : '');
     if ($jobId === '') {
         sendError('A job id is required.', 422);
         return;
@@ -1224,7 +1228,10 @@ function ur_action_run_job(bool $dryRun): void
  */
 function ur_action_abort_job(): void
 {
-    $jobId = isset($_POST['id']) ? trim((string) $_POST['id']) : '';
+    // Route the POST id through the same confinement gate the GET pollers use
+    // (symmetry + early rejection of a malformed/tampered id). The known-id and
+    // run-state checks below remain the authority for whether an abort proceeds.
+    $jobId = ur_safe_job_id(isset($_POST['id']) ? (string) $_POST['id'] : '');
     if ($jobId === '') {
         sendError('A job id is required.', 422);
         return;
@@ -1383,11 +1390,13 @@ function ur_last_run_shape(?array $summary): ?array
 
 /**
  * GET getStatus: a per-job status map for ALL configured jobs. Each entry:
- *   { running, state, lastRun: {...}|null, nextRun: epoch|null }
+ *   { name, enabled, running, state, lastRun: {...}|null, nextRun: epoch|null }
  * running  <- RunState::isRunning (PID-reuse-safe, self-heals stale state)
  * lastRun  <- Runner::readSummary (the /boot durable summary)
  * state    <- ur_derive_state (RUNNING overrides summary; PENDING when none)
  * nextRun  <- Cron::nextRun for an enabled job with a valid schedule, else null
+ * enabled  <- the job's enabled flag, so the UI can render "disabled" for the
+ *             Next-run cell (distinct from an enabled job with no computable next)
  *
  * Side-effect-free (isRunning may CLEAR a provably-stale state file, which is a
  * self-heal, not a state change driven by this request).
@@ -1430,6 +1439,7 @@ function ur_action_get_status(): void
 
         $out[$id] = [
             'name'    => (string) ($job['name'] ?? $id),
+            'enabled' => !empty($job['enabled']),
             'running' => $running,
             'state'   => ur_derive_state($running, $summary),
             'lastRun' => ur_last_run_shape($summary),
