@@ -6,15 +6,21 @@
   <!ENTITY version        "2026.06.13b">
   <!ENTITY gitBranch       "main">
   <!ENTITY releaseLocation "https://github.com/&gitUser;/&repoName;/releases/download/&version;">
-  <!ENTITY pluginURL       "https://raw.githubusercontent.com/&gitUser;/&repoName;/&gitBranch;/&pluginName;.plg">
+  <!ENTITY pluginURL       "https://github.com/&gitUser;/&repoName;/releases/latest/download/&pluginName;.plg">
   <!ENTITY plugin          "/boot/config/plugins/&pluginName;">
   <!ENTITY emhttp          "/usr/local/emhttp/plugins/&pluginName;">
-  <!-- md5 is intentionally empty in source control. pkg_build.sh computes it
-       from the freshly built .txz and rewrites this ENTITY (together with
-       version) at release time; the release workflow commits the regenerated
-       .plg back to the default branch, so the raw .plg URL users install from
-       always carries a real md5 that matches the released package. Never
-       hand-edit version/md5 - they must change together. -->
+  <!-- AUTHORITATIVE MANIFEST: the published manifest users install from and
+       auto-update against is the GitHub Release asset, served via the stable
+       redirect https://github.com/<user>/<repo>/releases/latest/download/unraid.rsync.plg
+       (that is what `pluginURL` above points at). That asset carries the real,
+       per-release version + md5 (rewritten by pkg_build.sh at build time) and
+       its FILE <URL> points at that same release's own .txz via releaseLocation.
+
+       The version/md5 ENTITYs in THIS repo copy are build-time PLACEHOLDERS.
+       pkg_build.sh rewrites them per release in the built artifact; this repo
+       .plg is only the source TEMPLATE and is no longer synced back to the
+       branch, so do not rely on (or try to keep current) the values below.
+       Never hand-edit version/md5 - they change together, in the build. -->
   <!ENTITY md5            "de35dad106eb4e06cf45f3f8f9c41823">
 ]>
 <PLUGIN name="&pluginName;" author="sasa-fajkovic" version="&version;"
