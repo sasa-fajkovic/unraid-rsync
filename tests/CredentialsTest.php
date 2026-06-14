@@ -243,7 +243,7 @@ final class CredentialsTest extends TestCase
 
     public function testIsSafeSshTokenAcceptsNormalValues(): void
     {
-        $this->assertTrue(Credentials::isSafeSshToken('host1.example.net'));
+        $this->assertTrue(Credentials::isSafeSshToken('my-host.sub.example.net')); // hyphenated + multi-label
         $this->assertTrue(Credentials::isSafeSshToken('10.0.0.5'));
         $this->assertTrue(Credentials::isSafeSshToken('backup-user'));
         $this->assertFalse(Credentials::isSafeSshToken('-bad'));

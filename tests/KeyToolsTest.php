@@ -217,7 +217,7 @@ final class KeyToolsTest extends TestCase
     public function hostProvider(): array
     {
         return [
-            'dns'              => ['host1.example.net', true],
+            'dns'              => ['my-host.sub.example.net', true], // hyphenated + multi-label
             'simple'           => ['tower', true],
             'ipv4'             => ['10.0.0.5', true],
             'ipv6 bracketed'   => ['[2001:db8::1]', true],
