@@ -12,7 +12,7 @@ use PHPUnit\Framework\TestCase;
  *      schedule fires.
  *
  * As of CQ-04 these share ONE parser: Job::isValidCron now delegates to
- * Cron::isValidExpression (== parseExpression !== null), so by construction they
+ * Cron::isValidExpression (i.e. parseExpression($expr) !== null), so by construction they
  * cannot disagree. This test predates that unification and is kept as a
  * belt-and-suspenders guard: should a future refactor ever re-split the grammar,
  * it still asserts the two entry points AGREE on a representative corpus:

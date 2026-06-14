@@ -543,9 +543,9 @@ class Job
 
     /**
      * Validate a 5-field cron expression (minute hour day-of-month month
-     * day-of-week). Supports the common syntax: *, ranges (a-b), lists (a,b),
-     * steps (* / n, a-b/n), and named month/day-of-week tokens (jan..dec,
-     * sun..sat).
+     * day-of-week). Supports the common syntax: "*", ranges (a-b), lists (a,b),
+     * step values ("*" or "a-b" followed by "/N", with no spaces), and named
+     * month/day-of-week tokens (jan..dec, sun..sat).
      *
      * Delegates to Cron::isValidExpression so the SAVE-TIME validator and the
      * NEXT-RUN calculator share one grammar and can never drift (previously this
