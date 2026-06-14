@@ -308,10 +308,12 @@ class Cron
     }
 
     /**
-     * Invoke update_cron via its absolute path as an argv array (no shell). The
-     * spawn is injectable: set Cron::$updateCronRunner to a callable
-     * `fn(array $argv): int` and this delegates to it instead of touching the
-     * real binary. Returns the process exit code.
+     * Invoke update_cron at its absolute path. The spawn is injectable: set
+     * Cron::$updateCronRunner to a callable `fn(array $argv): int` and this
+     * delegates to it (tests record the argv) instead of touching the real
+     * binary. The live default (defaultRunUpdateCron) runs it through the shell -
+     * see that method for why. Returns the process exit code, or -1 when it could
+     * not be launched (missing or non-executable binary).
      */
     public static function runUpdateCron(): int
     {
@@ -324,19 +326,34 @@ class Cron
     }
 
     /**
-     * Live update_cron runner: proc_open with the argv array (no shell), output
-     * discarded. Returns the exit code, or -1 if the process could not be
-     * launched. PHP passes an argv array to the OS directly (no re-parsing), so
-     * nothing is shell-interpreted.
+     * Live update_cron runner: invoke update_cron through the system shell,
+     * output discarded. Returns the exit code, or -1 if it could not be launched.
      *
-     * @param array<int,string> $argv
+     * WHY A SHELL HERE (the live "update_cron exit -1" bug): the argv-ARRAY form
+     * of proc_open (execvp) FAILED to launch update_cron on the real box - it
+     * returned no process at all (-1), even though the file exists and is
+     * executable. execvp runs the target DIRECTLY; when the kernel can't execve
+     * the file itself (ENOEXEC - e.g. no shebang line), execvp just fails. The
+     * shell provides the classic ENOEXEC fallback: /bin/sh re-reads the file and
+     * runs it as a shell script (and still honours a valid shebang when present).
+     * That is exactly how Unraid's own webGui invokes update_cron, so the
+     * schedule actually applies.
+     *
+     * This is the ONLY sanctioned shell use in Cron: $bin is a FIXED, trusted
+     * system path (Cron::updateCronPath(), default /usr/local/sbin/update_cron)
+     * with NO user input, and it is escapeshellarg-quoted defensively. The job-id
+     * cron LINES are still written via the no-shell argv/file path; this only
+     * changes how the trusted update_cron binary itself is spawned.
+     *
+     * @param array<int,string> $argv argv[0] is the update_cron path (no args)
      */
     private static function defaultRunUpdateCron(array $argv): int
     {
         $bin = $argv[0] ?? '';
-        if ($bin === '' || !is_file($bin)) {
-            // update_cron isn't present (not a live Unraid box, or wrong path):
-            // report failure rather than crashing.
+        // Treat both "missing" and "present but not executable" as a LAUNCH
+        // FAILURE (-1), so the -1 sentinel keeps meaning "could not spawn" and is
+        // never confused with a shell's 126 ("found but not executable") exit.
+        if ($bin === '' || !is_file($bin) || !is_executable($bin)) {
             return -1;
         }
 
@@ -346,7 +363,8 @@ class Cron
             2 => ['file', '/dev/null', 'w'],
         ];
         $pipes = [];
-        $proc = @proc_open($argv, $descriptors, $pipes);
+        // String (shell) form: /bin/sh -c '<path>' -> kernel honours the shebang.
+        $proc = @proc_open(escapeshellarg($bin), $descriptors, $pipes);
         if (!is_resource($proc)) {
             return -1;
         }
