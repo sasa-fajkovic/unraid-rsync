@@ -111,6 +111,29 @@ final class RunnerTest extends TestCase
         $this->assertFalse(RunState::isRunning($id));
     }
 
+    public function testRunThreadsTriggerIntoSummary(): void
+    {
+        Rsync::$runner = fn(array $a, $o): int => 0;
+        $id = $this->saveLocalJob('j-trig');
+
+        // schedule trigger lands in the persisted summary.
+        Runner::run($id, false, 'schedule');
+        $this->assertSame('schedule', Runner::readSummary($id)['trigger']);
+
+        // default trigger is manual; a bogus value is clamped to manual.
+        Runner::run($id, false);
+        $this->assertSame('manual', Runner::readSummary($id)['trigger']);
+        Runner::run($id, false, 'bogus');
+        $this->assertSame('manual', Runner::readSummary($id)['trigger']);
+    }
+
+    public function testHookEnvIncludesTrigger(): void
+    {
+        $this->assertSame('schedule', Runner::hookEnv([], 'j-x', false, null, null, 'schedule')['UR_TRIGGER']);
+        $this->assertSame('manual', Runner::hookEnv([], 'j-x', false)['UR_TRIGGER']);
+        $this->assertSame('manual', Runner::hookEnv([], 'j-x', false, null, null, 'bogus')['UR_TRIGGER']);
+    }
+
     public function testPostHookRunsOnRsyncFailure(): void
     {
         Rsync::$runner = function (array $argv, $onOutput): int {
@@ -498,18 +521,24 @@ final class RunnerTest extends TestCase
         }
         require_once __DIR__ . '/../source/scripts/runner.php';
 
+        // trigger defaults to 'manual'.
         $this->assertSame(
-            ['job' => 'j-music', 'dryRun' => false],
+            ['job' => 'j-music', 'dryRun' => false, 'trigger' => 'manual'],
             ur_runner_parse_args(['runner.php', '--job=j-music'])
         );
         $this->assertSame(
-            ['job' => 'j-music', 'dryRun' => true],
+            ['job' => 'j-music', 'dryRun' => true, 'trigger' => 'manual'],
             ur_runner_parse_args(['runner.php', '--job=j-music', '--dry-run'])
         );
-        // --job <id> (space form) also accepted.
+        // --trigger=schedule is parsed; --job <id> (space form) also accepted.
         $this->assertSame(
-            ['job' => 'j-x', 'dryRun' => false],
-            ur_runner_parse_args(['runner.php', '--job', 'j-x'])
+            ['job' => 'j-x', 'dryRun' => false, 'trigger' => 'schedule'],
+            ur_runner_parse_args(['runner.php', '--job', 'j-x', '--trigger=schedule'])
+        );
+        // An unrecognised trigger value is clamped to 'manual'.
+        $this->assertSame(
+            ['job' => 'j-x', 'dryRun' => false, 'trigger' => 'manual'],
+            ur_runner_parse_args(['runner.php', '--job=j-x', '--trigger=bogus'])
         );
         // No job.
         $this->assertSame('', ur_runner_parse_args(['runner.php'])['job']);

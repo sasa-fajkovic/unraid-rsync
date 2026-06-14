@@ -170,9 +170,11 @@ class RunState
     }
 
     /**
-     * Write a job's runtime state atomically (temp + rename). The shape is
-     * fixed: {pid, running, dryRun, startedAt, currentLog}. Unknown keys passed
-     * in are dropped so the file stays canonical.
+     * Write a job's runtime state atomically (temp + rename). The written shape
+     * is fixed: {jobId, pid, running, dryRun, trigger, startedAt, currentLog}
+     * (jobId is always stamped from the $jobId arg). Unknown keys passed in are
+     * dropped so the file stays canonical. `trigger` is clamped to the closed
+     * set ('manual'|'schedule', default 'manual').
      *
      * @param array<string,mixed> $state
      */
@@ -185,6 +187,7 @@ class RunState
             'pid'        => isset($state['pid']) ? (int) $state['pid'] : 0,
             'running'    => !empty($state['running']),
             'dryRun'     => !empty($state['dryRun']),
+            'trigger'    => (($state['trigger'] ?? '') === 'schedule') ? 'schedule' : 'manual',
             'startedAt'  => isset($state['startedAt']) ? (string) $state['startedAt'] : '',
             'currentLog' => isset($state['currentLog']) ? (string) $state['currentLog'] : '',
         ];
@@ -214,7 +217,7 @@ class RunState
      * unreadable/corrupt (a missing/garbage state file just means "not
      * running"). The returned array is always the canonical shape.
      *
-     * @return array{jobId:string,pid:int,running:bool,dryRun:bool,startedAt:string,currentLog:string}|null
+     * @return array{jobId:string,pid:int,running:bool,dryRun:bool,trigger:string,startedAt:string,currentLog:string}|null
      */
     public static function read(string $jobId): ?array
     {
@@ -235,6 +238,7 @@ class RunState
             'pid'        => (int) ($data['pid'] ?? 0),
             'running'    => !empty($data['running']),
             'dryRun'     => !empty($data['dryRun']),
+            'trigger'    => (($data['trigger'] ?? '') === 'schedule') ? 'schedule' : 'manual',
             'startedAt'  => (string) ($data['startedAt'] ?? ''),
             'currentLog' => (string) ($data['currentLog'] ?? ''),
         ];

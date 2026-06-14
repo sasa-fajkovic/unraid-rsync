@@ -27,17 +27,21 @@
 require_once __DIR__ . '/../include/Runner.php';
 
 /**
- * Parse the CLI args into [jobId, dryRun]. Accepts --job=<id> and --job <id>,
- * and --dry-run. Unknown args are ignored.
+ * Parse the CLI args into the associative array
+ * ['job' => <id>, 'dryRun' => bool, 'trigger' => <manual|schedule>]. Accepts
+ * --job=<id> and --job <id>, --dry-run, and --trigger=<manual|schedule>. Unknown args are
+ * ignored. `trigger` defaults to 'manual' and is clamped to the closed set
+ * (anything unrecognised -> 'manual') so a junk value can never propagate.
  *
  * @param array<int,string> $argv
- * @return array{job:string,dryRun:bool}
+ * @return array{job:string,dryRun:bool,trigger:string}
  */
 function ur_runner_parse_args(array $argv): array
 {
-    $job    = '';
-    $dryRun = false;
-    $n      = count($argv);
+    $job     = '';
+    $dryRun  = false;
+    $trigger = 'manual';
+    $n       = count($argv);
     for ($i = 1; $i < $n; $i++) {
         $arg = $argv[$i];
         if ($arg === '--dry-run') {
@@ -46,9 +50,14 @@ function ur_runner_parse_args(array $argv): array
             $job = substr($arg, 6);
         } elseif ($arg === '--job' && $i + 1 < $n) {
             $job = $argv[++$i];
+        } elseif (strncmp($arg, '--trigger=', 10) === 0) {
+            $trigger = substr($arg, 10);
         }
     }
-    return ['job' => trim($job), 'dryRun' => $dryRun];
+    if ($trigger !== 'schedule') {
+        $trigger = 'manual';
+    }
+    return ['job' => trim($job), 'dryRun' => $dryRun, 'trigger' => $trigger];
 }
 
 /**
@@ -72,9 +81,9 @@ function ur_runner_exit_code(string $state): int
 if (PHP_SAPI === 'cli' && !defined('UR_RUNNER_TESTING')) {
     $args = ur_runner_parse_args($argv ?? []);
     if ($args['job'] === '') {
-        fwrite(STDERR, "usage: runner.php --job=<id> [--dry-run]\n");
+        fwrite(STDERR, "usage: runner.php --job=<id> [--dry-run] [--trigger=manual|schedule]\n");
         exit(2);
     }
-    $result = Runner::run($args['job'], $args['dryRun']);
+    $result = Runner::run($args['job'], $args['dryRun'], $args['trigger']);
     exit(ur_runner_exit_code((string) $result['state']));
 }

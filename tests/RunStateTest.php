@@ -73,6 +73,17 @@ final class RunStateTest extends TestCase
         $this->assertTrue($s['dryRun']);
         $this->assertSame('2026-06-13T03:00:00Z', $s['startedAt']);
         $this->assertSame('/tmp/x/run.log', $s['currentLog']);
+        // trigger not supplied -> defaults to 'manual'.
+        $this->assertSame('manual', $s['trigger']);
+    }
+
+    public function testTriggerRoundTripsAndClampsToClosedSet(): void
+    {
+        RunState::write('j-sch', ['running' => true, 'trigger' => 'schedule']);
+        $this->assertSame('schedule', RunState::read('j-sch')['trigger']);
+        // An unrecognised value is clamped to 'manual' on write.
+        RunState::write('j-bog', ['running' => true, 'trigger' => 'bogus']);
+        $this->assertSame('manual', RunState::read('j-bog')['trigger']);
     }
 
     public function testReadMissingIsNull(): void
@@ -156,6 +167,10 @@ final class RunStateTest extends TestCase
         $this->assertTrue(RunState::cmdlineMatchesJob('php /x/scripts/runner.php --job=j-music --dry-run', 'j-music'));
         // Trailing --job at the very end of the cmdline (boundary = end-of-string).
         $this->assertTrue(RunState::cmdlineMatchesJob('php runner.php --job=j-music', 'j-music'));
+        // --trigger appended AFTER --job (manual + schedule launch forms) must
+        // still match: --job=<id> stays followed by whitespace.
+        $this->assertTrue(RunState::cmdlineMatchesJob('php runner.php --job=j-music --trigger=manual', 'j-music'));
+        $this->assertTrue(RunState::cmdlineMatchesJob("php\0runner.php\0--job=j-music\0--trigger=schedule", 'j-music'));
         // Wrong job id.
         $this->assertFalse(RunState::cmdlineMatchesJob('php runner.php --job=j-other', 'j-music'));
         // Not our runner at all.
