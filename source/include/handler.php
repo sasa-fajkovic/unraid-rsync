@@ -1653,19 +1653,29 @@ function ur_action_get_status(): void
                 'nextRun' => $nextRun,
             ];
         } catch (Throwable $e) {
+            // Log the detail server-side (webGui PHP log) only - never leak
+            // exception text/paths to the browser by default.
             error_log('unraid.rsync getStatus job ' . $id . ': '
-                . get_class($e) . ': ' . $e->getMessage());
-            $out[$id] = [
+                . get_class($e) . ': ' . $e->getMessage()
+                . ' @ ' . $e->getFile() . ':' . $e->getLine());
+            $entry = [
                 'name'    => (string) ($job['name'] ?? $id),
                 'enabled' => !empty($job['enabled']),
                 'running' => false,
-                'state'   => 'ERROR',
+                // Use the existing badge vocabulary so the UI renders a known
+                // state rather than falling through to the default badge.
+                'state'   => Rsync::STATE_FAILED,
                 'lastRun' => null,
                 'nextRun' => null,
-                // TODO(remove): temporary live diagnostic for the getStatus throw.
-                'error'   => get_class($e) . ': ' . $e->getMessage()
-                    . ' @ ' . basename($e->getFile()) . ':' . $e->getLine(),
             ];
+            // TODO(remove): temporary live diagnostic, gated behind ?debug=1 so a
+            // normal poll never receives exception details. Removed with the
+            // other temporary diagnostics once the live throw is pinned down.
+            if (!empty($_GET['debug'])) {
+                $entry['error'] = get_class($e) . ': ' . $e->getMessage()
+                    . ' @ ' . basename($e->getFile()) . ':' . $e->getLine();
+            }
+            $out[$id] = $entry;
         }
     }
 
