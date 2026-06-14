@@ -31,6 +31,21 @@ final class ConfigTest extends TestCase
         );
     }
 
+    public function testDefaultProfileIsRecursiveNonArchiveCopy(): void
+    {
+        // The shipped default profile (what a brand-new job inherits): recurse +
+        // preserve times + human-readable ON; archive + delete OFF. Guards the
+        // "90% user" defaults so a future edit can't silently change them.
+        $d = Config::defaultRsyncOptions();
+        $this->assertTrue($d['recursive'], 'recursive (-r) must default ON, else folder backups copy nothing');
+        $this->assertTrue($d['times'], 'times (-t) must default ON for sane incrementals');
+        $this->assertTrue($d['humanReadable']);
+        $this->assertFalse($d['archive'], 'archive (-a) must default OFF (cross-host owner/perm footgun)');
+        $this->assertFalse($d['delete'], 'delete must default OFF (destructive; per-job opt-in)');
+        $this->assertFalse($d['deleteExcluded']);
+        $this->assertSame('', $d['maxDelete']);
+    }
+
     public function testSaveThenLoadRoundTrip(): void
     {
         $cfg = Config::defaults();

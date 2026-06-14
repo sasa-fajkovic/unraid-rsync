@@ -141,7 +141,8 @@ if (!function_exists('ur_option_help')) {
     {
         return [
             // --- boolean flags ---------------------------------------------
-            'archive'        => 'Recurse into directories and preserve symlinks, permissions, modification times, group, owner and device files (-a). The usual baseline for a faithful copy.',
+            'recursive'      => 'Copy directories and everything inside them (-r). Required for any folder backup — without it (and without Archive) rsync copies only the top-level files and silently skips every sub-directory. On by default.',
+            'archive'        => 'Recurse into directories and preserve symlinks, permissions, modification times, group, owner and device files (-a). A faithful clone, but the owner/group/permission preservation needs root on both ends and can fail across hosts — off by default in favour of plain Recurse + Preserve times.',
             'compress'       => 'Compress file data while it is in transit (-z). Helps over slow or metered links; little benefit on a fast local network.',
             'humanReadable'  => 'Show sizes in a human-readable format such as 1.5K or 2.3M instead of raw bytes (-h).',
             'times'          => 'Preserve modification times on the destination (-t). Without it, every file looks changed on the next run.',
@@ -278,6 +279,7 @@ if (!function_exists('ur_render_rsync_options')) {
     {
         // key => [label, flag] for the boolean checkboxes, in display order.
         $bools = [
+            'recursive'      => ['Recurse into directories', '-r'],
             'archive'        => ['Archive', '-a'],
             'compress'       => ['Compress', '-z'],
             'humanReadable'  => ['Human-readable', '-h'],

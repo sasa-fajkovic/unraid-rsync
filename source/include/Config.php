@@ -52,10 +52,19 @@ class Config
     {
         return [
             // boolean flags
-            'archive'         => true,
+            // Default profile = a safe, recursive copy for the typical user:
+            // recurse into dirs (-r) + preserve mtimes (-t, sane incrementals) +
+            // human-readable, but NOT archive (-a) — -a's owner/group/perm
+            // preservation is a cross-host/non-root footgun. --delete (true
+            // mirror) is deliberately OFF by default: it is destructive and is a
+            // per-job opt-in (the options form auto-seeds --max-delete when it is
+            // enabled). Progress is already shown at the default 'normal' log
+            // level (--info=...,progress2), so there is no separate flag.
+            'recursive'       => true,
+            'archive'         => false,
             'compress'        => false,
             'humanReadable'   => true,
-            'times'           => false,
+            'times'           => true,
             'perms'           => false,
             'xattrs'          => false,
             'acls'            => false,

@@ -62,6 +62,7 @@ class Job
      * keys below) are ever persisted; anything else in a submission is dropped.
      */
     const BOOL_OPTION_KEYS = [
+        'recursive',
         'archive', 'compress', 'humanReadable', 'times', 'perms', 'xattrs',
         'acls', 'symlinks', 'hardlinks', 'sparse', 'numericIds', 'partial',
         'inplace', 'checksum', 'update', 'wholeFile', 'sizeOnly',
