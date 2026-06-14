@@ -501,4 +501,107 @@ final class JobTest extends TestCase
         $res2 = Job::validate($job, $creds);
         $this->assertTrue($res2['valid'], 'errors: ' . implode(' | ', $res2['errors']));
     }
+
+    // --- VAL-01: scalar option validation ----------------------------------
+
+    /**
+     * Integer scalars must be whole numbers; a non-numeric value is rejected at
+     * save time rather than failing the rsync run mid-flight.
+     *
+     * @dataProvider integerScalarProvider
+     */
+    public function testNonNumericIntegerScalarRejected(string $key, string $flag): void
+    {
+        $job = $this->validLocalJob(['rsyncOptions' => [$key => 'abc']]);
+        $res = Job::validate($job);
+        $this->assertFalse($res['valid']);
+        $this->assertNotEmpty(array_filter($res['errors'], fn($e) => stripos($e, $flag) !== false));
+
+        // a valid whole number passes
+        $ok = Job::validate($this->validLocalJob(['rsyncOptions' => [$key => '42']]));
+        $this->assertTrue($ok['valid'], 'errors: ' . implode(' | ', $ok['errors']));
+    }
+
+    /** @return array<string,array{0:string,1:string}> */
+    public static function integerScalarProvider(): array
+    {
+        return [
+            'maxDelete'     => ['maxDelete', '--max-delete'],
+            'timeout'       => ['timeout', '--timeout'],
+            'contimeout'    => ['contimeout', '--contimeout'],
+            'compressLevel' => ['compressLevel', '--compress-level'],
+            'modifyWindow'  => ['modifyWindow', '--modify-window'],
+        ];
+    }
+
+    public function testSizeScalarAcceptsSuffixesRejectsGarbage(): void
+    {
+        // rsync SIZE form: number + optional decimal + optional unit suffix.
+        foreach (['100', '1.5m', '500K', '2G', '10GiB'] as $good) {
+            $res = Job::validate($this->validLocalJob(['rsyncOptions' => ['maxSize' => $good]]));
+            $this->assertTrue($res['valid'], "expected '$good' valid; errors: " . implode(' | ', $res['errors']));
+        }
+        foreach (['abc', '1.2.3', '5 megs', '; rm', '-1'] as $bad) {
+            $res = Job::validate($this->validLocalJob(['rsyncOptions' => ['bwlimit' => $bad]]));
+            $this->assertFalse($res['valid'], "expected '$bad' invalid");
+            $this->assertNotEmpty(array_filter($res['errors'], fn($e) => stripos($e, '--bwlimit') !== false));
+        }
+    }
+
+    public function testEmptyNumericScalarsAreOptional(): void
+    {
+        // Every numeric scalar left blank must NOT raise an error.
+        $res = Job::validate($this->validLocalJob(['rsyncOptions' => [
+            'maxDelete' => '', 'bwlimit' => '', 'timeout' => '', 'contimeout' => '',
+            'maxSize' => '', 'minSize' => '', 'compressLevel' => '', 'modifyWindow' => '',
+        ]]));
+        $this->assertTrue($res['valid'], 'errors: ' . implode(' | ', $res['errors']));
+    }
+
+    // --- VAL-01: tempDir / backupDir guardrails ----------------------------
+
+    public function testLocalReceiverTempDirMustClearMntGuardrail(): void
+    {
+        // LOCAL transport: --temp-dir on the boot flash must be rejected, same as
+        // any local path. (Previously these scalars skipped the guardrail.)
+        $bad = $this->validLocalJob(['rsyncOptions' => ['tempDir' => '/boot/staging']]);
+        $res = Job::validate($bad);
+        $this->assertFalse($res['valid']);
+        $this->assertNotEmpty(array_filter($res['errors'], fn($e) => stripos($e, '--temp-dir') !== false));
+
+        // a proper /mnt sub-dir passes
+        $ok = Job::validate($this->validLocalJob(['rsyncOptions' => ['tempDir' => '/mnt/user/staging/']]));
+        $this->assertTrue($ok['valid'], 'errors: ' . implode(' | ', $ok['errors']));
+    }
+
+    public function testLocalReceiverBackupDirOnEtcRejected(): void
+    {
+        $bad = $this->validLocalJob(['rsyncOptions' => ['backupDir' => '/etc/ur-bak']]);
+        $res = Job::validate($bad);
+        $this->assertFalse($res['valid']);
+        $this->assertNotEmpty(array_filter($res['errors'], fn($e) => stripos($e, '--backup-dir') !== false));
+    }
+
+    public function testSshPushRemoteTempDirUsesRemoteCheck(): void
+    {
+        // For SSH PUSH the receiver is remote: a non-root absolute path is fine
+        // (it is NOT bound to /mnt - that's the local guardrail).
+        $job = Job::normalize([
+            'name'         => 'remote-temp',
+            'schedule'     => '0 3 * * *',
+            'transport'    => 'SSH',
+            'direction'    => 'PUSH',
+            'connectionId' => 'c-rpi',
+            'pairs'        => [['local' => '/mnt/user/docs/', 'remote' => '/srv/backup/docs/']],
+            'rsyncOptions' => ['tempDir' => '/srv/tmp/'],
+        ]);
+        $res = Job::validate($job);
+        $this->assertTrue($res['valid'], 'errors: ' . implode(' | ', $res['errors']));
+
+        // ...but a remote ROOT temp-dir is still rejected (non-root rule).
+        $job['rsyncOptions']['tempDir'] = '/';
+        $res2 = Job::validate($job);
+        $this->assertFalse($res2['valid']);
+        $this->assertNotEmpty(array_filter($res2['errors'], fn($e) => stripos($e, '--temp-dir') !== false));
+    }
 }

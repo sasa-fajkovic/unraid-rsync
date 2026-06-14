@@ -333,15 +333,25 @@ if (!function_exists('ur_render_rsync_options')) {
         }
 
         // --- scalar value inputs -------------------------------------------
+        // Numeric scalars get an inputmode hint mirroring the server-side
+        // validation (Job::INTEGER_SCALAR_KEYS / SIZE_SCALAR_KEYS): integers use
+        // a numeric keypad, sizes (which accept "1.5m" etc.) a decimal one. The
+        // server remains the source of truth - this is purely a UX hint.
+        $inputModes = [
+            'maxDelete' => 'numeric', 'timeout' => 'numeric', 'contimeout' => 'numeric',
+            'compressLevel' => 'numeric', 'modifyWindow' => 'numeric',
+            'bwlimit' => 'decimal', 'maxSize' => 'decimal', 'minSize' => 'decimal',
+        ];
         echo '<dl>';
         foreach ($scalars as $key => [$label, $flag]) {
             $name   = $prefix . '[' . $key . ']';
             $id     = $idBase . '_' . $key;
             $helpId = $id . '_help';
             $val    = isset($opts[$key]) ? (string) $opts[$key] : '';
+            $imAttr = isset($inputModes[$key]) ? ' inputmode="' . $inputModes[$key] . '"' : '';
             echo '<dt class="ur-dt"><label for="' . ur_h($id) . '">' . ur_h(ur_t($label)) . ' <code>' . ur_h($flag) . '</code></label>'
                 . ur_option_help_affordance($key, $helpId) . '</dt>';
-            echo '<dd><input type="text" id="' . ur_h($id) . '" name="' . ur_h($name) . '" value="' . ur_h($val) . '">';
+            echo '<dd><input type="text"' . $imAttr . ' id="' . ur_h($id) . '" name="' . ur_h($name) . '" value="' . ur_h($val) . '">';
             echo ur_option_help_block($key, $helpId);
             echo '</dd>';
         }
