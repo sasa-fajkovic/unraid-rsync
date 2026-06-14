@@ -51,7 +51,30 @@ on, forked from, or derived from any other plugin.
   per-run tmpfs secret paths and **size-capped** before it is written
   (`Logger::setRedaction` / `Logger::sink` / `UR_MAX_RUN_LOG_BYTES`).
 - **CSRF**: every state-changing POST verifies the webGui `csrf_token` via
-  `hash_equals`; GET pollers are read-only.
+  `hash_equals`; GET pollers are read-only. The check is **match-ANY** across all
+  server-side-trusted token sources (`$GLOBALS['var']['csrf_token']`,
+  `$_SESSION['csrf_token']`, and `var.ini`) — `ur_csrf_token_candidates()` /
+  `ur_check_csrf()`. **Do NOT revert to "first non-empty source wins":** on the
+  live box a stale `$var`/`$_SESSION` token masked the canonical `var.ini` token
+  and 403'd the *correct* token; match-any is the fix (every candidate is a token
+  the page legitimately echoes).
+- **Client AJAX POSTs are `application/x-www-form-urlencoded`, NEVER multipart.**
+  All POSTs go out as `URLSearchParams` via the shared `window.urAjax` helpers
+  (`source/pages/_options_form.php`) and the per-page equivalents in
+  `credentials.php` / `status.php`. **Never use a `FormData` object as a fetch
+  `body`** (use `URLSearchParams(new FormData(form))` to serialize a form):
+  multipart request bodies **stall in php-fpm** on the live box (the worker blocks
+  forever in `skb_wait_for_more_packets` waiting for the body over the FastCGI
+  socket), which hung *every* plugin POST; urlencoded returns in ~13ms. There are
+  **no file inputs** anywhere (SSH keys are pasted into textareas), so urlencoded
+  is correct and sufficient; nested names (`jobs[0][pairs][0][local]`) urlencode
+  fine and PHP parses them into `$_POST` arrays.
+- **Corrected root cause (live-diagnosed):** the earlier "discovery session-lock
+  wedge" (PR#24) was a partial misdiagnosis. POSTs hung because of **multipart
+  bodies stalling at the FastCGI layer** (+ the CSRF stale-token mismatch above),
+  not session locking. PR#24's `session_write_close` / detached keyscan are kept
+  as harmless hardening; the *actual* fixes are urlencoded client POSTs + CSRF
+  match-any.
 - **Path inputs** go through the confinement helpers (`ur_safe_job_id` / `safeId` /
   `Logger::runLogPathById`) — both the "latest" and "by id" run-log resolvers
   share `runLogPathById`.

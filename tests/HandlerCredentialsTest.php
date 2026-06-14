@@ -598,6 +598,161 @@ final class HandlerCredentialsTest extends TestCase
         }
     }
 
+    // --- CSRF match-any (live-diagnosed: a stale $var/$_SESSION token must NOT
+    //     mask the correct var.ini token) ------------------------------------
+
+    /**
+     * THE live bug: $GLOBALS['var']['csrf_token'] and $_SESSION['csrf_token'] both
+     * hold STALE/different values, while the supplied token matches the canonical
+     * var.ini token. The old "first non-empty source wins" logic 403'd; match-any
+     * must accept it.
+     */
+    public function testCsrfMatchesVarIniEvenWhenVarAndSessionDiffer(): void
+    {
+        if (!defined('UR_VAR_INI_PATHS')) {
+            $this->markTestSkipped('UR_VAR_INI_PATHS not overridable in this build');
+        }
+        $path = UR_VAR_INI_PATHS[0];
+        @mkdir(dirname($path), 0777, true);
+        file_put_contents($path, "csrf_token=\"canonical-token\"\n");
+        $prevSession = $_SESSION ?? null;
+        try {
+            $GLOBALS['var']        = ['csrf_token' => 'stale-var-token'];
+            $_SESSION              = ['csrf_token' => 'stale-session-token'];
+            $_POST                 = ['csrf_token' => 'canonical-token'];
+            [, $code] = $this->runCapture(fn() => $this->assertTrue(ur_check_csrf()));
+            $this->assertSame(200, $code);
+        } finally {
+            @unlink($path);
+            if ($prevSession === null) {
+                unset($_SESSION);
+            } else {
+                $_SESSION = $prevSession;
+            }
+            $GLOBALS['var'] = ['csrf_token' => 'test-token'];
+        }
+    }
+
+    /** A token matching ONLY $_SESSION (var + var.ini differ) must pass. */
+    public function testCsrfMatchesSessionOnly(): void
+    {
+        if (!defined('UR_VAR_INI_PATHS')) {
+            $this->markTestSkipped('UR_VAR_INI_PATHS not overridable in this build');
+        }
+        $path = UR_VAR_INI_PATHS[0];
+        @mkdir(dirname($path), 0777, true);
+        file_put_contents($path, "csrf_token=\"other-ini-token\"\n");
+        $prevSession = $_SESSION ?? null;
+        try {
+            $GLOBALS['var'] = ['csrf_token' => 'other-var-token'];
+            $_SESSION       = ['csrf_token' => 'session-token'];
+            $_POST          = ['csrf_token' => 'session-token'];
+            [, $code] = $this->runCapture(fn() => $this->assertTrue(ur_check_csrf()));
+            $this->assertSame(200, $code);
+        } finally {
+            @unlink($path);
+            if ($prevSession === null) {
+                unset($_SESSION);
+            } else {
+                $_SESSION = $prevSession;
+            }
+            $GLOBALS['var'] = ['csrf_token' => 'test-token'];
+        }
+    }
+
+    /** A token matching NO candidate must 403. */
+    public function testCsrfMismatchEverywhereRejected(): void
+    {
+        if (!defined('UR_VAR_INI_PATHS')) {
+            $this->markTestSkipped('UR_VAR_INI_PATHS not overridable in this build');
+        }
+        $path = UR_VAR_INI_PATHS[0];
+        @mkdir(dirname($path), 0777, true);
+        file_put_contents($path, "csrf_token=\"ini-token\"\n");
+        $prevSession = $_SESSION ?? null;
+        try {
+            $GLOBALS['var'] = ['csrf_token' => 'var-token'];
+            $_SESSION       = ['csrf_token' => 'session-token'];
+            $_POST          = ['csrf_token' => 'totally-wrong'];
+            [, $code] = $this->runCapture(fn() => ur_check_csrf());
+            $this->assertSame(403, $code);
+        } finally {
+            @unlink($path);
+            if ($prevSession === null) {
+                unset($_SESSION);
+            } else {
+                $_SESSION = $prevSession;
+            }
+            $GLOBALS['var'] = ['csrf_token' => 'test-token'];
+        }
+    }
+
+    /** With NO candidates available at all, any supplied token 403s. */
+    public function testCsrfNoCandidatesRejected(): void
+    {
+        if (!defined('UR_VAR_INI_PATHS')) {
+            $this->markTestSkipped('UR_VAR_INI_PATHS not overridable in this build');
+        }
+        $path = UR_VAR_INI_PATHS[0];
+        @unlink($path); // ensure no var.ini candidate
+        $prevSession = $_SESSION ?? null;
+        try {
+            unset($GLOBALS['var']);
+            unset($_SESSION);
+            $_POST = ['csrf_token' => 'anything'];
+            [, $code] = $this->runCapture(fn() => ur_check_csrf());
+            $this->assertSame(403, $code);
+        } finally {
+            if ($prevSession === null) {
+                unset($_SESSION);
+            } else {
+                $_SESSION = $prevSession;
+            }
+            $GLOBALS['var'] = ['csrf_token' => 'test-token'];
+        }
+    }
+
+    /** An empty supplied token 403s even when candidates exist. */
+    public function testCsrfEmptySuppliedRejectedWithCandidates(): void
+    {
+        $GLOBALS['var'] = ['csrf_token' => 'test-token'];
+        $_POST          = ['csrf_token' => ''];
+        [, $code] = $this->runCapture(fn() => ur_check_csrf());
+        $this->assertSame(403, $code);
+    }
+
+    /** ur_csrf_token_candidates() returns all non-empty sources, de-duplicated. */
+    public function testCsrfCandidatesAreCollectedAndDeduped(): void
+    {
+        if (!defined('UR_VAR_INI_PATHS')) {
+            $this->markTestSkipped('UR_VAR_INI_PATHS not overridable in this build');
+        }
+        $path = UR_VAR_INI_PATHS[0];
+        @mkdir(dirname($path), 0777, true);
+        // var.ini token DUPLICATES the $var token -> must appear once.
+        file_put_contents($path, "csrf_token=\"shared-token\"\n");
+        $prevSession = $_SESSION ?? null;
+        try {
+            $GLOBALS['var'] = ['csrf_token' => 'shared-token'];
+            $_SESSION       = ['csrf_token' => 'session-token'];
+            $candidates = ur_csrf_token_candidates();
+            $this->assertContains('shared-token', $candidates);
+            $this->assertContains('session-token', $candidates);
+            // de-duplicated: 'shared-token' present exactly once.
+            $this->assertSame(1, count(array_keys($candidates, 'shared-token', true)));
+            // no empty entries.
+            $this->assertNotContains('', $candidates);
+        } finally {
+            @unlink($path);
+            if ($prevSession === null) {
+                unset($_SESSION);
+            } else {
+                $_SESSION = $prevSession;
+            }
+            $GLOBALS['var'] = ['csrf_token' => 'test-token'];
+        }
+    }
+
     public function testGetMethodRejectedForCredentialActions(): void
     {
         $_GET = ['action' => 'deleteKey'];
