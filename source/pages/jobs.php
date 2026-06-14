@@ -254,8 +254,9 @@ function ur_render_job_card($job, $index): void
     $runDis  = (!$hasId || $running) ? ' disabled' : '';
     $abortDis = (!$hasId || !$running) ? ' disabled' : '';
     echo '<div class="ur-job-card-actions">';
-    echo '<button type="button" class="ur-job-run" data-jobid="' . ur_h($id) . '"' . $runDis . '>' . ur_h(ur_t('Run')) . '</button> ';
-    echo '<button type="button" class="ur-job-dry" data-jobid="' . ur_h($id) . '"' . $runDis . '>' . ur_h(ur_t('Dry-run')) . '</button> ';
+    $jobNameAttr = ' data-jobname="' . ur_h($name !== '' ? $name : $id) . '"';
+    echo '<button type="button" class="ur-job-run" data-jobid="' . ur_h($id) . '"' . $jobNameAttr . $runDis . '>' . ur_h(ur_t('Run')) . '</button> ';
+    echo '<button type="button" class="ur-job-dry" data-jobid="' . ur_h($id) . '"' . $jobNameAttr . $runDis . '>' . ur_h(ur_t('Dry-run')) . '</button> ';
     echo '<button type="button" class="ur-job-abort" data-jobid="' . ur_h($id) . '"' . $abortDis . '>' . ur_h(ur_t('Abort')) . '</button> ';
     echo '<button type="button" class="ur-job-del">' . ur_h(ur_t('Remove job')) . '</button>';
     echo '</div>';
@@ -550,6 +551,24 @@ input.ur-switch:disabled { opacity: 0.5; cursor: default; }
   white-space: pre-wrap; word-break: break-word;
   min-height: 240px; max-height: 60vh;
 }
+/* Inline spinner shown on a Run/Dry-run button the instant it is clicked. */
+.ur-spin {
+  display: inline-block; width: 12px; height: 12px;
+  border: 2px solid currentColor; border-right-color: transparent;
+  border-radius: 50%; vertical-align: middle; margin-right: 6px;
+  animation: ur-rot 0.7s linear infinite;
+}
+@keyframes ur-rot { to { transform: rotate(360deg); } }
+/* Transient toast confirming a Run/Dry-run/Abort was picked up. Sits above the
+   overlaid Unraid footer (bottom:96px). */
+.ur-toast {
+  position: fixed; right: 16px; bottom: 96px; z-index: 11000;
+  max-width: 360px; padding: 10px 14px; border-radius: 4px;
+  color: #fff; background: #2e7d32; box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+  opacity: 0; transition: opacity 0.3s ease;
+}
+.ur-toast.ur-toast-err { background: #c62828; }
+.ur-toast.ur-show { opacity: 1; }
 </style>
 <?php /* (the markup below re-opens output) */ ?>
 <?php
@@ -779,19 +798,57 @@ ur_emit_form_enable_assets();
    * to its card. Fire-and-confirm: the response just acknowledges the launch.
    * Instead of a full page reload, we kick the 1s status poll so badges and the
    * Run/Dry/Abort enable state update live. */
+  /* Lightweight transient toast (no dependency). Auto-removes after ~3.5s. */
+  function urToast(msg, ok) {
+    var t = document.createElement('div');
+    /* Default .ur-toast styling is the success (green) look; only the error
+     * variant needs an extra class. */
+    t.className = 'ur-toast' + (ok ? '' : ' ur-toast-err');
+    t.setAttribute('role', 'status');
+    t.textContent = msg;
+    document.body.appendChild(t);
+    /* next frame -> fade in */
+    requestAnimationFrame(function () { t.classList.add('ur-show'); });
+    setTimeout(function () {
+      t.classList.remove('ur-show');
+      setTimeout(function () { if (t.parentNode) { t.parentNode.removeChild(t); } }, 350);
+    }, 3500);
+  }
+
+  /* Optimistically paint a job's badge RUNNING the instant a launch is accepted,
+   * reusing the exact same badge code as the 1s status poll (which then
+   * confirms/corrects it). */
+  function setBadgeRunning(jobId) {
+    var badges = document.querySelectorAll('.ur-state-badge[data-jobid="' + cssEsc(jobId) + '"]');
+    badges.forEach(function (b) {
+      BADGE_CLASSES.forEach(function (c) { b.classList.remove(c); });
+      b.classList.add(badgeClassFor('RUNNING'));
+      b.textContent = badgeLabelFor('RUNNING');
+    });
+  }
+
   function postJobAction(action, jobId, btn) {
     if (!jobId) { return; }
+    var isLaunch = (action === 'runJob' || action === 'dryRunJob');
     var card = btn && btn.closest ? btn.closest('.ur-job-card') : null;
     var result = card ? card.querySelector('.ur-job-run-result') : null;
-    if (btn) { btn.disabled = true; }
+    /* Immediate, obvious feedback that the click was picked up: spinner on the
+     * clicked button (its label cached so we can restore it), button disabled. */
+    var prevHtml = null;
+    if (btn) {
+      prevHtml = btn.innerHTML;
+      btn.disabled = true;
+      btn.innerHTML = '<span class="ur-spin" aria-hidden="true"></span>' + btn.textContent;
+    }
     /* Uses the shared robust text->JSON parse (window.urAjax) so a non-JSON
      * 403/500 from the front controller surfaces WITH its HTTP status instead of
      * throwing inside r.json() and showing a generic "Network error". This never
      * rejects, so the result line is ALWAYS updated. */
     window.urAjax.postForm(HANDLER_URL, { action: action, id: jobId }, CSRF_TOKEN)
       .then(function (res) {
+        var okLaunch = !!(res.ok && res.body && res.body.ok);
         if (result) {
-          if (res.ok && res.body && res.body.ok) {
+          if (okLaunch) {
             result.className = 'ur-job-run-result ur-result ur-ok';
             result.textContent = res.body.message || 'Done.';
           } else {
@@ -799,9 +856,27 @@ ur_emit_form_enable_assets();
             result.textContent = window.urAjax.errText(res, 'Action failed.');
           }
         }
-        /* On a failed launch the job did not start, so re-enable the button; on
-         * success the status poll re-derives the enable state below. */
-        if (btn && !(res.ok && res.body && res.body.ok)) { btn.disabled = false; }
+        /* Restore the clicked button's label. On a failed launch re-enable it
+         * (the job didn't start); on success the status poll re-derives the
+         * enable state. */
+        if (btn) {
+          if (prevHtml !== null) { btn.innerHTML = prevHtml; }
+          if (!okLaunch) { btn.disabled = false; }
+        }
+        if (okLaunch) {
+          if (isLaunch) {
+            /* Optimistic RUNNING badge + a toast + jump straight to the live log
+             * so the user sees it pick up without hunting for the Logs button. */
+            setBadgeRunning(jobId);
+            urToast(action === 'dryRunJob' ? 'Dry-run started.' : 'Run started.', true);
+            var jobName = (btn && btn.getAttribute('data-jobname')) || jobId;
+            openLogViewer(jobId, jobName);
+          } else {
+            urToast(res.body.message || 'Done.', true);
+          }
+        } else {
+          urToast(window.urAjax.errText(res, 'Action failed.'), false);
+        }
         /* Resume polling so the badge + buttons reflect the new running state
          * immediately (poll re-derives the enable state from getStatus). */
         ensurePolling();
