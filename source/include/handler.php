@@ -1664,7 +1664,7 @@ function ur_action_get_status(): void
             error_log('unraid.rsync getStatus job ' . $id . ': '
                 . get_class($e) . ': ' . $e->getMessage()
                 . ' @ ' . $e->getFile() . ':' . $e->getLine());
-            $entry = [
+            $out[$id] = [
                 'name'    => (string) ($job['name'] ?? $id),
                 'enabled' => !empty($job['enabled']),
                 'running' => false,
@@ -1674,14 +1674,6 @@ function ur_action_get_status(): void
                 'lastRun' => null,
                 'nextRun' => null,
             ];
-            // TODO(remove): temporary live diagnostic, gated behind ?debug=1 so a
-            // normal poll never receives exception details. Removed with the
-            // other temporary diagnostics once the live throw is pinned down.
-            if (!empty($_GET['debug'])) {
-                $entry['error'] = get_class($e) . ': ' . $e->getMessage()
-                    . ' @ ' . basename($e->getFile()) . ':' . $e->getLine();
-            }
-            $out[$id] = $entry;
         }
     }
 
@@ -1797,128 +1789,6 @@ function ur_action_get_rsync_status(): void
 }
 
 /**
- * csrfProbe: a READ-ONLY, side-effect-free diagnostic of the CSRF candidate
- * pipeline, used to live-diagnose 403s where a POST carrying the correct token
- * is still rejected. Accepted on BOTH GET and POST (no CSRF check) precisely so
- * the candidate pipeline can be observed in the POST request context - the
- * context where the live 403s occur and which a GET-only endpoint can't reach.
- *
- * It NEVER RETURNS a token (only booleans, lengths, key NAMES, and a
- * non-sensitive id label per source - NEVER the absolute filesystem path nor a
- * token value), and the only token it READS is the request's own legitimate csrf
- * field - never a third party's:
- *   - GET:  ?th=<sha256-hex of the token> (a one-way hash, safe in a URL),
- *           compared via hash_equals against sha256() of each candidate;
- *   - POST: the standard `csrf_token` field (exactly what every real POST sends),
- *           recovered via ur_supplied_csrf_token() and compared via hash_equals
- *           against each candidate, reported only as the boolean
- *           `postSuppliedMatch`. It also reports WHERE the field survived
- *           ($_POST keys, $_REQUEST, raw body) - this is what revealed the front
- *           controller stripping csrf_token out of $_POST.
- * Behind the webGui's auth like every other endpoint.
- *
- * TODO(remove): temporary instrumentation; delete once the live 403 cause is
- * confirmed and the supplied-token fix is verified.
- */
-function ur_action_csrf_probe(): void
-{
-    $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
-    // GET: caller passes ?th=<sha256 hex of token> (one-way; safe in a URL).
-    // POST: the legit csrf_token field (same as every real POST), recovered the
-    // same way ur_check_csrf does, so the probe mirrors the real check.
-    $probeHash = isset($_GET['th']) ? strtolower((string) $_GET['th']) : '';
-    $rawInput = @file_get_contents('php://input');
-    $supplied = ur_supplied_csrf_token(is_string($rawInput) ? $rawInput : null);
-    $matchHash = false;
-    $matchSupplied = false;
-
-    $varSet = isset($GLOBALS['var']) && is_array($GLOBALS['var']) && isset($GLOBALS['var']['csrf_token']);
-
-    $sources = [];
-    $idx = 0;
-    foreach (ur_var_ini_candidates() as $path) {
-        if (!is_string($path)) {
-            continue;
-        }
-        $isFile = is_file($path);
-        $isReadable = $isFile && is_readable($path);
-        $ini = $isReadable ? @parse_ini_file($path, false, INI_SCANNER_RAW) : null;
-        $parseOk = is_array($ini);
-        $parseLen = ($parseOk && isset($ini['csrf_token'])) ? strlen((string) $ini['csrf_token']) : 0;
-        $tokens = ur_csrf_tokens_from_ini($path);
-        $robustLen = $tokens !== [] ? strlen($tokens[0]) : 0;
-        $sources[] = [
-            'id'         => 'varini[' . $idx . ']', // non-sensitive label, NOT the path
-            'isFile'     => $isFile,
-            'isReadable' => $isReadable,
-            'parseOk'    => $parseOk,
-            'parseLen'   => $parseLen,
-            'robustLen'  => $robustLen,
-        ];
-        $idx++;
-    }
-
-    $candidates = ur_csrf_token_candidates();
-    foreach ($candidates as $c) {
-        if ($probeHash !== '' && hash_equals(hash('sha256', $c), $probeHash)) {
-            $matchHash = true;
-        }
-        if ($supplied !== '' && hash_equals($c, $supplied)) {
-            $matchSupplied = true;
-        }
-    }
-
-    sendResponse([
-        'ok'               => true,
-        'method'           => $method,
-        'varGlobalSet'     => $varSet,
-        'sessionStatus'    => session_status(), // 0 disabled, 1 none, 2 active
-        'postKeys'         => array_keys($_POST),    // field NAMES only, no values
-        'postHasCsrf'      => isset($_POST['csrf_token']),
-        'requestHasCsrf'   => isset($_REQUEST['csrf_token']),
-        'contentType'      => (string) ($_SERVER['CONTENT_TYPE'] ?? ($_SERVER['HTTP_CONTENT_TYPE'] ?? '')),
-        'contentLength'    => (string) ($_SERVER['CONTENT_LENGTH'] ?? ''),
-        'rawInputLen'      => is_string($rawInput) ? strlen($rawInput) : -1,
-        'rawHasCsrfField'  => is_string($rawInput) && strpos($rawInput, 'csrf_token') !== false,
-        'suppliedLen'      => strlen($supplied),
-        'sources'          => $sources,
-        'candidateCount'   => count($candidates),
-        'probeGiven'       => $probeHash !== '',
-        'probeMatchAny'    => $matchHash,
-        'postSuppliedMatch' => $matchSupplied,
-    ], 200);
-}
-
-/**
- * GET envDiag: a READ-ONLY environment diagnostic for the detached-runner and
- * cron-apply paths, used to live-diagnose "update_cron exit -1" and runner
- * launch issues. Reports only environment facts (paths, booleans) - no secrets.
- *
- * TODO(remove): temporary instrumentation; delete with the other diagnostics.
- */
-function ur_action_env_diag(): void
-{
-    $disabled = array_map('trim', explode(',', (string) ini_get('disable_functions')));
-    $cronPath = Cron::updateCronPath();
-    sendResponse([
-        'ok'                 => true,
-        'phpSapi'            => PHP_SAPI,
-        'phpBinaryConst'     => defined('PHP_BINARY') ? PHP_BINARY : '',
-        'resolvedPhpBinary'  => ur_php_binary(),
-        'runnerScript'       => ur_runner_script_path(),
-        'runnerScriptIsFile' => is_file(ur_runner_script_path()),
-        'procOpenEnabled'    => function_exists('proc_open') && !in_array('proc_open', $disabled, true),
-        'execEnabled'        => function_exists('exec') && !in_array('exec', $disabled, true),
-        'pcntlAvailable'     => function_exists('pcntl_async_signals') && function_exists('pcntl_signal')
-            && !in_array('pcntl_async_signals', $disabled, true) && !in_array('pcntl_signal', $disabled, true),
-        'updateCronPath'     => $cronPath,
-        'updateCronIsFile'   => is_file($cronPath),
-        'updateCronReadable' => is_file($cronPath) && is_readable($cronPath),
-        'updateCronExec'     => is_file($cronPath) && is_executable($cronPath),
-    ], 200);
-}
-
-/**
  * Front-controller dispatch. Skipped when included by the test harness
  * (UR_HANDLER_TESTING defined), which calls the individual functions directly.
  *
@@ -1960,24 +1830,6 @@ function ur_dispatch(): void
     }
 
     switch ($action) {
-        // Read-only diagnostic - accepted on GET *and* POST (no CSRF) precisely so
-        // we can observe the candidate pipeline in the POST request context, which
-        // is where the live 403s occur. Never mutates state; never returns a token.
-        // TODO(remove): temporary instrumentation.
-        case 'csrfProbe':
-            ur_action_csrf_probe();
-            return;
-
-        // Temporary read-only environment diagnostic (no CSRF, no secrets).
-        // GET-only, like the other read-only pollers. TODO(remove).
-        case 'envDiag':
-            if ($method !== 'GET') {
-                sendError('envDiag requires GET.', 405);
-                return;
-            }
-            ur_action_env_diag();
-            return;
-
         case 'saveConfig':
             if ($method !== 'POST') {
                 sendError('saveConfig requires POST.', 405);
