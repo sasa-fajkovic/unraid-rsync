@@ -129,7 +129,8 @@ try {
 </div>
 
 <!-- Run-log modal ----------------------------------------------------------->
-<div id="ur-hist-modal" class="ur-hist-modal">
+<div id="ur-hist-modal" class="ur-hist-modal" role="dialog" aria-modal="true"
+     aria-labelledby="ur-hist-modal-title" aria-hidden="true">
   <div class="ur-hist-modal-box">
     <div class="ur-hist-modal-head">
       <strong id="ur-hist-modal-title"><?=_('Run log')?></strong>
@@ -254,6 +255,16 @@ try {
     nextBtn.disabled = (offset + PAGE_SIZE >= total);
   }
 
+  /* Render a single full-width message row (used for empty + error states). */
+  function messageRow(text) {
+    rowsEl.innerHTML = '';
+    var tr = document.createElement('tr');
+    var c = td(text);
+    c.setAttribute('colspan', '7');
+    tr.appendChild(c);
+    rowsEl.appendChild(tr);
+  }
+
   function load() {
     var job = currentJob();
     if (!job) { return; }
@@ -263,8 +274,10 @@ try {
       .then(function (r) { return r.json(); })
       .then(function (body) {
         if (!body || !body.ok) {
-          rowsEl.innerHTML = '';
-          rowsEl.appendChild((function () { var tr = document.createElement('tr'); var c = td((body && body.error) || 'Could not load history.'); c.setAttribute('colspan', '7'); tr.appendChild(c); return tr; })());
+          // Reset paging so the pager can't stay stale/enabled over an error.
+          total = 0; offset = 0;
+          messageRow((body && body.error) || 'Could not load history.');
+          updatePager();
           return;
         }
         total = parseInt(body.total, 10) || 0;
@@ -272,7 +285,13 @@ try {
         render(body.runs || []);
         updatePager();
       })
-      .catch(function () { /* transient */ });
+      .catch(function () {
+        // Network failure: show feedback instead of leaving "Loading…" stuck,
+        // and reset the pager (History does not auto-retry).
+        total = 0; offset = 0;
+        messageRow('Could not load history (network error).');
+        updatePager();
+      });
   }
 
   /* ---- log modal ---- */
@@ -282,6 +301,11 @@ try {
     modalTit.textContent = 'Run log — ' + runRef;
     modalPre.textContent = 'Loading…';
     modal.classList.add('ur-open');
+    modal.setAttribute('aria-hidden', 'false');
+    /* Move focus into the dialog so keyboard/SR users don't stay on background
+     * controls (mirrors the Jobs-tab log viewer). */
+    var closeBtn = document.getElementById('ur-hist-modal-close');
+    if (closeBtn && closeBtn.focus) { closeBtn.focus(); }
     var url = HANDLER_URL + '?action=getJobLog&id=' + encodeURIComponent(job) + '&run=' + encodeURIComponent(runRef);
     fetch(url, { credentials: 'same-origin' })
       .then(function (r) { return r.json(); })
@@ -297,7 +321,11 @@ try {
       })
       .catch(function () { modalPre.textContent = 'Could not load the log.'; });
   }
-  function closeLog() { modal.classList.remove('ur-open'); modalPre.textContent = ''; }
+  function closeLog() {
+    modal.classList.remove('ur-open');
+    modal.setAttribute('aria-hidden', 'true');
+    modalPre.textContent = '';
+  }
 
   /* ---- events ---- */
   if (jobSel) { jobSel.addEventListener('change', function () { offset = 0; load(); }); }
