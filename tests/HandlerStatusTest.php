@@ -143,6 +143,24 @@ final class HandlerStatusTest extends TestCase
         }
     }
 
+    public function testRunnerClassLoadedByHandler(): void
+    {
+        // Regression guard: getStatus calls Runner::readSummary, so handler.php
+        // must load Runner even with no autoloader (it 500'd live without this).
+        $this->assertTrue(class_exists('Runner'), 'Runner must be available to the handler');
+    }
+
+    public function testEnvDiagReportsEnvironmentFacts(): void
+    {
+        [$body, $code] = $this->runCapture('ur_action_env_diag');
+        $this->assertSame(200, $code);
+        $this->assertTrue($body['ok']);
+        foreach (['phpSapi', 'resolvedPhpBinary', 'runnerScript', 'procOpenEnabled', 'updateCronPath', 'updateCronIsFile'] as $k) {
+            $this->assertArrayHasKey($k, $body);
+        }
+        $this->assertNotSame('', $body['resolvedPhpBinary']);
+    }
+
     // ---- ur_derive_state ---------------------------------------------------
 
     public function testDeriveStateRunningOverridesSummary(): void
