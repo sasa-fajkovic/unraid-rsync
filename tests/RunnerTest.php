@@ -134,6 +134,27 @@ final class RunnerTest extends TestCase
         $this->assertSame('manual', Runner::hookEnv([], 'j-x', false, null, null, 'bogus')['UR_TRIGGER']);
     }
 
+    public function testRetentionSettingPrunesHistoryAndLogs(): void
+    {
+        Rsync::$runner = fn(array $a, $o): int => 0;
+        // Persist a small retention, then run more times than that.
+        $id = $this->saveLocalJob('j-ret');
+        $cfg = Config::load();
+        $cfg['global']['retention'] = 2;
+        Config::save($cfg);
+        try {
+            for ($i = 0; $i < 4; $i++) {
+                Runner::run($id, false);
+            }
+            // The retention setting (2) prunes BOTH stores: at most 2 history
+            // records and at most 2 tmpfs run logs survive.
+            $this->assertSame(2, History::list($id, 0, 25)['total']);
+            $this->assertLessThanOrEqual(2, count(Logger::listRuns($id, 100)));
+        } finally {
+            History::delete($id);
+        }
+    }
+
     public function testRunAppendsHistoryRecord(): void
     {
         Rsync::$runner = fn(array $a, $o): int => 0;

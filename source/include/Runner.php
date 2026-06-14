@@ -140,9 +140,12 @@ class Runner
         $startedAt   = gmdate('Y-m-d\TH:i:s\Z', $startedAtTs);
         try {
             $runLog = Logger::openRun($jobId, $startedAtTs);
-            // Retention: prune this job's older run logs to the last N (newest
-            // kept) NOW that the new run log exists, so tmpfs use stays bounded.
-            // Best-effort - a prune failure must never fail the run.
+            // Retention: the user's "keep last N executions" setting bounds BOTH
+            // the tmpfs run logs and the persistent history. Apply it to the log
+            // pruner here (newest N kept) now that the new run log exists, so
+            // tmpfs use stays bounded. Best-effort - a prune failure must never
+            // fail the run.
+            Logger::$retention = Config::retention();
             Logger::pruneRuns($jobId);
             RunState::clearAbort($jobId);
             RunState::write($jobId, [
@@ -420,7 +423,7 @@ class Runner
                 'durationSec' => $durationSec,
                 'logRef'      => Logger::runIdFromPath($runLog),
             ]);
-            History::prune($jobId, History::DEFAULT_KEEP);
+            History::prune($jobId, Config::retention());
 
             Logger::event($runLog, $jobId, "Run finished: state=$state exitCode=$exitCode.");
             RunState::markStopped($jobId);

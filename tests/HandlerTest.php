@@ -102,6 +102,29 @@ final class HandlerTest extends TestCase
         $this->assertSame(200, $code);
     }
 
+    public function testSaveConfigPersistsAndClampsRetention(): void
+    {
+        // A global-only save persists retention, clamped to [1,9999].
+        $_POST = [
+            'action'     => 'saveConfig',
+            'csrf_token' => 'test-token',
+            'global'     => ['retention' => '50000'], // over max -> clamps to 9999
+        ];
+        [$body, $code] = $this->runCapture(fn() => ur_action_save_config());
+        $this->assertSame(200, $code, json_encode($body));
+        $this->assertSame(9999, Config::load()['global']['retention']);
+
+        // A valid value round-trips; Config::retention() reflects it.
+        $_POST['global']['retention'] = '7';
+        $this->runCapture(fn() => ur_action_save_config());
+        $this->assertSame(7, Config::retention());
+
+        // Non-numeric clamps to the default.
+        $_POST['global']['retention'] = 'lots';
+        $this->runCapture(fn() => ur_action_save_config());
+        $this->assertSame(100, Config::load()['global']['retention']);
+    }
+
     public function testSaveConfigNestedFormRoundTrip(): void
     {
         // Simulate exactly the nested POST the form produces.

@@ -465,6 +465,12 @@ function ur_action_save_config(): void
             ? $globalIn['defaultRsyncOptions']
             : [];
         $config['global']['defaultRsyncOptions'] = Job::normalizeRsyncOptions($defaultOptsIn);
+        // retention: "keep last N executions" - clamp to [1,9999] (mirrors the
+        // client min/max); non-numeric falls back to the default. Only when the
+        // field is present, so a partial global POST can't wipe it.
+        if (array_key_exists('retention', $globalIn)) {
+            $config['global']['retention'] = Config::clampRetention($globalIn['retention']);
+        }
     }
 
     $allErrors   = [];

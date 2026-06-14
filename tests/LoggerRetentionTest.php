@@ -77,11 +77,12 @@ final class LoggerRetentionTest extends TestCase
     public function testPruneUsesDefaultRetention(): void
     {
         $jobId = 'j-default';
-        $this->seedRuns($jobId, 12);
-        // Default retention is 10.
+        // Default retention is 100 (Logger::DEFAULT_RETENTION, kept consistent
+        // with Config::DEFAULT_RETENTION). Seed 102 -> 2 oldest pruned, 100 kept.
+        $this->seedRuns($jobId, 102);
         $deleted = Logger::pruneRuns($jobId);
         $this->assertSame(2, $deleted);
-        $this->assertCount(10, glob($this->rtBase . '/logs/' . $jobId . '/run-*.log'));
+        $this->assertCount(100, glob($this->rtBase . '/logs/' . $jobId . '/run-*.log'));
     }
 
     public function testRetentionOverrideIsHonoured(): void

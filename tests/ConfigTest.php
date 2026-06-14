@@ -31,6 +31,29 @@ final class ConfigTest extends TestCase
         );
     }
 
+    public function testRetentionDefaultAndClamp(): void
+    {
+        // Default retention is 100; clamp to [1, 9999]; non-numeric -> default.
+        $this->assertSame(100, Config::defaults()['global']['retention']);
+        $this->assertSame(100, Config::clampRetention('abc'));
+        $this->assertSame(100, Config::clampRetention(null));
+        $this->assertSame(1, Config::clampRetention(0));
+        $this->assertSame(1, Config::clampRetention(-5));
+        $this->assertSame(9999, Config::clampRetention(10000));
+        $this->assertSame(9999, Config::clampRetention(999999));
+        $this->assertSame(42, Config::clampRetention(42));
+        $this->assertSame(42, Config::clampRetention('42')); // numeric string
+    }
+
+    public function testMergeDefaultsClampsRetention(): void
+    {
+        $merged = Config::mergeDefaults(['global' => ['retention' => 50000]]);
+        $this->assertSame(9999, $merged['global']['retention']);
+        // missing -> default
+        $merged2 = Config::mergeDefaults(['global' => []]);
+        $this->assertSame(100, $merged2['global']['retention']);
+    }
+
     public function testDefaultProfileIsRecursiveNonArchiveCopy(): void
     {
         // The shipped default profile (what a brand-new job inherits): recurse +
