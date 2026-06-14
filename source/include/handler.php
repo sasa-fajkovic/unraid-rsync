@@ -1967,8 +1967,12 @@ function ur_dispatch(): void
             return;
 
         // Temporary read-only environment diagnostic (no CSRF, no secrets).
-        // TODO(remove) with the other diagnostics.
+        // GET-only, like the other read-only pollers. TODO(remove).
         case 'envDiag':
+            if ($method !== 'GET') {
+                sendError('envDiag requires GET.', 405);
+                return;
+            }
             ur_action_env_diag();
             return;
 
