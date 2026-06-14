@@ -22,12 +22,12 @@
        Never hand-edit version/md5 - they change together, in the build. -->
   <!ENTITY md5            "de35dad106eb4e06cf45f3f8f9c41823">
 ]>
-<PLUGIN name="&pluginName;" author="sasa-fajkovic" version="&version;"
+<PLUGIN name="&pluginName;" author="&gitUser;" version="&version;"
         launch="Settings/UnraidRsync" pluginURL="&pluginURL;" icon="refresh"
-        min="7.0.0" support="https://github.com/sasa-fajkovic/unraid-rsync/issues">
+        min="7.0.0" support="https://github.com/&gitUser;/&repoName;/issues">
   <CHANGES>
-### 2026.06.13
-- Initial skeleton release.
+See the full per-release changelog (auto-generated from the merged PRs) at
+https://github.com/&gitUser;/&repoName;/releases
   </CHANGES>
 
   <!-- Remove cached .txz packages from previous versions -->
