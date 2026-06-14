@@ -125,6 +125,24 @@ final class HandlerStatusTest extends TestCase
         ];
     }
 
+    // ---- ur_php_binary (detached-runner interpreter) ----------------------
+
+    public function testPhpBinaryReturnsUsableInterpreter(): void
+    {
+        $php = ur_php_binary();
+        $this->assertIsString($php);
+        $this->assertNotSame('', $php);
+        // If it returned an absolute path, that path must be executable; if it
+        // returned a bare "php", it relies on PATH. Either way, never empty.
+        if (strpos($php, '/') !== false) {
+            $this->assertTrue(is_executable($php), "$php should be executable");
+        }
+        // The test process is CLI, so it should prefer the running CLI binary.
+        if (PHP_SAPI === 'cli' && defined('PHP_BINARY') && is_executable(PHP_BINARY)) {
+            $this->assertSame(PHP_BINARY, $php);
+        }
+    }
+
     // ---- ur_derive_state ---------------------------------------------------
 
     public function testDeriveStateRunningOverridesSummary(): void
