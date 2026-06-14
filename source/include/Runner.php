@@ -71,6 +71,21 @@ class Runner
     }
 
     /**
+     * Whether the pcntl signal API is actually usable: present AND not blocked by
+     * php.ini's disable_functions. function_exists() alone is insufficient - a
+     * disabled function is still "defined" but fatals when called.
+     */
+    private static function pcntlUsable(): bool
+    {
+        if (!function_exists('pcntl_async_signals') || !function_exists('pcntl_signal')) {
+            return false;
+        }
+        $disabled = array_map('trim', explode(',', (string) ini_get('disable_functions')));
+        return !in_array('pcntl_async_signals', $disabled, true)
+            && !in_array('pcntl_signal', $disabled, true);
+    }
+
+    /**
      * Run a job end-to-end. Returns a structured result describing the outcome
      * (the CLI maps `state` to an exit code). Does its own logging; throws only
      * for truly unexpected internal failures (the orchestration failures - bad
@@ -142,6 +157,39 @@ class Runner
             $jobId,
             $dryRun ? ' [DRY-RUN]' : ''
         ));
+
+        // Survive the abort SIGTERM so we can record an ABORTED outcome.
+        //
+        // WHY: abort SIGTERMs the runner's whole process GROUP (negative pid) to
+        // kill the in-flight rsync (and its ssh). That signal also hits THIS
+        // runner process - and with the default disposition it would DIE
+        // immediately, mid-pair, so the `finally` below never runs: no ABORTED
+        // summary, no postHook, and getStatus keeps showing the PREVIOUS run's
+        // stale state. By trapping SIGTERM/SIGINT we stay alive: rsync still dies
+        // from the same group signal, our blocking read returns, and the per-pair
+        // abort check (below) then records state=ABORTED through the normal
+        // unwind. The handler also mirrors the request into the abort flag so the
+        // between-pairs poll and the post-pair check agree. pcntl is a CLI-only
+        // extension; if it is unavailable OR disabled via disable_functions we
+        // degrade to the prior behaviour. The handlers + async-signal mode are
+        // process-GLOBAL, so we capture the prior async setting and RESTORE the
+        // disposition in the finally - otherwise a long-lived worker, or the test
+        // process (which calls run() many times), would leak our handlers.
+        $signalsInstalled = false;
+        $prevAsyncSignals = null;
+        if (self::pcntlUsable()) {
+            $prevAsyncSignals = pcntl_async_signals(true);
+            $onAbortSignal = static function () use ($jobId): void {
+                try {
+                    RunState::requestAbort($jobId);
+                } catch (\Throwable $e) {
+                    // Never let a signal handler throw.
+                }
+            };
+            pcntl_signal(defined('SIGTERM') ? SIGTERM : 15, $onAbortSignal);
+            pcntl_signal(defined('SIGINT') ? SIGINT : 2, $onAbortSignal);
+            $signalsInstalled = true;
+        }
 
         $state    = Rsync::STATE_SUCCESS;
         $exitCode = 0;
@@ -283,6 +331,17 @@ class Runner
                     Logger::enforceRunLogCap($runLog);
                     $exitCodes[] = $pairExit;
                     Logger::event($runLog, $jobId, "Pair #$n rsync exited with code $pairExit (" . Rsync::exitToState($pairExit) . ').');
+
+                    // Abort can land DURING a pair (the SIGTERM that killed rsync
+                    // also set the abort flag). Re-poll AFTER each rsync so an
+                    // interrupted run is recorded as ABORTED rather than as the
+                    // killed-rsync exit code (FAILED) - or, worse, leaving a stale
+                    // previous-run state when the runner used to die mid-pair.
+                    if (RunState::abortRequested($jobId)) {
+                        $aborted = true;
+                        Logger::event($runLog, $jobId, "Abort requested; stopping after pair #$n.");
+                        break;
+                    }
                 }
 
                 if ($aborted) {
@@ -346,6 +405,17 @@ class Runner
             // Release the per-job run lock last, so a queued launch only proceeds
             // once this run has fully wound down (state cleared, summary written).
             RunState::releaseLock($lock);
+
+            // Restore the signal disposition we changed, so our handlers/async
+            // mode never leak past this run (the detached runner exits anyway,
+            // but the test process and any future long-lived worker reuse it).
+            if ($signalsInstalled) {
+                pcntl_signal(defined('SIGTERM') ? SIGTERM : 15, SIG_DFL);
+                pcntl_signal(defined('SIGINT') ? SIGINT : 2, SIG_DFL);
+                if ($prevAsyncSignals !== null) {
+                    pcntl_async_signals((bool) $prevAsyncSignals);
+                }
+            }
         }
 
         $result = ['state' => $state, 'exitCode' => $exitCode, 'runLog' => $runLog];
