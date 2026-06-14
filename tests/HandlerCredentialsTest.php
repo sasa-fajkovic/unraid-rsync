@@ -26,8 +26,9 @@ final class HandlerCredentialsTest extends TestCase
 
     protected function setUp(): void
     {
-        $_POST = [];
-        $_GET  = [];
+        $_POST    = [];
+        $_GET     = [];
+        $_REQUEST = [];
         // Reset the handler's intended-status-code test seam instead of calling
         // http_response_code(200), which warns under CLI/PHP 8.4 once output has
         // begun (failOnWarning would fail the test). See sendResponse.
@@ -761,61 +762,92 @@ final class HandlerCredentialsTest extends TestCase
         $this->assertSame(405, $code);
     }
 
-    // --- Session-stashed token (ur_csrf_token): the page render saves the
-    //     canonical token in the session so a direct POST whose php-fpm context
-    //     cannot match var.ini still validates. ------------------------------
+    // --- Supplied-token recovery: the webGui front controller strips csrf_token
+    //     out of $_POST before our handler runs, so ur_supplied_csrf_token must
+    //     recover it from $_REQUEST/$_GET or the raw urlencoded body. -----------
 
-    /** A token matching ONLY $_SESSION['ur_csrf_token'] (no $var, no var.ini) passes. */
-    public function testCsrfMatchesSessionStashedTokenOnly(): void
+    /** $_POST takes precedence when present. */
+    public function testSuppliedCsrfPrefersPost(): void
     {
-        if (defined('UR_VAR_INI_PATHS')) {
-            @unlink(UR_VAR_INI_PATHS[0]); // ensure var.ini contributes nothing
+        $_POST    = ['csrf_token' => 'from-post'];
+        $_REQUEST = ['csrf_token' => 'from-request'];
+        $this->assertSame('from-post', ur_supplied_csrf_token());
+    }
+
+    /** With $_POST/$_REQUEST/$_GET empty, the token is recovered from the raw body. */
+    public function testSuppliedCsrfRecoversFromRawBody(): void
+    {
+        $_POST = $_GET = $_REQUEST = [];
+        $raw = 'action=saveCredentials&csrf_token=raw-token&connections_present=1';
+        $this->assertSame('raw-token', ur_supplied_csrf_token($raw));
+    }
+
+    /** Nothing anywhere -> empty (never throws). */
+    public function testSuppliedCsrfEmptyEverywhere(): void
+    {
+        $_POST = $_GET = $_REQUEST = [];
+        $this->assertSame('', ur_supplied_csrf_token(''));
+        $this->assertSame('', ur_supplied_csrf_token('action=saveCredentials')); // no csrf field
+    }
+
+    /**
+     * THE live bug end-to-end: the front controller stripped csrf_token from
+     * $_POST, but the correct token is still in the raw body and matches a
+     * candidate (here var.ini) -> ur_check_csrf must accept it.
+     */
+    public function testCsrfAcceptedWhenStrippedFromPostButInRawBody(): void
+    {
+        if (!defined('UR_VAR_INI_PATHS')) {
+            $this->markTestSkipped('UR_VAR_INI_PATHS not overridable in this build');
         }
-        $prevSession = $_SESSION ?? null;
+        $path = UR_VAR_INI_PATHS[0];
+        @mkdir(dirname($path), 0777, true);
+        file_put_contents($path, "csrf_token=\"raw-only-token\"\n");
         try {
+            // $_POST has NO csrf_token (front controller removed it); $_REQUEST/$_GET
+            // also empty. Only the raw body carries it. No $var either (direct POST).
             unset($GLOBALS['var']);
-            $_SESSION = ['ur_csrf_token' => 'stashed-token'];
-            $_POST    = ['csrf_token' => 'stashed-token'];
-            [, $code] = $this->runCapture(fn() => $this->assertTrue(ur_check_csrf()));
+            $_POST = ['action' => 'saveCredentials']; // action survived, csrf did not
+            $_GET = $_REQUEST = [];
+            $raw = 'action=saveCredentials&csrf_token=raw-only-token&connections_present=1';
+            $this->assertSame('raw-only-token', ur_supplied_csrf_token($raw));
+            // The full acceptance path: ur_check_csrf must accept the raw-body token.
+            [, $code] = $this->runCapture(fn() => $this->assertTrue(ur_check_csrf($raw)));
             $this->assertSame(200, $code);
-            $this->assertContains('stashed-token', ur_csrf_token_candidates());
+            // And reject when the raw body carries a WRONG token.
+            [, $code2] = $this->runCapture(fn() => ur_check_csrf('csrf_token=not-the-token'));
+            $this->assertSame(403, $code2);
         } finally {
-            if ($prevSession === null) {
-                unset($_SESSION);
-            } else {
-                $_SESSION = $prevSession;
-            }
+            @unlink($path);
             $GLOBALS['var'] = ['csrf_token' => 'test-token'];
         }
     }
 
-    /** csrfProbe on a POST reports postSuppliedMatch and the POST request context. */
+    /** csrfProbe (POST) reports postSuppliedMatch and the POST request context, never a token. */
     public function testCsrfProbePostContextReportsMatch(): void
     {
-        if (defined('UR_VAR_INI_PATHS')) {
-            @unlink(UR_VAR_INI_PATHS[0]);
+        if (!defined('UR_VAR_INI_PATHS')) {
+            $this->markTestSkipped('UR_VAR_INI_PATHS not overridable in this build');
         }
-        $prevSession = $_SESSION ?? null;
+        $path = UR_VAR_INI_PATHS[0];
+        @mkdir(dirname($path), 0777, true);
+        file_put_contents($path, "csrf_token=\"probe-token\"\n");
         try {
             unset($GLOBALS['var']);
             $_SERVER['REQUEST_METHOD'] = 'POST';
-            $_SESSION = ['ur_csrf_token' => 'post-token'];
-            $_POST    = ['csrf_token' => 'post-token'];
+            $_POST    = ['csrf_token' => 'probe-token']; // matched against var.ini candidate
             [$body, $code] = $this->runCapture(fn() => ur_action_csrf_probe());
             $this->assertSame(200, $code);
             $this->assertSame('POST', $body['method']);
-            $this->assertSame(strlen('post-token'), $body['postTokenLen']);
-            $this->assertTrue($body['sessionHasOurKey']);
+            $this->assertTrue($body['postHasCsrf']);
             $this->assertTrue($body['postSuppliedMatch']);
+            $this->assertArrayHasKey('postKeys', $body);
             // No raw token in the response.
-            $this->assertStringNotContainsString('post-token', json_encode($body));
+            $this->assertStringNotContainsString('probe-token', json_encode($body));
         } finally {
+            @unlink($path);
             $_SERVER['REQUEST_METHOD'] = 'GET';
-            if ($prevSession === null) {
-                unset($_SESSION);
-            } else {
-                $_SESSION = $prevSession;
-            }
+            $_POST = [];
             $GLOBALS['var'] = ['csrf_token' => 'test-token'];
         }
     }

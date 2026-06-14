@@ -311,15 +311,6 @@ function ur_csrf_token_candidates(): array
     if (isset($_SESSION['csrf_token'])) {
         $candidates[] = (string) $_SESSION['csrf_token'];
     }
-    // Token stashed into the PHP session by a page render (ur_stash_csrf_token),
-    // when $GLOBALS['var'] was available. The webGui front controller starts the
-    // SAME session (same PHPSESSID) on a direct POST to handler.php, so this is
-    // readable here EVEN IF the var.ini files are not reachable in the POST
-    // request's php-fpm context (the live root cause: a direct POST could read
-    // var.ini for a GET poller but matched no candidate on POST).
-    if (isset($_SESSION['ur_csrf_token'])) {
-        $candidates[] = (string) $_SESSION['ur_csrf_token'];
-    }
     // var.ini value(s) - read directly so a STANDALONE POST (where $var is never
     // populated) still has the real token to match against. ur_csrf_tokens_from_ini
     // recovers the token even when parse_ini_file() bails on an unrelated malformed
@@ -339,6 +330,48 @@ function ur_csrf_token_candidates(): array
 }
 
 /**
+ * The csrf_token the request SUPPLIED, recovered robustly from whichever place
+ * survives into our handler.
+ *
+ * WHY THIS IS NEEDED (the live root cause of the 403s, finally pinned down): the
+ * webGui front controller that fronts a direct POST to handler.php VALIDATES and
+ * then STRIPS `csrf_token` out of $_POST before our code runs - so by the time
+ * ur_check_csrf reads $_POST['csrf_token'] it is EMPTY, and every state-changing
+ * POST 403s, even though the page sent the correct token (confirmed live: a POST
+ * routed correctly on $_POST['action'] yet reported postTokenLen=0 for
+ * csrf_token, and $GLOBALS['var']['csrf_token'] WAS populated). The raw request
+ * body still carries the field, so we recover it from there.
+ *
+ * Order: $_POST -> $_REQUEST -> $_GET -> the raw urlencoded body (php://input).
+ * $rawInput is injectable for tests (php://input is not writable under CLI).
+ */
+function ur_supplied_csrf_token(?string $rawInput = null): string
+{
+    foreach ([$_POST, $_REQUEST, $_GET] as $src) {
+        if (isset($src['csrf_token']) && is_string($src['csrf_token']) && $src['csrf_token'] !== '') {
+            return (string) $src['csrf_token'];
+        }
+    }
+    // Fallback: pull ONLY the csrf_token field out of the raw urlencoded body
+    // (the front controller can strip it from $_POST but does not rewrite the raw
+    // input stream). We extract just that one parameter with a targeted regex
+    // rather than parse_str()-ing the whole payload, so an oversized body can't
+    // blow up memory/CPU. The `(?:^|&)` anchor avoids matching a key that merely
+    // ends in "csrf_token".
+    if ($rawInput === null) {
+        $rawInput = @file_get_contents('php://input');
+    }
+    if (is_string($rawInput) && $rawInput !== ''
+        && preg_match('/(?:^|&)csrf_token=([^&]*)/', $rawInput, $m)) {
+        $val = urldecode($m[1]);
+        if ($val !== '') {
+            return $val;
+        }
+    }
+    return '';
+}
+
+/**
  * Verify the request carries a CSRF token that matches ANY server-side-trusted
  * candidate. Returns true on success; on failure it has already emitted a 403
  * and (outside tests) exited.
@@ -347,14 +380,20 @@ function ur_csrf_token_candidates(): array
  * at least one candidate. We iterate ALL candidates (never early-comparing a
  * single source) so a stale $GLOBALS['var']/$_SESSION token can't mask the
  * correct var.ini token. With no candidates, or an empty supplied token, we 403.
+ *
+ * $rawInput is forwarded to ur_supplied_csrf_token() so tests can exercise the
+ * raw-body recovery path (php://input is not writable under CLI); in production
+ * it stays null and the token is read from php://input.
  */
-function ur_check_csrf(): bool
+function ur_check_csrf(?string $rawInput = null): bool
 {
     // Validate the cheap precondition (a token was supplied) BEFORE collecting
     // candidates: ur_csrf_token_candidates() reads var.ini from disk, so we skip
     // that work for an obviously-invalid request that carries no token. Behaviour
-    // is unchanged - an empty supplied token still 403s.
-    $supplied = isset($_POST['csrf_token']) ? (string) $_POST['csrf_token'] : '';
+    // is unchanged - an empty supplied token still 403s. ur_supplied_csrf_token
+    // recovers the token from the raw body when the front controller stripped it
+    // out of $_POST (see its docblock).
+    $supplied = ur_supplied_csrf_token($rawInput);
     if ($supplied === '') {
         sendError('Invalid or missing CSRF token.', 403);
         return false;
@@ -1716,29 +1755,34 @@ function ur_action_get_rsync_status(): void
  * the candidate pipeline can be observed in the POST request context - the
  * context where the live 403s occur and which a GET-only endpoint can't reach.
  *
- * It NEVER RETURNS a token (only booleans, lengths, and a non-sensitive id label
- * per source - NEVER the absolute filesystem path), and the only token it READS
- * is the request's own legitimate csrf field - never a third party's:
+ * It NEVER RETURNS a token (only booleans, lengths, key NAMES, and a
+ * non-sensitive id label per source - NEVER the absolute filesystem path nor a
+ * token value), and the only token it READS is the request's own legitimate csrf
+ * field - never a third party's:
  *   - GET:  ?th=<sha256-hex of the token> (a one-way hash, safe in a URL),
  *           compared via hash_equals against sha256() of each candidate;
  *   - POST: the standard `csrf_token` field (exactly what every real POST sends),
- *           compared via hash_equals against each candidate and reported only as
- *           the boolean `postSuppliedMatch`.
+ *           recovered via ur_supplied_csrf_token() and compared via hash_equals
+ *           against each candidate, reported only as the boolean
+ *           `postSuppliedMatch`. It also reports WHERE the field survived
+ *           ($_POST keys, $_REQUEST, raw body) - this is what revealed the front
+ *           controller stripping csrf_token out of $_POST.
  * Behind the webGui's auth like every other endpoint.
  *
  * TODO(remove): temporary instrumentation; delete once the live 403 cause is
- * confirmed and the session-stash fix is verified.
+ * confirmed and the supplied-token fix is verified.
  */
 function ur_action_csrf_probe(): void
 {
     $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
     // GET: caller passes ?th=<sha256 hex of token> (one-way; safe in a URL).
-    // POST: the legit csrf_token field (same as every real POST) is matched
-    // server-side - this lets us see the candidate pipeline in the POST context.
+    // POST: the legit csrf_token field (same as every real POST), recovered the
+    // same way ur_check_csrf does, so the probe mirrors the real check.
     $probeHash = isset($_GET['th']) ? strtolower((string) $_GET['th']) : '';
-    $postedTok = isset($_POST['csrf_token']) ? (string) $_POST['csrf_token'] : '';
+    $rawInput = @file_get_contents('php://input');
+    $supplied = ur_supplied_csrf_token(is_string($rawInput) ? $rawInput : null);
     $matchHash = false;
-    $matchPosted = false;
+    $matchSupplied = false;
 
     $varSet = isset($GLOBALS['var']) && is_array($GLOBALS['var']) && isset($GLOBALS['var']['csrf_token']);
 
@@ -1771,8 +1815,8 @@ function ur_action_csrf_probe(): void
         if ($probeHash !== '' && hash_equals(hash('sha256', $c), $probeHash)) {
             $matchHash = true;
         }
-        if ($postedTok !== '' && hash_equals($c, $postedTok)) {
-            $matchPosted = true;
+        if ($supplied !== '' && hash_equals($c, $supplied)) {
+            $matchSupplied = true;
         }
     }
 
@@ -1781,14 +1825,19 @@ function ur_action_csrf_probe(): void
         'method'           => $method,
         'varGlobalSet'     => $varSet,
         'sessionStatus'    => session_status(), // 0 disabled, 1 none, 2 active
-        'sessionHasUnraid' => isset($_SESSION['csrf_token']),
-        'sessionHasOurKey' => isset($_SESSION['ur_csrf_token']),
-        'postTokenLen'     => strlen($postedTok),
+        'postKeys'         => array_keys($_POST),    // field NAMES only, no values
+        'postHasCsrf'      => isset($_POST['csrf_token']),
+        'requestHasCsrf'   => isset($_REQUEST['csrf_token']),
+        'contentType'      => (string) ($_SERVER['CONTENT_TYPE'] ?? ($_SERVER['HTTP_CONTENT_TYPE'] ?? '')),
+        'contentLength'    => (string) ($_SERVER['CONTENT_LENGTH'] ?? ''),
+        'rawInputLen'      => is_string($rawInput) ? strlen($rawInput) : -1,
+        'rawHasCsrfField'  => is_string($rawInput) && strpos($rawInput, 'csrf_token') !== false,
+        'suppliedLen'      => strlen($supplied),
         'sources'          => $sources,
         'candidateCount'   => count($candidates),
         'probeGiven'       => $probeHash !== '',
         'probeMatchAny'    => $matchHash,
-        'postSuppliedMatch' => $matchPosted,
+        'postSuppliedMatch' => $matchSupplied,
     ], 200);
 }
 

@@ -43,9 +43,6 @@ $csrf = '';
 if (isset($GLOBALS['var']) && is_array($GLOBALS['var']) && !empty($GLOBALS['var']['csrf_token'])) {
     $csrf = (string) $GLOBALS['var']['csrf_token'];
 }
-// Make the canonical token reachable by a direct POST to handler.php (see
-// ur_stash_csrf_token): on the live box the POST context can't match var.ini.
-ur_stash_csrf_token($csrf);
 
 // If the on-disk config can't be read (unreadable, corrupt, or from a newer
 // schema), render defaults for DISPLAY only but surface a visible warning -
