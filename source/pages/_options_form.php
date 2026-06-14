@@ -700,31 +700,3 @@ if (!function_exists('ur_emit_form_enable_assets')) {
         <?php
     }
 }
-
-if (!function_exists('ur_stash_csrf_token')) {
-    /**
-     * Stash the page's canonical csrf_token (read from $GLOBALS['var'] at render
-     * time) into the PHP session so a DIRECT POST to handler.php can validate
-     * against it.
-     *
-     * WHY (the live root cause of the saveCredentials/etc. 403s): a direct POST to
-     * handler.php runs in a php-fpm request context where $GLOBALS['var'] is NOT
-     * populated AND the Unraid state file (var.ini) is NOT matchable as a candidate
-     * - yet a GET poller in the same plugin CAN read var.ini. The page render, by
-     * contrast, always has the correct token in $GLOBALS['var']. The webGui front
-     * controller starts the SAME PHP session (same PHPSESSID cookie) on both the
-     * render and the POST, so stashing the token in $_SESSION here makes it
-     * available to ur_csrf_token_candidates() on the POST. Idempotent; only writes
-     * when a session is already active (never starts one mid-render, which could
-     * fail after headers are sent).
-     */
-    function ur_stash_csrf_token(string $token): void
-    {
-        if ($token === '') {
-            return;
-        }
-        if (session_status() === PHP_SESSION_ACTIVE) {
-            $_SESSION['ur_csrf_token'] = $token;
-        }
-    }
-}

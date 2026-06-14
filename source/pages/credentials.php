@@ -37,9 +37,6 @@ $csrf = '';
 if (isset($GLOBALS['var']) && is_array($GLOBALS['var']) && !empty($GLOBALS['var']['csrf_token'])) {
     $csrf = (string) $GLOBALS['var']['csrf_token'];
 }
-// Make the canonical token reachable by a direct POST to handler.php (see
-// ur_stash_csrf_token): on the live box the POST context can't match var.ini.
-ur_stash_csrf_token($csrf);
 
 // Load credentials for DISPLAY only; on a read error show defaults + a warning
 // (the handler will refuse to save, 409, until it's resolved). Never persist
