@@ -21,9 +21,11 @@ name: Release
 # Concurrency: overlapping `main` pushes serialize (cancel-in-progress: false) so
 # two runs never race to compute the same same-day version.
 #
-# NOTE: third-party actions are SHA-pinned (with a trailing `# vX` comment) and
-# bumped by Dependabot. action-gh-release is on v3 (Node 24 runtime), which
-# clears the earlier Node 20 deprecation warning.
+# NOTE: third-party actions are SHA-pinned, with a trailing version comment for
+# readability (the exact form follows whatever bumped it - a major tag like
+# `# v2` or a full release like `# v6.0.3`); Dependabot keeps the SHAs current.
+# action-gh-release is on v3 (Node 24 runtime), which clears the earlier Node 20
+# deprecation warning.
 
 on:
   push:
