@@ -84,7 +84,14 @@ jobs:
           php-version: "8.4"
           tools: composer
 
+      - name: Validate composer.json + composer.lock
+        # Guards that the committed lock is in sync with composer.json (a stale
+        # lock here means someone edited composer.json without re-locking).
+        run: composer validate --no-check-publish
+
       - name: Install dependencies
+        # With the committed lock present, this installs the exact pinned
+        # versions (incl. the phpunit dev dependency), so CI runs are reproducible.
         run: composer install --no-interaction --no-progress --prefer-dist
 
       - name: Run PHPUnit
