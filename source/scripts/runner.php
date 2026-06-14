@@ -27,8 +27,9 @@
 require_once __DIR__ . '/../include/Runner.php';
 
 /**
- * Parse the CLI args into [jobId, dryRun, trigger]. Accepts --job=<id> and
- * --job <id>, --dry-run, and --trigger=<manual|schedule>. Unknown args are
+ * Parse the CLI args into the associative array
+ * ['job' => <id>, 'dryRun' => bool, 'trigger' => <manual|schedule>]. Accepts
+ * --job=<id> and --job <id>, --dry-run, and --trigger=<manual|schedule>. Unknown args are
  * ignored. `trigger` defaults to 'manual' and is clamped to the closed set
  * (anything unrecognised -> 'manual') so a junk value can never propagate.
  *
