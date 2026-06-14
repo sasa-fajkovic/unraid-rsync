@@ -71,6 +71,7 @@ require_once __DIR__ . '/KeyTools.php';
 require_once __DIR__ . '/Rsync.php';
 require_once __DIR__ . '/RunState.php';
 require_once __DIR__ . '/Logger.php';
+require_once __DIR__ . '/History.php';
 require_once __DIR__ . '/Cron.php';
 // Runner is used by getStatus (Runner::readSummary). There is no autoloader, so
 // it MUST be required explicitly: without this, every getStatus poll throws
@@ -540,6 +541,24 @@ function ur_action_save_config(): void
             'warnings' => $allWarnings,
         ]);
         return;
+    }
+
+    // Clean up the persistent history of any job that was just removed, so
+    // orphaned <jobid>.history.jsonl files don't accumulate on the flash. Diff
+    // the old job ids against the new set; jobName is snapshotted per record so
+    // nothing meaningful is lost. Best-effort.
+    $oldIds = array_values(array_filter(array_map(
+        static fn($j) => is_array($j) ? (string) ($j['id'] ?? '') : '',
+        $config['jobs'] ?? []
+    )));
+    $newIds = array_values(array_filter(array_map(
+        static fn($j) => (string) ($j['id'] ?? ''),
+        $normalized
+    )));
+    foreach (array_diff($oldIds, $newIds) as $removedId) {
+        if ($removedId !== '') {
+            History::delete($removedId);
+        }
     }
 
     $config['jobs'] = $normalized;
@@ -1719,6 +1738,44 @@ function ur_action_list_runs(): void
 }
 
 /**
+ * GET listHistory: paginated, newest-first persistent execution history for a
+ * job (real + dry runs, manual + scheduled). Read-only. Mirrors listRuns: the
+ * job id goes through ur_safe_job_id; offset/limit are clamped (limit 1..100).
+ * Returns {ok, jobId, total, offset, limit, runs:[<record>...]} where each
+ * record is the History record shape (incl. trigger, dryRun, state, logRef).
+ */
+function ur_action_list_history(): void
+{
+    $jobId = ur_safe_job_id(isset($_GET['id']) ? (string) $_GET['id'] : '');
+    if ($jobId === '') {
+        sendError('A valid job id is required.', 400);
+        return;
+    }
+
+    $offset = isset($_GET['offset']) ? (int) $_GET['offset'] : 0;
+    if ($offset < 0) {
+        $offset = 0;
+    }
+    $limit = isset($_GET['limit']) ? (int) $_GET['limit'] : 25;
+    if ($limit <= 0) {
+        $limit = 25;
+    }
+    if ($limit > 100) {
+        $limit = 100;
+    }
+
+    $page = History::list($jobId, $offset, $limit);
+    sendResponse([
+        'ok'     => true,
+        'jobId'  => $jobId,
+        'total'  => $page['total'],
+        'offset' => $page['offset'],
+        'limit'  => $page['limit'],
+        'runs'   => $page['runs'],
+    ], 200);
+}
+
+/**
  * GET getPluginLog: the HTML-escaped tail of the rolling cross-job plugin.log.
  * Bounded. No id needed - there is one plugin log.
  */
@@ -1847,6 +1904,7 @@ function ur_dispatch(): void
         case 'getStatus':
         case 'getJobLog':
         case 'listRuns':
+        case 'listHistory':
         case 'getPluginLog':
         case 'getRsyncStatus':
             if ($method !== 'GET') {
@@ -1857,6 +1915,7 @@ function ur_dispatch(): void
                 case 'getStatus':       ur_action_get_status();       return;
                 case 'getJobLog':       ur_action_get_job_log();      return;
                 case 'listRuns':        ur_action_list_runs();        return;
+                case 'listHistory':     ur_action_list_history();     return;
                 case 'getPluginLog':    ur_action_get_plugin_log();   return;
                 case 'getRsyncStatus':  ur_action_get_rsync_status(); return;
             }

@@ -134,6 +134,26 @@ final class RunnerTest extends TestCase
         $this->assertSame('manual', Runner::hookEnv([], 'j-x', false, null, null, 'bogus')['UR_TRIGGER']);
     }
 
+    public function testRunAppendsHistoryRecord(): void
+    {
+        Rsync::$runner = fn(array $a, $o): int => 0;
+        $id = $this->saveLocalJob('j-histrun');
+        try {
+            Runner::run($id, true, 'schedule'); // dry-run + scheduled
+            $page = History::list($id, 0, 25);
+            $this->assertSame(1, $page['total']);
+            $r = $page['runs'][0];
+            $this->assertSame(Rsync::STATE_SUCCESS, $r['state']);
+            $this->assertTrue($r['dryRun']);
+            $this->assertSame('schedule', $r['trigger']);
+            // logRef is a run-log basename that resolves back via runLogPathById.
+            $this->assertStringStartsWith('run-', $r['logRef']);
+            $this->assertNotNull(Logger::runLogPathById($id, $r['logRef']));
+        } finally {
+            History::delete($id);
+        }
+    }
+
     public function testPostHookRunsOnRsyncFailure(): void
     {
         Rsync::$runner = function (array $argv, $onOutput): int {

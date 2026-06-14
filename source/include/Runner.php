@@ -41,6 +41,7 @@ require_once __DIR__ . '/Rsync.php';
 require_once __DIR__ . '/RunState.php';
 require_once __DIR__ . '/Logger.php';
 require_once __DIR__ . '/Notify.php';
+require_once __DIR__ . '/History.php';
 
 class Runner
 {
@@ -391,15 +392,35 @@ class Runner
 
             // 9. Persist the last-run summary to /boot + clear running state.
             $finishedAtTs = time();
+            $finishedAt  = gmdate('Y-m-d\TH:i:s\Z', $finishedAtTs);
+            $durationSec = max(0, $finishedAtTs - $startedAtTs);
             self::writeSummary($jobId, [
                 'state'       => $state,
                 'startedAt'   => $startedAt,
-                'finishedAt'  => gmdate('Y-m-d\TH:i:s\Z', $finishedAtTs),
+                'finishedAt'  => $finishedAt,
                 'exitCode'    => $exitCode,
-                'durationSec' => max(0, $finishedAtTs - $startedAtTs),
+                'durationSec' => $durationSec,
                 'dryRun'      => $dryRun,
                 'trigger'     => $trigger,
             ]);
+
+            // Append a persistent history record (one small /boot write, same
+            // cadence as the summary), then lazily prune to the retention cap.
+            // jobName is snapshotted so the record survives a later rename/delete;
+            // logRef is the run-log BASENAME only (resolves via getJobLog?run=).
+            // Both calls are best-effort and never crash the run.
+            History::append($jobId, [
+                'startedAt'   => $startedAt,
+                'finishedAt'  => $finishedAt,
+                'jobName'     => (string) ($job['name'] ?? $jobId),
+                'dryRun'      => $dryRun,
+                'trigger'     => $trigger,
+                'state'       => $state,
+                'exitCode'    => $exitCode,
+                'durationSec' => $durationSec,
+                'logRef'      => Logger::runIdFromPath($runLog),
+            ]);
+            History::prune($jobId, History::DEFAULT_KEEP);
 
             Logger::event($runLog, $jobId, "Run finished: state=$state exitCode=$exitCode.");
             RunState::markStopped($jobId);
