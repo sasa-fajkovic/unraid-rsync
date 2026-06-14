@@ -71,6 +71,7 @@ require_once __DIR__ . '/KeyTools.php';
 require_once __DIR__ . '/Rsync.php';
 require_once __DIR__ . '/RunState.php';
 require_once __DIR__ . '/Logger.php';
+require_once __DIR__ . '/History.php';
 require_once __DIR__ . '/Cron.php';
 // Runner is used by getStatus (Runner::readSummary). There is no autoloader, so
 // it MUST be required explicitly: without this, every getStatus poll throws
@@ -542,6 +543,21 @@ function ur_action_save_config(): void
         return;
     }
 
+    // Identify jobs being REMOVED (old ids minus new ids) so we can clean up
+    // their persistent history. Compute the diff now (while $config still holds
+    // the OLD jobs), but ONLY delete AFTER the save succeeds - otherwise a failed
+    // save would 500 yet have already irreversibly dropped history for a change
+    // that never persisted.
+    $oldIds = array_values(array_filter(array_map(
+        static fn($j) => is_array($j) ? (string) ($j['id'] ?? '') : '',
+        $config['jobs'] ?? []
+    )));
+    $newIds = array_values(array_filter(array_map(
+        static fn($j) => (string) ($j['id'] ?? ''),
+        $normalized
+    )));
+    $removedIds = array_values(array_filter(array_diff($oldIds, $newIds), static fn($id) => $id !== ''));
+
     $config['jobs'] = $normalized;
 
     try {
@@ -549,6 +565,12 @@ function ur_action_save_config(): void
     } catch (Throwable $e) {
         sendError('Failed to save configuration: ' . $e->getMessage(), 500);
         return;
+    }
+
+    // Save persisted -> now it is safe to drop the removed jobs' history files
+    // (orphan cleanup, so they don't accumulate on /boot). Best-effort.
+    foreach ($removedIds as $removedId) {
+        History::delete($removedId);
     }
 
     // Re-sync the live crontab to the just-saved jobs (per-job schedules /
@@ -1719,6 +1741,44 @@ function ur_action_list_runs(): void
 }
 
 /**
+ * GET listHistory: paginated, newest-first persistent execution history for a
+ * job (real + dry runs, manual + scheduled). Read-only. Mirrors listRuns: the
+ * job id goes through ur_safe_job_id; offset/limit are clamped (limit 1..100).
+ * Returns {ok, jobId, total, offset, limit, runs:[<record>...]} where each
+ * record is the History record shape (incl. trigger, dryRun, state, logRef).
+ */
+function ur_action_list_history(): void
+{
+    $jobId = ur_safe_job_id(isset($_GET['id']) ? (string) $_GET['id'] : '');
+    if ($jobId === '') {
+        sendError('A valid job id is required.', 400);
+        return;
+    }
+
+    $offset = isset($_GET['offset']) ? (int) $_GET['offset'] : 0;
+    if ($offset < 0) {
+        $offset = 0;
+    }
+    $limit = isset($_GET['limit']) ? (int) $_GET['limit'] : 25;
+    if ($limit <= 0) {
+        $limit = 25;
+    }
+    if ($limit > 100) {
+        $limit = 100;
+    }
+
+    $page = History::list($jobId, $offset, $limit);
+    sendResponse([
+        'ok'     => true,
+        'jobId'  => $jobId,
+        'total'  => $page['total'],
+        'offset' => $page['offset'],
+        'limit'  => $page['limit'],
+        'runs'   => $page['runs'],
+    ], 200);
+}
+
+/**
  * GET getPluginLog: the HTML-escaped tail of the rolling cross-job plugin.log.
  * Bounded. No id needed - there is one plugin log.
  */
@@ -1847,6 +1907,7 @@ function ur_dispatch(): void
         case 'getStatus':
         case 'getJobLog':
         case 'listRuns':
+        case 'listHistory':
         case 'getPluginLog':
         case 'getRsyncStatus':
             if ($method !== 'GET') {
@@ -1857,6 +1918,7 @@ function ur_dispatch(): void
                 case 'getStatus':       ur_action_get_status();       return;
                 case 'getJobLog':       ur_action_get_job_log();      return;
                 case 'listRuns':        ur_action_list_runs();        return;
+                case 'listHistory':     ur_action_list_history();     return;
                 case 'getPluginLog':    ur_action_get_plugin_log();   return;
                 case 'getRsyncStatus':  ur_action_get_rsync_status(); return;
             }

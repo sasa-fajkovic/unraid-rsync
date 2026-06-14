@@ -367,4 +367,62 @@ final class HandlerTest extends TestCase
         $this->assertSame(400, $code);
         $this->assertStringContainsString('Unknown action', $body['error']);
     }
+
+    public function testListHistoryReturnsPagedRecords(): void
+    {
+        $id = 'j-hist-handler-' . bin2hex(random_bytes(3));
+        try {
+            for ($i = 1; $i <= 3; $i++) {
+                History::append($id, [
+                    'startedAt' => '2026-06-14T12:0' . $i . ':00Z',
+                    'state' => Rsync::STATE_SUCCESS, 'exitCode' => $i,
+                    'trigger' => 'manual', 'dryRun' => false,
+                    'logRef' => 'run-2026061412000' . $i . 'Z.log',
+                ]);
+            }
+            $_GET = ['id' => $id, 'offset' => '0', 'limit' => '2'];
+            [$body, $code] = $this->runCapture(fn() => ur_action_list_history());
+            $this->assertSame(200, $code);
+            $this->assertTrue($body['ok']);
+            $this->assertSame(3, $body['total']);
+            $this->assertSame(0, $body['offset']);
+            $this->assertSame(2, $body['limit']);
+            $this->assertCount(2, $body['runs']);
+            // newest-first
+            $this->assertSame(3, $body['runs'][0]['exitCode']);
+        } finally {
+            History::delete($id);
+        }
+    }
+
+    public function testListHistoryRejectsInvalidJobId(): void
+    {
+        $_GET = ['id' => '../etc'];
+        [$body, $code] = $this->runCapture(fn() => ur_action_list_history());
+        $this->assertSame(400, $code);
+        $this->assertStringContainsString('valid job id', $body['error']);
+    }
+
+    public function testListHistoryRequiresGet(): void
+    {
+        // A POST to a read-only GET poller must be 405.
+        $prevMethod = $_SERVER['REQUEST_METHOD'] ?? 'GET';
+        $_POST = ['action' => 'listHistory', 'csrf_token' => 'test-token'];
+        $_SERVER['REQUEST_METHOD'] = 'POST';
+        try {
+            [$body, $code] = $this->runCapture(fn() => ur_handle_request());
+            $this->assertSame(405, $code);
+            $this->assertStringContainsString('requires GET', $body['error']);
+        } finally {
+            // Restore so test order can't leak a POST method into other tests.
+            $_SERVER['REQUEST_METHOD'] = $prevMethod;
+        }
+    }
+
+    public function testListHistoryClampsLimit(): void
+    {
+        $_GET = ['id' => 'j-x', 'limit' => '9999'];
+        [$body] = $this->runCapture(fn() => ur_action_list_history());
+        $this->assertSame(100, $body['limit']);
+    }
 }
