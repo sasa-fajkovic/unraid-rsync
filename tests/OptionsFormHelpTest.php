@@ -377,6 +377,64 @@ final class OptionsFormHelpTest extends TestCase
         );
     }
 
+    // --- CQ-03: shared CSRF-token resolver ---------------------------------
+
+    public function testRenderCsrfTokenReadsVarGlobalAndDefaultsEmpty(): void
+    {
+        $prev = $GLOBALS['var'] ?? null;
+        try {
+            $GLOBALS['var'] = ['csrf_token' => 'tok-123'];
+            $this->assertSame('tok-123', ur_render_csrf_token());
+
+            // Missing/empty -> '' (a bare preview where the front controller
+            // never populated $var).
+            $GLOBALS['var'] = ['csrf_token' => ''];
+            $this->assertSame('', ur_render_csrf_token());
+            unset($GLOBALS['var']);
+            $this->assertSame('', ur_render_csrf_token());
+        } finally {
+            if ($prev === null) {
+                unset($GLOBALS['var']);
+            } else {
+                $GLOBALS['var'] = $prev;
+            }
+        }
+    }
+
+    // --- SEC-05: script-context JSON hardening ------------------------------
+
+    public function testUrJsEscapesScriptBreakingCharacters(): void
+    {
+        // A value that would otherwise close the <script> element or break out of
+        // a JS string must be \u-escaped, never emitted raw.
+        $out = ur_js('</script><svg onload=alert(1)>');
+        $this->assertStringNotContainsString('</script>', $out);
+        $this->assertStringNotContainsString('<', $out);
+        $this->assertStringNotContainsString('>', $out);
+
+        $out2 = ur_js('a"b\'c&d');
+        $this->assertStringNotContainsString('"b', $out2); // the inner double-quote is hex-escaped
+        $this->assertStringNotContainsString('&', $out2);
+        $this->assertStringNotContainsString("'", $out2);
+
+        // ...and a normal token still round-trips as valid JSON.
+        $this->assertSame('plain-token', json_decode(ur_js('plain-token')));
+    }
+
+    public function testPageBodiesEmitCsrfViaUrJsNotRawJsonEncode(): void
+    {
+        // Defence-in-depth regression: the inline-script HANDLER/CSRF vars must go
+        // through ur_js() (HEX flags), never a bare json_encode().
+        foreach (['jobs.php', 'status.php', 'credentials.php'] as $page) {
+            $src = (string) file_get_contents(__DIR__ . '/../source/pages/' . $page);
+            $this->assertDoesNotMatchRegularExpression(
+                '/=\s*json_encode\(\$(?:csrf|handlerUrl)\b/',
+                $src,
+                "$page must emit the CSRF/handler JS vars via ur_js(), not raw json_encode()."
+            );
+        }
+    }
+
     /**
      * Render the shared options partial to a string.
      *

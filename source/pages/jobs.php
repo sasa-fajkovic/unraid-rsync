@@ -39,10 +39,7 @@ require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Runner.php';
 require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Cron.php';
 require_once '/usr/local/emhttp/plugins/unraid.rsync/pages/_options_form.php';
 
-$csrf = '';
-if (isset($GLOBALS['var']) && is_array($GLOBALS['var']) && !empty($GLOBALS['var']['csrf_token'])) {
-    $csrf = (string) $GLOBALS['var']['csrf_token'];
-}
+$csrf = ur_render_csrf_token();
 
 // If the on-disk config can't be read (unreadable, corrupt, or from a newer
 // schema), render defaults for DISPLAY only but surface a visible warning -
@@ -775,8 +772,8 @@ ur_emit_form_enable_assets();
     rowsEl.appendChild(row);
   }
 
-  var HANDLER_URL = <?=json_encode($handlerUrl)?>;
-  var CSRF_TOKEN  = <?=json_encode($csrf)?>;
+  var HANDLER_URL = <?=ur_js($handlerUrl)?>;
+  var CSRF_TOKEN  = <?=ur_js($csrf)?>;
 
   /* Fire a run/dry-run/abort action for a job and show the result inline next
    * to its card. Fire-and-confirm: the response just acknowledges the launch.

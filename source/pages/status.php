@@ -19,11 +19,9 @@
 require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Config.php';
 require_once '/usr/local/emhttp/plugins/unraid.rsync/include/RunState.php';
 require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Rsync.php';
+require_once '/usr/local/emhttp/plugins/unraid.rsync/pages/_options_form.php'; // ur_render_csrf_token
 
-$csrf = '';
-if (isset($GLOBALS['var']) && is_array($GLOBALS['var']) && !empty($GLOBALS['var']['csrf_token'])) {
-    $csrf = (string) $GLOBALS['var']['csrf_token'];
-}
+$csrf = ur_render_csrf_token();
 $handlerUrl = '/plugins/unraid.rsync/include/handler.php';
 
 // Initial running/idle snapshot, rendered server-side so the tab is meaningful
@@ -168,8 +166,8 @@ $rsyncMissingMsg  = $rsyncAvailable ? '' : Rsync::rsyncMissingMessage();
 (function () {
   'use strict';
 
-  var HANDLER_URL = <?=json_encode($handlerUrl)?>;
-  var CSRF_TOKEN  = <?=json_encode($csrf)?>;
+  var HANDLER_URL = <?=ur_js($handlerUrl)?>;
+  var CSRF_TOKEN  = <?=ur_js($csrf)?>;
   var STATUS_URL  = HANDLER_URL + '?action=getStatus';
   var PLUGIN_LOG_URL = HANDLER_URL + '?action=getPluginLog';
 
