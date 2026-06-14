@@ -82,6 +82,10 @@ final class JobTest extends TestCase
             'slash'        => ['../../etc'],
             'shell-meta'   => ['j-a; rm -rf /'],
             'nul-byte'     => ["j-a\0b"],
+            // Control bytes must be rejected BEFORE trim() laundered them away
+            // (trailing newline/NUL), matching ur_safe_job_id's ordering.
+            'trailing-nl'  => ["j-ok\n"],
+            'trailing-nul' => ["j-ok\0"],
             'overlong'     => [str_repeat('a', 129)],
         ];
     }

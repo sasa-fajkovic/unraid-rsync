@@ -133,9 +133,14 @@ class Job
         // it is a safe single-token slug and NOT a pure-dots traversal segment
         // ("." / "..") - matching ur_safe_job_id - so a crafted config.json can
         // never persist an id that the filesystem helpers would have to defang.
-        // Anything else is regenerated from the name.
-        $id = isset($raw['id']) ? trim((string) $raw['id']) : '';
-        $idValid = $id !== ''
+        // Anything else is regenerated from the name. Control bytes are rejected
+        // BEFORE trim() (which strips NUL/whitespace) so a tampered "j-ok\0" /
+        // "j-ok\n" can't be laundered into a valid id - matching the gate's
+        // ordering exactly.
+        $rawId   = isset($raw['id']) ? (string) $raw['id'] : '';
+        $id      = trim($rawId);
+        $idValid = !preg_match('/[\x00-\x1f\x7f]/', $rawId)
+            && $id !== ''
             && strlen($id) <= 128
             && preg_match('/^[A-Za-z0-9._-]+$/D', $id)
             && !preg_match('/^\.+$/', $id);
