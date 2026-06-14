@@ -1,8 +1,9 @@
 # Unraid Rsync
 
 A native Unraid webGui plugin for scheduling and monitoring **rsync backup
-jobs over SSH** — closer in spirit to TrueNAS's Rsync Tasks than to existing
-single-schedule rsync plugins.
+jobs** — either **over SSH** to/from a remote host or **locally** between two
+paths on the server — closer in spirit to TrueNAS's Rsync Tasks than to
+existing single-schedule rsync plugins.
 
 > **Validate with dry-runs first.** rsync moves (and can delete) real data, so
 > exercise a new job with a **Dry-run** and inspect the per-run log before you
@@ -13,6 +14,8 @@ single-schedule rsync plugins.
 
 Run multiple **independent** rsync jobs, each with:
 
+- a **transport**: **SSH** (push to or pull from a remote host) or **Local**
+  (both sides are paths on this server, confined under `/mnt`);
 - its own cron schedule (per-job, not one global schedule), with a live
   **Next run** column;
 - a curated, **whitelisted** set of rsync flags exposed as checkboxes and value
@@ -21,10 +24,12 @@ Run multiple **independent** rsync jobs, each with:
 - explicit source -> destination pairs (one rsync per pair, not a cartesian product);
 - pre/post hooks and a per-job log level;
 - live **state badges**, a **per-run log viewer**, and last-run reporting;
-- optional **notifications** through Unraid's native notification system;
-- a reusable, TrueNAS-style **Credentials** keychain (SSH connections + a
-  managed key keychain) that jobs reference by connection (shown by name in the
-  UI), supporting **existing key file**, **managed key**, and **password** auth.
+- optional **notifications** through Unraid's native notification system.
+
+**SSH** jobs additionally reference a connection from the reusable, TrueNAS-style
+**Credentials** keychain (SSH connections + a managed key keychain), shown by
+name in the UI, supporting **existing key file**, **managed key**, and
+**password** auth. **Local** jobs use no connection or credentials.
 
 ## What ships today
 
@@ -92,8 +97,9 @@ re-applied automatically:
 
 ### Credentials
 
-The **Credentials** tab is a reusable keychain that jobs reference by
-connection, so a host's details are defined once and shared. It has two layers:
+The **Credentials** tab is a reusable keychain that **SSH** jobs reference by
+connection, so a host's details are defined once and shared. (**Local**
+transport jobs use no connection or credentials.) It has two layers:
 
 - **Connections** — an SSH endpoint (host, port, remote user) plus an **auth
   method**. Each connection has a **Discover host key** action and a selectable
