@@ -378,7 +378,11 @@ class Job
         }
         foreach (self::SIZE_SCALAR_KEYS as $key) {
             $v = trim((string) ($opts[$key] ?? ''));
-            if ($v !== '' && !preg_match('/^\d+(\.\d+)?[KkMmGgTtPp]?(i?[Bb])?$/', $v)) {
+            // number (+ optional decimal), then an OPTIONAL suffix that is either
+            // a unit letter [KMGTP] with optional binary "i" and optional "B"
+            // (K, KiB, MB, G, ...), OR a bare "B" for bytes. A standalone "iB"
+            // (no unit letter) is rejected.
+            if ($v !== '' && !preg_match('/^\d+(\.\d+)?([KkMmGgTtPp]i?[Bb]?|[Bb])?$/', $v)) {
                 $errors[] = 'The ' . self::SCALAR_FLAG_LABELS[$key]
                     . ' value must be a number, optionally with a size suffix (K, M, G, ...).';
             }

@@ -537,11 +537,12 @@ final class JobTest extends TestCase
     public function testSizeScalarAcceptsSuffixesRejectsGarbage(): void
     {
         // rsync SIZE form: number + optional decimal + optional unit suffix.
-        foreach (['100', '1.5m', '500K', '2G', '10GiB'] as $good) {
+        foreach (['100', '1.5m', '500K', '2G', '10GiB', '100B', '4MiB'] as $good) {
             $res = Job::validate($this->validLocalJob(['rsyncOptions' => ['maxSize' => $good]]));
             $this->assertTrue($res['valid'], "expected '$good' valid; errors: " . implode(' | ', $res['errors']));
         }
-        foreach (['abc', '1.2.3', '5 megs', '; rm', '-1'] as $bad) {
+        // "100iB" has a binary "i" with no unit letter -> rejected.
+        foreach (['abc', '1.2.3', '5 megs', '; rm', '-1', '100iB'] as $bad) {
             $res = Job::validate($this->validLocalJob(['rsyncOptions' => ['bwlimit' => $bad]]));
             $this->assertFalse($res['valid'], "expected '$bad' invalid");
             $this->assertNotEmpty(array_filter($res['errors'], fn($e) => stripos($e, '--bwlimit') !== false));
