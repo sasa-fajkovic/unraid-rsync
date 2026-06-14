@@ -2,7 +2,7 @@
 /**
  * Rsync.php - build the rsync invocation as an ARGV ARRAY (never a shell
  * string) from a job's whitelisted options, and map the resulting exit code to
- * a TrueNAS-style run state.
+ * a run state.
  *
  * Why argv, never a string: a shell string would let any path/flag/secret be
  * re-parsed by /bin/sh, which is the classic rsync command-injection footgun
@@ -209,7 +209,7 @@ class Rsync
         return is_string($stdout) ? $stdout : '';
     }
 
-    // --- TrueNAS-style state names (also used in the run summary on /boot). ---
+    // --- Run state names (also used in the run summary on /boot). ---
     const STATE_SUCCESS = 'SUCCESS';
     const STATE_WARNING = 'WARNING';
     const STATE_PARTIAL = 'PARTIAL';
@@ -402,7 +402,7 @@ class Rsync
 
     /**
      * Map a process exit code (or terminating signal, encoded as 128+signal by
-     * the shell convention) to a TrueNAS-style run state. PURE.
+     * the shell convention) to a run state. PURE.
      *
      *   0          -> SUCCESS
      *   24, 25     -> WARNING   (24: files vanished; 25: --max-delete limit hit)
