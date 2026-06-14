@@ -511,6 +511,17 @@ class Cron
     }
 
     /**
+     * Structural validity of a 5-field cron expression: true iff parseExpression
+     * accepts it. This is the SINGLE cron grammar in the plugin - Job::isValidCron
+     * (the save-time validator) delegates here, so the save check and the
+     * next-run calculator can never drift apart.
+     */
+    public static function isValidExpression(string $expr): bool
+    {
+        return self::parseExpression($expr) !== null;
+    }
+
+    /**
      * Parse a 5-field cron expression into per-field value sets (as int-keyed
      * presence maps) plus the dom/dow "restricted" flags needed for OR
      * semantics. Returns null on any malformed field.

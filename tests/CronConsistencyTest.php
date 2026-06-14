@@ -3,19 +3,19 @@
 use PHPUnit\Framework\TestCase;
 
 /**
- * Drift-guard for the TWO independent 5-field cron implementations:
+ * Drift-guard for the 5-field cron grammar across its two ENTRY POINTS:
  *
- *   1. Job::isValidCron / Job::isValidCronField - structural validation run
- *      when a job is saved (rejects clearly-malformed schedules).
+ *   1. Job::isValidCron - structural validation run when a job is saved
+ *      (rejects clearly-malformed schedules).
  *   2. Cron::parseExpression / Cron::nextRun - the pure next-run calculator
  *      used to display "Next run" and (conceptually) to reason about when a
  *      schedule fires.
  *
- * These two parsers were written separately and can silently DRIFT: one could
- * start accepting (or rejecting) an expression the other does not, which would
- * let a job save with a schedule the runner can never compute a next run for
- * (or vice-versa). This test does NOT touch either parser - it only asserts
- * that they AGREE on a representative corpus:
+ * As of CQ-04 these share ONE parser: Job::isValidCron now delegates to
+ * Cron::isValidExpression (== parseExpression !== null), so by construction they
+ * cannot disagree. This test predates that unification and is kept as a
+ * belt-and-suspenders guard: should a future refactor ever re-split the grammar,
+ * it still asserts the two entry points AGREE on a representative corpus:
  *
  *   - For every VALID expression: Job::isValidCron === true AND
  *     Cron::nextRun(expr, fromTs) returns a non-null, strictly-future ts.
