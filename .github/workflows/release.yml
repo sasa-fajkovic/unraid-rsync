@@ -21,8 +21,9 @@ name: Release
 # Concurrency: overlapping `main` pushes serialize (cancel-in-progress: false) so
 # two runs never race to compute the same same-day version.
 #
-# NOTE: softprops/action-gh-release@v2 currently emits a non-blocking Node20
-# deprecation warning in Actions logs; it is harmless and intentionally left.
+# NOTE: third-party actions are SHA-pinned (with a trailing `# vX` comment) and
+# bumped by Dependabot. action-gh-release is on v3 (Node 24 runtime), which
+# clears the earlier Node 20 deprecation warning.
 
 on:
   push:
@@ -46,7 +47,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
       - name: Determine version + build ref
         id: version
@@ -151,7 +152,7 @@ jobs:
         run: cp unraid.rsync.plg archive/unraid.rsync.plg
 
       - name: Create GitHub Release (.txz + .plg)
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
         with:
           tag_name: ${{ steps.version.outputs.version }}
           # The tag does not exist yet (no tag trigger anymore); pin it to
