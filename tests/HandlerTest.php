@@ -406,11 +406,17 @@ final class HandlerTest extends TestCase
     public function testListHistoryRequiresGet(): void
     {
         // A POST to a read-only GET poller must be 405.
+        $prevMethod = $_SERVER['REQUEST_METHOD'] ?? 'GET';
         $_POST = ['action' => 'listHistory', 'csrf_token' => 'test-token'];
         $_SERVER['REQUEST_METHOD'] = 'POST';
-        [$body, $code] = $this->runCapture(fn() => ur_handle_request());
-        $this->assertSame(405, $code);
-        $this->assertStringContainsString('requires GET', $body['error']);
+        try {
+            [$body, $code] = $this->runCapture(fn() => ur_handle_request());
+            $this->assertSame(405, $code);
+            $this->assertStringContainsString('requires GET', $body['error']);
+        } finally {
+            // Restore so test order can't leak a POST method into other tests.
+            $_SERVER['REQUEST_METHOD'] = $prevMethod;
+        }
     }
 
     public function testListHistoryClampsLimit(): void

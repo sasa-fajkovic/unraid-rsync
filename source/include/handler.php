@@ -543,10 +543,11 @@ function ur_action_save_config(): void
         return;
     }
 
-    // Clean up the persistent history of any job that was just removed, so
-    // orphaned <jobid>.history.jsonl files don't accumulate on the flash. Diff
-    // the old job ids against the new set; jobName is snapshotted per record so
-    // nothing meaningful is lost. Best-effort.
+    // Identify jobs being REMOVED (old ids minus new ids) so we can clean up
+    // their persistent history. Compute the diff now (while $config still holds
+    // the OLD jobs), but ONLY delete AFTER the save succeeds - otherwise a failed
+    // save would 500 yet have already irreversibly dropped history for a change
+    // that never persisted.
     $oldIds = array_values(array_filter(array_map(
         static fn($j) => is_array($j) ? (string) ($j['id'] ?? '') : '',
         $config['jobs'] ?? []
@@ -555,11 +556,7 @@ function ur_action_save_config(): void
         static fn($j) => (string) ($j['id'] ?? ''),
         $normalized
     )));
-    foreach (array_diff($oldIds, $newIds) as $removedId) {
-        if ($removedId !== '') {
-            History::delete($removedId);
-        }
-    }
+    $removedIds = array_values(array_filter(array_diff($oldIds, $newIds), static fn($id) => $id !== ''));
 
     $config['jobs'] = $normalized;
 
@@ -568,6 +565,12 @@ function ur_action_save_config(): void
     } catch (Throwable $e) {
         sendError('Failed to save configuration: ' . $e->getMessage(), 500);
         return;
+    }
+
+    // Save persisted -> now it is safe to drop the removed jobs' history files
+    // (orphan cleanup, so they don't accumulate on /boot). Best-effort.
+    foreach ($removedIds as $removedId) {
+        History::delete($removedId);
     }
 
     // Re-sync the live crontab to the just-saved jobs (per-job schedules /

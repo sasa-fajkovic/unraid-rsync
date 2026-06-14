@@ -104,11 +104,16 @@ class History
         if ($json === false) {
             return;
         }
-        $path = self::path($jobId);
+        // chmod only when the file is first created, so a normal append doesn't
+        // touch the inode's mode every run (extra flash metadata write).
+        $path  = self::path($jobId);
+        $isNew = !is_file($path);
         if (@file_put_contents($path, $json . "\n", FILE_APPEND | LOCK_EX) === false) {
             return;
         }
-        @chmod($path, 0644);
+        if ($isNew) {
+            @chmod($path, 0644);
+        }
     }
 
     /**
