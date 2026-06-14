@@ -1710,18 +1710,24 @@ function ur_action_get_rsync_status(): void
 }
 
 /**
- * GET csrfProbe: a READ-ONLY, secret-free diagnostic of the CSRF candidate
+ * csrfProbe: a READ-ONLY, side-effect-free diagnostic of the CSRF candidate
  * pipeline, used to live-diagnose 403s where a POST carrying the correct token
- * is still rejected. It NEVER accepts or returns a raw token:
- *   - to test for a match the caller passes `?th=<sha256-hex of the token>` (a
- *     one-way hash, safe to place in a URL), compared via hash_equals against
- *     sha256() of each candidate;
- *   - per-source it reports only booleans + token LENGTHS, and a non-sensitive
- *     id label (NEVER the absolute filesystem path).
+ * is still rejected. Accepted on BOTH GET and POST (no CSRF check) precisely so
+ * the candidate pipeline can be observed in the POST request context - the
+ * context where the live 403s occur and which a GET-only endpoint can't reach.
+ *
+ * It NEVER RETURNS a token (only booleans, lengths, and a non-sensitive id label
+ * per source - NEVER the absolute filesystem path), and the only token it READS
+ * is the request's own legitimate csrf field - never a third party's:
+ *   - GET:  ?th=<sha256-hex of the token> (a one-way hash, safe in a URL),
+ *           compared via hash_equals against sha256() of each candidate;
+ *   - POST: the standard `csrf_token` field (exactly what every real POST sends),
+ *           compared via hash_equals against each candidate and reported only as
+ *           the boolean `postSuppliedMatch`.
  * Behind the webGui's auth like every other endpoint.
  *
  * TODO(remove): temporary instrumentation; delete once the live 403 cause is
- * confirmed and the robust var.ini read is verified.
+ * confirmed and the session-stash fix is verified.
  */
 function ur_action_csrf_probe(): void
 {
