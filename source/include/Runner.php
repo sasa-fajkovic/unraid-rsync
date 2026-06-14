@@ -143,6 +143,32 @@ class Runner
             $dryRun ? ' [DRY-RUN]' : ''
         ));
 
+        // Survive the abort SIGTERM so we can record an ABORTED outcome.
+        //
+        // WHY: abort SIGTERMs the runner's whole process GROUP (negative pid) to
+        // kill the in-flight rsync (and its ssh). That signal also hits THIS
+        // runner process - and with the default disposition it would DIE
+        // immediately, mid-pair, so the `finally` below never runs: no ABORTED
+        // summary, no postHook, and getStatus keeps showing the PREVIOUS run's
+        // stale state. By trapping SIGTERM/SIGINT we stay alive: rsync still dies
+        // from the same group signal, our blocking read returns, and the per-pair
+        // abort check (below) then records state=ABORTED through the normal
+        // unwind. The handler also mirrors the request into the abort flag so the
+        // between-pairs poll and the post-pair check agree. pcntl is a CLI-only
+        // extension; if it is unavailable we degrade to the prior behaviour.
+        if (function_exists('pcntl_async_signals') && function_exists('pcntl_signal')) {
+            pcntl_async_signals(true);
+            $onAbortSignal = static function () use ($jobId): void {
+                try {
+                    RunState::requestAbort($jobId);
+                } catch (\Throwable $e) {
+                    // Never let a signal handler throw.
+                }
+            };
+            pcntl_signal(defined('SIGTERM') ? SIGTERM : 15, $onAbortSignal);
+            pcntl_signal(defined('SIGINT') ? SIGINT : 2, $onAbortSignal);
+        }
+
         $state    = Rsync::STATE_SUCCESS;
         $exitCode = 0;
         $reason   = '';
@@ -283,6 +309,17 @@ class Runner
                     Logger::enforceRunLogCap($runLog);
                     $exitCodes[] = $pairExit;
                     Logger::event($runLog, $jobId, "Pair #$n rsync exited with code $pairExit (" . Rsync::exitToState($pairExit) . ').');
+
+                    // Abort can land DURING a pair (the SIGTERM that killed rsync
+                    // also set the abort flag). Re-poll AFTER each rsync so an
+                    // interrupted run is recorded as ABORTED rather than as the
+                    // killed-rsync exit code (FAILED) - or, worse, leaving a stale
+                    // previous-run state when the runner used to die mid-pair.
+                    if (RunState::abortRequested($jobId)) {
+                        $aborted = true;
+                        Logger::event($runLog, $jobId, "Abort requested; stopping after pair #$n.");
+                        break;
+                    }
                 }
 
                 if ($aborted) {

@@ -416,6 +416,32 @@ final class RunnerTest extends TestCase
         $this->assertFalse(RunState::abortRequested($id));
     }
 
+    public function testAbortDuringSinglePairYieldsAborted(): void
+    {
+        // THE live case: a SINGLE-pair job aborted mid-rsync. There is no "next
+        // pair" pre-loop poll, so the POST-pair abort check is what records
+        // ABORTED. The killed rsync returns a non-zero code (here 255, as seen
+        // live when the abort tore down the ssh transport); without the post-pair
+        // check that would read as FAILED (or, when the runner died on the group
+        // SIGTERM, leave the previous run's stale state).
+        $id = $this->saveLocalJob('j-single', [
+            'postHook' => 'POST',
+            'pairs'    => [['local' => '/mnt/user/a/', 'remote' => '/mnt/disk1/a/']],
+        ]);
+        $rsyncCalls = 0;
+        Rsync::$runner = function (array $argv, $onOutput) use (&$rsyncCalls, $id): int {
+            $rsyncCalls++;
+            RunState::requestAbort($id); // abort lands during the only pair
+            return 255;                  // rsync killed by the abort signal
+        };
+        $res = Runner::run($id, false);
+        $this->assertSame(Rsync::STATE_ABORTED, $res['state'], 'a single-pair abort must record ABORTED, not FAILED');
+        $this->assertSame(143, $res['exitCode']);
+        $this->assertSame(1, $rsyncCalls);
+        $this->assertContains('hook:POST:ABORTED', $this->trace); // postHook sees ABORTED
+        $this->assertFalse(RunState::abortRequested($id));
+    }
+
     public function testStaleAbortFlagIsClearedAtRunStart(): void
     {
         // A leftover abort flag from a prior run must NOT abort a fresh run.
