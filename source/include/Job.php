@@ -77,6 +77,28 @@ class Job
     /** Whitelisted list value-input keys (stored as lists of non-empty strings). */
     const LIST_OPTION_KEYS = ['excludes', 'includes'];
 
+    /** Scalar option keys whose value must be a non-negative whole number. */
+    const INTEGER_SCALAR_KEYS = ['maxDelete', 'timeout', 'contimeout', 'compressLevel', 'modifyWindow'];
+
+    /**
+     * Scalar option keys whose value is an rsync SIZE: a number with an optional
+     * decimal part and an optional unit suffix (K/M/G/T/P, optionally i and/or B),
+     * e.g. "100", "1.5m", "500K", "2GiB".
+     */
+    const SIZE_SCALAR_KEYS = ['bwlimit', 'maxSize', 'minSize'];
+
+    /** Scalar key -> rsync flag, for human-readable validation messages. */
+    const SCALAR_FLAG_LABELS = [
+        'maxDelete'     => '--max-delete',
+        'timeout'       => '--timeout',
+        'contimeout'    => '--contimeout',
+        'compressLevel' => '--compress-level',
+        'modifyWindow'  => '--modify-window',
+        'bwlimit'       => '--bwlimit',
+        'maxSize'       => '--max-size',
+        'minSize'       => '--min-size',
+    ];
+
     /**
      * Normalise a raw job array into the canonical stored shape. Unknown keys
      * are dropped, rsync options are filtered to the whitelist, pairs are
@@ -341,6 +363,47 @@ class Job
                 if ($destPath !== '' && !self::isSpecificSubPath($destPath)) {
                     $errors[] = "Pair #$n: a delete option is enabled, so the destination must be a specific sub-directory, not a root.";
                 }
+            }
+        }
+
+        // Numeric scalar options. A non-numeric value here would otherwise sail
+        // through to rsync as `--max-delete=abc` and fail the run mid-flight with
+        // a confusing rsync error; reject it at save time instead. (The `=value`
+        // argv form already prevents option-injection - this is correctness/UX.)
+        foreach (self::INTEGER_SCALAR_KEYS as $key) {
+            $v = trim((string) ($opts[$key] ?? ''));
+            if ($v !== '' && !ctype_digit($v)) {
+                $errors[] = 'The ' . self::SCALAR_FLAG_LABELS[$key] . ' value must be a whole number.';
+            }
+        }
+        foreach (self::SIZE_SCALAR_KEYS as $key) {
+            $v = trim((string) ($opts[$key] ?? ''));
+            // number (+ optional decimal), then an OPTIONAL suffix that is either
+            // a unit letter [KMGTP] with optional binary "i" and optional "B"
+            // (K, KiB, MB, G, ...), OR a bare "B" for bytes. A standalone "iB"
+            // (no unit letter) is rejected.
+            if ($v !== '' && !preg_match('/^\d+(\.\d+)?([KkMmGgTtPp]i?[Bb]?|[Bb])?$/', $v)) {
+                $errors[] = 'The ' . self::SCALAR_FLAG_LABELS[$key]
+                    . ' value must be a number, optionally with a size suffix (K, M, G, ...).';
+            }
+        }
+
+        // --temp-dir / --backup-dir live on the RECEIVER's filesystem. For a local
+        // receiver (LOCAL transport, or an SSH PULL whose destination is the local
+        // side) they must clear the SAME /mnt guardrail as any local path -
+        // otherwise a job could quietly stage into or back up onto /boot, /etc,
+        // etc. For an SSH PUSH the receiver is remote, so the weaker
+        // absolute-non-root check applies (same as a remote pair path).
+        $receiverIsLocal = ($transport === 'LOCAL') || ($direction === 'PULL');
+        foreach (['tempDir' => '--temp-dir', 'backupDir' => '--backup-dir'] as $key => $flag) {
+            $p = trim((string) ($opts[$key] ?? ''));
+            if ($p === '') {
+                continue;
+            }
+            $label  = "Option $flag";
+            $checks = $receiverIsLocal ? self::checkLocalPath($p, $label) : self::checkRemotePath($p, $label);
+            foreach ($checks as $e) {
+                $errors[] = $e;
             }
         }
 
