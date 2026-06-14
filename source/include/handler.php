@@ -311,6 +311,15 @@ function ur_csrf_token_candidates(): array
     if (isset($_SESSION['csrf_token'])) {
         $candidates[] = (string) $_SESSION['csrf_token'];
     }
+    // Token stashed into the PHP session by a page render (ur_stash_csrf_token),
+    // when $GLOBALS['var'] was available. The webGui front controller starts the
+    // SAME session (same PHPSESSID) on a direct POST to handler.php, so this is
+    // readable here EVEN IF the var.ini files are not reachable in the POST
+    // request's php-fpm context (the live root cause: a direct POST could read
+    // var.ini for a GET poller but matched no candidate on POST).
+    if (isset($_SESSION['ur_csrf_token'])) {
+        $candidates[] = (string) $_SESSION['ur_csrf_token'];
+    }
     // var.ini value(s) - read directly so a STANDALONE POST (where $var is never
     // populated) still has the real token to match against. ur_csrf_tokens_from_ini
     // recovers the token even when parse_ini_file() bails on an unrelated malformed
@@ -1716,11 +1725,16 @@ function ur_action_get_rsync_status(): void
  */
 function ur_action_csrf_probe(): void
 {
+    $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
+    // GET: caller passes ?th=<sha256 hex of token> (one-way; safe in a URL).
+    // POST: the legit csrf_token field (same as every real POST) is matched
+    // server-side - this lets us see the candidate pipeline in the POST context.
     $probeHash = isset($_GET['th']) ? strtolower((string) $_GET['th']) : '';
-    $matchAny = false;
+    $postedTok = isset($_POST['csrf_token']) ? (string) $_POST['csrf_token'] : '';
+    $matchHash = false;
+    $matchPosted = false;
 
     $varSet = isset($GLOBALS['var']) && is_array($GLOBALS['var']) && isset($GLOBALS['var']['csrf_token']);
-    $sessSet = isset($_SESSION['csrf_token']);
 
     $sources = [];
     $idx = 0;
@@ -1747,22 +1761,28 @@ function ur_action_csrf_probe(): void
     }
 
     $candidates = ur_csrf_token_candidates();
-    if ($probeHash !== '') {
-        foreach ($candidates as $c) {
-            if (hash_equals(hash('sha256', $c), $probeHash)) {
-                $matchAny = true;
-            }
+    foreach ($candidates as $c) {
+        if ($probeHash !== '' && hash_equals(hash('sha256', $c), $probeHash)) {
+            $matchHash = true;
+        }
+        if ($postedTok !== '' && hash_equals($c, $postedTok)) {
+            $matchPosted = true;
         }
     }
 
     sendResponse([
-        'ok'             => true,
-        'varGlobalSet'   => $varSet,
-        'sessionSet'     => $sessSet,
-        'sources'        => $sources,
-        'candidateCount' => count($candidates),
-        'probeGiven'     => $probeHash !== '',
-        'probeMatchAny'  => $matchAny,
+        'ok'               => true,
+        'method'           => $method,
+        'varGlobalSet'     => $varSet,
+        'sessionStatus'    => session_status(), // 0 disabled, 1 none, 2 active
+        'sessionHasUnraid' => isset($_SESSION['csrf_token']),
+        'sessionHasOurKey' => isset($_SESSION['ur_csrf_token']),
+        'postTokenLen'     => strlen($postedTok),
+        'sources'          => $sources,
+        'candidateCount'   => count($candidates),
+        'probeGiven'       => $probeHash !== '',
+        'probeMatchAny'    => $matchHash,
+        'postSuppliedMatch' => $matchPosted,
     ], 200);
 }
 
@@ -1808,6 +1828,14 @@ function ur_dispatch(): void
     }
 
     switch ($action) {
+        // Read-only diagnostic - accepted on GET *and* POST (no CSRF) precisely so
+        // we can observe the candidate pipeline in the POST request context, which
+        // is where the live 403s occur. Never mutates state; never returns a token.
+        // TODO(remove): temporary instrumentation.
+        case 'csrfProbe':
+            ur_action_csrf_probe();
+            return;
+
         case 'saveConfig':
             if ($method !== 'POST') {
                 sendError('saveConfig requires POST.', 405);
@@ -1868,7 +1896,6 @@ function ur_dispatch(): void
         case 'listRuns':
         case 'getPluginLog':
         case 'getRsyncStatus':
-        case 'csrfProbe':
             if ($method !== 'GET') {
                 sendError($action . ' requires GET.', 405);
                 return;
@@ -1879,7 +1906,6 @@ function ur_dispatch(): void
                 case 'listRuns':        ur_action_list_runs();        return;
                 case 'getPluginLog':    ur_action_get_plugin_log();   return;
                 case 'getRsyncStatus':  ur_action_get_rsync_status(); return;
-                case 'csrfProbe':       ur_action_csrf_probe();       return;
             }
             return;
 

@@ -761,6 +761,65 @@ final class HandlerCredentialsTest extends TestCase
         $this->assertSame(405, $code);
     }
 
+    // --- Session-stashed token (ur_csrf_token): the page render saves the
+    //     canonical token in the session so a direct POST whose php-fpm context
+    //     cannot match var.ini still validates. ------------------------------
+
+    /** A token matching ONLY $_SESSION['ur_csrf_token'] (no $var, no var.ini) passes. */
+    public function testCsrfMatchesSessionStashedTokenOnly(): void
+    {
+        if (defined('UR_VAR_INI_PATHS')) {
+            @unlink(UR_VAR_INI_PATHS[0]); // ensure var.ini contributes nothing
+        }
+        $prevSession = $_SESSION ?? null;
+        try {
+            unset($GLOBALS['var']);
+            $_SESSION = ['ur_csrf_token' => 'stashed-token'];
+            $_POST    = ['csrf_token' => 'stashed-token'];
+            [, $code] = $this->runCapture(fn() => $this->assertTrue(ur_check_csrf()));
+            $this->assertSame(200, $code);
+            $this->assertContains('stashed-token', ur_csrf_token_candidates());
+        } finally {
+            if ($prevSession === null) {
+                unset($_SESSION);
+            } else {
+                $_SESSION = $prevSession;
+            }
+            $GLOBALS['var'] = ['csrf_token' => 'test-token'];
+        }
+    }
+
+    /** csrfProbe on a POST reports postSuppliedMatch and the POST request context. */
+    public function testCsrfProbePostContextReportsMatch(): void
+    {
+        if (defined('UR_VAR_INI_PATHS')) {
+            @unlink(UR_VAR_INI_PATHS[0]);
+        }
+        $prevSession = $_SESSION ?? null;
+        try {
+            unset($GLOBALS['var']);
+            $_SERVER['REQUEST_METHOD'] = 'POST';
+            $_SESSION = ['ur_csrf_token' => 'post-token'];
+            $_POST    = ['csrf_token' => 'post-token'];
+            [$body, $code] = $this->runCapture(fn() => ur_action_csrf_probe());
+            $this->assertSame(200, $code);
+            $this->assertSame('POST', $body['method']);
+            $this->assertSame(strlen('post-token'), $body['postTokenLen']);
+            $this->assertTrue($body['sessionHasOurKey']);
+            $this->assertTrue($body['postSuppliedMatch']);
+            // No raw token in the response.
+            $this->assertStringNotContainsString('post-token', json_encode($body));
+        } finally {
+            $_SERVER['REQUEST_METHOD'] = 'GET';
+            if ($prevSession === null) {
+                unset($_SESSION);
+            } else {
+                $_SESSION = $prevSession;
+            }
+            $GLOBALS['var'] = ['csrf_token' => 'test-token'];
+        }
+    }
+
     // --- Robust var.ini csrf read: recover the token even when parse_ini_file()
     //     bails on an UNRELATED malformed line elsewhere in the (large,
     //     machine-written) state file. This is the live-403 class: a readable
