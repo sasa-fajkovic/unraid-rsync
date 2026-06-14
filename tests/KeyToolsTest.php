@@ -217,7 +217,7 @@ final class KeyToolsTest extends TestCase
     public function hostProvider(): array
     {
         return [
-            'dns'              => ['rpi3b.tempel-drum.ts.net', true],
+            'dns'              => ['host1.example.net', true],
             'simple'           => ['tower', true],
             'ipv4'             => ['10.0.0.5', true],
             'ipv6 bracketed'   => ['[2001:db8::1]', true],
