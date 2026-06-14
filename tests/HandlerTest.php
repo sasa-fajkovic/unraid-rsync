@@ -448,4 +448,46 @@ final class HandlerTest extends TestCase
         [$body] = $this->runCapture(fn() => ur_action_list_history());
         $this->assertSame(100, $body['limit']);
     }
+
+    public function testRemovingJobKeepsItsHistory(): void
+    {
+        // Seed a config with a job, then record a run for it.
+        $seed = Config::defaults();
+        $seed['jobs'][] = Job::normalize([
+            'name' => 'doomed', 'schedule' => '0 3 * * *', 'transport' => 'LOCAL',
+            'pairs' => [['local' => '/mnt/user/a/', 'remote' => '/mnt/disk1/a/']],
+        ]);
+        Config::save($seed);
+        $jobId = Config::load()['jobs'][0]['id'];
+        $this->assertNotSame('', $jobId);
+
+        try {
+            History::append($jobId, [
+                'startedAt' => '2026-06-14T12:00:00Z',
+                'state' => Rsync::STATE_SUCCESS, 'exitCode' => 0,
+                'trigger' => 'manual', 'dryRun' => false,
+                'logRef' => 'run-20260614T120000Z.log',
+            ]);
+
+            // Save a config that REMOVES the job (a different job in its place).
+            $_POST = [
+                'action'     => 'saveConfig',
+                'csrf_token' => 'test-token',
+                'jobs'       => [
+                    0 => ['name' => 'replacement', 'schedule' => '0 4 * * *', 'transport' => 'LOCAL',
+                          'pairs' => [['local' => '/mnt/user/b/', 'remote' => '/mnt/disk1/b/']]],
+                ],
+            ];
+            [$body, $code] = $this->runCapture(fn() => ur_action_save_config());
+            $this->assertSame(200, $code, json_encode($body));
+
+            // The removed job's history must SURVIVE (history piles up; only
+            // uninstall clears it). Regression guard for the removed purge.
+            $page = History::list($jobId, 0, 25);
+            $this->assertSame(1, $page['total']);
+            $this->assertSame(0, $page['runs'][0]['exitCode']);
+        } finally {
+            History::delete($jobId);
+        }
+    }
 }

@@ -69,6 +69,7 @@ final class ConfigTest extends TestCase
         $this->assertTrue($d['recursive'], 'recursive (-r) must default ON, else folder backups copy nothing');
         $this->assertTrue($d['times'], 'times (-t) must default ON for sane incrementals');
         $this->assertTrue($d['humanReadable']);
+        $this->assertTrue($d['mkpath'], 'mkpath (--mkpath) must default ON so a missing destination path is auto-created');
         $this->assertFalse($d['archive'], 'archive (-a) must default OFF (cross-host owner/perm footgun)');
         $this->assertFalse($d['delete'], 'delete must default OFF (destructive; per-job opt-in)');
         $this->assertFalse($d['deleteExcluded']);

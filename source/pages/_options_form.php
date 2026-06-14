@@ -160,6 +160,7 @@ if (!function_exists('ur_option_help')) {
             'wholeFile'      => 'Copy whole files and skip the delta-transfer algorithm (-W). Often faster on a fast local link or local disks.',
             'sizeOnly'       => 'Treat files whose size matches as unchanged, ignoring modification time (--size-only).',
             'ignoreExisting' => 'Skip any file that already exists on the destination; only brand-new files are copied (--ignore-existing).',
+            'mkpath'         => 'Create the destination path, including any missing parent directories, before transferring (--mkpath). On by default so backing up to a brand-new target does not fail with a missing-directory error. Needs rsync 3.2.3 or newer on the receiving side — turn it off if a push fails against an older host.',
             // --- destructive flags -----------------------------------------
             'delete'         => 'DELETE files on the destination that no longer exist in the source (--delete). Destructive: it removes data from the destination — pair it with a Max delete cap.',
             'deleteExcluded' => 'Also DELETE files on the destination that match your exclude patterns (--delete-excluded). Destructive: excluded files are removed from the destination, not just skipped.',
@@ -298,6 +299,7 @@ if (!function_exists('ur_render_rsync_options')) {
             'wholeFile'      => ['Copy whole files (no delta)', '-W'],
             'sizeOnly'       => ['Skip files matching size', '--size-only'],
             'ignoreExisting' => ['Skip files that already exist', '--ignore-existing'],
+            'mkpath'         => ['Create destination path if missing', '--mkpath'],
         ];
         // Destructive booleans rendered separately with a warning.
         $destructive = [
