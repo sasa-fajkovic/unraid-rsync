@@ -130,23 +130,43 @@ class RunState
     private static function safeId(string $id): string
     {
         $clean = preg_replace('/[^A-Za-z0-9._-]/', '', $id);
-        return ($clean === '' || $clean === null) ? 'unknown' : $clean;
+        // A pure-dots id ("." / "..") survives the char-class strip but is a
+        // traversal segment, so collapse it to a literal. Mirrors
+        // ur_safe_job_id's pure-dots rejection (defence-in-depth).
+        if ($clean === '' || $clean === null || preg_match('/^\.+$/', $clean)) {
+            return 'unknown';
+        }
+        return $clean;
     }
 
-    /** Ensure the state dir exists (mode 700; it holds pids/log paths only). */
+    /**
+     * Ensure the state dir exists (mode 700; it holds pids/log paths only).
+     *
+     * Walks the ancestry base() -> stateDir() and creates each level
+     * NON-recursively, refusing a symlink at ANY level. A plain
+     * `mkdir($dir, 0700, true)` would silently FOLLOW a symlinked runtime base
+     * (the base lives under world-writable /tmp), letting an attacker redirect
+     * root-written state/lock files out of the sandbox. Mirrors
+     * Ssh::ensureRuntimeDirs. The post-mkdir re-check closes the TOCTOU where a
+     * level is swapped for a symlink between create and use.
+     */
     private static function ensureDir(): void
     {
-        $dir = self::stateDir();
-        if (is_link($dir)) {
-            throw new RuntimeException("Refusing to use a symlinked state dir: $dir");
+        foreach ([self::base(), self::stateDir()] as $dir) {
+            if (is_link($dir)) {
+                throw new RuntimeException("Refusing to use a symlinked state dir: $dir");
+            }
+            if (file_exists($dir) && !is_dir($dir)) {
+                throw new RuntimeException("State path exists but is not a directory: $dir");
+            }
+            if (!is_dir($dir) && !@mkdir($dir, 0700) && !is_dir($dir)) {
+                throw new RuntimeException("Unable to create state dir: $dir");
+            }
+            if (is_link($dir)) {
+                throw new RuntimeException("Refusing to use a symlinked state dir: $dir");
+            }
+            @chmod($dir, 0700);
         }
-        if (file_exists($dir) && !is_dir($dir)) {
-            throw new RuntimeException("State path exists but is not a directory: $dir");
-        }
-        if (!is_dir($dir) && !@mkdir($dir, 0700, true) && !is_dir($dir)) {
-            throw new RuntimeException("Unable to create state dir: $dir");
-        }
-        @chmod($dir, 0700);
     }
 
     /**

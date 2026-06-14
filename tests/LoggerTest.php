@@ -44,6 +44,49 @@ final class LoggerTest extends TestCase
         $this->assertStringEndsWith('.log', $path);
     }
 
+    /**
+     * SEC-01: a pure-dots job id ("." / ".." / "...") survives the char-class
+     * strip but is a traversal segment (logsDir()/".." == base()). safeId must
+     * collapse it to the literal "unknown" so the run log can never land outside
+     * the per-job dir, matching ur_safe_job_id.
+     *
+     * @dataProvider pureDotsIdProvider
+     */
+    public function testJobLogDirCollapsesPureDotsId(string $id): void
+    {
+        $dir = Logger::jobLogDir($id);
+        $this->assertSame(Logger::logsDir() . '/unknown', $dir);
+        $this->assertStringNotContainsString('/..', $dir);
+    }
+
+    /** @return array<string,array{0:string}> */
+    public static function pureDotsIdProvider(): array
+    {
+        return ['dot' => ['.'], 'dotdot' => ['..'], 'tripledot' => ['...']];
+    }
+
+    /**
+     * SEC-01: the runtime base lives under world-writable /tmp. ensureDir must
+     * REFUSE a symlinked base rather than letting mkdir -p follow it and redirect
+     * root-written logs out of the sandbox.
+     */
+    public function testOpenRunRefusesSymlinkedBase(): void
+    {
+        $target = sys_get_temp_dir() . '/ur-logger-target-' . getmypid() . '-' . bin2hex(random_bytes(4));
+        @mkdir($target, 0700, true);
+        $link = sys_get_temp_dir() . '/ur-logger-link-' . getmypid() . '-' . bin2hex(random_bytes(4));
+        @symlink($target, $link);
+        Logger::$baseOverride = $link;
+        try {
+            $this->expectException(RuntimeException::class);
+            Logger::openRun('j-x', 1750000000);
+        } finally {
+            @unlink($link);
+            @rmdir($target);
+            Logger::$baseOverride = $this->rtBase;
+        }
+    }
+
     public function testAppendAddsTrailingNewline(): void
     {
         $path = Logger::openRun('j-x', 1750000000);

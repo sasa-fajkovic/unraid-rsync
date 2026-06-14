@@ -129,9 +129,17 @@ class Job
         // rsync options (whitelist only)
         $job['rsyncOptions'] = self::normalizeRsyncOptions($raw['rsyncOptions'] ?? []);
 
-        // id last (slug from name if missing)
+        // id last (slug from name if missing). A supplied id is kept only when
+        // it is a safe single-token slug and NOT a pure-dots traversal segment
+        // ("." / "..") - matching ur_safe_job_id - so a crafted config.json can
+        // never persist an id that the filesystem helpers would have to defang.
+        // Anything else is regenerated from the name.
         $id = isset($raw['id']) ? trim((string) $raw['id']) : '';
-        $job['id'] = $id !== '' ? $id : self::generateId($job['name']);
+        $idValid = $id !== ''
+            && strlen($id) <= 128
+            && preg_match('/^[A-Za-z0-9._-]+$/D', $id)
+            && !preg_match('/^\.+$/', $id);
+        $job['id'] = $idValid ? $id : self::generateId($job['name']);
 
         return $job;
     }

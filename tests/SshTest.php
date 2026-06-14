@@ -130,6 +130,27 @@ final class SshTest extends TestCase
 
     // --- KEYFILE argv + materialise (no tmpfs key) -------------------------
 
+    /**
+     * SEC-01: a pure-dots token collapses to "unknown" in every tmpfs secret
+     * path so a crafted token can never address a file outside keys/ /known_hosts
+     * /pass. Mirrors ur_safe_job_id's pure-dots rejection.
+     *
+     * @dataProvider sshPureDotsProvider
+     */
+    public function testSecretPathsCollapsePureDotsToken(string $token): void
+    {
+        foreach ([Ssh::keyPath($token), Ssh::knownHostsPath($token), Ssh::passFilePath($token)] as $p) {
+            $this->assertStringEndsWith('/unknown', $p);
+            $this->assertStringNotContainsString('/..', $p);
+        }
+    }
+
+    /** @return array<string,array{0:string}> */
+    public static function sshPureDotsProvider(): array
+    {
+        return ['dot' => ['.'], 'dotdot' => ['..'], 'tripledot' => ['...']];
+    }
+
     public function testKeyfileArgvUsesPathDirectly(): void
     {
         $conn = $this->keyfileConn(['port' => 2022, 'strictHostKey' => 'yes']);

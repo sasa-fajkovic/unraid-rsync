@@ -217,6 +217,23 @@ final class CronTest extends TestCase
         $this->assertStringContainsString('--job=j-My_job.2-3', file_get_contents(Cron::cronFilePath()));
     }
 
+    public function testApplySkipsJobWithPureDotsId(): void
+    {
+        // SEC-01: "." / ".." pass SAFE_ID_PATTERN's char class but are traversal
+        // segments; they must never be emitted to the crontab.
+        $config = $this->configWith([
+            $this->job('j-ok', '0 3 * * *', true),
+            $this->job('.', '0 4 * * *', true),
+            $this->job('..', '0 5 * * *', true),
+        ]);
+        $res = Cron::apply($config);
+
+        $this->assertSame(1, $res['enabledJobs']); // only j-ok
+        $content = file_get_contents(Cron::cronFilePath());
+        $this->assertStringContainsString('--job=j-ok', $content);
+        $this->assertStringNotContainsString('--job=.', $content);
+    }
+
     public function testApplySkipsJobWithMalformedSchedule(): void
     {
         // A malformed schedule would shift the command tokens / be a junk crontab

@@ -80,6 +80,47 @@ final class RunStateTest extends TestCase
         $this->assertNull(RunState::read('j-nope'));
     }
 
+    /**
+     * SEC-01: a pure-dots id collapses to "unknown" across every state path so a
+     * crafted id can never address a file outside the state dir.
+     *
+     * @dataProvider pureDotsIdProvider
+     */
+    public function testStatePathsCollapsePureDotsId(string $id): void
+    {
+        foreach ([RunState::statePath($id), RunState::abortPath($id), RunState::lockPath($id)] as $p) {
+            $this->assertStringContainsString('/unknown.', $p);
+            $this->assertStringNotContainsString('/..', $p);
+        }
+    }
+
+    /** @return array<string,array{0:string}> */
+    public static function pureDotsIdProvider(): array
+    {
+        return ['dot' => ['.'], 'dotdot' => ['..'], 'tripledot' => ['...']];
+    }
+
+    /**
+     * SEC-01: ensureDir (triggered by write()) must REFUSE a symlinked runtime
+     * base rather than letting mkdir -p follow it out of the /tmp sandbox.
+     */
+    public function testWriteRefusesSymlinkedBase(): void
+    {
+        $target = sys_get_temp_dir() . '/ur-runstate-target-' . getmypid() . '-' . bin2hex(random_bytes(4));
+        @mkdir($target, 0700, true);
+        $link = sys_get_temp_dir() . '/ur-runstate-link-' . getmypid() . '-' . bin2hex(random_bytes(4));
+        @symlink($target, $link);
+        RunState::$baseOverride = $link;
+        try {
+            $this->expectException(RuntimeException::class);
+            RunState::write('j-x', ['pid' => 1, 'running' => true]);
+        } finally {
+            @unlink($link);
+            @rmdir($target);
+            RunState::$baseOverride = $this->rtBase;
+        }
+    }
+
     public function testClearRemovesState(): void
     {
         RunState::write('j-x', ['pid' => 1, 'running' => true]);
