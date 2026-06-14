@@ -14,7 +14,7 @@
  *   - All invocations are argv ARRAYS (proc_open without a shell). No path,
  *     name or key material is ever interpolated into a shell string.
  *   - Generation uses an EMPTY passphrase (-N "") on purpose: jobs run
- *     unattended from cron, like TrueNAS's rsync tasks. The resulting private
+ *     unattended from cron. The resulting private
  *     key is a secret stored in credentials.json; the UI documents that it
  *     lives on world-readable FAT32 and is materialised to tmpfs 600 before use.
  *   - host-key discovery (ssh-keyscan) validates host/port and never shells.

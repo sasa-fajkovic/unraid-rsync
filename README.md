@@ -2,8 +2,8 @@
 
 A native Unraid webGui plugin for scheduling and monitoring **rsync backup
 jobs** — either **over SSH** to/from a remote host or **locally** between two
-paths on the server — closer in spirit to TrueNAS's Rsync Tasks than to
-existing single-schedule rsync plugins.
+paths on the server — a multi-job scheduler rather than the usual
+single-schedule rsync plugins.
 
 > **Validate with dry-runs first.** rsync moves (and can delete) real data, so
 > exercise a new job with a **Dry-run** and inspect the per-run log before you
@@ -26,7 +26,7 @@ Run multiple **independent** rsync jobs, each with:
 - live **state badges**, a **per-run log viewer**, and last-run reporting;
 - optional **notifications** through Unraid's native notification system.
 
-**SSH** jobs additionally reference a connection from the reusable, TrueNAS-style
+**SSH** jobs additionally reference a connection from the reusable
 **Credentials** keychain (SSH connections + a managed key keychain), shown by
 name in the UI, supporting **existing key file**, **managed key**, and
 **password** auth. **Local** jobs use no connection or credentials.
@@ -49,7 +49,7 @@ name in the UI, supporting **existing key file**, **managed key**, and
   **inline help** on every rsync flag and option.
 - **Per-job cron scheduling**: each enabled job runs on its own 5-field cron
   schedule, plus a **Next run** column on the Jobs list.
-- **Live status badges** in TrueNAS-style colors —
+- **Live status badges** in clear status colors —
   **success** (green), **warning** (orange), **failed** (red),
   **aborted** (grey), **pending** (grey), **running** (blue, pulsing).
 - A **per-run log viewer**: pick any past run from a selector and watch the log

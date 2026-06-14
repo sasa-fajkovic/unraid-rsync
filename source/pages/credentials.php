@@ -1,6 +1,6 @@
 <?php
 /**
- * credentials.php - the Credentials tab body (two-tier TrueNAS-style keychain).
+ * credentials.php - the Credentials tab body (two-tier keychain).
  *
  * Two sections:
  *   1. SSH Keys     - list (name, type/fingerprint), generate, import, delete.

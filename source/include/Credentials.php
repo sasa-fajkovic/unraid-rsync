@@ -37,7 +37,7 @@
  *       (reversible, NOT encryption - documented as recoverable by anyone with
  *       flash access).
  *
- * Referential integrity (the TrueNAS used_by pattern) is enforced by the
+ * Referential integrity (a used_by pattern) is enforced by the
  * handler, which calls usedBy() / the typed delete helpers here:
  *   - deleting a KEY referenced by any connection is BLOCKED (the caller is
  *     told which connections depend on it);
@@ -637,7 +637,7 @@ class Credentials
 
     /**
      * Report what depends on a credential object so the UI/handler can enforce
-     * the TrueNAS used_by pattern on delete.
+     * the used_by pattern on delete.
      *
      * For a KEY ($type='key'): returns the NAMES of connections referencing it
      * (deletion must be blocked while non-empty).

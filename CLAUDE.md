@@ -5,7 +5,7 @@ Guidance for AI agents (and humans) working in this repository.
 ## What this is
 
 A **native Unraid 7.x webGui plugin** (PHP) that schedules and monitors **rsync
-backup jobs over SSH** — closer in spirit to TrueNAS's Rsync Tasks than to a
+backup jobs over SSH** — a multi-job rsync scheduler, not a
 single-schedule rsync plugin. It is written **from scratch**; it is **not** based
 on, forked from, or derived from any other plugin.
 

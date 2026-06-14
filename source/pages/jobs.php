@@ -500,7 +500,7 @@ input.ur-switch:checked::before { transform: translateX(20px); }
 input.ur-switch:focus-visible { outline: 2px solid var(--blue-500, #2196f3); outline-offset: 2px; }
 input.ur-switch:disabled { opacity: 0.5; cursor: default; }
 
-/* TrueNAS-style colored state badges + the per-run log viewer. Colors pull from
+/* Colored state badges + the per-run log viewer. Colors pull from
    the inherited dynamix palette where available (--orange-500, --green-...),
    with safe fallbacks so the badges read correctly under any theme. */
 .ur-badge {
