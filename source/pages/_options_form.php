@@ -565,6 +565,24 @@ if (!function_exists('ur_emit_option_help_assets')) {
     ev.preventDefault();
     toggle(el);
   });
+
+  /* Safety UX: when the destructive "Delete extraneous files" (--delete) box is
+   * ticked ON and no Max delete cap is set yet, seed a sensible cap (25) so a
+   * misconfigured mirror can't wipe an unbounded number of destination files on
+   * its first run. Purely presentational — the server stays the source of truth
+   * and still warns when --delete has no cap. Delegated so it also covers job
+   * cards cloned client-side; matches only the exact [delete] box (NOT
+   * [deleteExcluded]) and never overwrites a value the user already typed. */
+  document.addEventListener('change', function (ev) {
+    var t = ev.target;
+    if (!t || t.type !== 'checkbox' || !t.checked) { return; }
+    var name = t.getAttribute('name') || '';
+    if (!/\[delete\]$/.test(name)) { return; }
+    var box = t.closest ? t.closest('.ur-rsync-options') : null;
+    if (!box) { return; }
+    var md = box.querySelector('input[name$="[maxDelete]"]');
+    if (md && String(md.value).trim() === '') { md.value = '25'; }
+  });
 })();
 </script>
         <?php
