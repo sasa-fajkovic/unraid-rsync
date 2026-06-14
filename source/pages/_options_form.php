@@ -638,3 +638,65 @@ if (!function_exists('ur_emit_ajax_helpers')) {
         <?php
     }
 }
+
+if (!function_exists('ur_emit_form_enable_assets')) {
+    /**
+     * Emit (once per page) a tiny delegated handler that RE-ENABLES the plugin's
+     * own form submit ("Apply") buttons the moment the user edits a field or
+     * clicks an add/remove control inside one of our forms.
+     *
+     * WHY (a live UI bug): Unraid's settings framework disables a form's submit
+     * button on load until IT detects a change - but it only re-enables forms it
+     * manages, NOT the plugin's custom forms. The Credentials *connection* form
+     * (a non-markdown <form>) is the worst case: its Apply starts disabled and is
+     * NEVER re-enabled, so a connection cannot be saved through the UI at all
+     * (typing in a field, even with a real keystroke, leaves Apply greyed out).
+     * The markdown Jobs/Global-Settings forms can hit the same dead state.
+     *
+     * Setting disabled=false on input/change/click is idempotent and cannot fight
+     * the framework (which itself only ever ENABLES on change); it simply
+     * guarantees the plugin's own buttons become clickable once the form is dirty.
+     * All static markup; no user data is interpolated.
+     */
+    function ur_emit_form_enable_assets(): void
+    {
+        static $done = false;
+        if ($done) {
+            return;
+        }
+        $done = true;
+        ?>
+<script type="text/javascript">
+(function () {
+  'use strict';
+  if (window.urFormEnableWired) { return; }
+  window.urFormEnableWired = true;
+
+  /* The plugin's forms all carry an id beginning "ur-" (ur-jobs-form,
+   * ur-keys-form, ur-conns-form, ur-settings-form). */
+  function pluginForm(el) {
+    return (el && el.closest) ? el.closest('form[id^="ur-"]') : null;
+  }
+  function enableSubmit(form) {
+    if (!form) { return; }
+    var btns = form.querySelectorAll('input[type=submit], button[type=submit]');
+    for (var i = 0; i < btns.length; i++) { btns[i].disabled = false; }
+  }
+
+  /* Capture phase so we still see the event if a child handler stops bubbling. */
+  ['input', 'change'].forEach(function (evt) {
+    document.addEventListener(evt, function (ev) {
+      enableSubmit(pluginForm(ev.target));
+    }, true);
+  });
+  /* Add/remove controls (real <button>s; the "?" help affordance is a role=button
+   * <span>, so it is intentionally ignored) also make a form dirty. */
+  document.addEventListener('click', function (ev) {
+    var btn = (ev.target && ev.target.closest) ? ev.target.closest('button') : null;
+    if (btn) { enableSubmit(pluginForm(btn)); }
+  }, true);
+})();
+</script>
+        <?php
+    }
+}

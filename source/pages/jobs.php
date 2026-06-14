@@ -568,6 +568,9 @@ ur_emit_option_help_assets();
  * save AJAX surface a non-JSON 403/500 WITH its HTTP status instead of failing
  * silently in r.json() (the same fix the Credentials page already carries). */
 ur_emit_ajax_helpers();
+/* Re-enable the plugin's own Apply button once the form is edited (Unraid's
+ * framework disables it on load and won't re-enable our custom forms). */
+ur_emit_form_enable_assets();
 ?>
 <div class="ur-jobs-page">
 <div class="title">

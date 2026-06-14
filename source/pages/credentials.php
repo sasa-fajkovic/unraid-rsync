@@ -379,6 +379,13 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
   </dd>
 </dl>
 <div id="ur-key-result" class="ur-result"></div>
+<?php
+/* Re-enable the plugin's own submit buttons once a form is edited. Unraid's
+ * settings framework disables them on load and does NOT re-enable our custom
+ * (non-markdown) Connection form, which would otherwise leave Apply permanently
+ * greyed out and a connection impossible to save through the UI. */
+ur_emit_form_enable_assets();
+?>
 
 <!-- Rename/reorder existing keys (no secret material in this form). -->
 <form method="POST" action="<?=htmlspecialchars($handlerUrl, ENT_QUOTES, 'UTF-8')?>" id="ur-keys-form">

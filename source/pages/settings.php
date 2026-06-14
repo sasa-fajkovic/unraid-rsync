@@ -46,6 +46,9 @@ ur_emit_option_help_assets();
  * text->JSON parse that surfaces a non-JSON 403/500 WITH its status instead of
  * failing silently in r.json(). */
 ur_emit_ajax_helpers();
+/* Re-enable the plugin's own Apply button once the form is edited (Unraid's
+ * framework disables it on load and won't re-enable our custom forms). */
+ur_emit_form_enable_assets();
 ?>
 <style>
 /* Clear Unraid's fixed bottom status bar (#footer, "Array Started", ~30-40px tall

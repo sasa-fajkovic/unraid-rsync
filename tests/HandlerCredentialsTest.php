@@ -760,4 +760,113 @@ final class HandlerCredentialsTest extends TestCase
         [, $code] = $this->runCapture(fn() => ur_handle_request());
         $this->assertSame(405, $code);
     }
+
+    // --- Robust var.ini csrf read: recover the token even when parse_ini_file()
+    //     bails on an UNRELATED malformed line elsewhere in the (large,
+    //     machine-written) state file. This is the live-403 class: a readable
+    //     var.ini whose canonical csrf_token line is fine, but whose overall
+    //     parse fails, must still yield the token on a direct POST. ------------
+
+    /**
+     * Sanity: a stray section bracket makes parse_ini_file() return FALSE for the
+     * whole file, yet ur_csrf_tokens_from_ini() recovers the clean token line.
+     */
+    public function testCsrfTokensFromIniRecoversWhenParseIniFails(): void
+    {
+        if (!defined('UR_VAR_INI_PATHS')) {
+            $this->markTestSkipped('UR_VAR_INI_PATHS not overridable in this build');
+        }
+        $path = UR_VAR_INI_PATHS[0];
+        @mkdir(dirname($path), 0777, true);
+        // The trailing ']' is a syntax error that makes parse_ini_file() bail on
+        // the ENTIRE file (verified across PHP 8.x); the csrf_token line is fine.
+        file_put_contents($path, "csrf_token=\"recovered-token\"\nversion=\"7.3.1\"\n]\n");
+        try {
+            $this->assertFalse(
+                @parse_ini_file($path, false, INI_SCANNER_RAW),
+                'precondition: parse_ini_file must fail on this file'
+            );
+            $this->assertSame(['recovered-token'], ur_csrf_tokens_from_ini($path));
+        } finally {
+            @unlink($path);
+        }
+    }
+
+    /**
+     * THE live bug end-to-end: direct POST (no $var/$_SESSION), the ONLY token
+     * source is a var.ini whose parse_ini_file() fails - the supplied (correct)
+     * token must still be accepted via the robust line scan.
+     */
+    public function testCsrfAcceptedFromUnparseableVarIniOnDirectPost(): void
+    {
+        if (!defined('UR_VAR_INI_PATHS')) {
+            $this->markTestSkipped('UR_VAR_INI_PATHS not overridable in this build');
+        }
+        $path = UR_VAR_INI_PATHS[0];
+        @mkdir(dirname($path), 0777, true);
+        file_put_contents($path, "csrf_token=\"live-token\"\n]\n");
+        $prevSession = $_SESSION ?? null;
+        try {
+            unset($GLOBALS['var']);     // direct POST: front controller never set $var
+            unset($_SESSION);           // and no session token either
+            $_POST = ['csrf_token' => 'live-token'];
+            [, $code] = $this->runCapture(fn() => $this->assertTrue(ur_check_csrf()));
+            $this->assertSame(200, $code);
+        } finally {
+            @unlink($path);
+            if ($prevSession === null) {
+                unset($_SESSION);
+            } else {
+                $_SESSION = $prevSession;
+            }
+            $GLOBALS['var'] = ['csrf_token' => 'test-token'];
+        }
+    }
+
+    /** Unquoted and whitespace-padded token forms are both recovered. */
+    public function testCsrfTokensFromIniHandlesUnquotedAndPadding(): void
+    {
+        if (!defined('UR_VAR_INI_PATHS')) {
+            $this->markTestSkipped('UR_VAR_INI_PATHS not overridable in this build');
+        }
+        $path = UR_VAR_INI_PATHS[0];
+        @mkdir(dirname($path), 0777, true);
+        file_put_contents($path, "csrf_token = ABC123DEF\n]\n");
+        try {
+            $this->assertSame(['ABC123DEF'], ur_csrf_tokens_from_ini($path));
+        } finally {
+            @unlink($path);
+        }
+    }
+
+    /** A missing/unreadable file yields no tokens (never an error). */
+    public function testCsrfTokensFromIniMissingFileReturnsEmpty(): void
+    {
+        $this->assertSame([], ur_csrf_tokens_from_ini('/no/such/var.ini'));
+        $this->assertSame([], ur_csrf_tokens_from_ini(''));
+    }
+
+    // --- csrfProbe diagnostic: read-only, and NEVER leaks a token ------------
+
+    public function testCsrfProbeReportsAndNeverLeaksToken(): void
+    {
+        if (!defined('UR_VAR_INI_PATHS')) {
+            $this->markTestSkipped('UR_VAR_INI_PATHS not overridable in this build');
+        }
+        $path = UR_VAR_INI_PATHS[0];
+        @mkdir(dirname($path), 0777, true);
+        file_put_contents($path, "csrf_token=\"secret-xyz\"\n");
+        try {
+            $_GET = ['t' => 'secret-xyz'];
+            [$body, $code] = $this->runCapture(fn() => ur_action_csrf_probe());
+            $this->assertSame(200, $code);
+            $this->assertTrue($body['ok']);
+            $this->assertTrue($body['probeMatchAny'], 'live token should match a candidate');
+            // The token must never appear anywhere in the JSON response.
+            $this->assertStringNotContainsString('secret-xyz', json_encode($body));
+        } finally {
+            @unlink($path);
+            $_GET = [];
+        }
+    }
 }
