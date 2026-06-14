@@ -178,12 +178,28 @@ class KeyTools
         if ($dir === '') {
             return ['ok' => false, 'error' => 'Unable to create a temp dir.'];
         }
-        $keyFile = $dir . '/key';
-        if (@file_put_contents($keyFile, rtrim($privateKey, "\r\n") . "\n") === false) {
+        // Write the private key so it is 0600 from the moment it exists - never
+        // momentarily world-readable. A restrictive umask makes the OS CREATE the
+        // file at 0600 (0666 & ~0177), so correctness does not hinge on the
+        // chmod() succeeding (it may be a no-op on some FS). The 0700 parent dir
+        // (tempDir()) already gates access; this closes the write window too
+        // (defence in depth). [SEC-03]
+        $keyFile  = $dir . '/key';
+        $prevMask = umask(0177);
+        $fh = @fopen($keyFile, 'w');
+        if ($fh === false) {
+            umask($prevMask);
             self::rmTempDir($dir);
             return ['ok' => false, 'error' => 'Unable to write the key for validation.'];
         }
-        @chmod($keyFile, 0600);
+        @chmod($keyFile, 0600); // belt-and-suspenders; umask already forced 0600
+        $wrote = @fwrite($fh, rtrim($privateKey, "\r\n") . "\n");
+        @fclose($fh);
+        umask($prevMask);
+        if ($wrote === false) {
+            self::rmTempDir($dir);
+            return ['ok' => false, 'error' => 'Unable to write the key for validation.'];
+        }
 
         // -P "" supplies an empty passphrase non-interactively; a key that
         // actually needs a passphrase fails rather than hanging on a prompt.

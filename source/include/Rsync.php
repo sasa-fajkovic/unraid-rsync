@@ -560,6 +560,17 @@ class Rsync
             }
         }
 
+        // Close any pipe stream_select left open (e.g. on a select error that
+        // broke the loop above before EOF). Leaking the fd would not hang the
+        // run - proc_close + the group SIGTERM still tear the child down - but
+        // closing them keeps the fd table tidy across a long-lived runner.
+        // Mirrors KeyTools::runArgv. [ROB-01]
+        foreach ($open as $stream) {
+            if (is_resource($stream)) {
+                fclose($stream);
+            }
+        }
+
         // Capture the final status BEFORE proc_close. proc_close only returns
         // the exit CODE and gives -1 once the child has already been reaped, so
         // a process killed by a signal (our SIGTERM abort) would otherwise be
