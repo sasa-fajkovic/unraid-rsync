@@ -109,9 +109,53 @@ class Config
             'schemaVersion' => self::SCHEMA_VERSION,
             'global' => [
                 'defaultRsyncOptions' => self::defaultRsyncOptions(),
+                // How many past executions to keep PER JOB - bounds both the
+                // tmpfs run logs and the persistent history records.
+                'retention' => self::DEFAULT_RETENTION,
             ],
             'jobs' => [],
         ];
+    }
+
+    /** Default + bounds for the "keep last N executions" retention setting. */
+    const DEFAULT_RETENTION = 100;
+    const MIN_RETENTION     = 1;
+    const MAX_RETENTION     = 9999;
+
+    /**
+     * Clamp an arbitrary retention input to [MIN_RETENTION, MAX_RETENTION]; a
+     * non-numeric / missing value falls back to DEFAULT_RETENTION. Single source
+     * of truth for both the save-time clamp and the loaded value.
+     *
+     * @param mixed $value
+     */
+    public static function clampRetention($value): int
+    {
+        // Strict integer validation: FILTER_VALIDATE_INT rejects "1e3", "2.9",
+        // "" and other non-integer numerics (which a bare (int) cast would
+        // silently mangle to 1/2/0), falling back to the default instead.
+        $n = filter_var($value, FILTER_VALIDATE_INT);
+        if ($n === false) {
+            return self::DEFAULT_RETENTION;
+        }
+        if ($n < self::MIN_RETENTION) {
+            return self::MIN_RETENTION;
+        }
+        if ($n > self::MAX_RETENTION) {
+            return self::MAX_RETENTION;
+        }
+        return $n;
+    }
+
+    /** The effective retention from the loaded config (clamped). */
+    public static function retention(): int
+    {
+        try {
+            $cfg = self::load();
+        } catch (Throwable $e) {
+            return self::DEFAULT_RETENTION;
+        }
+        return self::clampRetention($cfg['global']['retention'] ?? self::DEFAULT_RETENTION);
     }
 
     /**
@@ -314,6 +358,8 @@ class Config
             : [];
         $out['global'] = [
             'defaultRsyncOptions' => self::mergeRsyncOptions($optsIn),
+            // retention: clamp to [MIN,MAX]; missing/garbage -> default.
+            'retention' => self::clampRetention($globalIn['retention'] ?? self::DEFAULT_RETENTION),
         ];
 
         // jobs: normalise each to the full default-job shape.

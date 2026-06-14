@@ -29,6 +29,7 @@ try {
     $loadError = $e->getMessage();
 }
 $defaultOpts = $config['global']['defaultRsyncOptions'] ?? Config::defaultRsyncOptions();
+$retention   = Config::clampRetention($config['global']['retention'] ?? Config::DEFAULT_RETENTION);
 $handlerUrl  = '/plugins/unraid.rsync/include/handler.php';
 
 /* Emit the option help CSS/JS once, in LIVE page-body context, before the form
@@ -77,6 +78,18 @@ ur_emit_form_enable_assets();
   <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf, ENT_QUOTES, 'UTF-8')?>">
 
   <?php ur_render_rsync_options($defaultOpts, 'global[defaultRsyncOptions]', 'ur_global'); ?>
+
+  <dl>
+    <dt class="ur-dt"><label for="ur_global_retention"><?=_('Keep last N executions')?></label></dt>
+    <dd>
+      <input type="number" id="ur_global_retention" name="global[retention]"
+             min="1" max="9999" step="1" inputmode="numeric"
+             value="<?=htmlspecialchars((string)$retention, ENT_QUOTES, 'UTF-8')?>">
+      <blockquote class="inline_help ur-help-text">
+        <?=_('How many past executions to keep per job — bounds both the in-RAM run logs and the persistent run history shown on the History tab. Oldest executions beyond this are pruned. 1–9999 (default 100).')?>
+      </blockquote>
+    </dd>
+  </dl>
 
   <div class="ur-actions">
     <input type="submit" value="<?=_('Apply')?>">
