@@ -71,6 +71,21 @@ class Runner
     }
 
     /**
+     * Whether the pcntl signal API is actually usable: present AND not blocked by
+     * php.ini's disable_functions. function_exists() alone is insufficient - a
+     * disabled function is still "defined" but fatals when called.
+     */
+    private static function pcntlUsable(): bool
+    {
+        if (!function_exists('pcntl_async_signals') || !function_exists('pcntl_signal')) {
+            return false;
+        }
+        $disabled = array_map('trim', explode(',', (string) ini_get('disable_functions')));
+        return !in_array('pcntl_async_signals', $disabled, true)
+            && !in_array('pcntl_signal', $disabled, true);
+    }
+
+    /**
      * Run a job end-to-end. Returns a structured result describing the outcome
      * (the CLI maps `state` to an exit code). Does its own logging; throws only
      * for truly unexpected internal failures (the orchestration failures - bad
@@ -155,9 +170,15 @@ class Runner
         // abort check (below) then records state=ABORTED through the normal
         // unwind. The handler also mirrors the request into the abort flag so the
         // between-pairs poll and the post-pair check agree. pcntl is a CLI-only
-        // extension; if it is unavailable we degrade to the prior behaviour.
-        if (function_exists('pcntl_async_signals') && function_exists('pcntl_signal')) {
-            pcntl_async_signals(true);
+        // extension; if it is unavailable OR disabled via disable_functions we
+        // degrade to the prior behaviour. The handlers + async-signal mode are
+        // process-GLOBAL, so we capture the prior async setting and RESTORE the
+        // disposition in the finally - otherwise a long-lived worker, or the test
+        // process (which calls run() many times), would leak our handlers.
+        $signalsInstalled = false;
+        $prevAsyncSignals = null;
+        if (self::pcntlUsable()) {
+            $prevAsyncSignals = pcntl_async_signals(true);
             $onAbortSignal = static function () use ($jobId): void {
                 try {
                     RunState::requestAbort($jobId);
@@ -167,6 +188,7 @@ class Runner
             };
             pcntl_signal(defined('SIGTERM') ? SIGTERM : 15, $onAbortSignal);
             pcntl_signal(defined('SIGINT') ? SIGINT : 2, $onAbortSignal);
+            $signalsInstalled = true;
         }
 
         $state    = Rsync::STATE_SUCCESS;
@@ -383,6 +405,17 @@ class Runner
             // Release the per-job run lock last, so a queued launch only proceeds
             // once this run has fully wound down (state cleared, summary written).
             RunState::releaseLock($lock);
+
+            // Restore the signal disposition we changed, so our handlers/async
+            // mode never leak past this run (the detached runner exits anyway,
+            // but the test process and any future long-lived worker reuse it).
+            if ($signalsInstalled) {
+                pcntl_signal(defined('SIGTERM') ? SIGTERM : 15, SIG_DFL);
+                pcntl_signal(defined('SIGINT') ? SIGINT : 2, SIG_DFL);
+                if ($prevAsyncSignals !== null) {
+                    pcntl_async_signals((bool) $prevAsyncSignals);
+                }
+            }
         }
 
         $result = ['state' => $state, 'exitCode' => $exitCode, 'runLog' => $runLog];

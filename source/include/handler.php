@@ -1909,7 +1909,8 @@ function ur_action_env_diag(): void
         'runnerScriptIsFile' => is_file(ur_runner_script_path()),
         'procOpenEnabled'    => function_exists('proc_open') && !in_array('proc_open', $disabled, true),
         'execEnabled'        => function_exists('exec') && !in_array('exec', $disabled, true),
-        'pcntlAvailable'     => function_exists('pcntl_async_signals') && function_exists('pcntl_signal'),
+        'pcntlAvailable'     => function_exists('pcntl_async_signals') && function_exists('pcntl_signal')
+            && !in_array('pcntl_async_signals', $disabled, true) && !in_array('pcntl_signal', $disabled, true),
         'updateCronPath'     => $cronPath,
         'updateCronIsFile'   => is_file($cronPath),
         'updateCronReadable' => is_file($cronPath) && is_readable($cronPath),
