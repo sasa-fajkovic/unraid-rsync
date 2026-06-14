@@ -1,0 +1,15 @@
+version: 2
+# Keep the SHA-pinned GitHub Actions current. The workflows pin third-party
+# actions to a full commit SHA (supply-chain hardening); Dependabot opens a PR
+# to bump the SHA (and the trailing `# vX` comment) when a new release lands, so
+# the pins stay current without a human tracking upstream tags by hand.
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "ci"
+    labels:
+      - "dependencies"
+      - "github-actions"

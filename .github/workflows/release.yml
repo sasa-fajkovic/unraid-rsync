@@ -46,7 +46,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: Determine version + build ref
         id: version
@@ -140,7 +140,7 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           docker run --rm -e VERSION -v "$PWD":/workspace -w /workspace \
-            aclemons/slackware:15.0 \
+            aclemons/slackware:15.0@sha256:c4fff5e20f3fce49bb1a51f62c57cc2314e68d4aa0e15ad6067659c71c552ede \
             bash -c 'bash pkg_build.sh -y -V "$VERSION"'
           sudo chown -R "$(id -u):$(id -g)" .
 
@@ -151,7 +151,7 @@ jobs:
         run: cp unraid.rsync.plg archive/unraid.rsync.plg
 
       - name: Create GitHub Release (.txz + .plg)
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ steps.version.outputs.version }}
           # The tag does not exist yet (no tag trigger anymore); pin it to

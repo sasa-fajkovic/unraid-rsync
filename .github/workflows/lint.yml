@@ -17,12 +17,20 @@ on:
 permissions:
   contents: read
 
+# Cancel a superseded run when a newer push/PR-sync arrives on the same ref, so
+# rapid pushes don't pile up redundant lint runs. Keyed per-ref so different
+# branches/PRs never cancel each other. (Efficiency only - does not change which
+# checks are required or their pass/fail semantics.)
+concurrency:
+  group: lint-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: Validate .plg is well-formed XML
         run: |
@@ -39,7 +47,7 @@ jobs:
           echo "pkg_build.sh: syntax + shellcheck clean"
 
       - name: Set up PHP
-        uses: shivammathur/setup-php@v2
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2
         with:
           php-version: "8.4"
 
@@ -68,10 +76,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: Set up PHP
-        uses: shivammathur/setup-php@v2
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2
         with:
           php-version: "8.4"
           tools: composer
