@@ -302,8 +302,9 @@ final class CronTest extends TestCase
     {
         Cron::$updateCronRunner = null; // exercise the REAL default runner
         $tmp = tempnam(sys_get_temp_dir(), 'urcron');
-        file_put_contents($tmp, "exit 0\n"); // deliberately NO shebang
-        chmod($tmp, 0755);
+        $this->assertNotFalse($tmp, 'tempnam failed');
+        $this->assertNotFalse(file_put_contents($tmp, "exit 0\n"), 'write failed'); // NO shebang
+        $this->assertTrue(chmod($tmp, 0755), 'chmod failed');
         Cron::$updateCronPath = $tmp;
         try {
             $this->assertSame(0, Cron::runUpdateCron(), 'shell-form must run a no-shebang script');
@@ -316,8 +317,9 @@ final class CronTest extends TestCase
     {
         Cron::$updateCronRunner = null;
         $tmp = tempnam(sys_get_temp_dir(), 'urcron');
-        file_put_contents($tmp, "exit 5\n");
-        chmod($tmp, 0755);
+        $this->assertNotFalse($tmp, 'tempnam failed');
+        $this->assertNotFalse(file_put_contents($tmp, "exit 5\n"), 'write failed');
+        $this->assertTrue(chmod($tmp, 0755), 'chmod failed');
         Cron::$updateCronPath = $tmp;
         try {
             $this->assertSame(5, Cron::runUpdateCron());
@@ -331,6 +333,23 @@ final class CronTest extends TestCase
         Cron::$updateCronRunner = null;
         Cron::$updateCronPath = '/no/such/update_cron';
         $this->assertSame(-1, Cron::runUpdateCron());
+    }
+
+    public function testRealRunUpdateCronNonExecutableReturnsMinusOne(): void
+    {
+        // Present but NOT executable must be a launch FAILURE (-1), not a shell's
+        // 126 - so -1 keeps meaning "could not spawn".
+        Cron::$updateCronRunner = null;
+        $tmp = tempnam(sys_get_temp_dir(), 'urcron');
+        $this->assertNotFalse($tmp, 'tempnam failed');
+        $this->assertNotFalse(file_put_contents($tmp, "exit 0\n"), 'write failed');
+        $this->assertTrue(chmod($tmp, 0644), 'chmod failed'); // no execute bit
+        Cron::$updateCronPath = $tmp;
+        try {
+            $this->assertSame(-1, Cron::runUpdateCron());
+        } finally {
+            @unlink($tmp);
+        }
     }
 
     // =====================================================================
