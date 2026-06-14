@@ -377,6 +377,71 @@ final class OptionsFormHelpTest extends TestCase
         );
     }
 
+    // --- CQ-03: shared CSRF-token resolver ---------------------------------
+
+    public function testRenderCsrfTokenReadsVarGlobalAndDefaultsEmpty(): void
+    {
+        $prev = $GLOBALS['var'] ?? null;
+        try {
+            $GLOBALS['var'] = ['csrf_token' => 'tok-123'];
+            $this->assertSame('tok-123', ur_render_csrf_token());
+
+            // Missing/empty -> '' (a bare preview where the front controller
+            // never populated $var).
+            $GLOBALS['var'] = ['csrf_token' => ''];
+            $this->assertSame('', ur_render_csrf_token());
+            unset($GLOBALS['var']);
+            $this->assertSame('', ur_render_csrf_token());
+        } finally {
+            if ($prev === null) {
+                unset($GLOBALS['var']);
+            } else {
+                $GLOBALS['var'] = $prev;
+            }
+        }
+    }
+
+    // --- SEC-05: script-context JSON hardening ------------------------------
+
+    public function testUrJsEscapesScriptBreakingCharacters(): void
+    {
+        // A value that would otherwise close the <script> element or break out of
+        // a JS string must be \u-escaped, never emitted raw.
+        $out = ur_js('</script><svg onload=alert(1)>');
+        $this->assertStringNotContainsString('</script>', $out);
+        $this->assertStringNotContainsString('<', $out);
+        $this->assertStringNotContainsString('>', $out);
+
+        // The HEX flags are actually in effect: a bare json_encode would leave
+        // & and ' raw and emit the plain escape for the double-quote. Assert the
+        // uXXXX hex escapes appear (matched without a backslash) + a round-trip.
+        $val  = 'a"b' . "'" . 'c&d';
+        $out2 = ur_js($val);
+        $this->assertStringContainsString('u0022', $out2); // double-quote -> hex (JSON_HEX_QUOT)
+        $this->assertStringContainsString('u0027', $out2); // apostrophe  -> hex (JSON_HEX_APOS)
+        $this->assertStringContainsString('u0026', $out2); // ampersand   -> hex (JSON_HEX_AMP)
+        $this->assertStringNotContainsString('&', $out2);  // never raw
+        $this->assertSame($val, json_decode($out2));       // escapes are valid
+
+        // ...and a normal token still round-trips as valid JSON.
+        $this->assertSame('plain-token', json_decode(ur_js('plain-token')));
+    }
+
+    public function testPageBodiesEmitCsrfViaUrJsNotRawJsonEncode(): void
+    {
+        // Defence-in-depth regression: the inline-script HANDLER/CSRF vars must go
+        // through ur_js() (HEX flags), never a bare json_encode().
+        foreach (['jobs.php', 'status.php', 'credentials.php'] as $page) {
+            $src = file_get_contents(__DIR__ . '/../source/pages/' . $page);
+            $this->assertIsString($src, "could not read $page");
+            $this->assertDoesNotMatchRegularExpression(
+                '/=\s*json_encode\(\$(?:csrf|handlerUrl)\b/',
+                $src,
+                "$page must emit the CSRF/handler JS vars via ur_js(), not raw json_encode()."
+            );
+        }
+    }
+
     /**
      * Render the shared options partial to a string.
      *

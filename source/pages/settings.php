@@ -14,11 +14,8 @@
 require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Config.php';
 require_once '/usr/local/emhttp/plugins/unraid.rsync/pages/_options_form.php';
 
-// On a live webGui $var is global (state). Read the CSRF token defensively.
-$csrf = '';
-if (isset($GLOBALS['var']) && is_array($GLOBALS['var']) && !empty($GLOBALS['var']['csrf_token'])) {
-    $csrf = (string) $GLOBALS['var']['csrf_token'];
-}
+// On a live webGui $var is global (state); ur_render_csrf_token reads it defensively.
+$csrf = ur_render_csrf_token();
 
 // If the on-disk config can't be read (unreadable, corrupt, or from a newer
 // schema), render defaults for DISPLAY only but surface a visible warning -

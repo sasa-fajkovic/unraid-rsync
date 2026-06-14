@@ -61,6 +61,50 @@ if (!function_exists('ur_t')) {
     }
 }
 
+if (!function_exists('ur_js')) {
+    /**
+     * json_encode a value for embedding inside an inline <script> block, with the
+     * HTML-context hardening flags set so '<', '>', '&', single/double quotes are
+     * \u-escaped. This prevents a value containing "</script>" (or quotes that
+     * break out of an attribute/string) from terminating the script element -
+     * defence in depth for the handler URL + CSRF token we emit as JS vars.
+     *
+     * @param mixed $value
+     */
+    function ur_js($value): string
+    {
+        try {
+            return json_encode(
+                $value,
+                JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP | JSON_THROW_ON_ERROR
+            );
+        } catch (\JsonException $e) {
+            // Never emit a bare `var X = ;` (which would break the whole script
+            // block). On an encode failure (e.g. invalid UTF-8) fall back to the
+            // syntactically-valid JS literal `null`.
+            return 'null';
+        }
+    }
+}
+
+if (!function_exists('ur_render_csrf_token')) {
+    /**
+     * The webGui CSRF token the page echoes into its hidden inputs / JS, or ''
+     * when the front controller has not populated $GLOBALS['var'] (e.g. a bare
+     * preview). Every page body derived this identically; centralised here so
+     * there is one source. The handler still verifies the SUPPLIED token
+     * match-ANY against the server-trusted candidates - this is only what the
+     * page renders, never the trust decision.
+     */
+    function ur_render_csrf_token(): string
+    {
+        if (isset($GLOBALS['var']) && is_array($GLOBALS['var']) && !empty($GLOBALS['var']['csrf_token'])) {
+            return (string) $GLOBALS['var']['csrf_token'];
+        }
+        return '';
+    }
+}
+
 if (!function_exists('ur_required_mark')) {
     /**
      * The visual "required" cue appended to a mandatory field's label: a red

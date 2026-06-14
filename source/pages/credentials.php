@@ -33,10 +33,7 @@ require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Credentials.php';
 require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Ssh.php';
 require_once '/usr/local/emhttp/plugins/unraid.rsync/pages/_options_form.php'; // ur_h / ur_t
 
-$csrf = '';
-if (isset($GLOBALS['var']) && is_array($GLOBALS['var']) && !empty($GLOBALS['var']['csrf_token'])) {
-    $csrf = (string) $GLOBALS['var']['csrf_token'];
-}
+$csrf = ur_render_csrf_token();
 
 // Load credentials for DISPLAY only; on a read error show defaults + a warning
 // (the handler will refuse to save, 409, until it's resolved). Never persist
@@ -465,8 +462,8 @@ ur_emit_form_enable_assets();
 (function () {
   'use strict';
 
-  var HANDLER = <?=json_encode($handlerUrl)?>;
-  var CSRF = <?=json_encode($csrf)?>;
+  var HANDLER = <?=ur_js($handlerUrl)?>;
+  var CSRF = <?=ur_js($csrf)?>;
 
   /* POST a form and ALWAYS resolve to { ok, status, body, parseError }:
    *   - ok         the HTTP response was 2xx;
