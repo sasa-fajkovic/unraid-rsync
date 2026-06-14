@@ -22,7 +22,9 @@ final class FakeKeyTools extends KeyTools
     /**
      * Snapshot of the -f key file at the moment a `-y` keygen runs, so a test can
      * prove the private key is already 0600 (and fully written) before ssh-keygen
-     * reads it. @var array{mode:int,content:string}|null
+     * reads it.
+     *
+     * @var array{mode:int,content:string}|null
      */
     public static $keyFileSnapshotAtKeygen = null;
 
