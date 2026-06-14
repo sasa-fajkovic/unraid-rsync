@@ -143,6 +143,34 @@ final class HandlerStatusTest extends TestCase
         }
     }
 
+    public function testRunnerClassLoadedByHandler(): void
+    {
+        // Regression guard for the live "Class Runner not found" 500: getStatus
+        // calls Runner::readSummary, so handler.php must require Runner itself
+        // (there is no autoloader). Asserting class_exists() in THIS process is
+        // meaningless (the bootstrap already loaded Runner), so we load ONLY
+        // handler.php in a fresh PHP process and check class_exists(...,false)
+        // with autoload disabled - exactly the live condition.
+        $repo    = dirname(__DIR__);
+        $handler = $repo . '/source/include/handler.php';
+        $code    = 'define("UR_HANDLER_TESTING", true); require ' . var_export($handler, true) . ';'
+            . ' echo class_exists("Runner", false) ? "RUNNER_OK" : "RUNNER_MISSING";';
+        $cmd = escapeshellarg(PHP_BINARY) . ' -d error_reporting=0 -r ' . escapeshellarg($code) . ' 2>&1';
+        $out = (string) shell_exec($cmd);
+        $this->assertStringContainsString('RUNNER_OK', $out, "handler.php must require Runner; got: $out");
+    }
+
+    public function testEnvDiagReportsEnvironmentFacts(): void
+    {
+        [$body, $code] = $this->runCapture('ur_action_env_diag');
+        $this->assertSame(200, $code);
+        $this->assertTrue($body['ok']);
+        foreach (['phpSapi', 'resolvedPhpBinary', 'runnerScript', 'procOpenEnabled', 'updateCronPath', 'updateCronIsFile'] as $k) {
+            $this->assertArrayHasKey($k, $body);
+        }
+        $this->assertNotSame('', $body['resolvedPhpBinary']);
+    }
+
     // ---- ur_derive_state ---------------------------------------------------
 
     public function testDeriveStateRunningOverridesSummary(): void

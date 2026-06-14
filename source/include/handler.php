@@ -72,6 +72,12 @@ require_once __DIR__ . '/Rsync.php';
 require_once __DIR__ . '/RunState.php';
 require_once __DIR__ . '/Logger.php';
 require_once __DIR__ . '/Cron.php';
+// Runner is used by getStatus (Runner::readSummary). There is no autoloader, so
+// it MUST be required explicitly: without this, every getStatus poll throws
+// "Class Runner not found" the moment a job exists (the unit tests masked it
+// because the bootstrap loads all classes). The detached run itself launches a
+// separate runner.php process that requires Runner on its own.
+require_once __DIR__ . '/Runner.php';
 
 /**
  * Re-sync the live crontab to the saved config. This is the single place the
@@ -1884,6 +1890,33 @@ function ur_action_csrf_probe(): void
 }
 
 /**
+ * GET envDiag: a READ-ONLY environment diagnostic for the detached-runner and
+ * cron-apply paths, used to live-diagnose "update_cron exit -1" and runner
+ * launch issues. Reports only environment facts (paths, booleans) - no secrets.
+ *
+ * TODO(remove): temporary instrumentation; delete with the other diagnostics.
+ */
+function ur_action_env_diag(): void
+{
+    $disabled = array_map('trim', explode(',', (string) ini_get('disable_functions')));
+    $cronPath = Cron::updateCronPath();
+    sendResponse([
+        'ok'                 => true,
+        'phpSapi'            => PHP_SAPI,
+        'phpBinaryConst'     => defined('PHP_BINARY') ? PHP_BINARY : '',
+        'resolvedPhpBinary'  => ur_php_binary(),
+        'runnerScript'       => ur_runner_script_path(),
+        'runnerScriptIsFile' => is_file(ur_runner_script_path()),
+        'procOpenEnabled'    => function_exists('proc_open') && !in_array('proc_open', $disabled, true),
+        'execEnabled'        => function_exists('exec') && !in_array('exec', $disabled, true),
+        'updateCronPath'     => $cronPath,
+        'updateCronIsFile'   => is_file($cronPath),
+        'updateCronReadable' => is_file($cronPath) && is_readable($cronPath),
+        'updateCronExec'     => is_file($cronPath) && is_executable($cronPath),
+    ], 200);
+}
+
+/**
  * Front-controller dispatch. Skipped when included by the test harness
  * (UR_HANDLER_TESTING defined), which calls the individual functions directly.
  *
@@ -1931,6 +1964,16 @@ function ur_dispatch(): void
         // TODO(remove): temporary instrumentation.
         case 'csrfProbe':
             ur_action_csrf_probe();
+            return;
+
+        // Temporary read-only environment diagnostic (no CSRF, no secrets).
+        // GET-only, like the other read-only pollers. TODO(remove).
+        case 'envDiag':
+            if ($method !== 'GET') {
+                sendError('envDiag requires GET.', 405);
+                return;
+            }
+            ur_action_env_diag();
             return;
 
         case 'saveConfig':
