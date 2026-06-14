@@ -543,120 +543,23 @@ class Job
 
     /**
      * Validate a 5-field cron expression (minute hour day-of-month month
-     * day-of-week). Supports the common syntax: *, ranges (a-b), lists (a,b),
-     * steps (* / n, a-b/n), and named month/day-of-week tokens (jan..dec,
-     * sun..sat). This is intentionally a structural check - it does not need to
-     * match vixie-cron exactly, only to reject clearly-malformed input on save.
+     * day-of-week). Supports the common syntax: "*", ranges (a-b), lists (a,b),
+     * step values ("*" or "a-b" followed by "/N", with no spaces), and named
+     * month/day-of-week tokens (jan..dec, sun..sat).
+     *
+     * Delegates to Cron::isValidExpression so the SAVE-TIME validator and the
+     * NEXT-RUN calculator share one grammar and can never drift (previously this
+     * re-implemented the same parser independently - CQ-04). Cron is lazily
+     * required because some callers (e.g. the runner) load Job without Cron; the
+     * require is a no-op when Cron is already loaded, and Cron.php's own top-level
+     * require of Job.php is already satisfied by the time we get here.
      */
     public static function isValidCron(string $expr): bool
     {
-        $expr = trim($expr);
-        if ($expr === '') {
-            return false;
+        if (!class_exists('Cron', false)) {
+            require_once __DIR__ . '/Cron.php';
         }
-        // Normalise internal whitespace to single spaces.
-        $fields = preg_split('/\s+/', $expr);
-        if (!is_array($fields) || count($fields) !== 5) {
-            return false;
-        }
-
-        // [min, hour, dom, month, dow] ranges.
-        $ranges = [
-            [0, 59],
-            [0, 23],
-            [1, 31],
-            [1, 12],
-            [0, 7],   // 0 and 7 are both Sunday
-        ];
-        $monthNames = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
-        $dowNames   = ['sun','mon','tue','wed','thu','fri','sat'];
-
-        foreach ($fields as $idx => $field) {
-            $allowNames = ($idx === 3) ? $monthNames : (($idx === 4) ? $dowNames : []);
-            if (!self::isValidCronField($field, $ranges[$idx][0], $ranges[$idx][1], $allowNames)) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    /**
-     * Validate a single cron field against [$min,$max], allowing the listed
-     * lowercase names as substitutes for numbers. Handles comma lists, ranges,
-     * and step values.
-     *
-     * @param array<int,string> $names
-     */
-    private static function isValidCronField(string $field, int $min, int $max, array $names): bool
-    {
-        if ($field === '') {
-            return false;
-        }
-        // Comma-separated list: every element must be valid.
-        foreach (explode(',', $field) as $part) {
-            if ($part === '') {
-                return false;
-            }
-            // Optional step: "<range>/<n>". We require n to be a positive
-            // integer; the range part is validated below.
-            if (strpos($part, '/') !== false) {
-                [$rangePart, $stepPart] = explode('/', $part, 2);
-                if (!ctype_digit($stepPart) || (int) $stepPart < 1) {
-                    return false;
-                }
-                $part = $rangePart;
-            }
-
-            if ($part === '*') {
-                // "*" or "*/n" is always fine.
-                continue;
-            }
-
-            // Range "a-b" or single value "a".
-            if (strpos($part, '-') !== false) {
-                [$lo, $hi] = explode('-', $part, 2);
-                $loVal = self::cronValue($lo, $names);
-                $hiVal = self::cronValue($hi, $names);
-                if ($loVal === null || $hiVal === null) {
-                    return false;
-                }
-                if ($loVal < $min || $hiVal > $max || $loVal > $hiVal) {
-                    return false;
-                }
-            } else {
-                $val = self::cronValue($part, $names);
-                if ($val === null || $val < $min || $val > $max) {
-                    return false;
-                }
-                // A bare value with a step (e.g. "5/10") is unusual but harmless.
-            }
-        }
-        return true;
-    }
-
-    /**
-     * Resolve a single cron token to an int: either a numeric string or a
-     * recognised lowercase name. Returns null if unrecognised.
-     *
-     * @param array<int,string> $names
-     */
-    private static function cronValue(string $token, array $names): ?int
-    {
-        $token = trim($token);
-        if ($token === '') {
-            return null;
-        }
-        if (ctype_digit($token)) {
-            return (int) $token;
-        }
-        if (!empty($names)) {
-            $idx = array_search(strtolower($token), $names, true);
-            if ($idx !== false) {
-                // month names map jan=1..dec=12; dow names map sun=0..sat=6.
-                return (count($names) === 12) ? ($idx + 1) : $idx;
-            }
-        }
-        return null;
+        return Cron::isValidExpression($expr);
     }
 
     /**

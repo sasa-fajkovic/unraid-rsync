@@ -208,6 +208,29 @@ final class CronTest extends TestCase
         $this->assertStringNotContainsString('whoami', $content);
     }
 
+    public function testIsValidExpressionMatchesJobIsValidCron(): void
+    {
+        // CQ-04: Job::isValidCron now delegates to Cron::isValidExpression, so the
+        // public Cron entry point must agree with the save-time validator across
+        // valid, invalid, and named/step/range forms.
+        $cases = [
+            '0 3 * * *'                 => true,
+            '*/15 0-6 * jan-mar mon-fri' => true,
+            '0 0 1,15 * *'              => true,
+            '15 2 * * 0'                => true,
+            ''                          => false,
+            'bad'                       => false,
+            '60 * * * *'                => false,   // minute out of range
+            '0 3 * * 8'                 => false,   // dow out of range
+            '* * * *'                   => false,   // only 4 fields
+            '0 3 * * mon-'              => false,   // malformed range
+        ];
+        foreach ($cases as $expr => $expected) {
+            $this->assertSame($expected, Cron::isValidExpression($expr), "Cron::isValidExpression('$expr')");
+            $this->assertSame(Job::isValidCron($expr), Cron::isValidExpression($expr), "parity for '$expr'");
+        }
+    }
+
     public function testApplyAcceptsSafeIdCharacters(): void
     {
         // Dots, underscores, hyphens, digits and letters are all allowed.
