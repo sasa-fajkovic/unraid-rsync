@@ -1,0 +1,17 @@
+title = "unraid-rsync gitleaks config"
+
+# Start from gitleaks' built-in ruleset (private keys, cloud creds, tokens, ...).
+[extend]
+useDefault = true
+
+[allowlist]
+description = """
+The PHPUnit fixtures under tests/ use OBVIOUSLY-FAKE SSH keys (e.g. a literal
+"-----BEGIN OPENSSH PRIVATE KEY-----\\nFAKE\\n-----END..." body) and synthetic
+hostnames to exercise key parsing/validation. They are not real secrets, so the
+default private-key rule is allowlisted for that path only. Production code
+(source/) and config are still fully scanned.
+"""
+paths = [
+  '''tests/.*''',
+]

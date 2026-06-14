@@ -96,3 +96,28 @@ jobs:
 
       - name: Run PHPUnit
         run: vendor/bin/phpunit --colors=never
+
+      - name: PHPStan static analysis
+        # Analyses the proc_open/ssh/rsync shell-out classes + CLI scripts
+        # (config in phpstan.neon.dist). A baseline absorbs pre-existing
+        # intentional findings, so this only fails on NEW regressions. The higher
+        # memory limit matches PHPStan's reflection needs.
+        run: vendor/bin/phpstan analyse --no-progress --memory-limit=1G
+
+  secret-scan:
+    name: gitleaks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository (full history)
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          # gitleaks scans the full commit history on push and the PR diff on
+          # pull_request, so it needs more than the default shallow clone.
+          fetch-depth: 0
+
+      - name: Scan for committed secrets (gitleaks)
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          # No SARIF/artifact upload; a finding just fails the job in the log.
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
