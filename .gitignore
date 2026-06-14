@@ -13,8 +13,9 @@
 # Sublime SFTP config sometimes used when sideloading to a live Unraid box
 sftp-config.json
 
-# PHP / PHPUnit (tests are run in CI; deps + caches are not committed)
+# PHP / PHPUnit (vendor + caches are not committed; composer.lock IS committed
+# - this is a "type: project", so the lock pins the exact dev toolchain for
+# reproducible CI test runs + integrity-verified installs).
 /vendor/
-/composer.lock
 /.phpunit.cache/
 .phpunit.result.cache
