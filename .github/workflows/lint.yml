@@ -90,8 +90,8 @@ jobs:
         run: composer validate --no-check-publish
 
       - name: Install dependencies
-        # --no-dev=false keeps phpunit; with the committed lock present this is a
-        # reproducible, integrity-verified install from the locked versions.
+        # With the committed lock present, this installs the exact pinned
+        # versions (incl. the phpunit dev dependency), so CI runs are reproducible.
         run: composer install --no-interaction --no-progress --prefer-dist
 
       - name: Run PHPUnit
