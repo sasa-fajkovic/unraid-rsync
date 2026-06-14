@@ -481,4 +481,64 @@ final class HandlerStatusTest extends TestCase
         [$body, $code] = $this->runCapture('ur_action_abort_job');
         $this->assertSame(404, $code, json_encode($body));
     }
+
+    // ---- abortJob orchestration (flag + signalling) ------------------------
+    // GAP-FILL: the existing abort tests cover only id-confinement (422) and the
+    // unknown-id 404. These cover the ACTION's contract for a KNOWN job:
+    //   - the abort flag is set FIRST (so the runner's between-pairs poll stops
+    //     the run even if no signal is sent);
+    //   - when the job is NOT running, no signal is sent (signalled=false), 200;
+    //   - an id that is not a configured job but HAS a live state file is still
+    //     accepted (an in-flight run whose job row was edited away).
+    // The actual posix_kill of a live runner pid is an integration concern (it
+    // needs a real /proc cmdline match) and is intentionally not simulated here.
+
+    public function testAbortKnownJobNotRunningSetsFlagAndReportsNotSignalled(): void
+    {
+        $id = $this->seedJob('to-abort');
+        // No run state -> RunState::isRunning() is false -> no signal sent.
+        RunState::clear($id);
+        RunState::clearAbort($id);
+        $this->assertFalse(RunState::abortRequested($id));
+
+        $_POST = ['id' => $id];
+        [$body, $code] = $this->runCapture('ur_action_abort_job');
+
+        $this->assertSame(200, $code, json_encode($body));
+        $this->assertTrue($body['ok']);
+        $this->assertSame($id, $body['jobId']);
+        $this->assertFalse($body['signalled'], 'a not-running job is not signalled');
+        // The flag is set regardless: the runner polls it between pairs.
+        $this->assertTrue(RunState::abortRequested($id), 'the abort flag is set even when not signalling');
+
+        RunState::clearAbort($id);
+    }
+
+    public function testAbortUnknownIdWithLiveStateIsAccepted(): void
+    {
+        // An id that is NOT a configured job (e.g. the job row was just deleted)
+        // but has a RUNTIME state file (a run is in flight) must still be
+        // abortable -> 200 + flag set, rather than 404.
+        $orphan = 'j-orphan-run';
+        // Ensure it is not in config.
+        $config = Config::load();
+        foreach (($config['jobs'] ?? []) as $j) {
+            $this->assertNotSame($orphan, (string) ($j['id'] ?? ''));
+        }
+        // Seed a runtime state file (no matching config job).
+        RunState::write($orphan, ['pid' => 999999, 'running' => true, 'currentLog' => '/x']);
+        RunState::clearAbort($orphan);
+
+        try {
+            $_POST = ['id' => $orphan];
+            [$body, $code] = $this->runCapture('ur_action_abort_job');
+
+            $this->assertSame(200, $code, json_encode($body));
+            $this->assertTrue($body['ok']);
+            $this->assertTrue(RunState::abortRequested($orphan), 'orphan in-flight run is abortable via its state file');
+        } finally {
+            RunState::clear($orphan);
+            RunState::clearAbort($orphan);
+        }
+    }
 }

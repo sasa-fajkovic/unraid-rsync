@@ -257,6 +257,36 @@ final class CronTest extends TestCase
         $this->assertStringContainsString('--job=j-disk', file_get_contents(Cron::cronFilePath()));
     }
 
+    public function testApplyBailsWithoutTouchingCronWhenConfigUnreadable(): void
+    {
+        // GAP-FILL: a config we CANNOT read must NOT clobber the live schedule.
+        // apply(null) must bail early: no cron file write/remove and update_cron
+        // is NOT invoked (otherwise an unparseable config.json would silently
+        // wipe every scheduled job from the live crontab).
+        //
+        // First lay down a GOOD cron file (a prior healthy apply) so we can prove
+        // it is left untouched by the failed apply.
+        Cron::apply($this->configWith([$this->job('j-keep', '0 2 * * *')]));
+        $this->assertFileExists(Cron::cronFilePath());
+        $before = file_get_contents(Cron::cronFilePath());
+        $this->updateCronCalls = []; // reset the stub call log
+
+        // Corrupt config.json so Config::load() throws.
+        file_put_contents(Config::path(), "{ this is not valid json ");
+
+        $res = Cron::apply(); // null -> reads from disk -> throws internally
+
+        $this->assertFalse($res['ok']);
+        $this->assertSame(-1, $res['updateCronCode']);
+        $this->assertFalse($res['wrote']);
+        $this->assertFalse($res['removed']);
+        $this->assertArrayHasKey('error', $res);
+        $this->assertStringContainsString('Could not read configuration', $res['error']);
+        // The pre-existing cron file is UNTOUCHED and update_cron was NOT run.
+        $this->assertSame($before, file_get_contents(Cron::cronFilePath()), 'the existing cron file must be preserved');
+        $this->assertCount(0, $this->updateCronCalls, 'update_cron must NOT run on an unreadable config');
+    }
+
     // =====================================================================
     // nextRun() - cron expression evaluation
     // =====================================================================

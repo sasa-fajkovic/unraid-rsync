@@ -238,6 +238,33 @@ final class RsyncTest extends TestCase
         $this->assertSame(['state' => Rsync::STATE_SUCCESS, 'exitCode' => 0], Rsync::worstOutcome([]));
     }
 
+    public function testWorstOutcomeFullSeverityLadder(): void
+    {
+        // GAP-FILL: the prior test asserts only the WARNING/FAILED/ABORTED edges.
+        // Exercise the COMPLETE rank ladder, especially the PARTIAL and TIMEOUT
+        // rungs that sit between WARNING and FAILED:
+        //   SUCCESS(0) < WARNING(1) < PARTIAL(2) < TIMEOUT(3) < FAILED(4) < ABORTED(5)
+        // PARTIAL(23) outranks WARNING(24).
+        $this->assertSame(Rsync::STATE_PARTIAL, Rsync::worstOutcome([24, 23])['state']);
+        $this->assertSame(23, Rsync::worstOutcome([24, 23])['exitCode']);
+        // TIMEOUT(30) outranks PARTIAL(23).
+        $w = Rsync::worstOutcome([23, 30]);
+        $this->assertSame(Rsync::STATE_TIMEOUT, $w['state']);
+        $this->assertSame(30, $w['exitCode']);
+        // FAILED(12) outranks TIMEOUT(35).
+        $this->assertSame(Rsync::STATE_FAILED, Rsync::worstOutcome([35, 12])['state']);
+        // SUCCESS only when every pair is 0.
+        $this->assertSame(Rsync::STATE_SUCCESS, Rsync::worstOutcome([0, 0, 0])['state']);
+        // A single pair returns that pair's state + exact code.
+        $this->assertSame(['state' => Rsync::STATE_TIMEOUT, 'exitCode' => 30], Rsync::worstOutcome([30]));
+        // The full ascending mix collapses to ABORTED carrying 20 (its code).
+        $full = Rsync::worstOutcome([0, 24, 23, 30, 12, 20]);
+        $this->assertSame(Rsync::STATE_ABORTED, $full['state']);
+        $this->assertSame(20, $full['exitCode']);
+        // An UNKNOWN exit code maps to FAILED (rank 4), so it outranks WARNING.
+        $this->assertSame(Rsync::STATE_FAILED, Rsync::worstOutcome([24, 99])['state']);
+    }
+
     public function testEffectiveOptionsUsesGlobalWhenFlagSet(): void
     {
         $global = [
