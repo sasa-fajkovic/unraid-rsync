@@ -442,6 +442,46 @@ final class OptionsFormHelpTest extends TestCase
         }
     }
 
+    public function testHistoryPageRendersPaginatedTableForConfiguredJob(): void
+    {
+        // Seed one job, render the History tab body, and confirm it wires the
+        // job filter + paginated table + listHistory poller + log modal. Clean up
+        // the temp config afterwards so other tests see a fresh default.
+        $cfg = Config::defaults();
+        $cfg['jobs'][] = Job::normalize([
+            'id'        => 'j-hist-ui',
+            'name'      => 'My History Job',
+            'transport' => 'LOCAL',
+            'pairs'     => [['local' => '/mnt/user/x/', 'remote' => '/mnt/disk1/x/']],
+        ]);
+        Config::save($cfg);
+        try {
+            $html = $this->renderPageBody(__DIR__ . '/../source/pages/history.php');
+            // Job filter carries the configured job (escaped name present).
+            $this->assertStringContainsString('id="ur-hist-job"', $html);
+            $this->assertStringContainsString('My History Job', $html);
+            // Paginated table + the read-only listHistory poller + pager controls.
+            $this->assertStringContainsString('id="ur-hist-rows"', $html);
+            $this->assertStringContainsString('action=listHistory', $html);
+            $this->assertStringContainsString('id="ur-hist-prev"', $html);
+            $this->assertStringContainsString('id="ur-hist-next"', $html);
+            // Log modal opens a run's log via getJobLog?run=.
+            $this->assertStringContainsString('action=getJobLog', $html);
+            $this->assertStringContainsString('id="ur-hist-modal"', $html);
+        } finally {
+            @unlink(Config::path());
+        }
+    }
+
+    public function testHistoryPageShowsEmptyStateWithNoJobs(): void
+    {
+        @unlink(Config::path()); // ensure no jobs
+        $html = $this->renderPageBody(__DIR__ . '/../source/pages/history.php');
+        $this->assertStringContainsString('No jobs configured yet', $html);
+        // The table/poller must NOT render in the empty state.
+        $this->assertStringNotContainsString('action=listHistory', $html);
+    }
+
     /**
      * Render the shared options partial to a string.
      *

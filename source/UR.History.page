@@ -1,0 +1,5 @@
+Menu="UnraidRsync:5"
+Title="History"
+Tag="history"
+---
+<?php include "/usr/local/emhttp/plugins/unraid.rsync/pages/history.php"; ?>
