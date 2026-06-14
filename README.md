@@ -1,49 +1,69 @@
 # Unraid Rsync
 
 A native Unraid webGui plugin for scheduling and monitoring **rsync backup
-jobs** — closer in spirit to TrueNAS's Rsync Tasks than to existing single-
-schedule rsync plugins.
+jobs** — either **over SSH** to/from a remote host or **locally** between two
+paths on the server — closer in spirit to TrueNAS's Rsync Tasks than to
+existing single-schedule rsync plugins.
 
-> **Pre-release / work in progress.** Jobs, credentials, the rsync execution
-> engine, and per-job scheduling are in place; the live status UI, per-run log
-> viewer, and notifications are still landing across later phases (see
-> [Roadmap](#roadmap)). Validate with dry-runs before relying on it for real
-> backups.
+> **Validate with dry-runs first.** rsync moves (and can delete) real data, so
+> exercise a new job with a **Dry-run** and inspect the per-run log before you
+> trust it for unattended backups. That is ordinary rsync hygiene, not a
+> disclaimer of missing features — everything described below ships today.
 
-## What it will do
+## What it does
 
-The goal is multiple **independent** rsync jobs, each with:
+Run multiple **independent** rsync jobs, each with:
 
-- its own cron schedule (per-job, not one global schedule);
+- a **transport**: **SSH** (push to or pull from a remote host) or **Local**
+  (both sides are paths on this server, confined under `/mnt`);
+- its own cron schedule (per-job, not one global schedule), with a live
+  **Next run** column;
 - a curated, **whitelisted** set of rsync flags exposed as checkboxes and value
-  inputs (no free-form flag string — destructive flags are gated with guardrails);
+  inputs (no free-form flag string — destructive flags are gated with
+  guardrails), each with native **inline help** (`?`-on-hover → blue box);
 - explicit source -> destination pairs (one rsync per pair, not a cartesian product);
-- pre/post hooks, per-job log level, live state and per-run logs;
-- a reusable, TrueNAS-style **Credentials** keychain (SSH keys + connections)
-  that jobs reference by connection id (shown by name in the UI), supporting
-  key and password auth.
+- pre/post hooks and a per-job log level;
+- live **state badges**, a **per-run log viewer**, and last-run reporting;
+- optional **notifications** through Unraid's native notification system.
 
-## Status
+**SSH** jobs additionally reference a connection from the reusable, TrueNAS-style
+**Credentials** keychain (SSH connections + a managed key keychain), shown by
+name in the UI, supporting **existing key file**, **managed key**, and
+**password** auth. **Local** jobs use no connection or credentials.
 
-What ships today:
+## What ships today
 
 - An installable `.plg` packaged in the standard Unraid way (a Slackware `.txz`
-  built by `pkg_build.sh`, released via GitHub Actions).
+  built by `pkg_build.sh`, released via GitHub Actions; **CalVer** auto-releases
+  on every merge to `main`).
 - A tabbed **Unraid Rsync** page under **Settings → User Utilities** with
   **Jobs**, **Credentials**, **Global Settings** and **Status** tabs.
 - Jobs CRUD + Global Settings (config persisted to `config.json`).
-- A two-tier **Credentials** keychain: reusable **SSH Keys** (generate or
-  import) + **Connections** (key or password auth), with referential integrity
+- A **Credentials** keychain (see [Credentials](#credentials)): SSH
+  **Connections** with three auth methods — **existing key file** (default),
+  a **managed key** keychain (generate or import), and **password** (via
+  `sshpass`) — plus **Discover host key**, selectable strict-host-key modes,
   and a per-connection **Test connection** probe.
 - A safe rsync **execution engine** (whitelisted flags built as an argv array,
-  path guardrails) with manual **Run / Dry-run / Abort** per job.
+  path guardrails) with manual **Run / Dry-run / Abort** per job, and native
+  **inline help** on every rsync flag and option.
 - **Per-job cron scheduling**: each enabled job runs on its own 5-field cron
   schedule, plus a **Next run** column on the Jobs list.
+- **Live status badges** in TrueNAS-style colors —
+  **success** (green), **warning** (orange), **failed** (red),
+  **aborted** (grey), **pending** (grey), **running** (blue, pulsing).
+- A **per-run log viewer**: pick any past run from a selector and watch the log
+  tail update live (1-second poll while a run is in progress).
+- A **Status** tab showing the rolling cross-job plugin log and an
+  **rsync-binary presence indicator** (detected path + the first line of
+  `rsync --version`, or a clear warning if rsync is somehow absent).
+- **Notifications** through Unraid's native `notify`, with a per-job
+  **notify mode** — `off`, `success-only`, `failure-only`, or `always` —
+  mapped to the correct webGui importance (success → *normal*, warning/partial/
+  timeout → *warning*, failure → *alert*). `notify init` is run on install so
+  notifications work out of the box.
 - Clean uninstall (removes both the runtime `emhttp` tree and the persistent
   `/boot` config dir, and clears the plugin's cron lines from the live crontab).
-
-Live status badges, the per-run log viewer, and notifications still land in
-later phases.
 
 ### Scheduling (how it works)
 
@@ -75,19 +95,45 @@ re-applied automatically:
 - on **array start** (the `event/started` hook re-applies), which works around a
   known Unraid 7.x bug where the boot-time `update_cron` may not run.
 
+### Credentials
+
+The **Credentials** tab is a reusable keychain that **SSH** jobs reference by
+connection, so a host's details are defined once and shared. (**Local**
+transport jobs use no connection or credentials.) It has two layers:
+
+- **Connections** — an SSH endpoint (host, port, remote user) plus an **auth
+  method**. Each connection has a **Discover host key** action and a selectable
+  **strict host-key checking** mode (`accept-new` — the default —, `yes`, or
+  `no`), and a per-connection **Test connection** probe.
+- **Keys** — a managed SSH key keychain you can **generate** or **import**,
+  referenced by connections that use managed-key auth.
+
+Each connection picks one of three **auth methods**:
+
+- **Existing key file** (the default) — point the connection at a key already on
+  the server, e.g. `/root/.ssh/id_ed25519`. Nothing is uploaded or copied into
+  the plugin's store; it uses the file in place.
+- **Managed key** — use a key from the plugin's **Keys** keychain (generated or
+  imported through the UI).
+- **Password** — authenticate with a stored password via `sshpass` (see below).
+
 ### Credential security (read this)
 
 Credentials are stored in `/boot/config/plugins/unraid.rsync/credentials.json`
 on the USB flash, which is **FAT32 and world-readable** — Unix file permissions
 do not apply there. Consequences:
 
-- **Private keys** are copied to RAM (`tmpfs`) at mode `600` only at run time
-  (OpenSSH refuses a world-readable key), and are **never shown again** in the
-  UI after they are saved — only the fingerprint and public key are displayed.
+- **Existing-key-file** auth keeps the private key entirely outside the plugin's
+  store — only the path is recorded — so it never lands on the world-readable
+  flash. This is the **default and recommended** method.
+- **Managed private keys** are copied to RAM (`tmpfs`) at mode `600` only at run
+  time (OpenSSH refuses a world-readable key), and are **never shown again** in
+  the UI after they are saved — only the fingerprint and public key are
+  displayed.
 - **Passwords** are stored **obfuscated (reversible), not encrypted**. Anyone
   with access to the flash drive can recover them. Prefer **key authentication**
-  (the primary, tested path) and, when password auth is unavoidable, use a
-  **dedicated low-privilege remote account**.
+  and, when password auth is unavoidable, use a **dedicated low-privilege remote
+  account**.
 
 **Password auth requires `sshpass`**, which is not part of Unraid's base OS.
 The plugin **detects it at runtime**: if it is missing, the Credentials tab and
@@ -134,7 +180,10 @@ To remove it: **Plugins -> Installed Plugins -> Unraid Rsync -> Remove**.
 
 Updates are automatic: **Plugins -> Check for Updates** compares your installed
 version against the manifest at the `releases/latest` URL above and offers an
-**Update** when a newer release has been published.
+**Update** when a newer release has been published. Releases use **CalVer**
+(`YYYY.MM.DD`, with a same-day lowercase suffix) and are published
+automatically on every merge to `main`, so the update check always sees the
+newest build.
 
 > **Migration (one-time):** if you installed an older build whose update URL
 > pointed at the raw `.plg` on `main`, **re-install once** from the
@@ -143,16 +192,23 @@ version against the manifest at the `releases/latest` URL above and offers an
 
 ## Roadmap
 
-The plugin is delivered in sequential phases, each one PR:
+The plugin is **feature-complete**. The full build landed across these areas,
+all of which now ship:
 
-1. **Skeleton + packaging + CI** — installable `.plg`, build script, release
-   workflow, empty tabbed Settings page.
-2. **Config core + Jobs CRUD + Global Settings.**
-3. **Credentials tab (two-tier SSH keys + connections) + secure storage.**
-4. Rsync execution engine (safe argv, path guardrails).
-5. **Per-job cron scheduling + next-run display.** ✅
-6. Status/state UI + log viewer + last-run reporting.
-7. Notifications.
+- ✅ Skeleton + packaging + CI (installable `.plg`, build script, release
+  workflow, tabbed Settings page).
+- ✅ Config core + Jobs CRUD + Global Settings.
+- ✅ Credentials keychain (SSH connections + managed keys) + secure storage.
+- ✅ Rsync execution engine (safe argv, path guardrails) + inline help.
+- ✅ Per-job cron scheduling + next-run display.
+- ✅ Status/state UI + per-run log viewer + last-run reporting.
+- ✅ Notifications via Unraid's native `notify`.
+
+Genuinely still ahead:
+
+- **Community Applications submission** — the repo is kept CA-ready (stable
+  `releases/latest` `.plg` URL, valid plugin attributes, versioned `.txz`
+  assets); listing it in the CA feed is a later, mechanical step.
 
 ## Building / releasing
 
