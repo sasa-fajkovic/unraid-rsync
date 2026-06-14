@@ -801,7 +801,9 @@ ur_emit_form_enable_assets();
   /* Lightweight transient toast (no dependency). Auto-removes after ~3.5s. */
   function urToast(msg, ok) {
     var t = document.createElement('div');
-    t.className = 'ur-toast' + (ok ? ' ur-toast-ok' : ' ur-toast-err');
+    /* Default .ur-toast styling is the success (green) look; only the error
+     * variant needs an extra class. */
+    t.className = 'ur-toast' + (ok ? '' : ' ur-toast-err');
     t.setAttribute('role', 'status');
     t.textContent = msg;
     document.body.appendChild(t);
