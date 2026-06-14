@@ -184,6 +184,58 @@ function ur_var_ini_candidates(): array
 }
 
 /**
+ * Extract EVERY csrf_token value carried by a single var.ini file, using TWO
+ * independent strategies and returning the union (non-empty, de-duplicated):
+ *
+ *   1. parse_ini_file() - the canonical parse.
+ *   2. a tolerant line/regex scan of the raw file text.
+ *
+ * WHY BOTH (the live root cause): on the real Unraid box parse_ini_file() can
+ * return FALSE for the whole var.ini - it is a large, machine-written state file
+ * and a SINGLE syntactically-awkward line anywhere in it makes the parser bail,
+ * yielding NO csrf_token even though the file is perfectly readable and the token
+ * line itself is trivial (csrf_token="...."). When that happens on a DIRECT POST
+ * to handler.php (where $GLOBALS['var'] / $_SESSION are not populated, so var.ini
+ * is the ONLY candidate source) the correct token never enters the candidate set
+ * and EVERY state-changing POST 403s. The regex scan reads just the one line we
+ * need and is immune to unrelated malformed lines, so the canonical token is
+ * always recovered as long as the file is readable.
+ *
+ * @return array<int,string> non-empty, de-duplicated tokens found in $path
+ */
+function ur_csrf_tokens_from_ini(string $path): array
+{
+    if ($path === '' || !is_file($path) || !is_readable($path)) {
+        return [];
+    }
+    $tokens = [];
+
+    // Strategy 1: parse_ini_file (no sections). Suppress warnings on a malformed
+    // file and fall through to the line scan rather than emitting HTML noise.
+    $ini = @parse_ini_file($path, false, INI_SCANNER_RAW);
+    if (is_array($ini) && isset($ini['csrf_token'])) {
+        $tokens[] = (string) $ini['csrf_token'];
+    }
+
+    // Strategy 2: tolerant scan, line-by-line so we NEVER slurp the whole (large)
+    // state file into memory. Collect EVERY csrf_token line - optional surrounding
+    // quotes and whitespace - so an unrelated malformed line elsewhere can't hide
+    // the token. Matches `csrf_token = "X"`, `csrf_token=X`, etc.
+    $fh = @fopen($path, 'rb');
+    if ($fh !== false) {
+        while (($line = fgets($fh)) !== false) {
+            $line = rtrim($line, "\r\n");
+            if (preg_match('/^[ \t]*csrf_token[ \t]*=[ \t]*"?(.*?)"?[ \t]*$/i', $line, $m)) {
+                $tokens[] = $m[1];
+            }
+        }
+        fclose($fh);
+    }
+
+    return array_values(array_unique(array_filter($tokens, static fn($t) => $t !== '')));
+}
+
+/**
  * Read csrf_token from the Unraid state file (var.ini). Returns '' when no
  * candidate file is readable or none carries a csrf_token. This is the
  * fallback that makes a DIRECT POST to handler.php work: the front controller
@@ -193,14 +245,12 @@ function ur_var_ini_candidates(): array
 function ur_csrf_token_from_state(): string
 {
     foreach (ur_var_ini_candidates() as $path) {
-        if (!is_string($path) || $path === '' || !is_file($path) || !is_readable($path)) {
+        if (!is_string($path)) {
             continue;
         }
-        // parse_ini_file without sections; suppress warnings on a malformed file
-        // and fall through to the next candidate rather than emitting HTML noise.
-        $ini = @parse_ini_file($path, false, INI_SCANNER_RAW);
-        if (is_array($ini) && isset($ini['csrf_token']) && $ini['csrf_token'] !== '') {
-            return (string) $ini['csrf_token'];
+        $tokens = ur_csrf_tokens_from_ini($path);
+        if ($tokens !== []) {
+            return $tokens[0];
         }
     }
     return '';
@@ -262,14 +312,15 @@ function ur_csrf_token_candidates(): array
         $candidates[] = (string) $_SESSION['csrf_token'];
     }
     // var.ini value(s) - read directly so a STANDALONE POST (where $var is never
-    // populated) still has the real token to match against.
+    // populated) still has the real token to match against. ur_csrf_tokens_from_ini
+    // recovers the token even when parse_ini_file() bails on an unrelated malformed
+    // line elsewhere in the (large, machine-written) file - see its docblock.
     foreach (ur_var_ini_candidates() as $path) {
-        if (!is_string($path) || $path === '' || !is_file($path) || !is_readable($path)) {
+        if (!is_string($path)) {
             continue;
         }
-        $ini = @parse_ini_file($path, false, INI_SCANNER_RAW);
-        if (is_array($ini) && isset($ini['csrf_token'])) {
-            $candidates[] = (string) $ini['csrf_token'];
+        foreach (ur_csrf_tokens_from_ini($path) as $tok) {
+            $candidates[] = $tok;
         }
     }
 
@@ -1650,6 +1701,72 @@ function ur_action_get_rsync_status(): void
 }
 
 /**
+ * GET csrfProbe: a READ-ONLY, secret-free diagnostic of the CSRF candidate
+ * pipeline, used to live-diagnose 403s where a POST carrying the correct token
+ * is still rejected. It NEVER accepts or returns a raw token:
+ *   - to test for a match the caller passes `?th=<sha256-hex of the token>` (a
+ *     one-way hash, safe to place in a URL), compared via hash_equals against
+ *     sha256() of each candidate;
+ *   - per-source it reports only booleans + token LENGTHS, and a non-sensitive
+ *     id label (NEVER the absolute filesystem path).
+ * Behind the webGui's auth like every other endpoint.
+ *
+ * TODO(remove): temporary instrumentation; delete once the live 403 cause is
+ * confirmed and the robust var.ini read is verified.
+ */
+function ur_action_csrf_probe(): void
+{
+    $probeHash = isset($_GET['th']) ? strtolower((string) $_GET['th']) : '';
+    $matchAny = false;
+
+    $varSet = isset($GLOBALS['var']) && is_array($GLOBALS['var']) && isset($GLOBALS['var']['csrf_token']);
+    $sessSet = isset($_SESSION['csrf_token']);
+
+    $sources = [];
+    $idx = 0;
+    foreach (ur_var_ini_candidates() as $path) {
+        if (!is_string($path)) {
+            continue;
+        }
+        $isFile = is_file($path);
+        $isReadable = $isFile && is_readable($path);
+        $ini = $isReadable ? @parse_ini_file($path, false, INI_SCANNER_RAW) : null;
+        $parseOk = is_array($ini);
+        $parseLen = ($parseOk && isset($ini['csrf_token'])) ? strlen((string) $ini['csrf_token']) : 0;
+        $tokens = ur_csrf_tokens_from_ini($path);
+        $robustLen = $tokens !== [] ? strlen($tokens[0]) : 0;
+        $sources[] = [
+            'id'         => 'varini[' . $idx . ']', // non-sensitive label, NOT the path
+            'isFile'     => $isFile,
+            'isReadable' => $isReadable,
+            'parseOk'    => $parseOk,
+            'parseLen'   => $parseLen,
+            'robustLen'  => $robustLen,
+        ];
+        $idx++;
+    }
+
+    $candidates = ur_csrf_token_candidates();
+    if ($probeHash !== '') {
+        foreach ($candidates as $c) {
+            if (hash_equals(hash('sha256', $c), $probeHash)) {
+                $matchAny = true;
+            }
+        }
+    }
+
+    sendResponse([
+        'ok'             => true,
+        'varGlobalSet'   => $varSet,
+        'sessionSet'     => $sessSet,
+        'sources'        => $sources,
+        'candidateCount' => count($candidates),
+        'probeGiven'     => $probeHash !== '',
+        'probeMatchAny'  => $matchAny,
+    ], 200);
+}
+
+/**
  * Front-controller dispatch. Skipped when included by the test harness
  * (UR_HANDLER_TESTING defined), which calls the individual functions directly.
  *
@@ -1751,6 +1868,7 @@ function ur_dispatch(): void
         case 'listRuns':
         case 'getPluginLog':
         case 'getRsyncStatus':
+        case 'csrfProbe':
             if ($method !== 'GET') {
                 sendError($action . ' requires GET.', 405);
                 return;
@@ -1761,6 +1879,7 @@ function ur_dispatch(): void
                 case 'listRuns':        ur_action_list_runs();        return;
                 case 'getPluginLog':    ur_action_get_plugin_log();   return;
                 case 'getRsyncStatus':  ur_action_get_rsync_status(); return;
+                case 'csrfProbe':       ur_action_csrf_probe();       return;
             }
             return;
 
