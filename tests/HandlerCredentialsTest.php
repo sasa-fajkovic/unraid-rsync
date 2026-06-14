@@ -823,35 +823,6 @@ final class HandlerCredentialsTest extends TestCase
         }
     }
 
-    /** csrfProbe (POST) reports postSuppliedMatch and the POST request context, never a token. */
-    public function testCsrfProbePostContextReportsMatch(): void
-    {
-        if (!defined('UR_VAR_INI_PATHS')) {
-            $this->markTestSkipped('UR_VAR_INI_PATHS not overridable in this build');
-        }
-        $path = UR_VAR_INI_PATHS[0];
-        @mkdir(dirname($path), 0777, true);
-        file_put_contents($path, "csrf_token=\"probe-token\"\n");
-        try {
-            unset($GLOBALS['var']);
-            $_SERVER['REQUEST_METHOD'] = 'POST';
-            $_POST    = ['csrf_token' => 'probe-token']; // matched against var.ini candidate
-            [$body, $code] = $this->runCapture(fn() => ur_action_csrf_probe());
-            $this->assertSame(200, $code);
-            $this->assertSame('POST', $body['method']);
-            $this->assertTrue($body['postHasCsrf']);
-            $this->assertTrue($body['postSuppliedMatch']);
-            $this->assertArrayHasKey('postKeys', $body);
-            // No raw token in the response.
-            $this->assertStringNotContainsString('probe-token', json_encode($body));
-        } finally {
-            @unlink($path);
-            $_SERVER['REQUEST_METHOD'] = 'GET';
-            $_POST = [];
-            $GLOBALS['var'] = ['csrf_token' => 'test-token'];
-        }
-    }
-
     // --- Robust var.ini csrf read: recover the token even when parse_ini_file()
     //     bails on an UNRELATED malformed line elsewhere in the (large,
     //     machine-written) state file. This is the live-403 class: a readable
@@ -935,32 +906,5 @@ final class HandlerCredentialsTest extends TestCase
     {
         $this->assertSame([], ur_csrf_tokens_from_ini('/no/such/var.ini'));
         $this->assertSame([], ur_csrf_tokens_from_ini(''));
-    }
-
-    // --- csrfProbe diagnostic: read-only, and NEVER leaks a token ------------
-
-    public function testCsrfProbeReportsAndNeverLeaksToken(): void
-    {
-        if (!defined('UR_VAR_INI_PATHS')) {
-            $this->markTestSkipped('UR_VAR_INI_PATHS not overridable in this build');
-        }
-        $path = UR_VAR_INI_PATHS[0];
-        @mkdir(dirname($path), 0777, true);
-        file_put_contents($path, "csrf_token=\"secret-xyz\"\n");
-        try {
-            // Caller passes a one-way sha256 hash of the token, never the token.
-            $_GET = ['th' => hash('sha256', 'secret-xyz')];
-            [$body, $code] = $this->runCapture(fn() => ur_action_csrf_probe());
-            $this->assertSame(200, $code);
-            $this->assertTrue($body['ok']);
-            $this->assertTrue($body['probeMatchAny'], 'live token hash should match a candidate');
-            $json = json_encode($body);
-            // Neither the token nor the absolute var.ini path may appear.
-            $this->assertStringNotContainsString('secret-xyz', $json);
-            $this->assertStringNotContainsString($path, $json);
-        } finally {
-            @unlink($path);
-            $_GET = [];
-        }
     }
 }

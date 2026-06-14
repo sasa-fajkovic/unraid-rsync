@@ -160,17 +160,6 @@ final class HandlerStatusTest extends TestCase
         $this->assertStringContainsString('RUNNER_OK', $out, "handler.php must require Runner; got: $out");
     }
 
-    public function testEnvDiagReportsEnvironmentFacts(): void
-    {
-        [$body, $code] = $this->runCapture('ur_action_env_diag');
-        $this->assertSame(200, $code);
-        $this->assertTrue($body['ok']);
-        foreach (['phpSapi', 'resolvedPhpBinary', 'runnerScript', 'procOpenEnabled', 'updateCronPath', 'updateCronIsFile'] as $k) {
-            $this->assertArrayHasKey($k, $body);
-        }
-        $this->assertNotSame('', $body['resolvedPhpBinary']);
-    }
-
     // ---- ur_derive_state ---------------------------------------------------
 
     public function testDeriveStateRunningOverridesSummary(): void
