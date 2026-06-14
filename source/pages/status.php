@@ -265,11 +265,14 @@ $rsyncMissingMsg  = $rsyncAvailable ? '' : Rsync::rsyncMissingMessage();
     if (!jobId) { return; }
     var result = document.getElementById('ur-status-result');
     t.disabled = true;
-    var fd = new FormData();
-    fd.append('action', 'abortJob');
-    fd.append('csrf_token', CSRF_TOKEN);
-    fd.append('id', jobId);
-    fetch(HANDLER_URL, { method: 'POST', body: fd, credentials: 'same-origin' })
+    /* urlencoded (URLSearchParams), NOT multipart (FormData): a
+       multipart/form-data body stalls in php-fpm in the live Unraid environment,
+       so the POST never returns. fetch() auto-sets the urlencoded Content-Type. */
+    var params = new URLSearchParams();
+    params.append('action', 'abortJob');
+    params.append('csrf_token', CSRF_TOKEN);
+    params.append('id', jobId);
+    fetch(HANDLER_URL, { method: 'POST', body: params, credentials: 'same-origin' })
       .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); })
       .then(function (res) {
         var ok = res.ok && res.body && res.body.ok;

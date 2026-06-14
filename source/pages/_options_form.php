@@ -564,24 +564,36 @@ if (!function_exists('ur_emit_ajax_helpers')) {
     });
   }
 
-  /* POST a FormData and ALWAYS resolve (never reject) to the parseResponse shape,
-   * plus { status: 0, networkError: true } on a genuine could-not-reach-server
-   * failure, so the UI is ALWAYS updated. The CSRF token is appended when given. */
+  /* POST fields as application/x-www-form-urlencoded and ALWAYS resolve (never
+   * reject) to the parseResponse shape, plus { status: 0, networkError: true } on
+   * a genuine could-not-reach-server failure, so the UI is ALWAYS updated. The
+   * CSRF token is appended when given.
+   *
+   * We send URLSearchParams (urlencoded), NOT FormData (multipart): a
+   * multipart/form-data request body STALLS in php-fpm in the live Unraid
+   * environment (the worker waits forever to receive the request body over the
+   * FastCGI socket), so every plugin POST hung. urlencoded returns in ~13ms.
+   * There are NO file inputs anywhere in the plugin (SSH keys are pasted into
+   * textareas), so urlencoded is correct and sufficient. fetch() auto-sets the
+   * Content-Type to application/x-www-form-urlencoded for a URLSearchParams body. */
   function postForm(handlerUrl, fields, csrfToken) {
-    var fd = new FormData();
-    if (csrfToken) { fd.append('csrf_token', csrfToken); }
-    Object.keys(fields || {}).forEach(function (k) { fd.append(k, fields[k]); });
-    return fetch(handlerUrl, { method: 'POST', body: fd, credentials: 'same-origin' })
+    var params = new URLSearchParams();
+    if (csrfToken) { params.append('csrf_token', csrfToken); }
+    Object.keys(fields || {}).forEach(function (k) { params.append(k, fields[k]); });
+    return fetch(handlerUrl, { method: 'POST', body: params, credentials: 'same-origin' })
       .then(parseResponse)
       .catch(function () {
         return { ok: false, status: 0, body: null, parseError: false, networkError: true };
       });
   }
 
-  /* POST an existing <form> (its FormData) with the same robust parsing. */
+  /* POST an existing <form> as urlencoded with the same robust parsing.
+   * URLSearchParams(new FormData(form)) serialises the form's text fields to
+   * urlencoded (there are no file inputs); nested names like jobs[0][name]
+   * round-trip unchanged into $_POST. See postForm for why we avoid multipart. */
   function postFormElement(form) {
-    var fd = new FormData(form);
-    return fetch(form.getAttribute('action'), { method: 'POST', body: fd, credentials: 'same-origin' })
+    var params = new URLSearchParams(new FormData(form));
+    return fetch(form.getAttribute('action'), { method: 'POST', body: params, credentials: 'same-origin' })
       .then(parseResponse)
       .catch(function () {
         return { ok: false, status: 0, body: null, parseError: false, networkError: true };

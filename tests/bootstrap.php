@@ -47,10 +47,12 @@ if (!function_exists('_')) {
     }
 }
 
-// Point handler.php's CSRF-from-state-file fallback at a temp var.ini inside the
-// test config base (never the real /var/local/emhttp/var.ini). Tests that
-// exercise the fallback write/remove this file themselves; tests that set
-// $GLOBALS['var']['csrf_token'] are unaffected (that source takes precedence).
+// Point handler.php's CSRF candidate collection at a temp var.ini inside the test
+// config base (never the real /var/local/emhttp/var.ini). Tests that exercise the
+// var.ini path write/remove this file themselves (in a finally), so by default no
+// var.ini exists and the only CSRF candidate is the $GLOBALS['var']['csrf_token']
+// most tests set. The check is match-ANY across all server-side token sources
+// (var / session / var.ini), so a test's supplied token need only match one.
 if (!defined('UR_VAR_INI_PATHS')) {
     define('UR_VAR_INI_PATHS', [$urTestBase . '/var.ini']);
 }

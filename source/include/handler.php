@@ -30,16 +30,32 @@
  *     `csrf_token` POST field on every form, and compared with hash_equals to
  *     avoid timing leaks.
  *
- *     ROOT CAUSE of the original "every POST silently fails" bug: $GLOBALS['var']
- *     is populated by the webGui front controller ONLY when a page is rendered
- *     through DefaultPageLayout. This handler is hit DIRECTLY at
- *     /plugins/unraid.rsync/include/handler.php, where nothing has defined $var,
- *     so $var['csrf_token'] was EMPTY -> the expected token was '' -> every POST
- *     403'd with "Invalid or missing CSRF token". The fix (ur_expected_csrf_token)
- *     falls back to reading the canonical Unraid state file
- *     /var/local/emhttp/var.ini (also exposed at /usr/local/emhttp/state/var.ini)
- *     with parse_ini_file to obtain csrf_token - exactly the value the webGui
- *     embeds in the page's forms - so a direct POST validates correctly.
+ *     ROOT CAUSE of the "every POST fails" bug (diagnosed LIVE on a real Unraid
+ *     box; corrects the earlier partial diagnoses). Two independent causes:
+ *       1. multipart request bodies STALL at the FastCGI layer. The client JS
+ *          posted via `new FormData()` (multipart/form-data); on the live box a
+ *          multipart POST to this handler HUNG - the php-fpm worker sat in kernel
+ *          skb_wait_for_more_packets waiting to receive a request body that never
+ *          completed over the FastCGI socket. The SAME endpoint with an
+ *          application/x-www-form-urlencoded body returned in ~13ms. FIX: the
+ *          client now sends all POSTs urlencoded (URLSearchParams); see the
+ *          window.urAjax helpers in source/pages/_options_form.php. (This - NOT
+ *          the "discovery session-lock wedge" hypothesised in PR#24 - is why
+ *          POSTs hung. PR#24's session_write_close / detached-keyscan are kept as
+ *          harmless hardening.) There are NO file uploads anywhere (SSH keys are
+ *          pasted into textareas), so urlencoded is correct and sufficient.
+ *       2. the CSRF check rejected the CORRECT token. A urlencoded POST carrying
+ *          the byte-identical page token still 403'd, because the old logic picked
+ *          the FIRST non-empty token source ($GLOBALS['var'] / $_SESSION) and
+ *          compared only that - a stale value there masked the canonical var.ini
+ *          token, so the right token never got a chance to match. FIX: the check
+ *          now accepts the supplied token if it hash_equals ANY server-side
+ *          candidate (var, session, AND var.ini); see ur_csrf_token_candidates()
+ *          / ur_check_csrf().
+ *     ($GLOBALS['var'] is populated by the webGui front controller only when a
+ *     page renders through DefaultPageLayout; a DIRECT POST to this handler never
+ *     has it, which is why reading var.ini directly - exactly the value the webGui
+ *     embeds in the page's forms - is essential.)
  *   - All responses are JSON with the right Content-Type + status code via the
  *     sendResponse()/sendError() helpers.
  *   - The actual validate/normalise/persist logic lives in Job.php / Config.php
@@ -191,15 +207,18 @@ function ur_csrf_token_from_state(): string
 }
 
 /**
- * Resolve the expected webGui CSRF token. Order of precedence:
+ * Resolve the FIRST available expected webGui CSRF token. Order of precedence:
  *   1. $GLOBALS['var']['csrf_token'] - set by the front controller when the
  *      handler is included through a rendered page (and by the unit tests).
  *   2. $_SESSION['csrf_token']       - some webGui contexts carry it here.
  *   3. /var/local/emhttp/var.ini     - the canonical Unraid state file; read
  *      directly so a STANDALONE POST to handler.php (where $var is never
- *      populated) still gets the real token. THIS is the fix for the bug where
- *      every credentials POST silently 403'd.
- * Returns '' only when none is available (then ur_check_csrf 403s, as before).
+ *      populated) still gets the real token.
+ * Returns '' only when none is available.
+ *
+ * NOTE: this "first non-empty source" resolver is retained for callers that want
+ * a single canonical token, but the CSRF CHECK no longer relies on it - see
+ * ur_csrf_token_candidates() / ur_check_csrf() and the root-cause note there.
  */
 function ur_expected_csrf_token(): string
 {
@@ -213,15 +232,82 @@ function ur_expected_csrf_token(): string
 }
 
 /**
- * Verify the request carries a matching CSRF token. Returns true on success;
- * on failure it has already emitted a 403 and (outside tests) exited.
+ * Collect EVERY server-side-trusted CSRF token the page legitimately echoes,
+ * de-duplicated and non-empty:
+ *   - $GLOBALS['var']['csrf_token'] (front-controller / tests),
+ *   - $_SESSION['csrf_token']       (when a session is active and carries it),
+ *   - the var.ini value(s) from ur_var_ini_candidates() (both known paths).
+ *
+ * WHY MATCH-ANY (the live root cause of the 403s): on the real box a urlencoded
+ * POST carrying the CORRECT token (byte-identical to the page's window.csrf_token
+ * = var.ini's csrf_token) still 403'd, because the old "pick the FIRST non-empty
+ * source and compare only that" logic returned a STALE/different
+ * $GLOBALS['var']['csrf_token'] (or $_SESSION value) and short-circuited BEFORE
+ * the correct var.ini fallback ever ran - so the page's canonical token never got
+ * a chance to match. Comparing the supplied token against ALL candidates fixes
+ * this: every candidate is a server-trusted token the page can legitimately
+ * present, so accepting a match against the canonical var.ini token (even when a
+ * stale $var/$_SESSION value also exists) is correct and secure.
+ *
+ * @return array<int,string> non-empty, de-duplicated candidate tokens
+ */
+function ur_csrf_token_candidates(): array
+{
+    $candidates = [];
+
+    if (isset($GLOBALS['var']) && is_array($GLOBALS['var']) && isset($GLOBALS['var']['csrf_token'])) {
+        $candidates[] = (string) $GLOBALS['var']['csrf_token'];
+    }
+    if (isset($_SESSION['csrf_token'])) {
+        $candidates[] = (string) $_SESSION['csrf_token'];
+    }
+    // var.ini value(s) - read directly so a STANDALONE POST (where $var is never
+    // populated) still has the real token to match against.
+    foreach (ur_var_ini_candidates() as $path) {
+        if (!is_string($path) || $path === '' || !is_file($path) || !is_readable($path)) {
+            continue;
+        }
+        $ini = @parse_ini_file($path, false, INI_SCANNER_RAW);
+        if (is_array($ini) && isset($ini['csrf_token'])) {
+            $candidates[] = (string) $ini['csrf_token'];
+        }
+    }
+
+    // Drop empties, then de-duplicate (a stable, non-empty candidate set).
+    $candidates = array_values(array_filter($candidates, static fn($t) => $t !== ''));
+    return array_values(array_unique($candidates));
+}
+
+/**
+ * Verify the request carries a CSRF token that matches ANY server-side-trusted
+ * candidate. Returns true on success; on failure it has already emitted a 403
+ * and (outside tests) exited.
+ *
+ * The supplied token must be non-empty AND timing-safely equal (hash_equals) to
+ * at least one candidate. We iterate ALL candidates (never early-comparing a
+ * single source) so a stale $GLOBALS['var']/$_SESSION token can't mask the
+ * correct var.ini token. With no candidates, or an empty supplied token, we 403.
  */
 function ur_check_csrf(): bool
 {
-    $expected = ur_expected_csrf_token();
-    $supplied = isset($_POST['csrf_token']) ? (string) $_POST['csrf_token'] : '';
+    $supplied   = isset($_POST['csrf_token']) ? (string) $_POST['csrf_token'] : '';
+    $candidates = ur_csrf_token_candidates();
 
-    if ($expected === '' || $supplied === '' || !hash_equals($expected, $supplied)) {
+    if ($supplied === '' || $candidates === []) {
+        sendError('Invalid or missing CSRF token.', 403);
+        return false;
+    }
+
+    $matched = false;
+    foreach ($candidates as $candidate) {
+        // hash_equals is timing-safe; iterate all candidates (don't short-circuit
+        // on the first source) so the canonical token always gets a chance.
+        if (hash_equals($candidate, $supplied)) {
+            $matched = true;
+        }
+    }
+
+    if (!$matched) {
         sendError('Invalid or missing CSRF token.', 403);
         return false;
     }

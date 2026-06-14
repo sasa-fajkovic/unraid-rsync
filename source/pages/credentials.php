@@ -479,11 +479,17 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
    * distinct "timed out" message rather than a generic network error. */
   function postForm(fields, opts) {
     opts = opts || {};
-    var fd = new FormData();
-    fd.append('csrf_token', CSRF);
-    Object.keys(fields).forEach(function (k) { fd.append(k, fields[k]); });
+    /* Send urlencoded (URLSearchParams), NOT multipart (FormData): a
+       multipart/form-data body STALLS in php-fpm in the live Unraid environment
+       (the worker blocks forever receiving the body over the FastCGI socket), so
+       every plugin POST hung; urlencoded returns in ~13ms. No file inputs exist
+       (keys are pasted into textareas). fetch() auto-sets the urlencoded
+       Content-Type for a URLSearchParams body. */
+    var params = new URLSearchParams();
+    params.append('csrf_token', CSRF);
+    Object.keys(fields).forEach(function (k) { params.append(k, fields[k]); });
 
-    var init = { method: 'POST', body: fd, credentials: 'same-origin' };
+    var init = { method: 'POST', body: params, credentials: 'same-origin' };
     var controller = null, timer = null;
     if (opts.timeoutMs && typeof AbortController !== 'undefined') {
       controller = new AbortController();
@@ -1007,9 +1013,13 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
     form.addEventListener('submit', function (ev) {
       ev.preventDefault();
       var result = document.getElementById(resultId);
-      var fd = new FormData(form);
+      /* urlencoded (URLSearchParams over the form's FormData), NOT multipart:
+         multipart bodies stall in php-fpm in the live environment. Nested field
+         names (keys[0][id], connections[0][host], …) round-trip unchanged into
+         $_POST; there are no file inputs on these forms. */
+      var params = new URLSearchParams(new FormData(form));
       show(result, true, 'Saving…');
-      fetch(form.getAttribute('action'), { method: 'POST', body: fd, credentials: 'same-origin' })
+      fetch(form.getAttribute('action'), { method: 'POST', body: params, credentials: 'same-origin' })
         .then(function (r) {
           return r.text().then(function (text) {
             var body = null, parseError = false;
