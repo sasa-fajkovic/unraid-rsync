@@ -549,21 +549,6 @@ function ur_action_save_config(): void
         return;
     }
 
-    // Identify jobs being REMOVED (old ids minus new ids) so we can clean up
-    // their persistent history. Compute the diff now (while $config still holds
-    // the OLD jobs), but ONLY delete AFTER the save succeeds - otherwise a failed
-    // save would 500 yet have already irreversibly dropped history for a change
-    // that never persisted.
-    $oldIds = array_values(array_filter(array_map(
-        static fn($j) => is_array($j) ? (string) ($j['id'] ?? '') : '',
-        $config['jobs'] ?? []
-    )));
-    $newIds = array_values(array_filter(array_map(
-        static fn($j) => (string) ($j['id'] ?? ''),
-        $normalized
-    )));
-    $removedIds = array_values(array_filter(array_diff($oldIds, $newIds), static fn($id) => $id !== ''));
-
     $config['jobs'] = $normalized;
 
     try {
@@ -573,11 +558,11 @@ function ur_action_save_config(): void
         return;
     }
 
-    // Save persisted -> now it is safe to drop the removed jobs' history files
-    // (orphan cleanup, so they don't accumulate on /boot). Best-effort.
-    foreach ($removedIds as $removedId) {
-        History::delete($removedId);
-    }
+    // NOTE: removing a job deliberately does NOT delete its persistent history.
+    // History is allowed to pile up so a job's past executions remain inspectable
+    // (and re-attach automatically if a same-named job is re-created, since job
+    // ids are stable name slugs). Per-job growth is still bounded by the
+    // retention prune in Runner. History::delete is reserved for uninstall.
 
     // Re-sync the live crontab to the just-saved jobs (per-job schedules /
     // enabled state). Best-effort: the save already succeeded, so a cron-sync

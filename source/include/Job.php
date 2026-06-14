@@ -66,7 +66,7 @@ class Job
         'archive', 'compress', 'humanReadable', 'times', 'perms', 'xattrs',
         'acls', 'symlinks', 'hardlinks', 'sparse', 'numericIds', 'partial',
         'inplace', 'checksum', 'update', 'wholeFile', 'sizeOnly',
-        'ignoreExisting', 'delete', 'deleteExcluded',
+        'ignoreExisting', 'delete', 'deleteExcluded', 'mkpath',
     ];
 
     /** Whitelisted scalar value-input keys (stored as strings). */

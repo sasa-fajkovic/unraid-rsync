@@ -60,6 +60,9 @@ class Config
             // per-job opt-in (the options form auto-seeds --max-delete when it is
             // enabled). Progress is already shown at the default 'normal' log
             // level (--info=...,progress2), so there is no separate flag.
+            // mkpath (--mkpath) defaults ON so a brand-new destination path
+            // (incl. missing parent dirs) is created automatically instead of
+            // failing the first run with "mkdir failed: No such file or directory".
             'recursive'       => true,
             'archive'         => false,
             'compress'        => false,
@@ -81,6 +84,7 @@ class Config
             'ignoreExisting'  => false,
             'delete'          => false,
             'deleteExcluded'  => false,
+            'mkpath'          => true,
             // value inputs
             'excludes'        => [],
             'includes'        => [],

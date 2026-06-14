@@ -60,6 +60,7 @@ class Rsync
         'ignoreExisting'  => '--ignore-existing',
         'delete'          => '--delete',
         'deleteExcluded'  => '--delete-excluded',
+        'mkpath'          => '--mkpath',
     ];
 
     /**
