@@ -290,13 +290,17 @@ function ur_csrf_token_candidates(): array
  */
 function ur_check_csrf(): bool
 {
-    $supplied   = isset($_POST['csrf_token']) ? (string) $_POST['csrf_token'] : '';
-    $candidates = ur_csrf_token_candidates();
-
-    if ($supplied === '' || $candidates === []) {
+    // Validate the cheap precondition (a token was supplied) BEFORE collecting
+    // candidates: ur_csrf_token_candidates() reads var.ini from disk, so we skip
+    // that work for an obviously-invalid request that carries no token. Behaviour
+    // is unchanged - an empty supplied token still 403s.
+    $supplied = isset($_POST['csrf_token']) ? (string) $_POST['csrf_token'] : '';
+    if ($supplied === '') {
         sendError('Invalid or missing CSRF token.', 403);
         return false;
     }
+
+    $candidates = ur_csrf_token_candidates();
 
     $matched = false;
     foreach ($candidates as $candidate) {
@@ -307,6 +311,7 @@ function ur_check_csrf(): bool
         }
     }
 
+    // No candidates (== []) leaves $matched false -> 403, exactly as before.
     if (!$matched) {
         sendError('Invalid or missing CSRF token.', 403);
         return false;
