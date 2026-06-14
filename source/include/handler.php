@@ -352,16 +352,20 @@ function ur_supplied_csrf_token(?string $rawInput = null): string
             return (string) $src['csrf_token'];
         }
     }
-    // Fallback: parse the raw urlencoded body. The front controller can strip the
-    // field from the $_POST array but does not rewrite the raw input stream.
+    // Fallback: pull ONLY the csrf_token field out of the raw urlencoded body
+    // (the front controller can strip it from $_POST but does not rewrite the raw
+    // input stream). We extract just that one parameter with a targeted regex
+    // rather than parse_str()-ing the whole payload, so an oversized body can't
+    // blow up memory/CPU. The `(?:^|&)` anchor avoids matching a key that merely
+    // ends in "csrf_token".
     if ($rawInput === null) {
         $rawInput = @file_get_contents('php://input');
     }
-    if (is_string($rawInput) && $rawInput !== '' && strpos($rawInput, 'csrf_token') !== false) {
-        $parsed = [];
-        parse_str($rawInput, $parsed);
-        if (isset($parsed['csrf_token']) && is_string($parsed['csrf_token']) && $parsed['csrf_token'] !== '') {
-            return (string) $parsed['csrf_token'];
+    if (is_string($rawInput) && $rawInput !== ''
+        && preg_match('/(?:^|&)csrf_token=([^&]*)/', $rawInput, $m)) {
+        $val = urldecode($m[1]);
+        if ($val !== '') {
+            return $val;
         }
     }
     return '';
@@ -376,8 +380,12 @@ function ur_supplied_csrf_token(?string $rawInput = null): string
  * at least one candidate. We iterate ALL candidates (never early-comparing a
  * single source) so a stale $GLOBALS['var']/$_SESSION token can't mask the
  * correct var.ini token. With no candidates, or an empty supplied token, we 403.
+ *
+ * $rawInput is forwarded to ur_supplied_csrf_token() so tests can exercise the
+ * raw-body recovery path (php://input is not writable under CLI); in production
+ * it stays null and the token is read from php://input.
  */
-function ur_check_csrf(): bool
+function ur_check_csrf(?string $rawInput = null): bool
 {
     // Validate the cheap precondition (a token was supplied) BEFORE collecting
     // candidates: ur_csrf_token_candidates() reads var.ini from disk, so we skip
@@ -385,7 +393,7 @@ function ur_check_csrf(): bool
     // is unchanged - an empty supplied token still 403s. ur_supplied_csrf_token
     // recovers the token from the raw body when the front controller stripped it
     // out of $_POST (see its docblock).
-    $supplied = ur_supplied_csrf_token();
+    $supplied = ur_supplied_csrf_token($rawInput);
     if ($supplied === '') {
         sendError('Invalid or missing CSRF token.', 403);
         return false;

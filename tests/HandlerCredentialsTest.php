@@ -26,8 +26,9 @@ final class HandlerCredentialsTest extends TestCase
 
     protected function setUp(): void
     {
-        $_POST = [];
-        $_GET  = [];
+        $_POST    = [];
+        $_GET     = [];
+        $_REQUEST = [];
         // Reset the handler's intended-status-code test seam instead of calling
         // http_response_code(200), which warns under CLI/PHP 8.4 once output has
         // begun (failOnWarning would fail the test). See sendResponse.
@@ -804,12 +805,18 @@ final class HandlerCredentialsTest extends TestCase
         file_put_contents($path, "csrf_token=\"raw-only-token\"\n");
         try {
             // $_POST has NO csrf_token (front controller removed it); $_REQUEST/$_GET
-            // also empty. Only the raw body carries it.
+            // also empty. Only the raw body carries it. No $var either (direct POST).
+            unset($GLOBALS['var']);
             $_POST = ['action' => 'saveCredentials']; // action survived, csrf did not
             $_GET = $_REQUEST = [];
-            $supplied = ur_supplied_csrf_token('action=saveCredentials&csrf_token=raw-only-token');
-            $this->assertSame('raw-only-token', $supplied);
-            $this->assertContains('raw-only-token', ur_csrf_token_candidates());
+            $raw = 'action=saveCredentials&csrf_token=raw-only-token&connections_present=1';
+            $this->assertSame('raw-only-token', ur_supplied_csrf_token($raw));
+            // The full acceptance path: ur_check_csrf must accept the raw-body token.
+            [, $code] = $this->runCapture(fn() => $this->assertTrue(ur_check_csrf($raw)));
+            $this->assertSame(200, $code);
+            // And reject when the raw body carries a WRONG token.
+            [, $code2] = $this->runCapture(fn() => ur_check_csrf('csrf_token=not-the-token'));
+            $this->assertSame(403, $code2);
         } finally {
             @unlink($path);
             $GLOBALS['var'] = ['csrf_token' => 'test-token'];
