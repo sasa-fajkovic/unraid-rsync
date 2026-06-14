@@ -52,6 +52,44 @@ final class JobTest extends TestCase
         $this->assertSame('j-my-music', $job['id']);
     }
 
+    public function testSuppliedSafeIdKept(): void
+    {
+        // A pre-existing safe slug id (incl. dots/underscores within the token)
+        // is preserved verbatim.
+        $job = Job::normalize(['name' => 'x', 'id' => 'j-My_job.2-3']);
+        $this->assertSame('j-My_job.2-3', $job['id']);
+    }
+
+    /**
+     * SEC-01: a crafted id (traversal, shell metachars, NUL, overlong, or a
+     * pure-dots segment) must never persist - normalize() regenerates from the
+     * name instead, so downstream filesystem helpers never see it.
+     *
+     * @dataProvider craftedIdProvider
+     */
+    public function testCraftedIdRegeneratedFromName(string $badId): void
+    {
+        $job = Job::normalize(['name' => 'safe name', 'id' => $badId]);
+        $this->assertSame('j-safe-name', $job['id']);
+    }
+
+    /** @return array<string,array{0:string}> */
+    public static function craftedIdProvider(): array
+    {
+        return [
+            'dotdot'       => ['..'],
+            'dot'          => ['.'],
+            'slash'        => ['../../etc'],
+            'shell-meta'   => ['j-a; rm -rf /'],
+            'nul-byte'     => ["j-a\0b"],
+            // Control bytes must be rejected BEFORE trim() laundered them away
+            // (trailing newline/NUL), matching ur_safe_job_id's ordering.
+            'trailing-nl'  => ["j-ok\n"],
+            'trailing-nul' => ["j-ok\0"],
+            'overlong'     => [str_repeat('a', 129)],
+        ];
+    }
+
     public function testOmittedScheduleKeepsDefault(): void
     {
         // A minimal job that omits schedule should keep the sensible default,

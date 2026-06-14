@@ -160,8 +160,10 @@ class Cron
             }
             // The id becomes part of a shell-executed cron line: refuse anything
             // that isn't a single safe token (prevents command injection from a
-            // crafted/legacy id like "j-a; rm -rf /").
-            if (!preg_match(self::SAFE_ID_PATTERN, $id)) {
+            // crafted/legacy id like "j-a; rm -rf /"). A pure-dots id ("." / "..")
+            // passes SAFE_ID_PATTERN's char class but is a traversal segment, so
+            // reject it too (mirrors ur_safe_job_id and the safeId helpers).
+            if (!preg_match(self::SAFE_ID_PATTERN, $id) || preg_match('/^\.+$/', $id)) {
                 continue;
             }
             // A malformed schedule would shift the command tokens (or be a junk

@@ -245,22 +245,48 @@ class Logger
     private static function safeId(string $id): string
     {
         $clean = preg_replace('/[^A-Za-z0-9._-]/', '', $id);
-        return ($clean === '' || $clean === null) ? 'unknown' : $clean;
+        // A pure-dots id ("." / ".." / "...") survives the char-class strip but
+        // is a traversal segment ("logs/.." == base()), so collapse it to a
+        // literal. Mirrors ur_safe_job_id's pure-dots rejection so this inner
+        // defence-in-depth layer can't be the weak link.
+        if ($clean === '' || $clean === null || preg_match('/^\.+$/', $clean)) {
+            return 'unknown';
+        }
+        return $clean;
     }
 
-    /** Ensure a log directory exists (mode 700; logs may name paths/hosts). */
+    /**
+     * Ensure a log directory exists (mode 700; logs may name paths/hosts).
+     *
+     * Walks the ancestry base() -> logsDir() -> leaf and creates each level
+     * NON-recursively, refusing a symlink at ANY level. A plain
+     * `mkdir($dir, 0700, true)` would silently FOLLOW a symlinked runtime base
+     * (the base lives under world-writable /tmp), letting an attacker who plants
+     * /tmp/unraid.rsync -> /somewhere redirect root-written logs out of the
+     * sandbox. Mirrors Ssh::ensureRuntimeDirs. The post-mkdir re-check closes the
+     * TOCTOU where a level is swapped for a symlink between create and use.
+     */
     private static function ensureDir(string $dir): void
     {
-        if (is_link($dir)) {
-            throw new RuntimeException("Refusing to use a symlinked log dir: $dir");
+        $chain = [self::base(), self::logsDir()];
+        if ($dir !== self::logsDir()) {
+            $chain[] = $dir;
         }
-        if (file_exists($dir) && !is_dir($dir)) {
-            throw new RuntimeException("Log path exists but is not a directory: $dir");
+        foreach ($chain as $d) {
+            if (is_link($d)) {
+                throw new RuntimeException("Refusing to use a symlinked log dir: $d");
+            }
+            if (file_exists($d) && !is_dir($d)) {
+                throw new RuntimeException("Log path exists but is not a directory: $d");
+            }
+            if (!is_dir($d) && !@mkdir($d, 0700) && !is_dir($d)) {
+                throw new RuntimeException("Unable to create log dir: $d");
+            }
+            if (is_link($d)) {
+                throw new RuntimeException("Refusing to use a symlinked log dir: $d");
+            }
+            @chmod($d, 0700);
         }
-        if (!is_dir($dir) && !@mkdir($dir, 0700, true) && !is_dir($dir)) {
-            throw new RuntimeException("Unable to create log dir: $dir");
-        }
-        @chmod($dir, 0700);
     }
 
     /**

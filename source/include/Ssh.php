@@ -146,7 +146,13 @@ class Ssh
     private static function safeId(string $id): string
     {
         $clean = preg_replace('/[^A-Za-z0-9._-]/', '', $id);
-        return ($clean === '' || $clean === null) ? 'unknown' : $clean;
+        // A pure-dots id ("." / "..") survives the char-class strip but is a
+        // traversal segment, so collapse it to a literal. Mirrors
+        // ur_safe_job_id's pure-dots rejection (defence-in-depth).
+        if ($clean === '' || $clean === null || preg_match('/^\.+$/', $clean)) {
+            return 'unknown';
+        }
+        return $clean;
     }
 
     // --- sshpass detection (detect-and-degrade) -----------------------------
