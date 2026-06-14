@@ -39,6 +39,7 @@ class Rsync
      * @var array<string,string>
      */
     const BOOL_FLAGS = [
+        'recursive'       => '-r',
         'archive'         => '-a',
         'compress'        => '-z',
         'humanReadable'   => '-h',

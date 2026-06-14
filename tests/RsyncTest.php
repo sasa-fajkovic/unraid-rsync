@@ -72,6 +72,25 @@ final class RsyncTest extends TestCase
         $this->assertSame(['-a', '-z', '--delete'], $tokens);
     }
 
+    public function testRecursiveKeyEmitsDashR(): void
+    {
+        $opts = $this->emptyOpts();
+        $opts['recursive'] = true;
+        $this->assertContains('-r', Rsync::optionTokens($opts));
+    }
+
+    public function testDefaultProfileTokensAreRecursiveNonArchive(): void
+    {
+        // The shipped defaults must build a recursive, non-archive, non-delete
+        // command: -r + -t + -h present; -a and --delete absent.
+        $tokens = Rsync::optionTokens(Config::defaultRsyncOptions());
+        $this->assertContains('-r', $tokens);
+        $this->assertContains('-t', $tokens);
+        $this->assertContains('-h', $tokens);
+        $this->assertNotContains('-a', $tokens);
+        $this->assertNotContains('--delete', $tokens);
+    }
+
     public function testScalarValueFlagsEmitWhenNonEmptyOnly(): void
     {
         $opts = $this->emptyOpts();
