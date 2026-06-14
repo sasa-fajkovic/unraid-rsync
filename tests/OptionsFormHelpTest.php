@@ -412,10 +412,16 @@ final class OptionsFormHelpTest extends TestCase
         $this->assertStringNotContainsString('<', $out);
         $this->assertStringNotContainsString('>', $out);
 
-        $out2 = ur_js('a"b\'c&d');
-        $this->assertStringNotContainsString('"b', $out2); // the inner double-quote is hex-escaped
-        $this->assertStringNotContainsString('&', $out2);
-        $this->assertStringNotContainsString("'", $out2);
+        // The HEX flags are actually in effect: a bare json_encode would leave
+        // & and ' raw and emit the plain escape for the double-quote. Assert the
+        // uXXXX hex escapes appear (matched without a backslash) + a round-trip.
+        $val  = 'a"b' . "'" . 'c&d';
+        $out2 = ur_js($val);
+        $this->assertStringContainsString('u0022', $out2); // double-quote -> hex (JSON_HEX_QUOT)
+        $this->assertStringContainsString('u0027', $out2); // apostrophe  -> hex (JSON_HEX_APOS)
+        $this->assertStringContainsString('u0026', $out2); // ampersand   -> hex (JSON_HEX_AMP)
+        $this->assertStringNotContainsString('&', $out2);  // never raw
+        $this->assertSame($val, json_decode($out2));       // escapes are valid
 
         // ...and a normal token still round-trips as valid JSON.
         $this->assertSame('plain-token', json_decode(ur_js('plain-token')));
@@ -426,7 +432,8 @@ final class OptionsFormHelpTest extends TestCase
         // Defence-in-depth regression: the inline-script HANDLER/CSRF vars must go
         // through ur_js() (HEX flags), never a bare json_encode().
         foreach (['jobs.php', 'status.php', 'credentials.php'] as $page) {
-            $src = (string) file_get_contents(__DIR__ . '/../source/pages/' . $page);
+            $src = file_get_contents(__DIR__ . '/../source/pages/' . $page);
+            $this->assertIsString($src, "could not read $page");
             $this->assertDoesNotMatchRegularExpression(
                 '/=\s*json_encode\(\$(?:csrf|handlerUrl)\b/',
                 $src,

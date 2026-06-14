@@ -73,10 +73,17 @@ if (!function_exists('ur_js')) {
      */
     function ur_js($value): string
     {
-        return (string) json_encode(
-            $value,
-            JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP
-        );
+        try {
+            return json_encode(
+                $value,
+                JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP | JSON_THROW_ON_ERROR
+            );
+        } catch (\JsonException $e) {
+            // Never emit a bare `var X = ;` (which would break the whole script
+            // block). On an encode failure (e.g. invalid UTF-8) fall back to the
+            // syntactically-valid JS literal `null`.
+            return 'null';
+        }
     }
 }
 

@@ -19,7 +19,7 @@
 require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Config.php';
 require_once '/usr/local/emhttp/plugins/unraid.rsync/include/RunState.php';
 require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Rsync.php';
-require_once '/usr/local/emhttp/plugins/unraid.rsync/pages/_options_form.php'; // ur_render_csrf_token
+require_once '/usr/local/emhttp/plugins/unraid.rsync/pages/_options_form.php'; // ur_render_csrf_token + ur_js
 
 $csrf = ur_render_csrf_token();
 $handlerUrl = '/plugins/unraid.rsync/include/handler.php';
