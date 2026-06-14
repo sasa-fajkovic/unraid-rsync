@@ -131,10 +131,13 @@ class Config
      */
     public static function clampRetention($value): int
     {
-        if (!is_numeric($value)) {
+        // Strict integer validation: FILTER_VALIDATE_INT rejects "1e3", "2.9",
+        // "" and other non-integer numerics (which a bare (int) cast would
+        // silently mangle to 1/2/0), falling back to the default instead.
+        $n = filter_var($value, FILTER_VALIDATE_INT);
+        if ($n === false) {
             return self::DEFAULT_RETENTION;
         }
-        $n = (int) $value;
         if ($n < self::MIN_RETENTION) {
             return self::MIN_RETENTION;
         }

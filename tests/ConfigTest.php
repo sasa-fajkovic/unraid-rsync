@@ -42,7 +42,13 @@ final class ConfigTest extends TestCase
         $this->assertSame(9999, Config::clampRetention(10000));
         $this->assertSame(9999, Config::clampRetention(999999));
         $this->assertSame(42, Config::clampRetention(42));
-        $this->assertSame(42, Config::clampRetention('42')); // numeric string
+        $this->assertSame(42, Config::clampRetention('42')); // integer string
+        // Non-INTEGER numerics must fall back to the default, not be mangled by a
+        // bare (int) cast ("1e3"->1, "2.9"->2).
+        $this->assertSame(100, Config::clampRetention('1e3'));
+        $this->assertSame(100, Config::clampRetention('2.9'));
+        $this->assertSame(100, Config::clampRetention(2.9));
+        $this->assertSame(100, Config::clampRetention(''));
     }
 
     public function testMergeDefaultsClampsRetention(): void
