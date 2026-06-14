@@ -1284,14 +1284,27 @@ function ur_runner_script_path(): string
 }
 
 /**
- * Locate a `php` interpreter to launch the detached runner with. Prefers the
- * currently-running binary (PHP_BINARY) so the runner uses the same PHP as the
- * webGui; falls back to a bare "php" on PATH.
+ * Locate a CLI `php` interpreter to launch the detached runner with.
+ *
+ * CRITICAL (the live "Run started but nothing happens" bug): handler.php runs
+ * under php-fpm, where PHP_BINARY is the php-fpm SERVER executable, NOT a CLI
+ * interpreter. `php-fpm scripts/runner.php --job=...` does NOT execute the
+ * script (php-fpm ignores a script argument and tries to run as a FastCGI
+ * server), so the backgrounded launch returns exit 0 while the runner never
+ * actually runs - no run log, no state, the job silently does nothing. We
+ * therefore only trust PHP_BINARY when we are genuinely under the CLI SAPI;
+ * otherwise we resolve a real CLI php (Unraid ships /usr/bin/php), falling back
+ * to a bare "php" on PATH.
  */
 function ur_php_binary(): string
 {
-    if (defined('PHP_BINARY') && PHP_BINARY !== '' && is_executable(PHP_BINARY)) {
+    if (PHP_SAPI === 'cli' && defined('PHP_BINARY') && PHP_BINARY !== '' && is_executable(PHP_BINARY)) {
         return PHP_BINARY;
+    }
+    foreach (['/usr/bin/php', '/usr/local/bin/php', '/bin/php'] as $cand) {
+        if (is_executable($cand)) {
+            return $cand;
+        }
     }
     return 'php';
 }
@@ -1615,26 +1628,45 @@ function ur_action_get_status(): void
             continue;
         }
 
-        $running = RunState::isRunning($id);
-        $summary = Runner::readSummary($id);
+        // Per-job resilience: a single job's runtime/state/schedule hiccup must
+        // not 500 the WHOLE poller (which would blank the entire Jobs/Status UI).
+        // Report that job with an ERROR state and keep going.
+        try {
+            $running = RunState::isRunning($id);
+            $summary = Runner::readSummary($id);
 
-        $nextRun = null;
-        if (!empty($job['enabled'])) {
-            $schedule = trim((string) ($job['schedule'] ?? ''));
-            if ($schedule !== '') {
-                $next = Cron::nextRun($schedule, $now);
-                $nextRun = ($next === null) ? null : (int) $next;
+            $nextRun = null;
+            if (!empty($job['enabled'])) {
+                $schedule = trim((string) ($job['schedule'] ?? ''));
+                if ($schedule !== '') {
+                    $next = Cron::nextRun($schedule, $now);
+                    $nextRun = ($next === null) ? null : (int) $next;
+                }
             }
-        }
 
-        $out[$id] = [
-            'name'    => (string) ($job['name'] ?? $id),
-            'enabled' => !empty($job['enabled']),
-            'running' => $running,
-            'state'   => ur_derive_state($running, $summary),
-            'lastRun' => ur_last_run_shape($summary),
-            'nextRun' => $nextRun,
-        ];
+            $out[$id] = [
+                'name'    => (string) ($job['name'] ?? $id),
+                'enabled' => !empty($job['enabled']),
+                'running' => $running,
+                'state'   => ur_derive_state($running, $summary),
+                'lastRun' => ur_last_run_shape($summary),
+                'nextRun' => $nextRun,
+            ];
+        } catch (Throwable $e) {
+            error_log('unraid.rsync getStatus job ' . $id . ': '
+                . get_class($e) . ': ' . $e->getMessage());
+            $out[$id] = [
+                'name'    => (string) ($job['name'] ?? $id),
+                'enabled' => !empty($job['enabled']),
+                'running' => false,
+                'state'   => 'ERROR',
+                'lastRun' => null,
+                'nextRun' => null,
+                // TODO(remove): temporary live diagnostic for the getStatus throw.
+                'error'   => get_class($e) . ': ' . $e->getMessage()
+                    . ' @ ' . basename($e->getFile()) . ':' . $e->getLine(),
+            ];
+        }
     }
 
     sendResponse(['ok' => true, 'now' => $now, 'jobs' => $out], 200);
