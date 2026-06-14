@@ -101,11 +101,11 @@ final class CronTest extends TestCase
 
         // Exact line shape incl. the load-bearing spelling + absolute path.
         $this->assertSame(
-            '0 3 * * * php /usr/local/emhttp/plugins/unraid.rsync/scripts/runner.php --job=j-music >/dev/null 2>&1',
+            '0 3 * * * php /usr/local/emhttp/plugins/unraid.rsync/scripts/runner.php --job=j-music --trigger=schedule >/dev/null 2>&1',
             $lines[1]
         );
         $this->assertSame(
-            '*/15 * * * * php /usr/local/emhttp/plugins/unraid.rsync/scripts/runner.php --job=j-docs >/dev/null 2>&1',
+            '*/15 * * * * php /usr/local/emhttp/plugins/unraid.rsync/scripts/runner.php --job=j-docs --trigger=schedule >/dev/null 2>&1',
             $lines[2]
         );
     }
@@ -183,7 +183,7 @@ final class CronTest extends TestCase
         Cron::apply($config);
         $content = file_get_contents(Cron::cronFilePath());
         $this->assertStringContainsString(
-            '0 3 * * * php /usr/local/emhttp/plugins/unraid.rsync/scripts/runner.php --job=j-ws >/dev/null 2>&1',
+            '0 3 * * * php /usr/local/emhttp/plugins/unraid.rsync/scripts/runner.php --job=j-ws --trigger=schedule >/dev/null 2>&1',
             $content
         );
     }

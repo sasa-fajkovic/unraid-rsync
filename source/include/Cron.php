@@ -175,9 +175,14 @@ class Cron
             // so a stray tab can't shift the command tokens.
             $schedule = (string) preg_replace('/\s+/', ' ', $schedule);
 
+            // A cron-fired run is a SCHEDULE trigger. 'schedule' is a hardcoded
+            // [a-z] literal (shell-safe), placed AFTER --job=<id> so the
+            // load-bearing --job=<id> token stays followed by whitespace for
+            // RunState::cmdlineMatchesJob.
             $lines[] = $schedule
                 . ' php ' . $runner
                 . ' --job=' . $id
+                . ' --trigger=schedule'
                 . ' >/dev/null 2>&1';
         }
 

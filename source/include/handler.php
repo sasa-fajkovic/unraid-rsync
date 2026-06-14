@@ -1300,6 +1300,11 @@ function ur_launch_runner(string $jobId, bool $dryRun): bool
     if ($dryRun) {
         $cmd .= ' --dry-run';
     }
+    // A handler-initiated run is always a MANUAL trigger (the scheduled path is
+    // the cron line, which passes --trigger=schedule). Fixed literal -> no
+    // escaping needed; placed AFTER --job so RunState::cmdlineMatchesJob still
+    // matches the --job=<id> token.
+    $cmd .= ' --trigger=manual';
     // MANDATORY: redirect both streams to /dev/null and background, else the
     // request hangs waiting on the child. setsid (when available) detaches the
     // runner into its own session/process group so abort can SIGTERM the whole

@@ -97,8 +97,13 @@ class Runner
      * @param bool   $dryRun
      * @return array{state:string,exitCode:int,runLog:string,reason?:string}
      */
-    public static function run(string $jobId, bool $dryRun = false): array
+    public static function run(string $jobId, bool $dryRun = false, string $trigger = 'manual'): array
     {
+        // How this run was triggered: 'manual' (UI Run/Dry-run) or 'schedule'
+        // (cron). Clamped to the closed set so a junk value never propagates into
+        // state/summary/history. Orthogonal to $dryRun (dry-vs-real).
+        $trigger = ($trigger === 'schedule') ? 'schedule' : 'manual';
+
         // 1. Load config + credentials; resolve the job.
         try {
             $config = Config::load();
@@ -143,6 +148,7 @@ class Runner
                 'pid'        => self::pid(),
                 'running'    => true,
                 'dryRun'     => $dryRun,
+                'trigger'    => $trigger,
                 'startedAt'  => $startedAt,
                 'currentLog' => $runLog,
             ]);
@@ -152,10 +158,11 @@ class Runner
         }
 
         Logger::event($runLog, $jobId, sprintf(
-            'Run started for job "%s" (%s)%s.',
+            'Run started for job "%s" (%s)%s [%s].',
             (string) ($job['name'] ?? $jobId),
             $jobId,
-            $dryRun ? ' [DRY-RUN]' : ''
+            $dryRun ? ' [DRY-RUN]' : '',
+            $trigger
         ));
 
         // Survive the abort SIGTERM so we can record an ABORTED outcome.
@@ -235,7 +242,7 @@ class Runner
             }
 
             // 5. preHook (only if SSH prep didn't already fail).
-            $hookEnvBase = self::hookEnv($job, $jobId, $dryRun);
+            $hookEnvBase = self::hookEnv($job, $jobId, $dryRun, null, null, $trigger);
             if ($state !== Rsync::STATE_FAILED) {
                 $preHook = (string) ($job['preHook'] ?? '');
                 if (trim($preHook) !== '') {
@@ -363,7 +370,7 @@ class Runner
             //    in its environment.
             $postHook = (string) ($job['postHook'] ?? '');
             if (trim($postHook) !== '') {
-                $postEnv = self::hookEnv($job, $jobId, $dryRun, $state, $exitCode);
+                $postEnv = self::hookEnv($job, $jobId, $dryRun, $state, $exitCode, $trigger);
                 Logger::event($runLog, $jobId, 'Running post-run hook.');
                 $postExit = self::runHook($postHook, $postEnv, $runLog);
                 Logger::event($runLog, $jobId, 'Post-run hook exited with code ' . $postExit . '.');
@@ -391,6 +398,7 @@ class Runner
                 'exitCode'    => $exitCode,
                 'durationSec' => max(0, $finishedAtTs - $startedAtTs),
                 'dryRun'      => $dryRun,
+                'trigger'     => $trigger,
             ]);
 
             Logger::event($runLog, $jobId, "Run finished: state=$state exitCode=$exitCode.");
@@ -811,17 +819,19 @@ class Runner
     /**
      * Build the environment array passed to a hook. The post-run hook also gets
      * the outcome (UR_JOB_STATUS, UR_EXIT_CODE); the pre-run hook gets the same
-     * keys with empty/0 values so a hook can rely on them existing.
+     * keys with empty/0 values so a hook can rely on them existing. UR_TRIGGER
+     * is 'manual' or 'schedule' so a hook can branch on how the run was started.
      *
      * @param array<string,mixed> $job
      * @return array<string,string>
      */
-    public static function hookEnv(array $job, string $jobId, bool $dryRun, ?string $status = null, ?int $exitCode = null): array
+    public static function hookEnv(array $job, string $jobId, bool $dryRun, ?string $status = null, ?int $exitCode = null, string $trigger = 'manual'): array
     {
         return [
             'UR_JOB_ID'     => $jobId,
             'UR_JOB_NAME'   => (string) ($job['name'] ?? ''),
             'UR_DRY_RUN'    => $dryRun ? '1' : '0',
+            'UR_TRIGGER'    => ($trigger === 'schedule') ? 'schedule' : 'manual',
             'UR_JOB_STATUS' => $status === null ? '' : $status,
             'UR_EXIT_CODE'  => $exitCode === null ? '' : (string) $exitCode,
         ];
@@ -961,6 +971,7 @@ class Runner
         $clean = ($clean === '' || $clean === null) ? 'unknown' : $clean;
         $path  = $dir . '/' . $clean . '.summary.json';
 
+        $trigger = (($summary['trigger'] ?? '') === 'schedule') ? 'schedule' : 'manual';
         $out = [
             'state'       => (string) ($summary['state'] ?? Rsync::STATE_FAILED),
             'startedAt'   => (string) ($summary['startedAt'] ?? ''),
@@ -968,6 +979,7 @@ class Runner
             'exitCode'    => (int) ($summary['exitCode'] ?? 1),
             'durationSec' => (int) ($summary['durationSec'] ?? 0),
             'dryRun'      => !empty($summary['dryRun']),
+            'trigger'     => $trigger,
         ];
         $json = json_encode($out, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
         if ($json === false) {

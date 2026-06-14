@@ -92,7 +92,7 @@ final class HandlerCronTest extends TestCase
         // The cron file carries exactly the saved job's line.
         $content = file_get_contents(Cron::cronFilePath());
         $this->assertStringContainsString(
-            '0 3 * * * php /usr/local/emhttp/plugins/unraid.rsync/scripts/runner.php --job=j-music >/dev/null 2>&1',
+            '0 3 * * * php /usr/local/emhttp/plugins/unraid.rsync/scripts/runner.php --job=j-music --trigger=schedule >/dev/null 2>&1',
             $content
         );
     }
