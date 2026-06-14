@@ -19,14 +19,21 @@ final class FakeKeyTools extends KeyTools
     public static $keyscanCalls = [];
     /** @var array<int,float|null> recorded keyscan wall-clock deadlines */
     public static $keyscanDeadlines = [];
+    /**
+     * Snapshot of the -f key file at the moment a `-y` keygen runs, so a test can
+     * prove the private key is already 0600 (and fully written) before ssh-keygen
+     * reads it. @var array{mode:int,content:string}|null
+     */
+    public static $keyFileSnapshotAtKeygen = null;
 
     public static function reset(): void
     {
-        self::$keygenResponses  = [];
-        self::$keyscanResponse  = [0, '', '', false];
-        self::$keygenCalls      = [];
-        self::$keyscanCalls     = [];
-        self::$keyscanDeadlines = [];
+        self::$keygenResponses         = [];
+        self::$keyscanResponse         = [0, '', '', false];
+        self::$keygenCalls             = [];
+        self::$keyscanCalls            = [];
+        self::$keyscanDeadlines        = [];
+        self::$keyFileSnapshotAtKeygen = null;
     }
 
     protected static function runKeygen(array $argv): array
@@ -35,6 +42,15 @@ final class FakeKeyTools extends KeyTools
 
         // -y derives a public key from a private key.
         if (in_array('-y', $argv, true)) {
+            // Snapshot the -f key file as ssh-keygen would see it: perms + bytes.
+            $fi = array_search('-f', $argv, true);
+            if ($fi !== false && isset($argv[$fi + 1]) && is_file($argv[$fi + 1])) {
+                $kf = $argv[$fi + 1];
+                self::$keyFileSnapshotAtKeygen = [
+                    'mode'    => fileperms($kf) & 0777,
+                    'content' => (string) file_get_contents($kf),
+                ];
+            }
             $r = self::$keygenResponses['-y'] ?? [0, "ssh-ed25519 AAAAderived comment\n", '', false];
         // -l lists a fingerprint.
         } elseif (in_array('-lf', $argv, true)) {
@@ -267,6 +283,23 @@ final class KeyToolsTest extends TestCase
         $this->assertStringContainsString('AAAAderived', $res['publicKey']);
         $this->assertSame('SHA256:SAMPLEFINGERPRINT', $res['fingerprint']);
         $this->assertStringContainsString('BEGIN OPENSSH PRIVATE KEY', $res['privateKey']);
+    }
+
+    public function testDerivedKeyFileIsChmod600BeforeKeygenReadsIt(): void
+    {
+        // SEC-03: the temp private key must already be 0600 (and fully written)
+        // when ssh-keygen reads it - never momentarily world-readable. The fake
+        // runKeygen snapshots the -f file's perms + bytes at that instant.
+        $key = "-----BEGIN OPENSSH PRIVATE KEY-----\nSEC03BODY\n-----END OPENSSH PRIVATE KEY-----";
+        $res = FakeKeyTools::derivePublicFromPrivate($key);
+        $this->assertTrue($res['ok'], $res['error'] ?? '');
+
+        $snap = FakeKeyTools::$keyFileSnapshotAtKeygen;
+        $this->assertNotNull($snap, 'keygen -y was not invoked with a key file');
+        $this->assertSame(0600, $snap['mode'], 'key file must be 0600 when ssh-keygen reads it');
+        // ...and the full key bytes were present (write completed before keygen).
+        $this->assertStringContainsString('SEC03BODY', $snap['content']);
+        $this->assertStringEndsWith("\n", $snap['content']);
     }
 
     public function testImportPublicOnly(): void

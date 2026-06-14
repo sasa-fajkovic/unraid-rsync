@@ -178,12 +178,23 @@ class KeyTools
         if ($dir === '') {
             return ['ok' => false, 'error' => 'Unable to create a temp dir.'];
         }
+        // Create the file, tighten it to 0600, THEN write the key bytes, so the
+        // private key never momentarily lands world-readable. The 0700 parent dir
+        // (tempDir()) already gates access, but ordering the chmod before the
+        // write closes even that brief window (defence in depth). [SEC-03]
         $keyFile = $dir . '/key';
-        if (@file_put_contents($keyFile, rtrim($privateKey, "\r\n") . "\n") === false) {
+        $fh = @fopen($keyFile, 'w');
+        if ($fh === false) {
             self::rmTempDir($dir);
             return ['ok' => false, 'error' => 'Unable to write the key for validation.'];
         }
         @chmod($keyFile, 0600);
+        if (@fwrite($fh, rtrim($privateKey, "\r\n") . "\n") === false) {
+            @fclose($fh);
+            self::rmTempDir($dir);
+            return ['ok' => false, 'error' => 'Unable to write the key for validation.'];
+        }
+        @fclose($fh);
 
         // -P "" supplies an empty passphrase non-interactively; a key that
         // actually needs a passphrase fails rather than hanging on a prompt.

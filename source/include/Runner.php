@@ -904,6 +904,16 @@ class Runner
             }
         }
 
+        // Close any pipe stream_select left open (e.g. on a select error that
+        // broke the loop before EOF), mirroring KeyTools::runArgv /
+        // Rsync::defaultRun. proc_close + the group SIGTERM still reap the child,
+        // so this is fd hygiene, not a deadlock fix. [ROB-01]
+        foreach ($open as $stream) {
+            if (is_resource($stream)) {
+                fclose($stream);
+            }
+        }
+
         // Capture signal status before proc_close (see Rsync::defaultRun).
         $status = @proc_get_status($proc);
         $code   = proc_close($proc);
