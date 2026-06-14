@@ -169,9 +169,13 @@ class Notify
 
     /**
      * Run `notify init` (initialise the notification subsystem - idempotent).
-     * Graceful no-op + false when the binary is absent; never throws. Wired into
-     * the .plg install path; exposed here so the same escaping/runner seam is
-     * unit-tested rather than duplicated in shell.
+     * Graceful no-op + false when the binary is absent; never throws.
+     *
+     * Provided as a tested escaping/runner seam. NOTE: the .plg install script
+     * currently shells out to `notify init` directly (unraid.rsync.plg:96, while
+     * the array is stopped during install) rather than calling this method, so
+     * there is no live caller today - it exists for completeness and to keep the
+     * init command path under unit test alongside buildInitCommand().
      */
     public static function init(): bool
     {

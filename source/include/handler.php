@@ -242,52 +242,6 @@ function ur_csrf_tokens_from_ini(string $path): array
 }
 
 /**
- * Read csrf_token from the Unraid state file (var.ini). Returns '' when no
- * candidate file is readable or none carries a csrf_token. This is the
- * fallback that makes a DIRECT POST to handler.php work: the front controller
- * only populates $GLOBALS['var'] when rendering a page via DefaultPageLayout,
- * so a standalone endpoint must read the token from disk itself.
- */
-function ur_csrf_token_from_state(): string
-{
-    foreach (ur_var_ini_candidates() as $path) {
-        if (!is_string($path)) {
-            continue;
-        }
-        $tokens = ur_csrf_tokens_from_ini($path);
-        if ($tokens !== []) {
-            return $tokens[0];
-        }
-    }
-    return '';
-}
-
-/**
- * Resolve the FIRST available expected webGui CSRF token. Order of precedence:
- *   1. $GLOBALS['var']['csrf_token'] - set by the front controller when the
- *      handler is included through a rendered page (and by the unit tests).
- *   2. $_SESSION['csrf_token']       - some webGui contexts carry it here.
- *   3. /var/local/emhttp/var.ini     - the canonical Unraid state file; read
- *      directly so a STANDALONE POST to handler.php (where $var is never
- *      populated) still gets the real token.
- * Returns '' only when none is available.
- *
- * NOTE: this "first non-empty source" resolver is retained for callers that want
- * a single canonical token, but the CSRF CHECK no longer relies on it - see
- * ur_csrf_token_candidates() / ur_check_csrf() and the root-cause note there.
- */
-function ur_expected_csrf_token(): string
-{
-    if (isset($GLOBALS['var']) && is_array($GLOBALS['var']) && !empty($GLOBALS['var']['csrf_token'])) {
-        return (string) $GLOBALS['var']['csrf_token'];
-    }
-    if (isset($_SESSION['csrf_token']) && !empty($_SESSION['csrf_token'])) {
-        return (string) $_SESSION['csrf_token'];
-    }
-    return ur_csrf_token_from_state();
-}
-
-/**
  * Collect EVERY server-side-trusted CSRF token the page legitimately echoes,
  * de-duplicated and non-empty:
  *   - $GLOBALS['var']['csrf_token'] (front-controller / tests),
@@ -440,10 +394,10 @@ function ur_check_csrf(?string $rawInput = null): bool
  *   it. The result is exactly the observed symptom: one slow/stuck discover and
  *   suddenly every POST hangs.
  *
- *   Closing the session as early as possible (we hold nothing in it - the only
- *   read is the csrf_token fallback in ur_expected_csrf_token, which has already
- *   run by the time we get here) WRITES IT BACK AND RELEASES THE LOCK, so a long
- *   request can never serialise other requests behind its session.
+ *   Closing the session as early as possible (we hold nothing in it - the CSRF
+ *   check reads its candidate tokens via ur_csrf_token_candidates(), which has
+ *   already run by the time we get here) WRITES IT BACK AND RELEASES THE LOCK, so
+ *   a long request can never serialise other requests behind its session.
  *
  * Safe to call unconditionally: it is a no-op when no session is active (e.g.
  * the unit tests, or a webGui build that doesn't prepend a session). We guard on
