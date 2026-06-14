@@ -560,26 +560,6 @@ final class HandlerCredentialsTest extends TestCase
         $this->assertSame(403, (int) ($GLOBALS['ur_last_response_code'] ?? 0));
     }
 
-    public function testExpectedCsrfTokenFallsBackToVarIni(): void
-    {
-        // ROOT-CAUSE regression guard: when $GLOBALS['var'] is NOT populated
-        // (a direct POST to handler.php), the expected token must come from the
-        // Unraid state file via parse_ini_file - the fix for the silent-403 bug.
-        if (!defined('UR_VAR_INI_PATHS')) {
-            $this->markTestSkipped('UR_VAR_INI_PATHS not overridable in this build');
-        }
-        $path = UR_VAR_INI_PATHS[0];
-        @mkdir(dirname($path), 0777, true);
-        file_put_contents($path, "version=\"7.3.1\"\ncsrf_token=\"from-state-ini\"\n");
-        try {
-            unset($GLOBALS['var']); // simulate the standalone-endpoint case
-            $this->assertSame('from-state-ini', ur_expected_csrf_token());
-        } finally {
-            @unlink($path);
-            $GLOBALS['var'] = ['csrf_token' => 'test-token'];
-        }
-    }
-
     public function testCsrfValidatesAgainstVarIniTokenOnDirectPost(): void
     {
         if (!defined('UR_VAR_INI_PATHS')) {
