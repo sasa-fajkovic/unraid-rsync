@@ -211,18 +211,25 @@ function ur_csrf_tokens_from_ini(string $path): array
     $tokens = [];
 
     // Strategy 1: parse_ini_file (no sections). Suppress warnings on a malformed
-    // file and fall through to the regex scan rather than emitting HTML noise.
+    // file and fall through to the line scan rather than emitting HTML noise.
     $ini = @parse_ini_file($path, false, INI_SCANNER_RAW);
     if (is_array($ini) && isset($ini['csrf_token'])) {
         $tokens[] = (string) $ini['csrf_token'];
     }
 
-    // Strategy 2: tolerant line scan of the raw text. Matches `csrf_token = "X"`,
-    // `csrf_token=X`, optional surrounding quotes and whitespace.
-    $text = @file_get_contents($path);
-    if (is_string($text) && $text !== ''
-        && preg_match('/^[ \t]*csrf_token[ \t]*=[ \t]*"?([^"\r\n]+?)"?[ \t]*$/mi', $text, $m)) {
-        $tokens[] = trim($m[1]);
+    // Strategy 2: tolerant scan, line-by-line so we NEVER slurp the whole (large)
+    // state file into memory. Collect EVERY csrf_token line - optional surrounding
+    // quotes and whitespace - so an unrelated malformed line elsewhere can't hide
+    // the token. Matches `csrf_token = "X"`, `csrf_token=X`, etc.
+    $fh = @fopen($path, 'rb');
+    if ($fh !== false) {
+        while (($line = fgets($fh)) !== false) {
+            $line = rtrim($line, "\r\n");
+            if (preg_match('/^[ \t]*csrf_token[ \t]*=[ \t]*"?(.*?)"?[ \t]*$/i', $line, $m)) {
+                $tokens[] = $m[1];
+            }
+        }
+        fclose($fh);
     }
 
     return array_values(array_unique(array_filter($tokens, static fn($t) => $t !== '')));
@@ -1696,22 +1703,27 @@ function ur_action_get_rsync_status(): void
 /**
  * GET csrfProbe: a READ-ONLY, secret-free diagnostic of the CSRF candidate
  * pipeline, used to live-diagnose 403s where a POST carrying the correct token
- * is still rejected. It NEVER returns a token: only booleans, lengths, and -
- * when the caller passes the token it already holds as `?t=` - a hash_equals
- * match flag per source. Behind the webGui's auth like every other endpoint.
+ * is still rejected. It NEVER accepts or returns a raw token:
+ *   - to test for a match the caller passes `?th=<sha256-hex of the token>` (a
+ *     one-way hash, safe to place in a URL), compared via hash_equals against
+ *     sha256() of each candidate;
+ *   - per-source it reports only booleans + token LENGTHS, and a non-sensitive
+ *     id label (NEVER the absolute filesystem path).
+ * Behind the webGui's auth like every other endpoint.
  *
  * TODO(remove): temporary instrumentation; delete once the live 403 cause is
  * confirmed and the robust var.ini read is verified.
  */
 function ur_action_csrf_probe(): void
 {
-    $probe = isset($_GET['t']) ? (string) $_GET['t'] : '';
+    $probeHash = isset($_GET['th']) ? strtolower((string) $_GET['th']) : '';
     $matchAny = false;
 
     $varSet = isset($GLOBALS['var']) && is_array($GLOBALS['var']) && isset($GLOBALS['var']['csrf_token']);
     $sessSet = isset($_SESSION['csrf_token']);
 
-    $paths = [];
+    $sources = [];
+    $idx = 0;
     foreach (ur_var_ini_candidates() as $path) {
         if (!is_string($path)) {
             continue;
@@ -1723,27 +1735,21 @@ function ur_action_csrf_probe(): void
         $parseLen = ($parseOk && isset($ini['csrf_token'])) ? strlen((string) $ini['csrf_token']) : 0;
         $tokens = ur_csrf_tokens_from_ini($path);
         $robustLen = $tokens !== [] ? strlen($tokens[0]) : 0;
-        if ($probe !== '') {
-            foreach ($tokens as $t) {
-                if (hash_equals($t, $probe)) {
-                    $matchAny = true;
-                }
-            }
-        }
-        $paths[] = [
-            'path'       => $path,
+        $sources[] = [
+            'id'         => 'varini[' . $idx . ']', // non-sensitive label, NOT the path
             'isFile'     => $isFile,
             'isReadable' => $isReadable,
             'parseOk'    => $parseOk,
             'parseLen'   => $parseLen,
             'robustLen'  => $robustLen,
         ];
+        $idx++;
     }
 
     $candidates = ur_csrf_token_candidates();
-    if ($probe !== '') {
+    if ($probeHash !== '') {
         foreach ($candidates as $c) {
-            if (hash_equals($c, $probe)) {
+            if (hash_equals(hash('sha256', $c), $probeHash)) {
                 $matchAny = true;
             }
         }
@@ -1753,9 +1759,9 @@ function ur_action_csrf_probe(): void
         'ok'             => true,
         'varGlobalSet'   => $varSet,
         'sessionSet'     => $sessSet,
-        'paths'          => $paths,
+        'sources'        => $sources,
         'candidateCount' => count($candidates),
-        'probeGiven'     => $probe !== '',
+        'probeGiven'     => $probeHash !== '',
         'probeMatchAny'  => $matchAny,
     ], 200);
 }

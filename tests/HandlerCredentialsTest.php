@@ -857,13 +857,16 @@ final class HandlerCredentialsTest extends TestCase
         @mkdir(dirname($path), 0777, true);
         file_put_contents($path, "csrf_token=\"secret-xyz\"\n");
         try {
-            $_GET = ['t' => 'secret-xyz'];
+            // Caller passes a one-way sha256 hash of the token, never the token.
+            $_GET = ['th' => hash('sha256', 'secret-xyz')];
             [$body, $code] = $this->runCapture(fn() => ur_action_csrf_probe());
             $this->assertSame(200, $code);
             $this->assertTrue($body['ok']);
-            $this->assertTrue($body['probeMatchAny'], 'live token should match a candidate');
-            // The token must never appear anywhere in the JSON response.
-            $this->assertStringNotContainsString('secret-xyz', json_encode($body));
+            $this->assertTrue($body['probeMatchAny'], 'live token hash should match a candidate');
+            $json = json_encode($body);
+            // Neither the token nor the absolute var.ini path may appear.
+            $this->assertStringNotContainsString('secret-xyz', $json);
+            $this->assertStringNotContainsString($path, $json);
         } finally {
             @unlink($path);
             $_GET = [];
