@@ -1,0 +1,103 @@
+parameters:
+	ignoreErrors:
+		-
+			message: '#^Call to function is_array\(\) with array\<mixed\> will always evaluate to true\.$#'
+			identifier: function.alreadyNarrowedType
+			count: 1
+			path: source/include/Credentials.php
+
+		-
+			message: '#^Call to function method_exists\(\) with ''Runner'' and ''readSummary'' will always evaluate to true\.$#'
+			identifier: function.alreadyNarrowedType
+			count: 1
+			path: source/include/Logger.php
+
+		-
+			message: '#^Comparison operation "\>" between 16777216 and 0 is always true\.$#'
+			identifier: greater.alwaysTrue
+			count: 1
+			path: source/include/Logger.php
+
+		-
+			message: '#^If condition is always false\.$#'
+			identifier: if.alwaysFalse
+			count: 1
+			path: source/include/Logger.php
+
+		-
+			message: '#^Unsafe call to private method Notify\:\:dispatch\(\) through static\:\:\.$#'
+			identifier: staticClassAccess.privateMethod
+			count: 2
+			path: source/include/Notify.php
+
+		-
+			message: '#^Call to function array_key_exists\(\) with ''exitcode'' and array\{command\: string, pid\: int, running\: bool, signaled\: false, stopped\: bool, exitcode\: int, termsig\: int, stopsig\: int\} will always evaluate to true\.$#'
+			identifier: function.alreadyNarrowedType
+			count: 1
+			path: source/include/Rsync.php
+
+		-
+			message: '#^Call to function is_array\(\) with array\{command\: string, pid\: int, running\: bool, signaled\: bool, stopped\: bool, exitcode\: int, termsig\: int, stopsig\: int\} will always evaluate to true\.$#'
+			identifier: function.alreadyNarrowedType
+			count: 1
+			path: source/include/Rsync.php
+
+		-
+			message: '#^Offset ''termsig'' on array\{command\: string, pid\: int, running\: bool, signaled\: bool, stopped\: bool, exitcode\: int, termsig\: int, stopsig\: int\} in isset\(\) always exists and is not nullable\.$#'
+			identifier: isset.offset
+			count: 1
+			path: source/include/Rsync.php
+
+		-
+			message: '#^If condition is always false\.$#'
+			identifier: if.alwaysFalse
+			count: 1
+			path: source/include/RunState.php
+
+		-
+			message: '#^Call to function array_key_exists\(\) with ''exitcode'' and array\{command\: string, pid\: int, running\: bool, signaled\: false, stopped\: bool, exitcode\: int, termsig\: int, stopsig\: int\} will always evaluate to true\.$#'
+			identifier: function.alreadyNarrowedType
+			count: 1
+			path: source/include/Runner.php
+
+		-
+			message: '#^Call to function is_array\(\) with array\{command\: string, pid\: int, running\: bool, signaled\: bool, stopped\: bool, exitcode\: int, termsig\: int, stopsig\: int\} will always evaluate to true\.$#'
+			identifier: function.alreadyNarrowedType
+			count: 1
+			path: source/include/Runner.php
+
+		-
+			message: '#^If condition is always false\.$#'
+			identifier: if.alwaysFalse
+			count: 1
+			path: source/include/Runner.php
+
+		-
+			message: '#^Offset ''termsig'' on array\{command\: string, pid\: int, running\: bool, signaled\: bool, stopped\: bool, exitcode\: int, termsig\: int, stopsig\: int\} in isset\(\) always exists and is not nullable\.$#'
+			identifier: isset.offset
+			count: 1
+			path: source/include/Runner.php
+
+		-
+			message: '#^If condition is always false\.$#'
+			identifier: if.alwaysFalse
+			count: 1
+			path: source/include/Ssh.php
+
+		-
+			message: '#^Negated boolean expression is always true\.$#'
+			identifier: booleanNot.alwaysTrue
+			count: 1
+			path: source/include/handler.php
+
+		-
+			message: '#^Strict comparison using \!\=\= between non\-falsy\-string and '''' will always evaluate to true\.$#'
+			identifier: notIdentical.alwaysTrue
+			count: 1
+			path: source/include/handler.php
+
+		-
+			message: '#^Unreachable statement \- code above always terminates\.$#'
+			identifier: deadCode.unreachable
+			count: 2
+			path: source/include/handler.php

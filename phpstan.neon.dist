@@ -1,0 +1,24 @@
+# PHPStan static analysis, scoped to the backend that matters most: the
+# proc_open/ssh/rsync shell-out classes and the CLI scripts. The webGui page
+# bodies (source/pages, *.page) are intentionally NOT analysed - they lean on
+# webGui globals ($GLOBALS['var'], the _() translation fn, included var.ini)
+# that only exist inside the live dynamix runtime, so they would produce only
+# environment noise here.
+#
+# treatPhpDocTypesAsCertain is OFF: this code DELIBERATELY re-validates values
+# whose PHPDoc type is not guaranteed at runtime (JSON-decoded config.json /
+# credentials.json, proc_get_status() arrays, etc.). Trusting the PHPDoc would
+# flag those defensive checks as "always true" and pressure us to delete the
+# very guards that make the plugin robust against malformed on-disk state.
+#
+# A baseline (phpstan-baseline.neon) absorbs the remaining pre-existing,
+# intentional findings so this gate catches NEW regressions from here on.
+includes:
+    - phpstan-baseline.neon
+
+parameters:
+    level: 5
+    paths:
+        - source/include
+        - source/scripts
+    treatPhpDocTypesAsCertain: false
