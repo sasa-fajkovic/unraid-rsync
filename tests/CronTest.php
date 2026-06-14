@@ -288,6 +288,52 @@ final class CronTest extends TestCase
     }
 
     // =====================================================================
+    // defaultRunUpdateCron - REAL (shell-form) runner
+    //
+    // Regression guard for the live "update_cron exit -1": the argv-ARRAY form
+    // of proc_open could not launch update_cron on the box (a script the kernel
+    // would not execve directly -> no process at all). We now go through the
+    // shell so the kernel honours the script's own shebang. On Linux (the CI),
+    // the OLD array form returned -1 for a no-shebang script; the shell form
+    // runs it and returns its real exit code.
+    // =====================================================================
+
+    public function testRealRunUpdateCronRunsNoShebangScript(): void
+    {
+        Cron::$updateCronRunner = null; // exercise the REAL default runner
+        $tmp = tempnam(sys_get_temp_dir(), 'urcron');
+        file_put_contents($tmp, "exit 0\n"); // deliberately NO shebang
+        chmod($tmp, 0755);
+        Cron::$updateCronPath = $tmp;
+        try {
+            $this->assertSame(0, Cron::runUpdateCron(), 'shell-form must run a no-shebang script');
+        } finally {
+            @unlink($tmp);
+        }
+    }
+
+    public function testRealRunUpdateCronPropagatesExitCode(): void
+    {
+        Cron::$updateCronRunner = null;
+        $tmp = tempnam(sys_get_temp_dir(), 'urcron');
+        file_put_contents($tmp, "exit 5\n");
+        chmod($tmp, 0755);
+        Cron::$updateCronPath = $tmp;
+        try {
+            $this->assertSame(5, Cron::runUpdateCron());
+        } finally {
+            @unlink($tmp);
+        }
+    }
+
+    public function testRealRunUpdateCronMissingBinaryReturnsMinusOne(): void
+    {
+        Cron::$updateCronRunner = null;
+        Cron::$updateCronPath = '/no/such/update_cron';
+        $this->assertSame(-1, Cron::runUpdateCron());
+    }
+
+    // =====================================================================
     // nextRun() - cron expression evaluation
     // =====================================================================
 

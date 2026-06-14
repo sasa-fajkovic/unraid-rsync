@@ -324,12 +324,25 @@ class Cron
     }
 
     /**
-     * Live update_cron runner: proc_open with the argv array (no shell), output
-     * discarded. Returns the exit code, or -1 if the process could not be
-     * launched. PHP passes an argv array to the OS directly (no re-parsing), so
-     * nothing is shell-interpreted.
+     * Live update_cron runner: invoke update_cron through the system shell,
+     * output discarded. Returns the exit code, or -1 if it could not be launched.
      *
-     * @param array<int,string> $argv
+     * WHY A SHELL HERE (the live "update_cron exit -1" bug): the argv-ARRAY form
+     * of proc_open (execvp) FAILED to launch update_cron on the real box - it
+     * returned no process at all (-1), even though the file exists and is
+     * executable. execvp runs the target directly, so it cannot start a script
+     * the kernel won't execve on its own (a missing/awkward shebang yields
+     * ENOEXEC). Running it through /bin/sh lets the kernel honour update_cron's
+     * OWN shebang - exactly how Unraid's webGui itself invokes update_cron - so
+     * the schedule actually applies.
+     *
+     * This is the ONLY sanctioned shell use in Cron: $bin is a FIXED, trusted
+     * system path (Cron::updateCronPath(), default /usr/local/sbin/update_cron)
+     * with NO user input, and it is escapeshellarg-quoted defensively. The job-id
+     * cron LINES are still written via the no-shell argv/file path; this only
+     * changes how the trusted update_cron binary itself is spawned.
+     *
+     * @param array<int,string> $argv argv[0] is the update_cron path (no args)
      */
     private static function defaultRunUpdateCron(array $argv): int
     {
@@ -346,7 +359,8 @@ class Cron
             2 => ['file', '/dev/null', 'w'],
         ];
         $pipes = [];
-        $proc = @proc_open($argv, $descriptors, $pipes);
+        // String (shell) form: /bin/sh -c '<path>' -> kernel honours the shebang.
+        $proc = @proc_open(escapeshellarg($bin), $descriptors, $pipes);
         if (!is_resource($proc)) {
             return -1;
         }
