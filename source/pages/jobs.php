@@ -99,6 +99,26 @@ function ur_render_job_card($job, $index): void
 
     echo '<div class="ur-job-card" data-index="' . ur_h($index) . '">';
 
+    // Collapsible header (COLLAPSED by default): a one-line summary so a page with
+    // many jobs is not a wall of forms. Click / Enter / Space toggles the editable
+    // body below (delegated in JS; works for server-rendered AND cloned cards).
+    $summaryBits = [];
+    $summaryBits[] = $enabled ? ur_t('enabled') : ur_t('disabled');
+    if ($schedule !== '') {
+        $summaryBits[] = $schedule;
+    }
+    echo '<div class="ur-job-head" role="button" tabindex="0" aria-expanded="false">';
+    echo '<span class="ur-job-caret" aria-hidden="true">&#9654;</span>';
+    echo '<span class="ur-job-title">' . ur_h($name !== '' ? $name : ur_t('(unnamed job)')) . '</span>';
+    echo '<span class="ur-job-sub">' . ur_h(implode(' · ', $summaryBits)) . '</span>';
+    echo '</div>';
+
+    // The editable body. `hidden` keeps it collapsed by default; a display:none
+    // region still SUBMITS its fields, so saved values are never lost while
+    // collapsed. (New cards are expanded by the Add-job handler, and any card
+    // with an invalid required field is auto-expanded before submit validation.)
+    echo '<div class="ur-job-body" hidden>';
+
     // Hidden id (preserved across edits; blank for a new job - handler slugs it).
     echo '<input type="hidden" name="' . ur_h($p . '[id]') . '" value="' . ur_h($id) . '">';
 
@@ -265,6 +285,7 @@ function ur_render_job_card($job, $index): void
     }
     echo '<div class="ur-job-run-result ur-result" data-jobid="' . ur_h($id) . '"></div>';
 
+    echo '</div>'; // .ur-job-body
     echo '</div>'; // .ur-job-card
 }
 
@@ -469,6 +490,20 @@ function ur_ago(int $deltaSec): string
 /* A little breathing room above each job card's action row + the form actions so
    the bottom buttons sit clear of the buffer's edge. */
 .ur-job-card-actions { margin-top: 8px; }
+
+/* Collapsible job cards: a clickable summary header with the body collapsed by
+   default, so a page with many jobs stays compact. */
+.ur-job-card { border: 1px solid var(--border-color, #444); border-radius: 6px; margin: 8px 0; padding: 6px 8px; }
+.ur-job-head {
+  display: flex; align-items: center; gap: 8px; cursor: pointer;
+  padding: 6px 4px; border-radius: 4px; -webkit-user-select: none; user-select: none;
+}
+.ur-job-head:hover { background: var(--color-tablebody, rgba(127,127,127,0.12)); }
+.ur-job-head:focus { outline: 1px solid var(--blue-200, #bce8f1); outline-offset: 1px; }
+.ur-job-caret { display: inline-block; font-size: 11px; transition: transform .12s ease-in-out; opacity: 0.8; }
+.ur-job-card.ur-open .ur-job-caret { transform: rotate(90deg); }
+.ur-job-title { font-weight: bold; }
+.ur-job-sub { margin-left: auto; color: var(--color-text-secondary, #888); font-size: 0.85em; white-space: nowrap; }
 
 /* The "required" field marker: a red asterisk paired with the HTML5 `required`
    attribute on the mandatory inputs. text-decoration:none drops the dotted
@@ -756,6 +791,11 @@ ur_emit_form_enable_assets();
     /* A cloned card defaults to SSH transport, so seed its Connection-required
      * state to match. */
     syncAllConnRequired();
+    /* A just-added card starts EXPANDED (the user wants to fill it in) and gets
+     * focus on its name field. */
+    setCardOpen(card, true);
+    var nameInput = card.querySelector('input[name$="[name]"]');
+    if (nameInput && nameInput.focus) { nameInput.focus(); }
   }
 
   function addPair(rowsEl) {
@@ -884,9 +924,27 @@ ur_emit_form_enable_assets();
       });
   }
 
+  /* ---- collapsible job cards ---- */
+  function setCardOpen(card, open) {
+    if (!card) { return; }
+    var body = card.querySelector('.ur-job-body');
+    var head = card.querySelector('.ur-job-head');
+    card.classList.toggle('ur-open', open);
+    if (body) { body.hidden = !open; }
+    if (head) { head.setAttribute('aria-expanded', open ? 'true' : 'false'); }
+  }
+  function toggleCard(card) {
+    if (card) { setCardOpen(card, !card.classList.contains('ur-open')); }
+  }
+
   document.addEventListener('click', function (ev) {
     var t = ev.target;
     if (!t || !t.classList) { return; }
+
+    /* A click anywhere on the collapsible header toggles that card. Buttons in
+     * the body have their own handlers below and are never inside the header. */
+    var head = t.closest ? t.closest('.ur-job-head') : null;
+    if (head) { toggleCard(head.closest('.ur-job-card')); return; }
 
     if (t.id === 'ur-add-job') {
       addJob();
@@ -948,6 +1006,25 @@ ur_emit_form_enable_assets();
     }
   });
 
+  /* Keyboard toggle for the collapsible header (it is a role=button). */
+  document.addEventListener('keydown', function (ev) {
+    if (ev.key !== 'Enter' && ev.key !== ' ' && ev.key !== 'Spacebar') { return; }
+    var head = ev.target && ev.target.classList && ev.target.classList.contains('ur-job-head') ? ev.target : null;
+    if (!head) { return; }
+    ev.preventDefault();
+    toggleCard(head.closest('.ur-job-card'));
+  });
+
+  /* Live-update a card's collapsed header title as its Name field is typed, so a
+   * renamed/new job reads correctly without waiting for a reload. */
+  document.addEventListener('input', function (ev) {
+    var t = ev.target;
+    if (!t || !t.name || !/\[name\]$/.test(t.name)) { return; }
+    var card = t.closest ? t.closest('.ur-job-card') : null;
+    var title = card ? card.querySelector('.ur-job-title') : null;
+    if (title) { title.textContent = (t.value || '').trim() || '(unnamed job)'; }
+  });
+
   /* Seed the Connection-required state on load for every existing card (the
    * server already set it for the initial transport, but a JS-cloned new card
    * starts as SSH and must reflect that). Re-run after a card is added. */
@@ -962,6 +1039,24 @@ ur_emit_form_enable_assets();
    * failure inside r.json(). */
   var form = document.getElementById('ur-jobs-form');
   if (form) {
+    /* Before the browser validates on Apply, expand any COLLAPSED card that
+     * holds an invalid (e.g. empty required) field. A required control inside a
+     * display:none region is "not focusable", so native validation would block
+     * the submit with no visible bubble. Clicking the submit button fires this
+     * BEFORE validation, so the offending card is open and focusable in time. */
+    var submitBtn = form.querySelector('input[type=submit], button[type=submit]');
+    if (submitBtn) {
+      submitBtn.addEventListener('click', function () {
+        var cards = document.querySelectorAll('#ur-jobs-container .ur-job-card');
+        Array.prototype.forEach.call(cards, function (card) {
+          if (!card.classList.contains('ur-open')) {
+            var body = card.querySelector('.ur-job-body');
+            if (body && body.querySelector(':invalid')) { setCardOpen(card, true); }
+          }
+        });
+      });
+    }
+
     form.addEventListener('submit', function (ev) {
       ev.preventDefault();
       var result = document.getElementById('ur-jobs-result');
