@@ -58,7 +58,7 @@ $handlerUrl  = '/plugins/unraid.rsync/include/handler.php';
 
 // Load the saved connections so the per-job Connection select can be populated.
 // A credentials read error here is non-fatal for the Jobs tab: we just render
-// an empty connection list (the Credentials tab surfaces the real error).
+// an empty connection list (the Connections tab surfaces the real error).
 $urConnections = [];
 try {
     $credsForJobs = Credentials::load();
@@ -171,9 +171,9 @@ function ur_render_job_card($job, $index): void
     }
     echo '</select>';
     if (empty($conns)) {
-        echo '<blockquote class="inline_help"><p>' . ur_h(ur_t('Add connections in the Credentials tab.')) . '</p></blockquote>';
+        echo '<blockquote class="inline_help"><p>' . ur_h(ur_t('Add connections in the Connections tab.')) . '</p></blockquote>';
     } else {
-        echo '<blockquote class="inline_help"><p>' . ur_h(ur_t('Used for SSH transport. Manage connections in the Credentials tab.')) . '</p></blockquote>';
+        echo '<blockquote class="inline_help"><p>' . ur_h(ur_t('Used for SSH transport. Manage connections in the Connections tab.')) . '</p></blockquote>';
     }
     echo '</dd>';
 

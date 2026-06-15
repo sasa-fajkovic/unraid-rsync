@@ -1,0 +1,5 @@
+Menu="UnraidRsync:2"
+Title="Connections"
+Tag="plug"
+---
+<?php include "/usr/local/emhttp/plugins/unraid.rsync/pages/connections.php"; ?>
