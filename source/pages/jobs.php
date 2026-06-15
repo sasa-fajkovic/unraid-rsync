@@ -217,13 +217,13 @@ function ur_render_job_card($job, $index): void
     echo '<div><button type="button" class="ur-pair-add" data-rows="' . ur_h($pairsRowsId) . '">' . ur_h(ur_t('Add pair')) . '</button></div>';
     echo '</dd>';
 
-    // use global defaults toggle
-    echo '<dt>' . ur_h(ur_t('Use global default rsync options')) . ':</dt>';
+    // use global config toggle
+    echo '<dt>' . ur_h(ur_t('Use global config')) . ':</dt>';
     echo '<dd>';
     echo '<input type="hidden" name="' . ur_h($p . '[useGlobalDefaults]') . '" value="0">';
     echo '<input type="checkbox" class="ur-switch ur-use-global" name="' . ur_h($p . '[useGlobalDefaults]') . '" value="1"'
         . ($useGlobal ? ' checked' : '') . ' data-target="' . ur_h($idb . '_opts') . '">';
-    echo '<blockquote class="inline_help"><p>' . ur_h(ur_t('When on, this job ignores its own options and uses the Global Settings defaults.')) . '</p></blockquote>';
+    echo '<blockquote class="inline_help"><p>' . ur_h(ur_t('When ON, this job uses the rsync options you set on the Global Settings tab (and follows any change you make there). Turn it OFF to give this job its own options below.')) . '</p></blockquote>';
     echo '</dd>';
 
     // log level
@@ -586,6 +586,19 @@ input.ur-switch:disabled { opacity: 0.5; cursor: default; }
   white-space: pre-wrap; word-break: break-word;
   min-height: 240px; max-height: 60vh;
 }
+/* Confirm dialog (reuses the .ur-log-modal overlay) for destructive actions
+   like Remove job. */
+.ur-confirm-box {
+  position: absolute; top: 28%; left: 50%; transform: translate(-50%, -28%);
+  width: min(460px, 92vw);
+  background: var(--background-color, #1c1c1c);
+  border: 1px solid var(--border-color, #444); border-radius: 6px;
+  padding: 18px 20px; box-shadow: 0 8px 30px rgba(0,0,0,0.4);
+}
+.ur-confirm-box p { margin: 10px 0 0; }
+.ur-confirm-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+.ur-confirm-danger { background: var(--red-800, #b71c1c); color: #fff; border: none; font-weight: bold; }
+
 /* Inline spinner shown on a Run/Dry-run button the instant it is clicked. */
 .ur-spin {
   display: inline-block; width: 12px; height: 12px;
@@ -703,6 +716,18 @@ ur_emit_form_enable_assets();
   </div>
 </div>
 
+<!-- Confirm dialog for Remove job -------------------------------------------->
+<div id="ur-confirm-modal" class="ur-log-modal" aria-hidden="true">
+  <div class="ur-confirm-box" role="dialog" aria-modal="true" aria-labelledby="ur-confirm-title">
+    <strong id="ur-confirm-title"><?=_('Remove job?')?></strong>
+    <p id="ur-confirm-msg"></p>
+    <div class="ur-confirm-actions">
+      <button type="button" id="ur-confirm-cancel"><?=_('Cancel')?></button>
+      <button type="button" id="ur-confirm-ok" class="ur-confirm-danger"><?=_('Remove job')?></button>
+    </div>
+  </div>
+</div>
+
 <!-- CRUD form ---------------------------------------------------------------->
 <form markdown="1" method="POST" action="<?=htmlspecialchars($handlerUrl, ENT_QUOTES, 'UTF-8')?>" id="ur-jobs-form">
   <input type="hidden" name="action" value="saveConfig">
@@ -735,7 +760,8 @@ ur_emit_form_enable_assets();
 <script type="text/html" id="ur-job-template">
 <?php
     $templateJob = Config::defaultJob();
-    $templateJob['rsyncOptions'] = $globalOpts; // seed from Global Settings
+    $templateJob['rsyncOptions'] = $globalOpts;      // seed from Global Settings
+    $templateJob['useGlobalDefaults'] = true;        // new jobs default to "Use global config" ON
     ur_render_job_card($templateJob, '__IDX__');
 ?>
 </script>
@@ -937,6 +963,50 @@ ur_emit_form_enable_assets();
     if (card) { setCardOpen(card, !card.classList.contains('ur-open')); }
   }
 
+  /* ---- Remove-job confirmation modal ----
+   * Removing a card drops the job (it is deleted from config on the next Apply),
+   * so it must be confirmed explicitly rather than on a single stray click. */
+  var confirmModal = document.getElementById('ur-confirm-modal');
+  var confirmMsg   = document.getElementById('ur-confirm-msg');
+  var pendingDelCard = null;
+
+  function askRemoveJob(card) {
+    pendingDelCard = card;
+    var nameInput = card.querySelector('input[name$="[name]"]');
+    var name = (nameInput && nameInput.value.trim()) || '';
+    confirmMsg.textContent = name
+      ? ('Remove the job "' + name + '"? It is deleted permanently when you click Apply.')
+      : 'Remove this job? It is deleted permanently when you click Apply.';
+    confirmModal.classList.add('ur-open');
+    confirmModal.setAttribute('aria-hidden', 'false');
+    var ok = document.getElementById('ur-confirm-ok');
+    if (ok && ok.focus) { ok.focus(); }
+  }
+  function closeConfirm() {
+    confirmModal.classList.remove('ur-open');
+    confirmModal.setAttribute('aria-hidden', 'true');
+    pendingDelCard = null;
+  }
+  if (confirmModal) {
+    document.getElementById('ur-confirm-cancel').addEventListener('click', closeConfirm);
+    document.getElementById('ur-confirm-ok').addEventListener('click', function () {
+      if (pendingDelCard && pendingDelCard.parentNode) {
+        pendingDelCard.parentNode.removeChild(pendingDelCard);
+      }
+      closeConfirm();
+    });
+    /* Backdrop click closes (only when the press STARTED on the backdrop). */
+    var cDown = false;
+    confirmModal.addEventListener('mousedown', function (ev) { cDown = (ev.target === confirmModal); });
+    confirmModal.addEventListener('click', function (ev) {
+      if (ev.target === confirmModal && cDown) { closeConfirm(); }
+      cDown = false;
+    });
+    document.addEventListener('keydown', function (ev) {
+      if (ev.key === 'Escape' && confirmModal.classList.contains('ur-open')) { closeConfirm(); }
+    });
+  }
+
   document.addEventListener('click', function (ev) {
     var t = ev.target;
     if (!t || !t.classList) { return; }
@@ -966,7 +1036,7 @@ ur_emit_form_enable_assets();
       closeLogViewer();
     } else if (t.classList.contains('ur-job-del')) {
       var card = t.closest ? t.closest('.ur-job-card') : null;
-      if (card && card.parentNode) { card.parentNode.removeChild(card); }
+      if (card) { askRemoveJob(card); }
     } else if (t.classList.contains('ur-row-add')) {
       var or = document.getElementById(t.getAttribute('data-rows'));
       if (or) { addOptRow(or); }
