@@ -1,0 +1,5 @@
+Menu="UnraidRsync:1"
+Title="Overview"
+Tag="dashboard"
+---
+<?php include "/usr/local/emhttp/plugins/unraid.rsync/pages/overview.php"; ?>
