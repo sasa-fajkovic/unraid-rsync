@@ -215,7 +215,16 @@ function ur_render_job_card($job, $index): void
     $schedRowStyle = $manualOnly ? ' style="display:none"' : '';
     echo '<dt class="ur-sched-row" id="' . ur_h($idb . '_schedrow_dt') . '"' . $schedRowStyle . '><label for="' . ur_h($idb . '_schedule') . '">' . ur_h(ur_t('Schedule (cron)')) . '</label>'
         . '<abbr class="ur-required ur-sched-required" title="' . ur_h(ur_t('Required')) . '"' . ($manualOnly ? ' style="display:none"' : '') . '>*</abbr>:</dt>';
-    echo '<dd class="ur-sched-row" id="' . ur_h($idb . '_schedrow_dd') . '"' . $schedRowStyle . '><input type="text" id="' . ur_h($idb . '_schedule') . '" name="' . ur_h($p . '[schedule]') . '" value="' . ur_h($schedule) . '" placeholder="0 3 * * *"' . ($manualOnly ? '' : ' required') . '></dd>';
+    echo '<dd class="ur-sched-row" id="' . ur_h($idb . '_schedrow_dd') . '"' . $schedRowStyle . '>';
+    echo '<input type="text" class="ur-cron-input" id="' . ur_h($idb . '_schedule') . '" name="' . ur_h($p . '[schedule]') . '" value="' . ur_h($schedule) . '" placeholder="0 3 * * *"' . ($manualOnly ? '' : ' required') . '>';
+    // Live, plain-English reading of the cron expression (filled by JS on input)
+    // plus a field-order legend so the digit order is never guesswork.
+    echo '<div class="ur-cron-human" id="' . ur_h($idb . '_cronhuman') . '" aria-live="polite"></div>';
+    echo '<div class="ur-cron-legend"><code>* * * * *</code> = '
+        . ur_h(ur_t('minute(0-59) hour(0-23) day-of-month(1-31) month(1-12) day-of-week(0-6, Sun=0)'))
+        . ' &nbsp;·&nbsp; ' . ur_h(ur_t('e.g.')) . ' <code>0 3 * * *</code> = ' . ur_h(ur_t('03:00 daily'))
+        . ', <code>*/15 * * * *</code> = ' . ur_h(ur_t('every 15 min')) . '</div>';
+    echo '</dd>';
 
     // pairs
     $pairsRowsId = $idb . '_pairs';
@@ -529,6 +538,13 @@ function ur_ago(int $deltaSec): string
    <abbr> underline so it reads as a clean asterisk. */
 .ur-required { color: var(--red-800, #b71c1c); font-weight: bold; text-decoration: none; cursor: help; }
 
+/* Live cron reading + field-order legend under the schedule input. */
+.ur-cron-human { margin-top: 4px; font-size: 0.9em; font-weight: bold; color: var(--blue-800, #1565c0); min-height: 1.1em; }
+.ur-cron-human.ur-cron-bad { color: var(--red-800, #b71c1c); }
+.ur-cron-legend { margin-top: 3px; font-size: 0.8em; color: var(--color-text-secondary, #888); }
+.ur-cron-legend code { font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  background: rgba(127,127,127,0.15); border-radius: 3px; padding: 0 4px; }
+
 /* Native-looking slider toggle for the Enabled / Use-global-defaults checkboxes.
    These are plain <input type="checkbox" class="ur-switch"> (preceded by a hidden
    "0" so an unchecked box still POSTs a value at the same name — the round-trip is
@@ -837,6 +853,7 @@ ur_emit_form_enable_assets();
      * state to match. */
     syncAllConnRequired();
     syncAllManualOnly();
+    syncAllCronHuman();
     /* A just-added card starts EXPANDED (the user wants to fill it in) and gets
      * focus on its name field. */
     setCardOpen(card, true);
@@ -1130,15 +1147,93 @@ ur_emit_form_enable_assets();
     toggleCard(head.closest('.ur-job-card'));
   });
 
-  /* Live-update a card's collapsed header title as its Name field is typed, so a
-   * renamed/new job reads correctly without waiting for a reload. */
+  /* Live-update a card's collapsed header title as its Name field is typed, and
+   * the plain-English cron reading as the Schedule field is typed. */
   document.addEventListener('input', function (ev) {
     var t = ev.target;
-    if (!t || !t.name || !/\[name\]$/.test(t.name)) { return; }
-    var card = t.closest ? t.closest('.ur-job-card') : null;
-    var title = card ? card.querySelector('.ur-job-title') : null;
-    if (title) { title.textContent = (t.value || '').trim() || '(unnamed job)'; }
+    if (!t || !t.name) { return; }
+    if (/\[name\]$/.test(t.name)) {
+      var card = t.closest ? t.closest('.ur-job-card') : null;
+      var title = card ? card.querySelector('.ur-job-title') : null;
+      if (title) { title.textContent = (t.value || '').trim() || '(unnamed job)'; }
+    } else if (t.classList && t.classList.contains('ur-cron-input')) {
+      updateCronHuman(t);
+    }
   });
+
+  /* Translate a 5-field cron expression into a short plain-English phrase. Covers
+   * the common shapes (numbers, *, */n, ranges, lists) and falls back to a
+   * field-by-field reading; a hint, not an authoritative scheduler. */
+  function describeCron(expr) {
+    expr = (expr || '').trim().replace(/\s+/g, ' ');
+    if (expr === '') { return { ok: true, text: '' }; }
+    var f = expr.split(' ');
+    if (f.length !== 5) { return { ok: false, text: 'Needs 5 fields: minute hour day-of-month month day-of-week.' }; }
+    var DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    var MON = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    var min = f[0], hour = f[1], dom = f[2], mon = f[3], dow = f[4];
+    var isNum = function (x) { return /^\d+$/.test(x); };
+    var pad = function (n) { n = parseInt(n, 10); return (n < 10 ? '0' : '') + n; };
+
+    function fieldOk(v, lo, hi) {
+      return v.split(',').every(function (part) {
+        var m;
+        if (part === '*') { return true; }
+        if ((m = part.match(/^\*\/(\d+)$/))) { return +m[1] >= 1; }
+        if ((m = part.match(/^(\d+)-(\d+)(?:\/(\d+))?$/))) { return +m[1] >= lo && +m[2] <= hi && +m[1] <= +m[2]; }
+        if ((m = part.match(/^(\d+)(?:\/(\d+))?$/))) { return +m[1] >= lo && +m[1] <= hi; }
+        return false;
+      });
+    }
+    if (!(fieldOk(min, 0, 59) && fieldOk(hour, 0, 23) && fieldOk(dom, 1, 31) && fieldOk(mon, 1, 12) && fieldOk(dow, 0, 7))) {
+      return { ok: false, text: 'Not a valid 5-field cron expression.' };
+    }
+
+    var timeStr;
+    if (isNum(min) && isNum(hour)) { timeStr = 'at ' + pad(hour) + ':' + pad(min); }
+    else if (min === '*' && hour === '*') { timeStr = 'every minute'; }
+    else if (/^\*\/\d+$/.test(min) && hour === '*') { timeStr = 'every ' + min.split('/')[1] + ' minutes'; }
+    else if (isNum(min) && hour === '*') { timeStr = 'at minute ' + (+min) + ' of every hour'; }
+    else if ((min === '0') && /^\*\/\d+$/.test(hour)) { timeStr = 'every ' + hour.split('/')[1] + ' hours'; }
+    else { timeStr = 'minute ' + min + ', hour ' + hour; }
+
+    function names(field, arr) {
+      return field.split(',').map(function (part) {
+        var m;
+        if ((m = part.match(/^(\d+)-(\d+)$/))) { return arr[+m[1]] + '–' + arr[+m[2]]; }
+        if (isNum(part)) { return arr[+part]; }
+        return part;
+      }).join(', ');
+    }
+
+    var parts = [];
+    if (dow !== '*') {
+      var dn = dow.replace(/7/g, '0');
+      parts.push(/^\d+([,-]\d+)*$/.test(dn) ? ('on ' + names(dn, DOW)) : ('on weekday ' + dow));
+    }
+    if (dom !== '*') { parts.push(isNum(dom) ? ('on day ' + (+dom)) : ('on day-of-month ' + dom)); }
+    if (mon !== '*') { parts.push(/^\d+([,-]\d+)*$/.test(mon) ? ('in ' + names(mon, MON)) : ('in month ' + mon)); }
+
+    var everyDay = (dom === '*' && dow === '*');
+    var text;
+    if (/^every /.test(timeStr) && everyDay) { text = timeStr; }
+    else if (everyDay) { text = timeStr + ' every day'; }
+    else { text = timeStr + ' ' + parts.join(' '); }
+    return { ok: true, text: text.charAt(0).toUpperCase() + text.slice(1) + '.' };
+  }
+
+  function updateCronHuman(input) {
+    var idb = input.id.replace(/_schedule$/, '');
+    var out = document.getElementById(idb + '_cronhuman');
+    if (!out) { return; }
+    var r = describeCron(input.value);
+    out.textContent = r.text;
+    out.className = 'ur-cron-human' + ((!r.ok && r.text !== '') ? ' ur-cron-bad' : '');
+  }
+  function syncAllCronHuman() {
+    var ins = document.querySelectorAll('.ur-cron-input');
+    Array.prototype.forEach.call(ins, updateCronHuman);
+  }
 
   /* Seed the Connection-required state on load for every existing card (the
    * server already set it for the initial transport, but a JS-cloned new card
@@ -1507,9 +1602,11 @@ ur_emit_form_enable_assets();
     }
   });
 
-  /* Seed the Connection-required + manual-only state for all rendered cards. */
+  /* Seed the Connection-required + manual-only + cron-reading state for all
+   * rendered cards. */
   syncAllConnRequired();
   syncAllManualOnly();
+  syncAllCronHuman();
 
   /* Kick off polling on load only when something is already running (the
    * server-rendered badges tell us, but a cheap initial poll is simplest and
