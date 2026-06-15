@@ -373,8 +373,8 @@ if (!function_exists('ur_render_rsync_options')) {
                 }
             }
             echo '</div>';
-            echo '<button type="button" class="ur-row-add" data-rows="' . ur_h($rowsId) . '">'
-                . ur_h(ur_t('Add')) . '</button>';
+            echo '<div><button type="button" class="ur-row-add" data-rows="' . ur_h($rowsId) . '">'
+                . ur_h(ur_t('Add')) . '</button></div>';
             echo ur_option_help_block($key, $helpId);
             echo '</dd>';
             echo '</dl>';
@@ -480,11 +480,6 @@ if (!function_exists('ur_emit_option_help_assets')) {
   white-space: nowrap;
 }
 .ur-rsync-options .ur-dt { position: relative; }
-
-/* Keep the repeatable-row "Add" button compact (its natural width) instead of
-   letting the webGui base stylesheet stretch a standalone <button> to the full
-   row width. */
-.ur-rsync-options .ur-row-add { width: auto; display: inline-block; }
 
 /* The "?" help affordance. A small circular icon in the native help-blue, kept
    subtle (opacity:0) until the row is hovered or the icon focused — mirroring how

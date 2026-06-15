@@ -59,12 +59,6 @@ $handlerUrl = '/plugins/unraid.rsync/include/handler.php';
    unavailable): a readonly, selectable rendering of the key the user can copy
    by hand. */
 .ur-copy-pub-fallback { display: block; width: 100%; margin-top: 6px; font-family: monospace; font-size: 0.85em; }
-
-/* Keep the keychain action buttons compact (their natural width) instead of
-   letting the webGui base stylesheet stretch a <button> to the full row width;
-   this matches the inline look of the "Discover host key" button. The ID
-   selectors out-specify the base button rule without needing !important. */
-#ur-key-generate, #ur-key-import { width: auto; display: inline-block; }
 </style>
 <div class="title">
   <span class="left">
@@ -147,7 +141,7 @@ $handlerUrl = '/plugins/unraid.rsync/include/handler.php';
       <option value="ed25519">ed25519</option>
       <option value="rsa">rsa (4096)</option>
     </select>
-    <button type="button" id="ur-key-generate"><?=_('Generate key')?></button>
+    <div><button type="button" id="ur-key-generate"><?=_('Generate key')?></button></div>
   </dd>
   <dt><label for="ur_key_import_priv"><?=_('Import private key')?></label>:</dt>
   <dd>
@@ -159,7 +153,7 @@ $handlerUrl = '/plugins/unraid.rsync/include/handler.php';
   <dt><label for="ur_key_import_pub"><?=_('Import public key (optional)')?></label>:</dt>
   <dd>
     <textarea id="ur_key_import_pub" rows="2" placeholder="ssh-ed25519 AAAA..."></textarea>
-    <button type="button" id="ur-key-import"><?=_('Import key')?></button>
+    <div><button type="button" id="ur-key-import"><?=_('Import key')?></button></div>
   </dd>
 </dl>
 <div id="ur-key-result" class="ur-result"></div>
