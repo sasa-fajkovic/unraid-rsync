@@ -22,12 +22,19 @@ on, forked from, or derived from any other plugin.
   `keys/<token>`, `pass/<token>`, `known_hosts/<token>`.
 - **UI** = a parent hub `source/UnraidRsync.page` (`Menu="Utilities"` →
   **Settings ▸ User Utilities**, `Type="xmenu"`, **empty body**) plus child tab
-  pages `source/UR.*.page` (`Menu="UnraidRsync:1..6"` → **Jobs / Connections /
-  Credentials / Global Settings / Status / History**), each including a
-  `source/pages/*.php` body. **Connections** (host/port/user/auth cards) and
-  **Credentials** (the managed SSH-key keychain) are SEPARATE tabs/bodies
-  (`connections.php` / `credentials.php`); a connection references a managed key
-  by id via its KEY auth method.
+  pages `source/UR.*.page` (`Menu="UnraidRsync:1..7"` → **Overview / Jobs /
+  Connections / Credentials / Global Settings / Status / History**), each
+  including a `source/pages/*.php` body. **Connections** (host/port/user/auth
+  cards) and **Credentials** (the managed SSH-key keychain) are SEPARATE
+  tabs/bodies (`connections.php` / `credentials.php`); a connection references a
+  managed key by id via its KEY auth method. **Overview** (`overview.php`) is a
+  read-only status board that polls `getStatus`.
+- **Dashboard widget:** `source/UR.Dashboard.page` uses `Menu="Dashboard"` (NOT
+  the `UnraidRsync` xmenu) and sets `$mytiles['unraid.rsync']['column1']` to a
+  self-contained tile string (markup + scoped CSS + a `getStatus` poller) that
+  Unraid's `dynamix/DashStats.page` echoes into the dashboard. This `$mytiles`
+  contract is undocumented but stable since 6.12; the body branches on the
+  Unraid version for the pre-7.2 header fixup.
 - **Backend classes** in `source/include/`: `Config`, `Credentials`, `Job`, `Ssh`,
   `Rsync`, `RunState`, `Runner`, `Logger`, `Cron`, `Notify`, `KeyTools`,
   `handler.php` (the POST/GET front controller). Plus
