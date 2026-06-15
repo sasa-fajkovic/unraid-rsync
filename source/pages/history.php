@@ -55,6 +55,8 @@ try {
 .ur-badge-warning { background: #b15c00; color: #1a1a1a; }
 .ur-badge-failed  { background: var(--red-800, #b71c1c); }
 .ur-badge-aborted { background: #555; }
+.ur-badge-running { background: #1565c0; animation: ur-badge-pulse 1.2s ease-in-out infinite; }
+@keyframes ur-badge-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.55; } }
 .ur-hist-controls { margin: 8px 0; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
 .ur-hist-table { width: 100%; border-collapse: collapse; margin-top: 6px; }
 .ur-hist-table th, .ur-hist-table td { padding: 6px 10px; text-align: left; border-bottom: 1px solid var(--border-color, #444); white-space: nowrap; }
@@ -163,9 +165,16 @@ try {
 
   var offset = 0;
   var total  = 0;
+  var pollTimer = null; // set only while a RUNNING row is visible
+
+  /* History is normally static (it changes only when a run finishes), so there
+   * is no constant poller. But while an in-flight RUNNING row is on screen we
+   * reload every few seconds so it flips to its final status on its own. */
+  function clearPoll() { if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; } }
 
   function badgeFor(state) {
     switch (state) {
+      case 'RUNNING':  return 'ur-badge-running';
       case 'SUCCESS':  return 'ur-badge-idle';
       case 'WARNING':
       case 'PARTIAL':  return 'ur-badge-warning';
@@ -229,8 +238,10 @@ try {
       stTd.appendChild(b);
       tr.appendChild(stTd);
 
-      tr.appendChild(td(String(r.exitCode)));
-      tr.appendChild(td(fmtDuration(r.durationSec)));
+      // A still-running row has no final exit code or duration yet.
+      var isRunning = (r.state === 'RUNNING');
+      tr.appendChild(td(isRunning ? '—' : String(r.exitCode)));
+      tr.appendChild(td(isRunning ? '—' : fmtDuration(r.durationSec)));
 
       // Logs button (or a dash when no log ref was recorded)
       var logTd = document.createElement('td');
@@ -271,6 +282,7 @@ try {
   }
 
   function load() {
+    clearPoll(); // cancel any pending refresh; the success path reschedules if still running
     var job = currentJob();
     if (!job) { return; }
     /* cache-buster + no-store: History only changes when a run finishes, so the
@@ -292,6 +304,10 @@ try {
         offset = parseInt(body.offset, 10) || 0;
         render(body.runs || []);
         updatePager();
+        // Keep refreshing while the server reports a run in flight, so a RUNNING
+        // row resolves to SUCCESS/FAILED/etc. without a manual reload.
+        clearPoll();
+        if (body.running) { pollTimer = setTimeout(load, 3000); }
       })
       .catch(function () {
         // Network failure: show feedback instead of leaving "Loading…" stuck,

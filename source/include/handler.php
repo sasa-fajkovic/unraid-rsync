@@ -1829,15 +1829,63 @@ function ur_action_list_history(): void
         $limit = 100;
     }
 
-    $page = History::list($jobId, $offset, $limit);
+    // A run in progress is NOT a History record yet (records are written when a
+    // run finishes), so surface the live run as a synthetic newest "RUNNING" row
+    // built from RunState. It is the newest VIRTUAL record, so paging treats the
+    // logical list as [RUNNING, <persisted records...>]: offset 0 prepends it and
+    // fills the rest from the real records (limit-1 of them); a later page reads
+    // the persisted records shifted down by one so nothing is shown twice.
+    $state   = RunState::isRunning($jobId) ? RunState::read($jobId) : null;
+    $running = ($state !== null);
+
+    if ($running && $offset === 0) {
+        $page  = History::list($jobId, 0, max(1, $limit - 1));
+        $runs  = $page['runs'];
+        array_unshift($runs, ur_running_history_row($state));
+        $total = $page['total'] + 1;
+    } elseif ($running) {
+        // Persisted records are shifted down by the one virtual RUNNING row.
+        $page  = History::list($jobId, $offset - 1, $limit);
+        $runs  = $page['runs'];
+        $total = $page['total'] + 1;
+    } else {
+        $page  = History::list($jobId, $offset, $limit);
+        $runs  = $page['runs'];
+        $total = $page['total'];
+    }
+
     sendResponse([
-        'ok'     => true,
-        'jobId'  => $jobId,
-        'total'  => $page['total'],
-        'offset' => $page['offset'],
-        'limit'  => $page['limit'],
-        'runs'   => $page['runs'],
+        'ok'      => true,
+        'jobId'   => $jobId,
+        'total'   => $total,
+        'offset'  => $offset,
+        'limit'   => $limit,
+        'running' => $running,
+        'runs'    => $runs,
     ], 200);
+}
+
+/**
+ * Build the synthetic "RUNNING" History row for an in-flight run from its
+ * RunState. Mirrors History's record shape (so the front-end renders it like any
+ * other row) with state=RUNNING and unknown exit/duration; logRef is the live
+ * run log's basename so View/Download resolve it via Logger::runLogPathById.
+ *
+ * @param array<string,mixed> $state a RunState::read() result
+ * @return array<string,mixed>
+ */
+function ur_running_history_row(array $state): array
+{
+    return [
+        'startedAt'   => (string) ($state['startedAt'] ?? ''),
+        'dryRun'      => !empty($state['dryRun']),
+        'trigger'     => (($state['trigger'] ?? '') === 'schedule') ? 'schedule' : 'manual',
+        'state'       => 'RUNNING',
+        'exitCode'    => 0,
+        'durationSec' => 0,
+        'logRef'      => basename((string) ($state['currentLog'] ?? '')),
+        'running'     => true,
+    ];
 }
 
 /**

@@ -419,6 +419,44 @@ final class HandlerStatusTest extends TestCase
         $this->assertArrayHasKey('error', $json);
     }
 
+    // ---- listHistory: live RUNNING row -------------------------------------
+
+    public function testRunningHistoryRowShape(): void
+    {
+        // The pure helper that turns a RunState into a synthetic "RUNNING" row.
+        $row = ur_running_history_row([
+            'startedAt'  => '2026-06-15T12:00:00Z',
+            'dryRun'     => true,
+            'trigger'    => 'schedule',
+            'currentLog' => '/tmp/ur/logs/j-x/run-20260615T120000Z.log',
+        ]);
+        $this->assertSame('RUNNING', $row['state']);
+        $this->assertTrue($row['dryRun']);
+        $this->assertSame('schedule', $row['trigger']);
+        $this->assertSame('2026-06-15T12:00:00Z', $row['startedAt']);
+        // logRef is a BASENAME only (so View/Download resolve it via runLogPathById).
+        $this->assertSame('run-20260615T120000Z.log', $row['logRef']);
+        $this->assertTrue($row['running']);
+    }
+
+    public function testListHistoryReportsIdleAndNoRunningRow(): void
+    {
+        $id = $this->seedJob('HistIdle');
+        @unlink(History::path($id)); // isolate from any prior run
+        History::append($id, [
+            'startedAt' => '2026-06-15T10:00:00Z', 'state' => 'SUCCESS',
+            'exitCode' => 0, 'durationSec' => 5, 'trigger' => 'manual', 'logRef' => 'run-a.log',
+        ]);
+
+        $_GET = ['id' => $id, 'offset' => 0, 'limit' => 25];
+        [$body, $code] = $this->runCapture('ur_action_list_history');
+        $this->assertSame(200, $code);
+        $this->assertFalse($body['running'], 'an idle job must not report a running row');
+        $this->assertSame(1, $body['total']);
+        $this->assertSame('SUCCESS', $body['runs'][0]['state']);
+        @unlink(History::path($id));
+    }
+
     public function testGetJobLogMissingLogReturnsEmpty(): void
     {
         $id = $this->seedJob('NoLogYet');
