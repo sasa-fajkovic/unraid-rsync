@@ -179,6 +179,13 @@ if it is somehow absent — a sign your system is misconfigured). This mirrors t
 
 To remove it: **Plugins -> Installed Plugins -> Unraid Rsync -> Remove**.
 
+## Support
+
+- **Bugs / feature requests:** open an issue at
+  <https://github.com/sasa-fajkovic/unraid-rsync/issues>.
+- **Unraid forum thread:** _(coming soon — the Community Applications support
+  thread; this is also the `support=` URL CA links to.)_
+
 ### Updating
 
 Updates are automatic: **Plugins -> Check for Updates** compares your installed

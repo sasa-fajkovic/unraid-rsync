@@ -6,6 +6,10 @@
   <!ENTITY version        "2026.06.13b">
   <!ENTITY releaseLocation "https://github.com/&gitUser;/&repoName;/releases/download/&version;">
   <!ENTITY pluginURL       "https://github.com/&gitUser;/&repoName;/releases/latest/download/&pluginName;.plg">
+  <!-- Plugin/Community-Applications icon: a raw GitHub URL to the PNG at the repo
+       root on the default branch (the in-app menu tabs use their own FontAwesome
+       Icon= in the .page files, so this only affects the Plugins page + CA card). -->
+  <!ENTITY iconURL         "https://raw.githubusercontent.com/&gitUser;/&repoName;/main/&pluginName;.png">
   <!ENTITY plugin          "/boot/config/plugins/&pluginName;">
   <!ENTITY emhttp          "/usr/local/emhttp/plugins/&pluginName;">
   <!-- AUTHORITATIVE MANIFEST: the published manifest users install from and
@@ -23,7 +27,7 @@
   <!ENTITY md5            "de35dad106eb4e06cf45f3f8f9c41823">
 ]>
 <PLUGIN name="&pluginName;" author="&gitUser;" version="&version;"
-        launch="Settings/UnraidRsync" pluginURL="&pluginURL;" icon="refresh"
+        launch="Settings/UnraidRsync" pluginURL="&pluginURL;" icon="&iconURL;"
         min="7.0.0" support="https://github.com/&gitUser;/&repoName;/issues">
   <CHANGES>
 See the full per-release changelog (auto-generated from the merged PRs) at
