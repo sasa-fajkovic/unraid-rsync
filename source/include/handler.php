@@ -1707,6 +1707,77 @@ function ur_action_get_job_log(): void
 }
 
 /**
+ * GET downloadJobLog: stream the FULL run log for a job as a text/plain
+ * attachment (the getJobLog viewer only returns a bounded TAIL, so a large run
+ * is truncated at the top there). Params: id (job id, required) + optional run
+ * (a run-file id from listRuns/listHistory); with no run id we serve the latest.
+ *
+ * Safe to serve in full: the stored file was ALREADY redacted of per-run tmpfs
+ * secret paths and size-capped (UR_MAX_RUN_LOG_BYTES) when it was written
+ * (Logger::setRedaction / Logger::sink), so nothing secret is on disk to leak.
+ * It is served as text/plain with X-Content-Type-Options: nosniff and a
+ * Content-Disposition attachment, so the browser saves it rather than rendering
+ * it as HTML (no log-XSS path). The run id is whitelisted + realpath-confined to
+ * the job's log dir by Logger::runLogPathById; a bad/traversing id is a 400.
+ * The download filename is built only from the slug-shaped job/run ids and then
+ * stripped to a safe charset, so it can't inject a response header.
+ */
+function ur_action_download_job_log(): void
+{
+    $jobId = ur_safe_job_id(isset($_GET['id']) ? (string) $_GET['id'] : '');
+    if ($jobId === '') {
+        sendError('A valid job id is required.', 400);
+        return;
+    }
+
+    $runId = isset($_GET['run']) ? (string) $_GET['run'] : '';
+    if ($runId !== '') {
+        $path = Logger::runLogPathById($jobId, $runId);
+        if ($path === null) {
+            sendError('Invalid run id.', 400);
+            return;
+        }
+    } else {
+        $path = Logger::latestRunLogPath($jobId);
+    }
+
+    if ($path === '' || !is_file($path) || !is_readable($path)) {
+        // The History record persists across reboots but its tmpfs log does not.
+        sendError('Log not found (run logs live in RAM and are cleared on reboot).', 404);
+        return;
+    }
+
+    $servedRun = Logger::runIdFromPath($path);
+    // Build a download filename from already-validated, slug-shaped ids, then
+    // strip to a safe charset (defence-in-depth against header injection).
+    $fname = $jobId . ($servedRun !== '' ? '-' . $servedRun : '') . '.log';
+    $fname = preg_replace('/[^A-Za-z0-9._-]/', '_', $fname);
+
+    $size = @filesize($path);
+
+    if (!headers_sent()) {
+        header('Content-Type: text/plain; charset=utf-8');
+        header('X-Content-Type-Options: nosniff');
+        header('Content-Disposition: attachment; filename="' . $fname . '"');
+        header('Cache-Control: no-store');
+        if ($size !== false) {
+            header('Content-Length: ' . $size);
+        }
+    }
+
+    // Test seam: expose what WOULD be streamed without terminating the process
+    // or emitting bytes the test harness can't capture (mirrors sendResponse).
+    if (defined('UR_HANDLER_TESTING')) {
+        $GLOBALS['ur_last_download'] = ['path' => $path, 'filename' => $fname, 'size' => $size];
+        $GLOBALS['ur_last_response_code'] = 200;
+        return;
+    }
+
+    @readfile($path);
+    exit;
+}
+
+/**
  * GET listRuns: the last N run logs for a job, newest first, as
  * [{ id, ts, state }] for the viewer's run selector. Bounded by a `limit`
  * param (default UR_LIST_RUNS_DEFAULT, capped at 200).
@@ -1897,6 +1968,7 @@ function ur_dispatch(): void
         // is explicit.
         case 'getStatus':
         case 'getJobLog':
+        case 'downloadJobLog':
         case 'listRuns':
         case 'listHistory':
         case 'getPluginLog':
@@ -1908,6 +1980,7 @@ function ur_dispatch(): void
             switch ($action) {
                 case 'getStatus':       ur_action_get_status();       return;
                 case 'getJobLog':       ur_action_get_job_log();      return;
+                case 'downloadJobLog':  ur_action_download_job_log(); return;
                 case 'listRuns':        ur_action_list_runs();        return;
                 case 'listHistory':     ur_action_list_history();     return;
                 case 'getPluginLog':    ur_action_get_plugin_log();   return;

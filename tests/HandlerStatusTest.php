@@ -338,6 +338,87 @@ final class HandlerStatusTest extends TestCase
         $this->assertSame(400, $code);
     }
 
+    // ---- downloadJobLog ----------------------------------------------------
+
+    /** Capture a download action: [downloadMeta|null, jsonBody|null, code]. */
+    private function runDownload(): array
+    {
+        $GLOBALS['ur_last_download'] = null;
+        ob_start();
+        ur_action_download_job_log();
+        $out = ob_get_clean();
+        return [
+            $GLOBALS['ur_last_download'] ?? null,
+            json_decode((string) $out, true),
+            (int) ($GLOBALS['ur_last_response_code'] ?? 200),
+        ];
+    }
+
+    public function testDownloadJobLogServesFullFileForSelectedRun(): void
+    {
+        $id  = $this->seedJob('Downloadable');
+        $old = Logger::openRun($id, 1750000000);
+        Logger::append($old, 'OLD-RUN-MARKER');
+        $new = Logger::openRun($id, 1750000600);
+        Logger::append($new, 'NEW-RUN-MARKER');
+
+        // Explicit older run id -> serves THAT run's file (not the latest).
+        $_GET = ['id' => $id, 'run' => basename($old)];
+        [$dl, $json, $code] = $this->runDownload();
+        $this->assertSame(200, $code);
+        $this->assertNull($json, 'a download streams the file, not a JSON body.');
+        $this->assertIsArray($dl);
+        // Compare by basename: runLogPathById realpath-resolves the path, which on
+        // macOS adds a /private prefix the raw openRun() path lacks.
+        $this->assertSame(basename($old), basename($dl['path']));
+        // Filename is slug-shaped (job + run id), safe charset only.
+        $this->assertMatchesRegularExpression('/^[A-Za-z0-9._-]+\.log$/', $dl['filename']);
+        $this->assertStringContainsString($id, $dl['filename']);
+        $this->assertGreaterThan(0, $dl['size']);
+        // Confirm the served file really holds the OLD run's full content.
+        $this->assertStringContainsString('OLD-RUN-MARKER', (string) file_get_contents($dl['path']));
+    }
+
+    public function testDownloadJobLogDefaultsToLatestRun(): void
+    {
+        $id  = $this->seedJob('DownloadLatest');
+        Logger::append(Logger::openRun($id, 1750000000), 'OLD');
+        $new = Logger::openRun($id, 1750000600);
+        Logger::append($new, 'NEW');
+
+        $_GET = ['id' => $id]; // no run -> latest
+        [$dl, , $code] = $this->runDownload();
+        $this->assertSame(200, $code);
+        $this->assertSame(basename($new), basename($dl['path']));
+    }
+
+    public function testDownloadJobLogRejectsTraversalRunId(): void
+    {
+        $id = $this->seedJob('DlTrav');
+        $_GET = ['id' => $id, 'run' => '../../etc/passwd'];
+        [$dl, $json, $code] = $this->runDownload();
+        $this->assertSame(400, $code);
+        $this->assertNull($dl);
+        $this->assertArrayHasKey('error', $json);
+    }
+
+    public function testDownloadJobLogRejectsBadJobId(): void
+    {
+        $_GET = ['id' => '../evil'];
+        [, , $code] = $this->runDownload();
+        $this->assertSame(400, $code);
+    }
+
+    public function testDownloadJobLogMissingLogIs404(): void
+    {
+        $id = $this->seedJob('DlNoLog'); // no run opened
+        $_GET = ['id' => $id];
+        [$dl, $json, $code] = $this->runDownload();
+        $this->assertSame(404, $code);
+        $this->assertNull($dl);
+        $this->assertArrayHasKey('error', $json);
+    }
+
     public function testGetJobLogMissingLogReturnsEmpty(): void
     {
         $id = $this->seedJob('NoLogYet');
@@ -424,7 +505,7 @@ final class HandlerStatusTest extends TestCase
 
     public function testGetPollersRejectPost(): void
     {
-        foreach (['getStatus', 'getJobLog', 'listRuns', 'getPluginLog', 'getRsyncStatus'] as $action) {
+        foreach (['getStatus', 'getJobLog', 'downloadJobLog', 'listRuns', 'getPluginLog', 'getRsyncStatus'] as $action) {
             $_POST = ['action' => $action];
             $_GET  = [];
             $_SERVER['REQUEST_METHOD'] = 'POST';
