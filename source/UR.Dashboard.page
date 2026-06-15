@@ -1,0 +1,124 @@
+Menu="Dashboard"
+Title="Rsync Backups"
+Icon="unraid.rsync.png"
+Tag="refresh"
+---
+<?php
+/**
+ * UR.Dashboard.page - a tile on Unraid's built-in DASHBOARD page.
+ *
+ * Unraid's dashboard (dynamix/DashStats.page) collects every plugin .page whose
+ * header is `Menu="Dashboard"` and echoes the string each sets in
+ * $mytiles[<slug>]['columnN'] into that column (via customTiles()). So we build
+ * our whole tile - markup + its own scoped CSS + a small live poller - as one
+ * string and assign it; the dashboard renders it server-side, so the <script>
+ * runs normally on page load.
+ *
+ * The tile is read-only: it lists each job with a colored last-execution badge,
+ * polling our existing read-only getStatus GET endpoint (no CSRF needed). Users
+ * show/hide and reorder it through the dashboard's own per-tile controls.
+ *
+ * This is the (undocumented but stable since 6.12) $mytiles convention. The
+ * pre-7.2 webGui needs a tiny header fixup that 7.2+'s responsive layout does
+ * not, so we branch on the Unraid version.
+ */
+
+$slug = 'unraid.rsync';
+
+$tile = <<<'HTML'
+<tbody class="sortable" title="Rsync Backups">
+  <tr><td>
+    <div class="tile-header" id="ur-dash-header">
+      <div class="tile-header-left">
+        <i class="fa fa-fw fa-refresh icon"></i>
+        <div class="section">
+          <h3 class="tile-header-main">Rsync Backups</h3>
+          <span><span id="ur-dash-count">0</span> jobs</span>
+        </div>
+      </div>
+      <div class="tile-header-right"><div class="tile-header-right-controls">
+        <a href="/Utilities/UnraidRsync" title="Open Unraid Rsync"><i class="fa fa-fw fa-cog control"></i></a>
+      </div></div>
+    </div>
+  </td></tr>
+  <tr><td>
+    <div id="ur-dash-body">
+      <p style="font-style:italic;text-align:center;padding:8px 0;opacity:.7;">Loading…</p>
+    </div>
+  </td></tr>
+</tbody>
+<style>
+  #ur-dash-body .ur-d-row { display:flex; align-items:center; gap:8px; padding:5px 2px; border-bottom:1px solid rgba(127,127,127,.18); }
+  #ur-dash-body .ur-d-row:last-child { border-bottom:none; }
+  #ur-dash-body .ur-d-name { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #ur-dash-body .ur-d-badge { flex:0 0 auto; padding:1px 8px; border-radius:10px; font-size:.78rem; font-weight:bold; color:#fff; white-space:nowrap; }
+  #ur-dash-body .ur-d-success { background:#1c7d3f; }
+  #ur-dash-body .ur-d-warning { background:#b15c00; color:#1a1a1a; }
+  #ur-dash-body .ur-d-failed  { background:#b71c1c; }
+  #ur-dash-body .ur-d-aborted { background:#555; }
+  #ur-dash-body .ur-d-pending { background:#777; }
+  #ur-dash-body .ur-d-running { background:#1565c0; }
+</style>
+<script>
+(function () {
+  'use strict';
+  var URL = '/plugins/unraid.rsync/include/handler.php?action=getStatus';
+  function cls(state, running) {
+    if (running) { return 'ur-d-running'; }
+    switch ((state || '').toUpperCase()) {
+      case 'SUCCESS': return 'ur-d-success';
+      case 'WARNING': case 'PARTIAL': return 'ur-d-warning';
+      case 'FAILED': case 'TIMEOUT': return 'ur-d-failed';
+      case 'ABORTED': return 'ur-d-aborted';
+      default: return 'ur-d-pending';
+    }
+  }
+  function esc(t) { var d = document.createElement('div'); d.textContent = (t == null ? '' : t); return d.innerHTML; }
+  function render(jobs) {
+    var body = document.getElementById('ur-dash-body');
+    var count = document.getElementById('ur-dash-count');
+    if (!body) { return; }
+    var ids = Object.keys(jobs || {});
+    if (count) { count.textContent = ids.length; }
+    if (!ids.length) {
+      body.innerHTML = '<p style="font-style:italic;text-align:center;padding:8px 0;opacity:.7;">No jobs configured</p>';
+      return false;
+    }
+    var anyRunning = false;
+    var html = ids.map(function (id) {
+      var j = jobs[id];
+      if (j.running) { anyRunning = true; }
+      var label = j.running ? 'Running' : ((j.state || 'pending').charAt(0) + (j.state || 'pending').slice(1).toLowerCase());
+      return '<div class="ur-d-row"><span class="ur-d-name">' + esc(j.name) +
+             '</span><span class="ur-d-badge ' + cls(j.state, j.running) + '">' + esc(label) + '</span></div>';
+    }).join('');
+    body.innerHTML = html;
+    return anyRunning;
+  }
+  var timer = null;
+  function poll() {
+    fetch(URL, { credentials: 'same-origin', cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) { return render((d && d.jobs) || {}); })
+      .catch(function () { return false; })
+      .then(function (anyRunning) {
+        if (timer) { clearTimeout(timer); }
+        timer = setTimeout(poll, anyRunning ? 3000 : 20000);
+      });
+  }
+  if (document.readyState !== 'loading') { poll(); }
+  else { document.addEventListener('DOMContentLoaded', poll); }
+})();
+</script>
+HTML;
+
+// Pre-7.2 webGui needs a tiny header fixup (title line break) that the 7.2+
+// responsive layout handles itself.
+$verIni = @parse_ini_file('/etc/unraid-version');
+$ver    = is_array($verIni) ? (string) ($verIni['version'] ?? '') : '';
+if ($ver !== '' && version_compare($ver, '7.2', '<')) {
+    $tile .= "<script>jQuery(function(){jQuery('#ur-dash-header .tile-header-main').append('<br>');});</script>";
+}
+
+$mytiles[$slug]['column1'] = $tile;
+?>
