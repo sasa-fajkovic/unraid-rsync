@@ -484,7 +484,11 @@ class Runner
      * backup).
      *
      * Gating + mapping (no ambiguity):
-     *   - dryRun                  => never notify (suppress for dry-runs).
+     *   - dryRun                  => notified just like a real run (subject to the
+     *                                same notifyMode gating below), but with a
+     *                                "[Dry-run]" marker added to the subject and
+     *                                description so it is never mistaken for a real
+     *                                backup.
      *   - Classify the state:
      *       isSuccess = state in {SUCCESS, WARNING}
      *       isFailure = state in {FAILED, PARTIAL, TIMEOUT}
@@ -505,11 +509,6 @@ class Runner
     public static function notifyHook(array $job, string $state, int $exitCode, bool $dryRun): void
     {
         try {
-            // Dry-runs never notify.
-            if ($dryRun) {
-                return;
-            }
-
             $mode = self::normalizeNotifyMode((string) ($job['notifyMode'] ?? self::NOTIFY_OFF));
             if (!self::shouldNotify($mode, $state)) {
                 return;
@@ -517,11 +516,14 @@ class Runner
 
             $jobName    = (string) ($job['name'] ?? ($job['id'] ?? 'job'));
             $importance = self::notifyImportance($state);
-            $subject    = sprintf('%s: %s %s', self::NOTIFY_EVENT, $jobName, $state);
+            // A dry-run notification is clearly marked so it is never mistaken for
+            // a real backup.
+            $subject    = sprintf('%s: %s %s', self::NOTIFY_EVENT, $jobName, $state)
+                        . ($dryRun ? ' [Dry-run]' : '');
 
             // Duration is read from the just-written /boot summary if available
             // (it is written immediately before this hook in run()'s finally).
-            $description = self::notifyDescription($job, $state, $exitCode);
+            $description = self::notifyDescription($job, $state, $exitCode, $dryRun);
 
             Notify::send([
                 'event'       => self::NOTIFY_EVENT,
@@ -612,11 +614,17 @@ class Runner
      *
      * @param array<string,mixed> $job
      */
-    public static function notifyDescription(array $job, string $state, int $exitCode): string
+    public static function notifyDescription(array $job, string $state, int $exitCode, bool $dryRun = false): string
     {
         $jobName = (string) ($job['name'] ?? ($job['id'] ?? 'job'));
         $parts   = [
-            sprintf('Job "%s" finished with state %s (rsync exit code %d).', $jobName, $state, $exitCode),
+            sprintf(
+                '%sJob "%s" finished with state %s (rsync exit code %d).',
+                $dryRun ? '[Dry-run] ' : '',
+                $jobName,
+                $state,
+                $exitCode
+            ),
         ];
 
         $duration = self::notifyDuration($job);

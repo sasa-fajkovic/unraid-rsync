@@ -8,7 +8,7 @@ use PHPUnit\Framework\TestCase;
  * Drives notifyHook directly with a fabricated $job and captures dispatch via an
  * injected Notify::$runner (the fake notify binary is present so available() is
  * true). Asserts:
- *   - dryRun suppresses ALL notifications;
+ *   - dryRun notifies like a real run (same gating) but carries a [Dry-run] marker;
  *   - the FULL gating matrix: each notifyMode x each terminal state -> notify?
  *     and the correct importance;
  *   - the message (subject + description) carries job name, state, exit code;
@@ -70,15 +70,43 @@ final class RunnerNotifyTest extends TestCase
         ];
     }
 
-    // --- dry-run suppression -------------------------------------------------
+    // --- dry-run notifies (with a marker), subject to the same gating --------
 
-    public function testDryRunSuppressesEvenWithAlways(): void
+    public function testDryRunNotifiesUnderAlwaysWithMarker(): void
     {
         foreach ($this->terminalStates() as $state) {
             $this->captured = [];
             Runner::notifyHook($this->job('always'), $state, 0, true);
-            $this->assertCount(0, $this->captured, "dry-run must suppress notify for state $state");
+            $this->assertCount(1, $this->captured, "dry-run must notify under 'always' for state $state");
+            // The dispatched subject + description carry the [Dry-run] marker.
+            $this->assertStringContainsString(
+                '[Dry-run]',
+                $this->captured[0],
+                "dry-run notification for state $state must be marked [Dry-run]"
+            );
         }
+    }
+
+    public function testDryRunStillRespectsGating(): void
+    {
+        // notifyMode=off must suppress even a dry-run; failure-only must not fire
+        // on a dry-run SUCCESS. (Gating is independent of dry-vs-real.)
+        $this->captured = [];
+        Runner::notifyHook($this->job('off'), Rsync::STATE_SUCCESS, 0, true);
+        $this->assertCount(0, $this->captured, "notifyMode=off must suppress dry-run notify");
+
+        $this->captured = [];
+        Runner::notifyHook($this->job('failure-only'), Rsync::STATE_SUCCESS, 0, true);
+        $this->assertCount(0, $this->captured, "failure-only must not fire on a dry-run SUCCESS");
+    }
+
+    public function testDryRunDescriptionCarriesMarker(): void
+    {
+        $desc = Runner::notifyDescription($this->job('always', 'photos'), Rsync::STATE_SUCCESS, 0, true);
+        $this->assertStringContainsString('[Dry-run]', $desc);
+        // A real run's description has no marker.
+        $real = Runner::notifyDescription($this->job('always', 'photos'), Rsync::STATE_SUCCESS, 0, false);
+        $this->assertStringNotContainsString('[Dry-run]', $real);
     }
 
     // --- the full gating matrix: mode x state -> notify? ---------------------
