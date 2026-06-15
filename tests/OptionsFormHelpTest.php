@@ -482,6 +482,36 @@ final class OptionsFormHelpTest extends TestCase
         $this->assertStringNotContainsString('action=listHistory', $html);
     }
 
+    public function testOverviewPageRendersJobRowsAndPoller(): void
+    {
+        $cfg = Config::defaults();
+        $cfg['jobs'][] = Job::normalize([
+            'id'        => 'j-ov',
+            'name'      => 'Overview Job',
+            'transport' => 'LOCAL',
+            'pairs'     => [['local' => '/mnt/user/x/', 'remote' => '/mnt/disk1/x/']],
+        ]);
+        Config::save($cfg);
+        try {
+            $html = $this->renderPageBody(__DIR__ . '/../source/pages/overview.php');
+            // One skeleton row per job, keyed by id, plus the live getStatus poll.
+            $this->assertStringContainsString('data-jobid="j-ov"', $html);
+            $this->assertStringContainsString('Overview Job', $html);
+            $this->assertStringContainsString('action=getStatus', $html);
+            $this->assertStringContainsString('id="ur-ov-rows"', $html);
+        } finally {
+            @unlink(Config::path());
+        }
+    }
+
+    public function testOverviewPageShowsEmptyStateWithNoJobs(): void
+    {
+        @unlink(Config::path());
+        $html = $this->renderPageBody(__DIR__ . '/../source/pages/overview.php');
+        $this->assertStringContainsString('No jobs configured yet', $html);
+        $this->assertStringNotContainsString('action=getStatus', $html);
+    }
+
     /**
      * Render the shared options partial to a string.
      *
