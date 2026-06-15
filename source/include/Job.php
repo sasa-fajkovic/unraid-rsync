@@ -114,6 +114,9 @@ class Job
 
         $job['name']     = isset($raw['name']) ? trim((string) $raw['name']) : '';
         $job['enabled']  = self::toBool($raw['enabled'] ?? true);
+        // A manual-only job is never added to cron and has no schedule
+        // requirement; it runs only via the Run / Dry-run buttons.
+        $job['manualOnly'] = self::toBool($raw['manualOnly'] ?? false);
         // Only override the default schedule when one was actually supplied; an
         // omitted schedule keeps the sensible default rather than becoming the
         // always-invalid empty string.
@@ -278,8 +281,9 @@ class Job
             $errors[] = 'Log level is invalid.';
         }
 
-        // schedule (5-field cron)
-        if (!self::isValidCron((string) ($job['schedule'] ?? ''))) {
+        // schedule (5-field cron). A manual-only job is never scheduled, so its
+        // schedule is irrelevant and not validated.
+        if (empty($job['manualOnly']) && !self::isValidCron((string) ($job['schedule'] ?? ''))) {
             $errors[] = 'Schedule must be a valid 5-field cron expression.';
         }
 

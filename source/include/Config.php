@@ -175,6 +175,7 @@ class Config
             'id'                => '',
             'name'              => '',
             'enabled'           => true,
+            'manualOnly'        => false,
             'schedule'          => '0 3 * * *',
             'transport'         => 'SSH',
             'connectionId'      => '',

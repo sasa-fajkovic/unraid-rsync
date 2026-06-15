@@ -84,6 +84,7 @@ function ur_render_job_card($job, $index): void
     $name        = (string) ($job['name'] ?? '');
     $id          = (string) ($job['id'] ?? '');
     $enabled     = !empty($job['enabled']);
+    $manualOnly  = !empty($job['manualOnly']);
     $schedule    = (string) ($job['schedule'] ?? '0 3 * * *');
     $transport   = (string) ($job['transport'] ?? 'SSH');
     $direction   = (string) ($job['direction'] ?? 'PUSH');
@@ -197,9 +198,24 @@ function ur_render_job_card($job, $index): void
     }
     echo '</dd>';
 
-    // schedule (5-field cron) (required)
-    echo '<dt><label for="' . ur_h($idb . '_schedule') . '">' . ur_h(ur_t('Schedule (cron)')) . '</label>' . ur_required_mark() . ':</dt>';
-    echo '<dd><input type="text" id="' . ur_h($idb . '_schedule') . '" name="' . ur_h($p . '[schedule]') . '" value="' . ur_h($schedule) . '" placeholder="0 3 * * *" required></dd>';
+    // manual-only toggle: when ON the job is never scheduled (no cron line) and
+    // the schedule field is hidden + not required; it runs only on demand.
+    echo '<dt>' . ur_h(ur_t('Manual only (no schedule)')) . ':</dt>';
+    echo '<dd>';
+    echo '<input type="hidden" name="' . ur_h($p . '[manualOnly]') . '" value="0">';
+    echo '<input type="checkbox" class="ur-switch ur-manual-only" name="' . ur_h($p . '[manualOnly]') . '" value="1"'
+        . ($manualOnly ? ' checked' : '') . ' data-idb="' . ur_h($idb) . '">';
+    echo '<blockquote class="inline_help"><p>' . ur_h(ur_t('When ON, this job is never scheduled — it runs only when you click Run or Dry-run, and the schedule below is ignored.')) . '</p></blockquote>';
+    echo '</dd>';
+
+    // schedule (5-field cron). Required UNLESS manual-only (then hidden); a hidden
+    // required field is "not focusable" and would block submit, so the `required`
+    // attribute + visual marker track the manual-only toggle (seeded here, kept in
+    // sync by JS).
+    $schedRowStyle = $manualOnly ? ' style="display:none"' : '';
+    echo '<dt class="ur-sched-row" id="' . ur_h($idb . '_schedrow_dt') . '"' . $schedRowStyle . '><label for="' . ur_h($idb . '_schedule') . '">' . ur_h(ur_t('Schedule (cron)')) . '</label>'
+        . '<abbr class="ur-required ur-sched-required" title="' . ur_h(ur_t('Required')) . '"' . ($manualOnly ? ' style="display:none"' : '') . '>*</abbr>:</dt>';
+    echo '<dd class="ur-sched-row" id="' . ur_h($idb . '_schedrow_dd') . '"' . $schedRowStyle . '><input type="text" id="' . ur_h($idb . '_schedule') . '" name="' . ur_h($p . '[schedule]') . '" value="' . ur_h($schedule) . '" placeholder="0 3 * * *"' . ($manualOnly ? '' : ' required') . '></dd>';
 
     // pairs
     $pairsRowsId = $idb . '_pairs';
@@ -325,6 +341,9 @@ function ur_render_pair_row(string $prefix, $k, string $local, string $remote): 
  */
 function ur_next_run_label(array $job, int $now): string
 {
+    if (!empty($job['manualOnly'])) {
+        return ur_t('manual (on demand)');
+    }
     if (empty($job['enabled'])) {
         return ur_t('disabled');
     }
@@ -691,7 +710,7 @@ ur_emit_form_enable_assets();
         </td>
         <td><?=!empty($job['enabled']) ? _('Yes') : _('No')?></td>
         <td><?=htmlspecialchars((string)($job['transport'] ?? ''), ENT_QUOTES, 'UTF-8')?></td>
-        <td><?=htmlspecialchars((string)($job['schedule'] ?? ''), ENT_QUOTES, 'UTF-8')?></td>
+        <td><?=!empty($job['manualOnly']) ? _('Manual') : htmlspecialchars((string)($job['schedule'] ?? ''), ENT_QUOTES, 'UTF-8')?></td>
         <td class="ur-last-run-cell"><?=htmlspecialchars(ur_last_run_label($summary, $urNow), ENT_QUOTES, 'UTF-8')?></td>
         <td class="ur-next-run-cell"><?=htmlspecialchars(ur_next_run_label($job, $urNow), ENT_QUOTES, 'UTF-8')?></td>
       </tr>
@@ -817,6 +836,7 @@ ur_emit_form_enable_assets();
     /* A cloned card defaults to SSH transport, so seed its Connection-required
      * state to match. */
     syncAllConnRequired();
+    syncAllManualOnly();
     /* A just-added card starts EXPANDED (the user wants to fill it in) and gets
      * focus on its name field. */
     setCardOpen(card, true);
@@ -1073,8 +1093,33 @@ ur_emit_form_enable_assets();
       if (target) { target.style.display = t.checked ? 'none' : ''; }
     } else if (t.classList.contains('ur-transport-select')) {
       syncConnRequired(t);
+    } else if (t.classList.contains('ur-manual-only')) {
+      syncManualOnly(t);
     }
   });
+
+  /* Manual-only toggle: hide the schedule row and drop its `required` when ON (a
+   * hidden required field is "not focusable" and would block Apply), restore when
+   * OFF. Mirrors the server-seeded initial state. */
+  function syncManualOnly(cb) {
+    if (!cb || !cb.getAttribute) { return; }
+    var idb = cb.getAttribute('data-idb');
+    if (!idb) { return; }
+    var on = cb.checked;
+    ['_schedrow_dt', '_schedrow_dd'].forEach(function (s) {
+      var el = document.getElementById(idb + s);
+      if (el) { el.style.display = on ? 'none' : ''; }
+    });
+    var input = document.getElementById(idb + '_schedule');
+    if (input) { input.required = !on; }
+    var dt = document.getElementById(idb + '_schedrow_dt');
+    var mark = dt ? dt.querySelector('.ur-sched-required') : null;
+    if (mark) { mark.style.display = on ? 'none' : ''; }
+  }
+  function syncAllManualOnly() {
+    var cbs = document.querySelectorAll('.ur-manual-only');
+    Array.prototype.forEach.call(cbs, syncManualOnly);
+  }
 
   /* Keyboard toggle for the collapsible header (it is a role=button). */
   document.addEventListener('keydown', function (ev) {
@@ -1462,8 +1507,9 @@ ur_emit_form_enable_assets();
     }
   });
 
-  /* Seed the Connection-required state for all initially-rendered cards. */
+  /* Seed the Connection-required + manual-only state for all rendered cards. */
   syncAllConnRequired();
+  syncAllManualOnly();
 
   /* Kick off polling on load only when something is already running (the
    * server-rendered badges tell us, but a cheap initial poll is simplest and
