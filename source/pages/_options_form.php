@@ -466,8 +466,25 @@ if (!function_exists('ur_emit_option_help_assets')) {
 <style>
 /* Native two-column rsync options. The dl/dt/dd grid + label alignment come from
    the inherited dynamix stylesheet; these rules only tune the inline bits. */
-.ur-rsync-options code { font-size: 0.95em; opacity: 0.85; }
+/* Render each rsync flag (e.g. -a, --delete) as a clear inline code chip so it
+   reads as a literal flag name rather than dim prose. The translucent grey
+   background + border work on both light and dark webGui themes without
+   depending on a specific palette var. */
+.ur-rsync-options code {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: 0.85em;
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid rgba(127, 127, 127, 0.30);
+  background: rgba(127, 127, 127, 0.15);
+  white-space: nowrap;
+}
 .ur-rsync-options .ur-dt { position: relative; }
+
+/* Keep the repeatable-row "Add" button compact (its natural width) instead of
+   letting the webGui base stylesheet stretch a standalone <button> to the full
+   row width. */
+.ur-rsync-options .ur-row-add { width: auto; display: inline-block; }
 
 /* The "?" help affordance. A small circular icon in the native help-blue, kept
    subtle (opacity:0) until the row is hovered or the icon focused — mirroring how

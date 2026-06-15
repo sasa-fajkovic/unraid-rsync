@@ -27,9 +27,9 @@ Run multiple **independent** rsync jobs, each with:
 - optional **notifications** through Unraid's native notification system.
 
 **SSH** jobs additionally reference a connection from the reusable
-**Credentials** keychain (SSH connections + a managed key keychain), shown by
-name in the UI, supporting **existing key file**, **managed key**, and
-**password** auth. **Local** jobs use no connection or credentials.
+**Connections** tab, shown by name in the UI, supporting **existing key file**,
+**managed key**, and **password** auth. Managed keys live in their own
+**Credentials** keychain tab. **Local** jobs use no connection or credentials.
 
 ## What ships today
 
@@ -37,13 +37,16 @@ name in the UI, supporting **existing key file**, **managed key**, and
   built by `pkg_build.sh`, released via GitHub Actions; **CalVer** auto-releases
   on every merge to `main`).
 - A tabbed **Unraid Rsync** page under **Settings → User Utilities** with
-  **Jobs**, **Credentials**, **Global Settings** and **Status** tabs.
+  **Jobs**, **Connections**, **Credentials**, **Global Settings**, **Status**
+  and **History** tabs.
 - Jobs CRUD + Global Settings (config persisted to `config.json`).
-- A **Credentials** keychain (see [Credentials](#credentials)): SSH
-  **Connections** with three auth methods — **existing key file** (default),
-  a **managed key** keychain (generate or import), and **password** (via
-  `sshpass`) — plus **Discover host key**, selectable strict-host-key modes,
-  and a per-connection **Test connection** probe.
+- A **Connections** tab (see [Credentials](#credentials)): SSH connections with
+  three auth methods — **existing key file** (default), a **managed key** (from
+  the Credentials tab), and **password** (via `sshpass`) — plus **Discover host
+  key**, selectable strict-host-key modes, and a per-connection **Test
+  connection** probe.
+- A **Credentials** tab: a managed SSH key keychain you can **generate** or
+  **import**, referenced by connections that use managed-key auth.
 - A safe rsync **execution engine** (whitelisted flags built as an argv array,
   path guardrails) with manual **Run / Dry-run / Abort** per job, and native
   **inline help** on every rsync flag and option.
@@ -97,16 +100,16 @@ re-applied automatically:
 
 ### Credentials
 
-The **Credentials** tab is a reusable keychain that **SSH** jobs reference by
-connection, so a host's details are defined once and shared. (**Local**
-transport jobs use no connection or credentials.) It has two layers:
+**SSH** jobs reference a connection by name, so a host's details are defined
+once and shared. (**Local** transport jobs use no connection or credentials.)
+Two tabs cover this:
 
 - **Connections** — an SSH endpoint (host, port, remote user) plus an **auth
   method**. Each connection has a **Discover host key** action and a selectable
   **strict host-key checking** mode (`accept-new` — the default —, `yes`, or
   `no`), and a per-connection **Test connection** probe.
-- **Keys** — a managed SSH key keychain you can **generate** or **import**,
-  referenced by connections that use managed-key auth.
+- **Credentials** — a managed SSH key keychain you can **generate** or
+  **import**, referenced by connections that use managed-key auth.
 
 Each connection picks one of three **auth methods**:
 
@@ -136,7 +139,7 @@ do not apply there. Consequences:
   account**.
 
 **Password auth requires `sshpass`**, which is not part of Unraid's base OS.
-The plugin **detects it at runtime**: if it is missing, the Credentials tab and
+The plugin **detects it at runtime**: if it is missing, the Connections tab and
 the connection test say so and point you at the **NerdTools** plugin (install
 it and enable its `sshpass` package). Key auth works regardless.
 

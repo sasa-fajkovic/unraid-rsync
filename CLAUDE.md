@@ -22,8 +22,12 @@ on, forked from, or derived from any other plugin.
   `keys/<token>`, `pass/<token>`, `known_hosts/<token>`.
 - **UI** = a parent hub `source/UnraidRsync.page` (`Menu="Utilities"` →
   **Settings ▸ User Utilities**, `Type="xmenu"`, **empty body**) plus child tab
-  pages `source/UR.*.page` (`Menu="UnraidRsync:1..4"` → **Jobs / Credentials /
-  Global Settings / Status**), each including a `source/pages/*.php` body.
+  pages `source/UR.*.page` (`Menu="UnraidRsync:1..6"` → **Jobs / Connections /
+  Credentials / Global Settings / Status / History**), each including a
+  `source/pages/*.php` body. **Connections** (host/port/user/auth cards) and
+  **Credentials** (the managed SSH-key keychain) are SEPARATE tabs/bodies
+  (`connections.php` / `credentials.php`); a connection references a managed key
+  by id via its KEY auth method.
 - **Backend classes** in `source/include/`: `Config`, `Credentials`, `Job`, `Ssh`,
   `Rsync`, `RunState`, `Runner`, `Logger`, `Cron`, `Notify`, `KeyTools`,
   `handler.php` (the POST/GET front controller). Plus
