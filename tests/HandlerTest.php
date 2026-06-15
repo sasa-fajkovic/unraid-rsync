@@ -449,6 +449,36 @@ final class HandlerTest extends TestCase
         $this->assertSame(100, $body['limit']);
     }
 
+    public function testListHistoryAllJobsAggregatesNewestFirst(): void
+    {
+        // Hermetic: clear any history files other tests may have left.
+        foreach (glob(rtrim(UR_CONFIG_BASE, '/') . '/runs/*.history.jsonl') ?: [] as $f) {
+            @unlink($f);
+        }
+        History::append('j-a', ['startedAt' => '2026-06-14T12:00:00Z', 'state' => 'SUCCESS', 'jobName' => 'Alpha', 'logRef' => 'a1.log']);
+        History::append('j-b', ['startedAt' => '2026-06-14T13:00:00Z', 'state' => 'FAILED',  'jobName' => 'Beta',  'logRef' => 'b1.log']);
+        History::append('j-a', ['startedAt' => '2026-06-14T14:00:00Z', 'state' => 'SUCCESS', 'jobName' => 'Alpha', 'logRef' => 'a2.log']);
+        try {
+            // No id => all-jobs view (the default).
+            $_GET = ['offset' => '0', 'limit' => '25'];
+            [$body, $code] = $this->runCapture(fn() => ur_action_list_history());
+            $this->assertSame(200, $code);
+            $this->assertTrue($body['ok']);
+            $this->assertTrue($body['allJobs']);
+            $this->assertSame(3, $body['total']);
+            // Newest-first across BOTH jobs, each row tagged with its job.
+            $this->assertSame('a2.log', $body['runs'][0]['logRef']);
+            $this->assertSame('j-a',    $body['runs'][0]['jobId']);
+            $this->assertSame('Alpha',  $body['runs'][0]['jobName']);
+            $this->assertSame('b1.log', $body['runs'][1]['logRef']);
+            $this->assertSame('j-b',    $body['runs'][1]['jobId']);
+            $this->assertSame('a1.log', $body['runs'][2]['logRef']);
+        } finally {
+            History::delete('j-a');
+            History::delete('j-b');
+        }
+    }
+
     public function testRemovingJobKeepsItsHistory(): void
     {
         // Seed a config with a job, then record a run for it.
