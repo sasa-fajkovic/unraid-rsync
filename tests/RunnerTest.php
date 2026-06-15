@@ -755,11 +755,12 @@ final class RunnerTest extends TestCase
         $this->assertNotSame('posthook-failed', $res['reason'] ?? '');
     }
 
-    public function testDryRunSuppressesNotificationThroughFullRun(): void
+    public function testDryRunNotifiesWithMarkerThroughFullRun(): void
     {
-        // notifyHook's dry-run suppression is unit-tested directly; here we prove
-        // it END-TO-END: a DRY run with notifyMode=always dispatches NO notify
-        // through the real Runner::run finally. We capture via Notify's seam.
+        // notifyHook's dry-run behaviour is unit-tested directly; here we prove it
+        // END-TO-END: a DRY run with notifyMode=always DOES dispatch a notify
+        // through the real Runner::run finally, carrying the [Dry-run] marker. We
+        // capture via Notify's seam.
         $fakeBin = sys_get_temp_dir() . '/ur-rnotify-dry-' . getmypid() . '-' . bin2hex(random_bytes(4));
         file_put_contents($fakeBin, "#!/bin/sh\nexit 0\n");
         chmod($fakeBin, 0755);
@@ -779,7 +780,8 @@ final class RunnerTest extends TestCase
             $id = $this->saveLocalJob('j-local', ['notifyMode' => 'always']);
             $res = Runner::run($id, true); // DRY run
             $this->assertSame(Rsync::STATE_SUCCESS, $res['state']);
-            $this->assertCount(0, $captured, 'a dry run must never notify, even with notifyMode=always');
+            $this->assertCount(1, $captured, 'a dry run must notify under notifyMode=always');
+            $this->assertStringContainsString('[Dry-run]', $captured[0], 'the dry-run notification must be marked');
         } finally {
             Notify::$notifyPath = $origPath;
             Notify::$runner = null;
