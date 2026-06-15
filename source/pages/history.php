@@ -78,7 +78,20 @@ try {
   background: var(--background-color, #1c1c1c); border-radius: 6px; padding: 14px;
   display: flex; flex-direction: column;
 }
-.ur-hist-modal-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.ur-hist-modal-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; gap: 8px; }
+.ur-hist-modal-actions { display: flex; align-items: center; gap: 6px; }
+/* Modal action buttons. "Download full log" is a prominent green button (it was
+   an easy-to-miss text link); Copy is blue. */
+.ur-btn {
+  display: inline-block; padding: 5px 12px; border-radius: 4px; cursor: pointer;
+  font-size: 12px; font-weight: bold; text-decoration: none; border: none; line-height: 1.5;
+}
+.ur-btn-dl   { background: var(--green, #1c7d3f); color: #fff; }
+.ur-btn-copy { background: var(--blue-500, #216feb); color: #fff; }
+.ur-btn:hover { filter: brightness(1.12); }
+/* Per-row "Download" link sits next to the View button as a small text button. */
+.ur-hist-dl-row { margin-left: 8px; text-decoration: none; color: var(--blue-500, #2196f3); font-weight: bold; }
+.ur-hist-dl-row:hover { text-decoration: underline; }
 .ur-hist-log-pre {
   overflow: auto; margin: 0; background: #000; color: #d0d0d0; padding: 10px;
   border-radius: 4px; font-family: monospace; font-size: 12px;
@@ -136,12 +149,13 @@ try {
   <div class="ur-hist-modal-box">
     <div class="ur-hist-modal-head">
       <strong id="ur-hist-modal-title"><?=_('Run log')?></strong>
-      <span>
-        <a id="ur-hist-log-download" href="#" download><?=_('Download full log')?></a>
+      <span class="ur-hist-modal-actions">
+        <a id="ur-hist-log-download" class="ur-btn ur-btn-dl" href="#" download>&#11015;&nbsp;<?=_('Download full log')?></a>
+        <button type="button" id="ur-hist-log-copy" class="ur-btn ur-btn-copy"><?=_('Copy')?></button>
         <button type="button" id="ur-hist-modal-close"><?=_('Close')?></button>
       </span>
     </div>
-    <blockquote class="inline_help" style="display:block;margin:0 0 8px"><p><?=_('The view below shows the most recent part of the log (the tail). Use "Download full log" for the complete file')?>.</p></blockquote>
+    <blockquote class="inline_help" style="display:block;margin:0 0 8px"><p><?=_('The view below shows the most recent part of the log (the tail). Use Download full log for the complete file; Copy copies what is shown')?>.</p></blockquote>
     <pre id="ur-hist-log-pre" class="ur-hist-log-pre"></pre>
   </div>
 </div>
@@ -243,7 +257,7 @@ try {
       tr.appendChild(td(isRunning ? '—' : String(r.exitCode)));
       tr.appendChild(td(isRunning ? '—' : fmtDuration(r.durationSec)));
 
-      // Logs button (or a dash when no log ref was recorded)
+      // Logs: View (modal) + Download (full file) when a log ref was recorded.
       var logTd = document.createElement('td');
       if (r.logRef) {
         var btn = document.createElement('button');
@@ -252,6 +266,14 @@ try {
         btn.textContent = 'View';
         btn.setAttribute('data-run', r.logRef);
         logTd.appendChild(btn);
+
+        var dl = document.createElement('a');
+        dl.className = 'ur-hist-dl-row';
+        dl.textContent = 'Download';
+        dl.setAttribute('download', '');
+        dl.href = HANDLER_URL + '?action=downloadJobLog&id=' + encodeURIComponent(currentJob()) +
+                  '&run=' + encodeURIComponent(r.logRef);
+        logTd.appendChild(dl);
       } else {
         logTd.textContent = '—';
       }
@@ -364,7 +386,39 @@ try {
     if (t && t.classList && t.classList.contains('ur-hist-viewlog')) { openLog(t.getAttribute('data-run')); }
   });
   document.getElementById('ur-hist-modal-close').addEventListener('click', closeLog);
-  modal.addEventListener('click', function (ev) { if (ev.target === modal) { closeLog(); } });
+
+  /* Copy the shown log to the clipboard (the visible tail; Download gives the
+   * full file). Falls back to selecting the <pre> when the Clipboard API is
+   * unavailable (non-secure context). */
+  var copyBtn = document.getElementById('ur-hist-log-copy');
+  if (copyBtn) {
+    copyBtn.addEventListener('click', function () {
+      var txt = modalPre.textContent || '';
+      var flash = function () { var o = copyBtn.textContent; copyBtn.textContent = 'Copied!'; setTimeout(function () { copyBtn.textContent = o; }, 1200); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(txt).then(flash).catch(function () { selectPre(); });
+      } else {
+        selectPre();
+      }
+    });
+  }
+  function selectPre() {
+    var rng = document.createRange(); rng.selectNodeContents(modalPre);
+    var sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(rng);
+    try { document.execCommand('copy'); } catch (e) { /* leave it selected for manual copy */ }
+  }
+
+  /* Close on a genuine backdrop click only. Selecting text in the log and
+   * releasing the drag over the backdrop fires a click with target===modal too,
+   * which used to close the window mid-selection. Require the mousedown to have
+   * STARTED on the backdrop, so a selection drag that began inside the box never
+   * closes it. */
+  var downOnBackdrop = false;
+  modal.addEventListener('mousedown', function (ev) { downOnBackdrop = (ev.target === modal); });
+  modal.addEventListener('click', function (ev) {
+    if (ev.target === modal && downOnBackdrop) { closeLog(); }
+    downOnBackdrop = false;
+  });
   document.addEventListener('keydown', function (ev) { if (ev.key === 'Escape' && modal.classList.contains('ur-open')) { closeLog(); } });
 
   /* Initial load (fetch on open; no polling - history only changes on run end). */
