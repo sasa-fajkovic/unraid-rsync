@@ -134,8 +134,12 @@ try {
   <div class="ur-hist-modal-box">
     <div class="ur-hist-modal-head">
       <strong id="ur-hist-modal-title"><?=_('Run log')?></strong>
-      <button type="button" id="ur-hist-modal-close"><?=_('Close')?></button>
+      <span>
+        <a id="ur-hist-log-download" href="#" download><?=_('Download full log')?></a>
+        <button type="button" id="ur-hist-modal-close"><?=_('Close')?></button>
+      </span>
     </div>
+    <blockquote class="inline_help" style="display:block;margin:0 0 8px"><p><?=_('The view below shows the most recent part of the log (the tail). Use "Download full log" for the complete file')?>.</p></blockquote>
     <pre id="ur-hist-log-pre" class="ur-hist-log-pre"></pre>
   </div>
 </div>
@@ -155,6 +159,7 @@ try {
   var modal    = document.getElementById('ur-hist-modal');
   var modalPre = document.getElementById('ur-hist-log-pre');
   var modalTit = document.getElementById('ur-hist-modal-title');
+  var modalDl  = document.getElementById('ur-hist-log-download');
 
   var offset = 0;
   var total  = 0;
@@ -268,9 +273,12 @@ try {
   function load() {
     var job = currentJob();
     if (!job) { return; }
+    /* cache-buster + no-store: History only changes when a run finishes, so the
+       browser would otherwise serve a CACHED listHistory response and a
+       just-finished run would not appear until a hard refresh. */
     var url = HANDLER_URL + '?action=listHistory&id=' + encodeURIComponent(job) +
-              '&offset=' + offset + '&limit=' + PAGE_SIZE;
-    fetch(url, { credentials: 'same-origin' })
+              '&offset=' + offset + '&limit=' + PAGE_SIZE + '&_=' + Date.now();
+    fetch(url, { credentials: 'same-origin', cache: 'no-store' })
       .then(function (r) { return r.json(); })
       .then(function (body) {
         if (!body || !body.ok) {
@@ -306,8 +314,12 @@ try {
      * controls (mirrors the Jobs-tab log viewer). */
     var closeBtn = document.getElementById('ur-hist-modal-close');
     if (closeBtn && closeBtn.focus) { closeBtn.focus(); }
-    var url = HANDLER_URL + '?action=getJobLog&id=' + encodeURIComponent(job) + '&run=' + encodeURIComponent(runRef);
-    fetch(url, { credentials: 'same-origin' })
+    /* Point the "Download full log" link at the full-file endpoint for this run. */
+    if (modalDl) {
+      modalDl.href = HANDLER_URL + '?action=downloadJobLog&id=' + encodeURIComponent(job) + '&run=' + encodeURIComponent(runRef);
+    }
+    var url = HANDLER_URL + '?action=getJobLog&id=' + encodeURIComponent(job) + '&run=' + encodeURIComponent(runRef) + '&_=' + Date.now();
+    fetch(url, { credentials: 'same-origin', cache: 'no-store' })
       .then(function (r) { return r.json(); })
       .then(function (body) {
         if (body && body.ok && body.log) {
