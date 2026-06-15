@@ -168,17 +168,17 @@ if (!function_exists('ur_option_help')) {
             'excludes'       => 'Skip files and directories matching each pattern (--exclude=PATTERN). Add one pattern per row, e.g. *.tmp or .cache/.',
             'includes'       => 'Force matching files to be transferred even when a later exclude pattern would skip them (--include=PATTERN). Add one pattern per row.',
             // --- scalar value inputs ---------------------------------------
-            'maxDelete'      => 'Refuse to delete more than this many files (--max-delete=N). A safety cap that aborts a run if --delete would remove too much.',
-            'bwlimit'        => 'Cap the transfer bandwidth in KB/s (--bwlimit=RATE), e.g. 5000 for about 5 MB/s. Leave blank for no limit.',
-            'timeout'        => 'Abort the transfer if no data is sent or received for this many seconds (--timeout=SECONDS).',
-            'contimeout'     => 'Give up if the connection cannot be established within this many seconds (--contimeout=SECONDS).',
-            'maxSize'        => 'Skip any file larger than this size (--max-size=SIZE), e.g. 100M or 2G.',
-            'minSize'        => 'Skip any file smaller than this size (--min-size=SIZE), e.g. 10K.',
-            'chmod'          => 'Force permissions on transferred files and directories (--chmod=CHMOD), e.g. D755,F644 for directories 755 and files 644.',
-            'tempDir'        => 'Place temporary files in this directory during the transfer (--temp-dir=DIR) instead of next to the destination files.',
-            'backupDir'      => 'Move changed or deleted files into this directory instead of overwriting them (--backup-dir=DIR). Also enables --backup.',
-            'compressLevel'  => 'Set the zlib compression level from 0 (none) to 9 (maximum) (--compress-level=N). Only matters when Compress is on.',
-            'modifyWindow'   => 'Allow this many seconds of tolerance when comparing modification times (--modify-window=SECONDS). Useful for FAT filesystems with coarse timestamps.',
+            'maxDelete'      => 'Refuse to delete more than this many files on the destination (--max-delete=N): the run aborts (exit 25) instead of deleting more. LEAVE BLANK for no cap — any number may be deleted. Note 0 is NOT unlimited: it means delete nothing and only warn. Only applies when a Delete option is on; the form pre-fills 25 as a safe starting point the first time you enable delete.',
+            'bwlimit'        => 'Cap the transfer bandwidth in KB/s (--bwlimit=RATE), e.g. 5000 for about 5 MB/s. Leave blank for no limit (full speed).',
+            'timeout'        => 'Abort the transfer if no data is sent or received for this many seconds (--timeout=SECONDS). Leave blank for no timeout (wait indefinitely).',
+            'contimeout'     => 'Give up if the connection cannot be established within this many seconds (--contimeout=SECONDS). Leave blank to use the SSH/rsync default.',
+            'maxSize'        => 'Skip any file larger than this size (--max-size=SIZE), e.g. 100M or 2G. Leave blank for no maximum (transfer files of any size).',
+            'minSize'        => 'Skip any file smaller than this size (--min-size=SIZE), e.g. 10K. Leave blank for no minimum.',
+            'chmod'          => 'Force permissions on transferred files and directories (--chmod=CHMOD), e.g. D755,F644 for directories 755 and files 644. Leave blank to keep the existing permissions unchanged.',
+            'tempDir'        => 'Place temporary files in this directory during the transfer (--temp-dir=DIR). Leave blank to use the default location (alongside the destination files).',
+            'backupDir'      => 'Move changed or deleted files into this directory instead of overwriting them (--backup-dir=DIR); also enables --backup. Leave blank to disable backups (files are overwritten in place).',
+            'compressLevel'  => 'Set the zlib compression level from 0 (none) to 9 (maximum) (--compress-level=N). Leave blank for rsync\'s default level. Only matters when Compress is on.',
+            'modifyWindow'   => 'Allow this many seconds of tolerance when comparing modification times (--modify-window=SECONDS). Useful for FAT filesystems with coarse timestamps. Leave blank for exact matching (0 seconds).',
         ];
     }
 }
