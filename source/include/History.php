@@ -155,6 +155,62 @@ class History
     }
 
     /**
+     * Every job's records merged and sorted NEWEST-FIRST (by startedAt, an
+     * ISO-8601/Zulu string so a lexicographic compare is chronological). Each
+     * row is tagged with its `jobId` (derived from the history filename) so an
+     * all-jobs view can show which job a run belongs to and resolve its log.
+     *
+     * Reads all per-job history files; bounded by the retention cap per job, so
+     * the total stays modest on a real box. Best-effort: unreadable/!json lines
+     * are skipped.
+     *
+     * @return array<int,array<string,mixed>>
+     */
+    public static function allSorted(): array
+    {
+        $records = [];
+        foreach (@glob(self::dir() . '/*.history.jsonl') ?: [] as $file) {
+            // Filename is "<jobid>.history.jsonl"; strip the suffix for the id.
+            $jobId = basename($file, '.history.jsonl');
+            $lines = @file($file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+            if (!is_array($lines)) {
+                continue;
+            }
+            foreach ($lines as $line) {
+                $d = json_decode($line, true);
+                if (is_array($d)) {
+                    $rec = self::normalizeRecord($d);
+                    $rec['jobId'] = $jobId;
+                    $records[] = $rec;
+                }
+            }
+        }
+        usort($records, static function ($a, $b) {
+            return strcmp((string) ($b['startedAt'] ?? ''), (string) ($a['startedAt'] ?? ''));
+        });
+        return $records;
+    }
+
+    /**
+     * Paginated newest-first view across ALL jobs (see allSorted). Same return
+     * shape as list(); each run carries a `jobId`.
+     *
+     * @return array{total:int,offset:int,limit:int,runs:array<int,array<string,mixed>>}
+     */
+    public static function listAll(int $offset = 0, int $limit = 25): array
+    {
+        $offset  = max(0, $offset);
+        $limit   = max(1, min(100, $limit));
+        $records = self::allSorted();
+        return [
+            'total'  => count($records),
+            'offset' => $offset,
+            'limit'  => $limit,
+            'runs'   => array_values(array_slice($records, $offset, $limit)),
+        ];
+    }
+
+    /**
      * Prune to the newest $keep records. LAZY: only rewrites the file when it is
      * actually over the cap (so a run that doesn't exceed the cap pays no extra
      * flash write). Atomic temp + rename. Best-effort; never throws.

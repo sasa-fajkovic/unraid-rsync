@@ -104,7 +104,7 @@ try {
 </div>
 
 <p>
-  <?=_('Past executions for a job — real runs and dry-runs, started manually or on schedule. How many are kept is the "Keep last N executions" setting on the Global Settings tab')?>.
+  <?=_('Past executions across all jobs — real runs and dry-runs, started manually or on schedule. Use the filter to narrow to one job. How many are kept per job is the "Keep last N executions" setting on the Global Settings tab')?>.
 </p>
 
 <?php if (empty($jobs)): ?>
@@ -112,8 +112,9 @@ try {
 <?php else: ?>
 
 <div class="ur-hist-controls">
-  <label for="ur-hist-job"><?=_('Job')?>:</label>
+  <label for="ur-hist-job"><?=_('Filter by job')?>:</label>
   <select id="ur-hist-job">
+    <option value="" selected><?=_('All jobs')?></option>
     <?php foreach ($jobs as $jid => $jname): ?>
       <option value="<?=htmlspecialchars($jid, ENT_QUOTES, 'UTF-8')?>"><?=htmlspecialchars($jname, ENT_QUOTES, 'UTF-8')?></option>
     <?php endforeach; ?>
@@ -123,6 +124,7 @@ try {
 <table class="ur-hist-table">
   <thead>
     <tr>
+      <th><?=_('Job')?></th>
       <th><?=_('When')?></th>
       <th><?=_('Trigger')?></th>
       <th><?=_('Type')?></th>
@@ -133,7 +135,7 @@ try {
     </tr>
   </thead>
   <tbody id="ur-hist-rows">
-    <tr><td colspan="7"><?=_('Loading…')?></td></tr>
+    <tr><td colspan="8"><?=_('Loading…')?></td></tr>
   </tbody>
 </table>
 
@@ -223,14 +225,20 @@ try {
     if (!runs || !runs.length) {
       var tr0 = document.createElement('tr');
       var c0 = document.createElement('td');
-      c0.setAttribute('colspan', '7');
-      c0.textContent = (total === 0) ? 'No executions yet for this job.' : 'No executions on this page.';
+      c0.setAttribute('colspan', '8');
+      c0.textContent = (total === 0) ? 'No executions yet.' : 'No executions on this page.';
       tr0.appendChild(c0);
       rowsEl.appendChild(tr0);
       return;
     }
     runs.forEach(function (r) {
       var tr = document.createElement('tr');
+
+      // Job name (resolved server-side; falls back to the id).
+      var jobCell = td(r.jobName || r.jobId || '—');
+      jobCell.className = 'ur-hist-name';
+      tr.appendChild(jobCell);
+
       tr.appendChild(td(fmtWhen(r.startedAt)));
 
       // Trigger (icon + label)
@@ -265,13 +273,14 @@ try {
         btn.className = 'ur-hist-viewlog';
         btn.textContent = 'View';
         btn.setAttribute('data-run', r.logRef);
+        btn.setAttribute('data-jobid', r.jobId || '');
         logTd.appendChild(btn);
 
         var dl = document.createElement('a');
         dl.className = 'ur-hist-dl-row';
         dl.textContent = 'Download';
         dl.setAttribute('download', '');
-        dl.href = HANDLER_URL + '?action=downloadJobLog&id=' + encodeURIComponent(currentJob()) +
+        dl.href = HANDLER_URL + '?action=downloadJobLog&id=' + encodeURIComponent(r.jobId || '') +
                   '&run=' + encodeURIComponent(r.logRef);
         logTd.appendChild(dl);
       } else {
@@ -298,18 +307,17 @@ try {
     rowsEl.innerHTML = '';
     var tr = document.createElement('tr');
     var c = td(text);
-    c.setAttribute('colspan', '7');
+    c.setAttribute('colspan', '8');
     tr.appendChild(c);
     rowsEl.appendChild(tr);
   }
 
   function load() {
     clearPoll(); // cancel any pending refresh; the success path reschedules if still running
+    /* An empty job filter means "all jobs" (the default); the server treats an
+       empty id that way. cache-buster + no-store so a just-finished run shows
+       without a hard refresh. */
     var job = currentJob();
-    if (!job) { return; }
-    /* cache-buster + no-store: History only changes when a run finishes, so the
-       browser would otherwise serve a CACHED listHistory response and a
-       just-finished run would not appear until a hard refresh. */
     var url = HANDLER_URL + '?action=listHistory&id=' + encodeURIComponent(job) +
               '&offset=' + offset + '&limit=' + PAGE_SIZE + '&_=' + Date.now();
     fetch(url, { credentials: 'same-origin', cache: 'no-store' })
@@ -341,8 +349,7 @@ try {
   }
 
   /* ---- log modal ---- */
-  function openLog(runRef) {
-    var job = currentJob();
+  function openLog(runRef, job) {
     if (!job || !runRef) { return; }
     modalTit.textContent = 'Run log — ' + runRef;
     modalPre.textContent = 'Loading…';
@@ -383,7 +390,7 @@ try {
   nextBtn.addEventListener('click', function () { if (offset + PAGE_SIZE < total) { offset += PAGE_SIZE; load(); } });
   rowsEl.addEventListener('click', function (ev) {
     var t = ev.target;
-    if (t && t.classList && t.classList.contains('ur-hist-viewlog')) { openLog(t.getAttribute('data-run')); }
+    if (t && t.classList && t.classList.contains('ur-hist-viewlog')) { openLog(t.getAttribute('data-run'), t.getAttribute('data-jobid')); }
   });
   document.getElementById('ur-hist-modal-close').addEventListener('click', closeLog);
 

@@ -1811,8 +1811,12 @@ function ur_action_list_runs(): void
  */
 function ur_action_list_history(): void
 {
-    $jobId = ur_safe_job_id(isset($_GET['id']) ? (string) $_GET['id'] : '');
-    if ($jobId === '') {
+    // No id (or id=all) => ALL JOBS view (the default). A specific id filters to
+    // one job. An invalid non-empty id is a 400.
+    $rawId   = isset($_GET['id']) ? (string) $_GET['id'] : '';
+    $allJobs = ($rawId === '' || $rawId === 'all');
+    $jobId   = $allJobs ? '' : ur_safe_job_id($rawId);
+    if (!$allJobs && $jobId === '') {
         sendError('A valid job id is required.', 400);
         return;
     }
@@ -1830,33 +1834,84 @@ function ur_action_list_history(): void
     }
 
     // A run in progress is NOT a History record yet (records are written when a
-    // run finishes), so surface the live run as a synthetic newest "RUNNING" row
-    // built from RunState. It is the newest VIRTUAL record, so paging treats the
-    // logical list as [RUNNING, <persisted records...>]: offset 0 prepends it and
-    // fills the rest from the real records (limit-1 of them); a later page reads
-    // the persisted records shifted down by one so nothing is shown twice.
-    $state   = RunState::isRunning($jobId) ? RunState::read($jobId) : null;
-    $running = ($state !== null);
+    // run finishes), so surface each live run as a synthetic newest "RUNNING"
+    // row built from RunState. Running rows are the newest VIRTUAL records, so
+    // the logical list is [running... , <persisted, newest-first>] and we page
+    // by slicing that combined list (nothing is shown twice).
+    if ($allJobs) {
+        // id -> name map + running rows for every currently-running job.
+        $names       = [];
+        $runningRows = [];
+        try {
+            $cfg = Config::load();
+            foreach (($cfg['jobs'] ?? []) as $job) {
+                if (!is_array($job)) {
+                    continue;
+                }
+                $jid = (string) ($job['id'] ?? '');
+                if ($jid === '') {
+                    continue;
+                }
+                $names[$jid] = (string) ($job['name'] ?? $jid);
+                if (RunState::isRunning($jid)) {
+                    $st = RunState::read($jid);
+                    if ($st !== null) {
+                        $row             = ur_running_history_row($st);
+                        $row['jobId']    = $jid;
+                        $row['jobName']  = $names[$jid];
+                        $runningRows[]   = $row;
+                    }
+                }
+            }
+        } catch (Throwable $e) {
+            // A config read error just means no names/running rows; the persisted
+            // history still lists.
+        }
 
-    if ($running && $offset === 0) {
-        $page  = History::list($jobId, 0, max(1, $limit - 1));
-        $runs  = $page['runs'];
-        array_unshift($runs, ur_running_history_row($state));
-        $total = $page['total'] + 1;
-    } elseif ($running) {
-        // Persisted records are shifted down by the one virtual RUNNING row.
-        $page  = History::list($jobId, $offset - 1, $limit);
-        $runs  = $page['runs'];
-        $total = $page['total'] + 1;
+        $persisted = History::allSorted();
+        foreach ($persisted as &$rec) {
+            // Older records may lack jobName; fall back to the config map, then id.
+            if ((string) ($rec['jobName'] ?? '') === '') {
+                $rid = (string) ($rec['jobId'] ?? '');
+                $rec['jobName'] = $names[$rid] ?? $rid;
+            }
+        }
+        unset($rec);
+
+        $virtual = array_merge($runningRows, $persisted);
+        $total   = count($virtual);
+        $runs    = array_values(array_slice($virtual, $offset, $limit));
+        $running = count($runningRows) > 0;
     } else {
-        $page  = History::list($jobId, $offset, $limit);
-        $runs  = $page['runs'];
-        $total = $page['total'];
+        $state   = RunState::isRunning($jobId) ? RunState::read($jobId) : null;
+        $running = ($state !== null);
+
+        if ($running && $offset === 0) {
+            $page  = History::list($jobId, 0, max(1, $limit - 1));
+            $runs  = $page['runs'];
+            array_unshift($runs, ur_running_history_row($state));
+            $total = $page['total'] + 1;
+        } elseif ($running) {
+            $page  = History::list($jobId, $offset - 1, $limit);
+            $runs  = $page['runs'];
+            $total = $page['total'] + 1;
+        } else {
+            $page  = History::list($jobId, $offset, $limit);
+            $runs  = $page['runs'];
+            $total = $page['total'];
+        }
+        // Tag every row with the job id so the client resolves View/Download the
+        // same way it does in the all-jobs view.
+        foreach ($runs as &$r) {
+            $r['jobId'] = $jobId;
+        }
+        unset($r);
     }
 
     sendResponse([
         'ok'      => true,
         'jobId'   => $jobId,
+        'allJobs' => $allJobs,
         'total'   => $total,
         'offset'  => $offset,
         'limit'   => $limit,
