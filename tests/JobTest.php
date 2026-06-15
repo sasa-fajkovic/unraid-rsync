@@ -133,6 +133,22 @@ final class JobTest extends TestCase
         $this->assertFalse($res['valid'], "cron '$cron' should be invalid");
     }
 
+    public function testManualOnlyJobSkipsScheduleValidation(): void
+    {
+        // A manual-only job is never scheduled, so an empty/garbage schedule must
+        // NOT fail validation.
+        $job = Job::normalize($this->validLocalJob(['manualOnly' => true, 'schedule' => '']));
+        $this->assertTrue($job['manualOnly']);
+        $res = Job::validate($job);
+        $this->assertTrue($res['valid'], 'manual-only job must validate without a cron schedule: ' . implode('; ', $res['errors']));
+    }
+
+    public function testNormalizeDefaultsManualOnlyFalse(): void
+    {
+        $job = Job::normalize($this->validLocalJob());
+        $this->assertFalse($job['manualOnly']);
+    }
+
     public function invalidCronProvider(): array
     {
         return [

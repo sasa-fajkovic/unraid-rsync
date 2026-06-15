@@ -176,6 +176,22 @@ final class CronTest extends TestCase
         $this->assertStringNotContainsString('j-blank', $content);
     }
 
+    public function testApplySkipsManualOnlyJob(): void
+    {
+        // A manual-only job is never scheduled, even with a valid schedule + enabled.
+        $manual = $this->job('j-manual', '0 3 * * *', true);
+        $manual['manualOnly'] = true;
+        $config = $this->configWith([
+            $this->job('j-good', '0 3 * * *', true),
+            $manual,
+        ]);
+        $res = Cron::apply($config);
+        $this->assertSame(1, $res['enabledJobs']);
+        $content = file_get_contents(Cron::cronFilePath());
+        $this->assertStringContainsString('--job=j-good', $content);
+        $this->assertStringNotContainsString('j-manual', $content);
+    }
+
     public function testApplyCollapsesWhitespaceInSchedule(): void
     {
         // A schedule with tabs/multiple spaces must not shift the command tokens.

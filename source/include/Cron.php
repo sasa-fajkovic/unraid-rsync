@@ -153,6 +153,11 @@ class Cron
             if (empty($job['enabled'])) {
                 continue;
             }
+            // A manual-only job is never scheduled (it runs only on demand), so it
+            // contributes no cron line.
+            if (!empty($job['manualOnly'])) {
+                continue;
+            }
             $id       = trim((string) ($job['id'] ?? ''));
             $schedule = trim((string) ($job['schedule'] ?? ''));
             if ($id === '' || $schedule === '') {
