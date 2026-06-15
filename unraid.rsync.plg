@@ -6,10 +6,13 @@
   <!ENTITY version        "2026.06.13b">
   <!ENTITY releaseLocation "https://github.com/&gitUser;/&repoName;/releases/download/&version;">
   <!ENTITY pluginURL       "https://github.com/&gitUser;/&repoName;/releases/latest/download/&pluginName;.plg">
-  <!-- Plugin/Community-Applications icon: a raw GitHub URL to the PNG at the repo
-       root on the default branch (the in-app menu tabs use their own FontAwesome
-       Icon= in the .page files, so this only affects the Plugins page + CA card). -->
-  <!ENTITY iconURL         "https://raw.githubusercontent.com/&gitUser;/&repoName;/main/&pluginName;.png">
+  <!-- Plugin icon: a LOCAL webGui path to the PNG packaged into the plugin's
+       install dir (source/&pluginName;.png -> &emhttp;/&pluginName;.png). Unraid's
+       installed-Plugins page resolves the icon from the local plugin dir, not a
+       remote URL, so a raw GitHub URL renders as a broken image there. The same
+       PNG backs the Dashboard tile's Icon=. (CA's own template carries its icon
+       separately, so a local path here doesn't affect a future CA listing.) -->
+  <!ENTITY iconURL         "/plugins/&pluginName;/&pluginName;.png">
   <!ENTITY plugin          "/boot/config/plugins/&pluginName;">
   <!ENTITY emhttp          "/usr/local/emhttp/plugins/&pluginName;">
   <!-- AUTHORITATIVE MANIFEST: the published manifest users install from and
