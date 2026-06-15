@@ -194,7 +194,7 @@ function ur_render_job_card($job, $index): void
         }
     }
     echo '</div>';
-    echo '<button type="button" class="ur-pair-add" data-rows="' . ur_h($pairsRowsId) . '">' . ur_h(ur_t('Add pair')) . '</button>';
+    echo '<div><button type="button" class="ur-pair-add" data-rows="' . ur_h($pairsRowsId) . '">' . ur_h(ur_t('Add pair')) . '</button></div>';
     echo '</dd>';
 
     // use global defaults toggle
