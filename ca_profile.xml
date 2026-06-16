@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Community Applications repository profile (required for CA submission).
+  See https://ca.unraid.net/submit/help/repository-info-xml
+  This describes the REPOSITORY for the CA feed; the plugin itself is defined by
+  unraid.rsync.plg. Run Validate + Scan at https://ca.unraid.net/submit after any
+  change here.
+-->
+<CommunityApplications>
+  <Profile>
+Unraid Rsync — a native Unraid 7.x webGui plugin that schedules and monitors multiple rsync backup jobs, either over SSH to/from a remote host or locally between two paths on the server. Per-job cron schedules (or manual-only run-on-demand), a whitelisted rsync option set with inline help, source→destination pairs, pre/post hooks, live status badges, a per-run log viewer with full-log download, paginated history across all jobs, native notifications, an Overview tab, and an Unraid Dashboard widget. Reusable SSH connections with existing-key-file / managed-key / password auth. Support: open an issue on the GitHub repository.
+  </Profile>
+  <Icon>https://raw.githubusercontent.com/sasa-fajkovic/unraid-rsync/main/unraid.rsync.png</Icon>
+  <WebPage>https://github.com/sasa-fajkovic/unraid-rsync</WebPage>
+  <!-- No dedicated Unraid forum thread yet; support is via GitHub issues
+       (the .plg's support= URL). Add a <Forum> link here once a thread exists. -->
+</CommunityApplications>
