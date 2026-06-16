@@ -384,7 +384,49 @@ try {
     modalPre.textContent = '';
   }
 
+  /* Download a full run log via fetch (not a bare <a download> navigation) so an
+   * expired/missing log surfaces a clean message. Run logs live in RAM (tmpfs)
+   * and are cleared on reboot, so downloadJobLog can legitimately 404 with a JSON
+   * envelope; a plain anchor would save that JSON as "handler.json" and Chrome
+   * would report "File wasn't available on site". Here we inspect the response:
+   * on success we save the bytes via a Blob + object-URL; on an error envelope we
+   * show why instead of downloading anything. */
+  function downloadLog(href) {
+    fetch(href, { credentials: 'same-origin', cache: 'no-store' })
+      .then(function (r) {
+        var ct = r.headers.get('Content-Type') || '';
+        if (!r.ok || ct.indexOf('application/json') !== -1) {
+          return r.json().then(
+            function (j) { throw new Error((j && j.error) ? j.error : 'Log not available.'); },
+            function () { throw new Error('Log not available.'); }
+          );
+        }
+        var fname = 'run.log';
+        var m = (r.headers.get('Content-Disposition') || '').match(/filename="?([^"]+)"?/);
+        if (m) { fname = m[1]; }
+        return r.blob().then(function (blob) { return { blob: blob, fname: fname }; });
+      })
+      .then(function (res) {
+        var url = URL.createObjectURL(res.blob);
+        var a = document.createElement('a');
+        a.href = url; a.download = res.fname;
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+      })
+      .catch(function (err) {
+        alert(err && err.message ? err.message : 'Log not available (run logs live in RAM and are cleared on reboot).');
+      });
+  }
+
   /* ---- events ---- */
+  /* Intercept both download links (the modal "Download full log" + each row's
+   * "Download") so the fetch-based path above runs instead of a raw navigation. */
+  document.addEventListener('click', function (ev) {
+    var a = ev.target && ev.target.closest ? ev.target.closest('a.ur-btn-dl, a.ur-hist-dl-row') : null;
+    if (!a) { return; }
+    ev.preventDefault();
+    downloadLog(a.href);
+  });
   if (jobSel) { jobSel.addEventListener('change', function () { offset = 0; load(); }); }
   prevBtn.addEventListener('click', function () { if (offset > 0) { offset = Math.max(0, offset - PAGE_SIZE); load(); } });
   nextBtn.addEventListener('click', function () { if (offset + PAGE_SIZE < total) { offset += PAGE_SIZE; load(); } });
