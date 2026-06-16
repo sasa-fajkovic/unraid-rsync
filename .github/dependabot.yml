@@ -13,3 +13,15 @@ updates:
     labels:
       - "dependencies"
       - "github-actions"
+  # Keep the Composer dev dependencies (PHPUnit, etc.) current. These are
+  # test-only — not packaged into the .txz — but stale tooling drifts from the
+  # PHP 8.4 runtime CI targets, so let Dependabot bump them.
+  - package-ecosystem: "composer"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "deps"
+    labels:
+      - "dependencies"
+      - "composer"

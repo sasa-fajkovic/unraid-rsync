@@ -84,6 +84,9 @@ $rsyncMissingMsg  = $rsyncAvailable ? '' : Rsync::rsyncMissingMessage();
   padding: 10px; border-radius: 4px; font-family: monospace; font-size: 12px;
   white-space: pre-wrap; word-break: break-word; min-height: 280px; max-height: 60vh;
 }
+/* Placeholder shown when the plugin log is empty (no run yet). Muted, non-mono so
+   it reads as a hint rather than log content. */
+.ur-plugin-log-pre.ur-log-empty { color: #888; font-style: italic; }
 /* Empty-state hint shown when there are zero jobs. A plain visible callout — NOT
    blockquote.inline_help, which the dynamix base CSS hides by default
    (.inline_help { display:none }), so it would be invisible without help mode. */
@@ -246,6 +249,15 @@ $rsyncMissingMsg  = $rsyncAvailable ? '' : Rsync::rsyncMissingMessage();
       .then(function (r) { return r.json(); })
       .then(function (body) {
         if (!pre || !body || !body.ok) { return; }
+        /* Empty plugin log => nothing has been written yet (no job has run since
+         * boot; the log lives in tmpfs and is cleared on reboot). Show an explicit
+         * placeholder instead of a blank box that reads as broken. */
+        if (!body.log) {
+          pre.classList.add('ur-log-empty');
+          pre.textContent = 'No log entries yet. The plugin log fills as jobs run; it lives in memory and is cleared on reboot.';
+          return;
+        }
+        pre.classList.remove('ur-log-empty');
         /* body.log is ALREADY HTML-escaped server-side; inject as escaped HTML
          * so the <pre> shows it verbatim. Preserve the scroll-to-bottom UX. */
         var atBottom = (pre.scrollTop + pre.clientHeight) >= (pre.scrollHeight - 20);
