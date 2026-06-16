@@ -60,6 +60,77 @@ final class ConfigTest extends TestCase
         $this->assertSame(100, $merged2['global']['retention']);
     }
 
+    public function testLogDirDefaultsEmpty(): void
+    {
+        // RAM-only is the default: the persistent log dir is unset.
+        $this->assertSame('', Config::defaults()['global']['logDir']);
+    }
+
+    /** @dataProvider validLogDirProvider */
+    public function testSanitizeLogDirAcceptsMntPaths(string $in, string $expected): void
+    {
+        $this->assertSame($expected, Config::sanitizeLogDir($in));
+    }
+
+    public static function validLogDirProvider(): array
+    {
+        return [
+            'appdata share'      => ['/mnt/user/appdata/unraid.rsync/logs', '/mnt/user/appdata/unraid.rsync/logs'],
+            'trailing slash'     => ['/mnt/user/appdata/logs/', '/mnt/user/appdata/logs'],
+            'surrounding spaces' => ['  /mnt/cache/logs  ', '/mnt/cache/logs'],
+            'disk share'         => ['/mnt/disk1/backups/logs', '/mnt/disk1/backups/logs'],
+            'unassigned device'  => ['/mnt/disks/usb/logs', '/mnt/disks/usb/logs'],
+        ];
+    }
+
+    /** @dataProvider invalidLogDirProvider */
+    public function testSanitizeLogDirRejectsUnsafePaths($in): void
+    {
+        // Anything outside /mnt/<top>/<leaf>, relative, traversing, or non-string
+        // collapses to '' (RAM-only), never throws.
+        $this->assertSame('', Config::sanitizeLogDir($in));
+    }
+
+    public static function invalidLogDirProvider(): array
+    {
+        return [
+            'empty'           => [''],
+            'relative'        => ['relative/path'],
+            'mnt root'        => ['/mnt'],
+            'mnt user root'   => ['/mnt/user'],
+            'system etc'      => ['/etc/cron.d'],
+            'boot flash'      => ['/boot/config/plugins/unraid.rsync/logs'],
+            'tmp'             => ['/tmp/x/y'],
+            'traversal'       => ['/mnt/user/../../etc/logs'],
+            'dot segment'     => ['/mnt/user/./logs'],
+            'newline inject'  => ["/mnt/user/logs\nX-Evil: 1"],
+            'nul byte'        => ["/mnt/user/lo\0gs"],
+            'non-string int'  => [123],
+            'non-string null' => [null],
+            'non-string arr'  => [['/mnt/user/logs']],
+        ];
+    }
+
+    public function testMergeDefaultsSanitizesLogDir(): void
+    {
+        $ok = Config::mergeDefaults(['global' => ['logDir' => '/mnt/user/appdata/ur/logs']]);
+        $this->assertSame('/mnt/user/appdata/ur/logs', $ok['global']['logDir']);
+        // Invalid -> '' (RAM-only), never persisted as-is.
+        $bad = Config::mergeDefaults(['global' => ['logDir' => '/etc/evil']]);
+        $this->assertSame('', $bad['global']['logDir']);
+        // Missing -> ''.
+        $none = Config::mergeDefaults(['global' => []]);
+        $this->assertSame('', $none['global']['logDir']);
+    }
+
+    public function testLogDirAccessorReadsSavedConfig(): void
+    {
+        $cfg = Config::defaults();
+        $cfg['global']['logDir'] = '/mnt/user/appdata/ur/logs';
+        Config::save($cfg);
+        $this->assertSame('/mnt/user/appdata/ur/logs', Config::logDir());
+    }
+
     public function testDefaultProfileIsRecursiveNonArchiveCopy(): void
     {
         // The shipped default profile (what a brand-new job inherits): recurse +

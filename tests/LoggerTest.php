@@ -11,6 +11,7 @@ use PHPUnit\Framework\TestCase;
 final class LoggerTest extends TestCase
 {
     private string $rtBase;
+    private ?string $extBase = null;
 
     protected function setUp(): void
     {
@@ -21,18 +22,60 @@ final class LoggerTest extends TestCase
     protected function tearDown(): void
     {
         Logger::$baseOverride = null;
+        Logger::$logsDirOverride = null;
         Logger::$maxRunLogBytesOverride = null;
         Logger::clearRedaction();
-        if (is_dir($this->rtBase)) {
+        foreach (array_filter([$this->rtBase, $this->extBase]) as $dir) {
+            if (!is_dir($dir)) {
+                continue;
+            }
             $it = new RecursiveIteratorIterator(
-                new RecursiveDirectoryIterator($this->rtBase, FilesystemIterator::SKIP_DOTS),
+                new RecursiveDirectoryIterator($dir, FilesystemIterator::SKIP_DOTS),
                 RecursiveIteratorIterator::CHILD_FIRST
             );
             foreach ($it as $f) {
                 $f->isDir() ? @rmdir($f->getPathname()) : @unlink($f->getPathname());
             }
-            @rmdir($this->rtBase);
+            @rmdir($dir);
         }
+    }
+
+    /**
+     * With a persistent logs dir configured (Logger::$logsDirOverride), logs are
+     * written UNDER that dir - including a not-yet-existing nested path, which is
+     * created recursively - and NOT under the RAM base. This is the opt-in
+     * "survive a reboot" mode (Config::logDir()); the override decouples Logger
+     * from Config so the Runner/handler push the validated path in.
+     */
+    public function testExternalLogsDirOverrideWritesOutsideRamBase(): void
+    {
+        $this->extBase = sys_get_temp_dir() . '/ur-logger-ext-' . getmypid() . '-' . bin2hex(random_bytes(4));
+        // A nested path that does NOT exist yet, to prove recursive creation.
+        $extLogs = $this->extBase . '/appdata/unraid.rsync/logs';
+        Logger::$logsDirOverride = $extLogs;
+
+        $this->assertSame($extLogs, Logger::logsDir());
+
+        $path = Logger::openRun('j-photos', 1750000000);
+        $this->assertFileExists($path);
+        $this->assertStringStartsWith($extLogs . '/j-photos/run-', $path);
+
+        Logger::event($path, 'j-photos', 'hello from external');
+        // Both the run log and the rolling plugin.log live under the external dir.
+        $this->assertStringContainsString('hello from external', file_get_contents($path));
+        $this->assertFileExists($extLogs . '/plugin.log');
+        $this->assertStringContainsString('[j-photos]', file_get_contents($extLogs . '/plugin.log'));
+
+        // listRuns / latestRunLogPath resolve against the SAME external dir.
+        $runs = Logger::listRuns('j-photos', 10, static fn ($j) => null);
+        $this->assertCount(1, $runs);
+        $this->assertSame(Logger::runIdFromPath($path), $runs[0]['id']);
+        // latestRunLogPath realpath-confines, so compare canonicalised paths
+        // (on macOS /var -> /private/var would otherwise differ from $path).
+        $this->assertSame(realpath($path), realpath(Logger::latestRunLogPath('j-photos')));
+
+        // Nothing leaked into the RAM base.
+        $this->assertDirectoryDoesNotExist($this->rtBase . '/logs');
     }
 
     public function testOpenRunCreatesEmptyLogUnderJobDir(): void

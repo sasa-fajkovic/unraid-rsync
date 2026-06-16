@@ -116,6 +116,11 @@ class Config
                 // How many past executions to keep PER JOB - bounds both the
                 // tmpfs run logs and the persistent history records.
                 'retention' => self::DEFAULT_RETENTION,
+                // Optional persistent log directory (an array/pool path under
+                // /mnt). Empty (the default) = run logs live in RAM (tmpfs) and
+                // are cleared on reboot. When set, run logs + plugin.log are
+                // written here so they survive a reboot. See sanitizeLogDir().
+                'logDir' => '',
             ],
             'jobs' => [],
         ];
@@ -160,6 +165,62 @@ class Config
             return self::DEFAULT_RETENTION;
         }
         return self::clampRetention($cfg['global']['retention'] ?? self::DEFAULT_RETENTION);
+    }
+
+    /**
+     * Validate a user-supplied persistent log directory, returning the cleaned
+     * absolute path or '' (meaning "unset" -> logs stay in RAM/tmpfs). The rules
+     * confine it to an Unraid storage path so a stray value can't redirect
+     * root-written logs into a system location:
+     *   - must be a non-empty, absolute (leading "/") string;
+     *   - no control bytes (NUL/newline) - those could break a path or a header;
+     *   - no "." / ".." traversal segments;
+     *   - must live UNDER /mnt/<something>/ (array disk, cache, pool, or an
+     *     Unassigned Devices mount) - never the bare /mnt, /mnt/user root, or a
+     *     system path like /etc or /boot (flash wear).
+     * Anything failing these returns '' rather than throwing, so an invalid value
+     * falls back to the safe RAM-only default; the save path surfaces a warning.
+     *
+     * @param mixed $value
+     */
+    public static function sanitizeLogDir($value): string
+    {
+        if (!is_string($value)) {
+            return '';
+        }
+        $v = trim($value);
+        if ($v === '' || $v[0] !== '/') {
+            return '';
+        }
+        if (preg_match('/[\x00-\x1f]/', $v)) {
+            return '';
+        }
+        foreach (explode('/', $v) as $seg) {
+            if ($seg === '.' || $seg === '..') {
+                return '';
+            }
+        }
+        $v = rtrim($v, '/');
+        // Require at least /mnt/<top>/<leaf> so the bare /mnt and /mnt/user roots
+        // (and any non-/mnt system path) are rejected.
+        if (!preg_match('#^/mnt/[^/]+/.+#', $v)) {
+            return '';
+        }
+        return $v;
+    }
+
+    /**
+     * The effective persistent log dir from the loaded config (validated), or ''
+     * when unset/invalid (RAM-only). Mirrors retention().
+     */
+    public static function logDir(): string
+    {
+        try {
+            $cfg = self::load();
+        } catch (Throwable $e) {
+            return '';
+        }
+        return self::sanitizeLogDir($cfg['global']['logDir'] ?? '');
     }
 
     /**
@@ -365,6 +426,8 @@ class Config
             'defaultRsyncOptions' => self::mergeRsyncOptions($optsIn),
             // retention: clamp to [MIN,MAX]; missing/garbage -> default.
             'retention' => self::clampRetention($globalIn['retention'] ?? self::DEFAULT_RETENTION),
+            // logDir: validate/confine; invalid or missing -> '' (RAM-only).
+            'logDir' => self::sanitizeLogDir($globalIn['logDir'] ?? ''),
         ];
 
         // jobs: normalise each to the full default-job shape.
