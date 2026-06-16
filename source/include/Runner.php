@@ -122,6 +122,13 @@ class Runner
         // the tmpfs run logs and the persistent history later in this run.
         $retention = Config::clampRetention($config['global']['retention'] ?? Config::DEFAULT_RETENTION);
 
+        // Persistent log dir: when the user has configured one (an array/pool
+        // path under /mnt), point the Logger at it so this run's logs survive a
+        // reboot; otherwise leave it null so logs stay in RAM/tmpfs. Derived from
+        // the already-loaded config (validated/confined by Config::sanitizeLogDir).
+        $logDir = Config::sanitizeLogDir($config['global']['logDir'] ?? '');
+        Logger::$logsDirOverride = ($logDir !== '') ? $logDir : null;
+
         // 2. Concurrency guard. Acquire an ATOMIC per-job lock FIRST so two
         //    near-simultaneous launches can't both pass an isRunning() check and
         //    start duplicate concurrent rsync runs for one job (dangerous with

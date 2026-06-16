@@ -30,6 +30,7 @@ try {
 }
 $defaultOpts = $config['global']['defaultRsyncOptions'] ?? Config::defaultRsyncOptions();
 $retention   = Config::clampRetention($config['global']['retention'] ?? Config::DEFAULT_RETENTION);
+$logDir      = Config::sanitizeLogDir($config['global']['logDir'] ?? '');
 $handlerUrl  = '/plugins/unraid.rsync/include/handler.php';
 
 /* Emit the option help CSS/JS once, in LIVE page-body context, before the form
@@ -86,7 +87,17 @@ ur_emit_form_enable_assets();
              min="1" max="9999" step="1" inputmode="numeric"
              value="<?=htmlspecialchars((string)$retention, ENT_QUOTES, 'UTF-8')?>">
       <blockquote class="inline_help ur-help-text">
-        <?=_('How many past executions to keep per job — bounds both the in-RAM run logs and the persistent run history shown on the History tab. Oldest executions beyond this are pruned. 1–9999 (default 100).')?>
+        <?=_('How many past executions to keep per job — bounds both the run logs and the persistent run history shown on the History tab. Oldest executions beyond this are pruned. 1–9999 (default 100).')?>
+      </blockquote>
+    </dd>
+
+    <dt class="ur-dt"><label for="ur_global_logdir"><?=_('Persistent log directory')?></label></dt>
+    <dd>
+      <input type="text" id="ur_global_logdir" name="global[logDir]"
+             value="<?=htmlspecialchars($logDir, ENT_QUOTES, 'UTF-8')?>"
+             placeholder="/mnt/user/appdata/unraid.rsync/logs" spellcheck="false">
+      <blockquote class="inline_help ur-help-text">
+        <?=_('Leave EMPTY (default) to keep run logs in RAM — they are fast and never wear the USB flash, but are cleared on reboot (the History tab still shows past executions; only the full log bodies are lost). To keep logs across reboots, enter an absolute path under /mnt (an array share, cache, or pool), e.g. /mnt/user/appdata/unraid.rsync/logs. The directory is created if missing. Note: writing here keeps the target disk(s) spun up while jobs run.')?>
       </blockquote>
     </dd>
   </dl>

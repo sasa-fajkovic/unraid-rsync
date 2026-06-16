@@ -208,6 +208,17 @@ class Logger
     /** Override the runtime base for tests (else UR_RUNTIME_BASE). */
     public static $baseOverride = null;
 
+    /**
+     * Optional absolute, persistent logs directory (an array/pool path under
+     * /mnt) set by the Runner + handler from Config::logDir(). When non-empty,
+     * logs are written here and survive a reboot; when null/empty, logs live in
+     * RAM under base()/logs and are cleared on reboot. Decoupled from Config on
+     * purpose: callers that have a config push it in, tests leave it null.
+     *
+     * @var string|null
+     */
+    public static $logsDirOverride = null;
+
     public static function base(): string
     {
         if (self::$baseOverride !== null && self::$baseOverride !== '') {
@@ -216,9 +227,18 @@ class Logger
         return rtrim(UR_RUNTIME_BASE, '/');
     }
 
-    /** Root of all logs. */
+    /** True when a persistent (external) logs dir is configured. */
+    private static function hasExternalLogsDir(): bool
+    {
+        return self::$logsDirOverride !== null && self::$logsDirOverride !== '';
+    }
+
+    /** Root of all logs: the configured persistent dir, else base()/logs (RAM). */
     public static function logsDir(): string
     {
+        if (self::hasExternalLogsDir()) {
+            return rtrim((string) self::$logsDirOverride, '/');
+        }
         return self::base() . '/logs';
     }
 
@@ -271,25 +291,61 @@ class Logger
      */
     private static function ensureDir(string $dir): void
     {
-        $chain = [self::base(), self::logsDir()];
-        if ($dir !== self::logsDir()) {
+        $logsDir = self::logsDir();
+
+        if (self::hasExternalLogsDir()) {
+            // A configured persistent logs dir (e.g. /mnt/user/...): its ancestry
+            // is user-owned (NOT world-writable /tmp), and the parent share may
+            // not exist yet, so create the logs root recursively, then the
+            // per-job leaf non-recursively. Each created level still refuses a
+            // symlink (defence in depth) via ensureLevel.
+            if (!is_dir($logsDir)) {
+                if (is_link($logsDir)) {
+                    throw new RuntimeException("Refusing to use a symlinked log dir: $logsDir");
+                }
+                @mkdir($logsDir, 0700, true);
+            }
+            self::ensureLevel($logsDir);
+            if ($dir !== $logsDir) {
+                self::ensureLevel($dir);
+            }
+            return;
+        }
+
+        // Default RAM/tmpfs base: hardened NON-recursive per-level walk. base()
+        // lives under world-writable /tmp, so a plain recursive mkdir could
+        // silently follow a planted symlink and redirect root-written logs out
+        // of the sandbox; refuse a symlink at every level instead.
+        $chain = [self::base(), $logsDir];
+        if ($dir !== $logsDir) {
             $chain[] = $dir;
         }
         foreach ($chain as $d) {
-            if (is_link($d)) {
-                throw new RuntimeException("Refusing to use a symlinked log dir: $d");
-            }
-            if (file_exists($d) && !is_dir($d)) {
-                throw new RuntimeException("Log path exists but is not a directory: $d");
-            }
-            if (!is_dir($d) && !@mkdir($d, 0700) && !is_dir($d)) {
-                throw new RuntimeException("Unable to create log dir: $d");
-            }
-            if (is_link($d)) {
-                throw new RuntimeException("Refusing to use a symlinked log dir: $d");
-            }
-            @chmod($d, 0700);
+            self::ensureLevel($d);
         }
+    }
+
+    /**
+     * Create (if missing) and harden ONE directory level: refuse a symlink,
+     * refuse a non-directory, create it non-recursively at mode 700, and chmod.
+     * The pre- and post-mkdir symlink checks close the TOCTOU where a level is
+     * swapped for a symlink between create and use.
+     */
+    private static function ensureLevel(string $d): void
+    {
+        if (is_link($d)) {
+            throw new RuntimeException("Refusing to use a symlinked log dir: $d");
+        }
+        if (file_exists($d) && !is_dir($d)) {
+            throw new RuntimeException("Log path exists but is not a directory: $d");
+        }
+        if (!is_dir($d) && !@mkdir($d, 0700) && !is_dir($d)) {
+            throw new RuntimeException("Unable to create log dir: $d");
+        }
+        if (is_link($d)) {
+            throw new RuntimeException("Refusing to use a symlinked log dir: $d");
+        }
+        @chmod($d, 0700);
     }
 
     /**

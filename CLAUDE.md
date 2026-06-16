@@ -19,7 +19,16 @@ on, forked from, or derived from any other plugin.
 - **Runtime state + logs** live in RAM at `/tmp/unraid.rsync/` (tmpfs, cleared on
   reboot): per-run logs under `logs/<jobid>/run-<UTCts>.log`, the rolling
   cross-job `logs/plugin.log`, run state, and materialised secrets under
-  `keys/<token>`, `pass/<token>`, `known_hosts/<token>`.
+  `keys/<token>`, `pass/<token>`, `known_hosts/<token>`. **Logs are RAM-only by
+  default** (no flash wear, mirrors Unraid's own `/var/log` tmpfs) — only the
+  small `runs/<jobid>.summary.json` is persisted to `/boot`, which is why History
+  survives a reboot but full log bodies don't. **Opt-in persistence:** the
+  `global.logDir` setting (validated/confined to `/mnt/<top>/<leaf>` by
+  `Config::sanitizeLogDir`) relocates run logs + `plugin.log` to an array/pool
+  path so they survive a reboot. It's plumbed via `Logger::$logsDirOverride`
+  (Logger stays decoupled from Config — the Runner and the handler front
+  controller push the validated path in); empty = tmpfs. Run state + secrets
+  ALWAYS stay in tmpfs regardless.
 - **UI** = a parent hub `source/UnraidRsync.page` (`Menu="Utilities"` →
   **Settings ▸ User Utilities**, `Type="xmenu"`, **empty body**) plus child tab
   pages `source/UR.*.page` (`Menu="UnraidRsync:1..7"` → **Overview / Jobs /
