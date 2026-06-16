@@ -1162,7 +1162,7 @@ ur_emit_form_enable_assets();
   });
 
   /* Translate a 5-field cron expression into a short plain-English phrase. Covers
-   * the common shapes (numbers, *, */n, ranges, lists) and falls back to a
+   * the common shapes (numbers, asterisk, step values, ranges, lists) and falls back to a
    * field-by-field reading; a hint, not an authoritative scheduler. */
   function describeCron(expr) {
     expr = (expr || '').trim().replace(/\s+/g, ' ');

@@ -2,5 +2,5 @@ Menu="Utilities"
 Type="xmenu"
 Title="Unraid Rsync"
 Tabs="true"
-Icon="refresh"
+Icon="unraid.rsync.png"
 ---
