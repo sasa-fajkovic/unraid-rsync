@@ -43,7 +43,7 @@ $mytiles[$slug]['column1'] = <<<'HTML'
   <tr><td>
     <span class="tile-header" id="ur-dash-header">
       <span class="tile-header-left">
-        <i class="fa fa-refresh f32"></i>
+        <img src="/plugins/unraid.rsync/unraid.rsync.png" alt="" class="f32" style="width:32px;height:32px;border-radius:6px;vertical-align:middle;">
         <div class="section">
           <h3 class="tile-header-main">Rsync Backups</h3>
           <span><span id="ur-dash-count">0</span> jobs</span>
