@@ -23,8 +23,17 @@
 PLUGIN="unraid.rsync"
 APPLY="/usr/local/emhttp/plugins/${PLUGIN}/scripts/apply-cron.php"
 
+# Route the apply output to syslog, NOT stdout: emhttpd captures an array-start
+# event hook's stdout and echoes it into the Main page footer status line (next
+# to "Array Started"), so the "cron applied (N job(s))" line would pollute the
+# footer on every boot/array start. The plugin surfaces real problems through
+# notifications, so the success line belongs in syslog only.
 if [ -f "$APPLY" ]; then
-  php "$APPLY" || logger -t "$PLUGIN" "event/started: cron re-apply failed (non-fatal)"
+  if out="$(php "$APPLY" 2>&1)"; then
+    [ -n "$out" ] && logger -t "$PLUGIN" "$out"
+  else
+    logger -t "$PLUGIN" "event/started: cron re-apply failed (non-fatal): $out"
+  fi
 fi
 
 exit 0
