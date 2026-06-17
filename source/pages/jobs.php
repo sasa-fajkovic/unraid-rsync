@@ -668,17 +668,26 @@ input.ur-switch:disabled { opacity: 0.5; cursor: default; }
 .ur-toast.ur-show { opacity: 1; }
 
 /* Pre/post hook editors: users paste shell snippets here, so the textareas read
-   as small code editors — monospace, resizable, no soft-wrap (horizontal scroll
-   like a terminal), spellcheck off. The accompanying .ur-hook-help is a VISIBLE
-   callout (the stock blockquote.inline_help is hidden unless help mode is on). */
+   as small code editors — monospace, resizable, soft-wrapping (so a long command
+   stays fully visible instead of hiding behind a horizontal scrollbar),
+   spellcheck off. The accompanying .ur-hook-help is a VISIBLE callout (the stock
+   blockquote.inline_help is hidden unless help mode is on).
+
+   The palette is a FIXED dark code-editor look, deliberately NOT theme vars: the
+   old `color: var(--font-color)` resolved to its #d0d0d0 fallback on Unraid's
+   white theme (--font-color is undefined there) while `--background-color` flipped
+   to #f2f2f2, leaving light-grey text on a light-grey box — the actual hook
+   content was all but invisible. An explicit dark terminal palette reads clearly
+   on BOTH the white and black webGui themes. */
 .ur-hook-ta {
   width: 100%; box-sizing: border-box; min-height: 7em; resize: vertical;
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
   font-size: 12px; line-height: 1.5; tab-size: 2; -moz-tab-size: 2;
-  white-space: pre; overflow: auto;
-  background: var(--background-color, #1c1c1c); color: var(--font-color, #d0d0d0);
+  white-space: pre-wrap; word-break: break-word; overflow: auto;
+  background: #1e1e1e; color: #e6e6e6;
   border: 1px solid var(--border-color, #555); border-radius: 4px; padding: 8px 10px;
 }
+.ur-hook-ta::placeholder { color: #7d7d7d; opacity: 1; }
 .ur-hook-ta:focus { outline: none; border-color: var(--blue-500, #2196f3); }
 .ur-hook-help {
   margin: 4px 0 10px; padding: 10px 12px; border-radius: 4px;
