@@ -684,11 +684,16 @@ input.ur-switch:disabled { opacity: 0.5; cursor: default; }
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
   font-size: 12px; line-height: 1.5; tab-size: 2; -moz-tab-size: 2;
   white-space: pre-wrap; word-break: break-word; overflow: auto;
-  background: #1e1e1e; color: #e6e6e6;
+  /* !important so the dark palette survives FOCUS: the webGui theme ships a
+     `textarea:focus` rule that repaints the background light (#e8e8e8) on focus,
+     which against our light #e6e6e6 text left the focused box unreadable. An
+     !important background/color defeats that non-important focus rule, keeping
+     the editor dark and legible whether or not it has focus. */
+  background: #1e1e1e !important; color: #e6e6e6 !important;
   border: 1px solid var(--border-color, #555); border-radius: 4px; padding: 8px 10px;
 }
-.ur-hook-ta::placeholder { color: #7d7d7d; opacity: 1; }
-.ur-hook-ta:focus { outline: none; border-color: var(--blue-500, #2196f3); }
+.ur-hook-ta::placeholder { color: #7d7d7d !important; opacity: 1; }
+.ur-hook-ta:focus { outline: none; border-color: var(--blue-500, #2196f3); background: #1e1e1e !important; color: #e6e6e6 !important; }
 .ur-hook-help {
   margin: 4px 0 10px; padding: 10px 12px; border-radius: 4px;
   background: var(--blue-100, #d9edf7); border: 1px solid var(--blue-200, #bce8f1);
