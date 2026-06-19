@@ -1,6 +1,7 @@
 <?php
 
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 /**
  * Tests for Job.php: normalisation (whitelist -> stored shape), validation, and
@@ -64,9 +65,8 @@ final class JobTest extends TestCase
      * SEC-01: a crafted id (traversal, shell metachars, NUL, overlong, or a
      * pure-dots segment) must never persist - normalize() regenerates from the
      * name instead, so downstream filesystem helpers never see it.
-     *
-     * @dataProvider craftedIdProvider
      */
+    #[DataProvider('craftedIdProvider')]
     public function testCraftedIdRegeneratedFromName(string $badId): void
     {
         $job = Job::normalize(['name' => 'safe name', 'id' => $badId]);
@@ -126,7 +126,7 @@ final class JobTest extends TestCase
         $this->assertFalse($res['valid']);
     }
 
-    /** @dataProvider invalidCronProvider */
+    #[DataProvider('invalidCronProvider')]
     public function testInvalidCronRejected(string $cron): void
     {
         $res = Job::validate($this->validLocalJob(['schedule' => $cron]));
@@ -149,7 +149,7 @@ final class JobTest extends TestCase
         $this->assertFalse($job['manualOnly']);
     }
 
-    public function invalidCronProvider(): array
+    public static function invalidCronProvider(): array
     {
         return [
             'empty'        => [''],
@@ -164,13 +164,13 @@ final class JobTest extends TestCase
         ];
     }
 
-    /** @dataProvider validCronProvider */
+    #[DataProvider('validCronProvider')]
     public function testValidCronAccepted(string $cron): void
     {
         $this->assertTrue(Job::isValidCron($cron), "cron '$cron' should be valid");
     }
 
-    public function validCronProvider(): array
+    public static function validCronProvider(): array
     {
         return [
             'every minute'    => ['* * * * *'],
@@ -202,7 +202,7 @@ final class JobTest extends TestCase
 
     // --- PATH GUARDRAILS ---------------------------------------------------
 
-    /** @dataProvider forbiddenLocalPathProvider */
+    #[DataProvider('forbiddenLocalPathProvider')]
     public function testForbiddenLocalSourceRejected(string $path): void
     {
         $job = $this->validLocalJob();
@@ -211,7 +211,7 @@ final class JobTest extends TestCase
         $this->assertFalse($res['valid'], "local source '$path' must be rejected");
     }
 
-    /** @dataProvider forbiddenLocalPathProvider */
+    #[DataProvider('forbiddenLocalPathProvider')]
     public function testForbiddenLocalDestRejected(string $path): void
     {
         // Under LOCAL transport the destination is also guardrail-checked.
@@ -221,7 +221,7 @@ final class JobTest extends TestCase
         $this->assertFalse($res['valid'], "local dest '$path' must be rejected");
     }
 
-    public function forbiddenLocalPathProvider(): array
+    public static function forbiddenLocalPathProvider(): array
     {
         return [
             'root'             => ['/'],
@@ -523,9 +523,8 @@ final class JobTest extends TestCase
     /**
      * Integer scalars must be whole numbers; a non-numeric value is rejected at
      * save time rather than failing the rsync run mid-flight.
-     *
-     * @dataProvider integerScalarProvider
      */
+    #[DataProvider('integerScalarProvider')]
     public function testNonNumericIntegerScalarRejected(string $key, string $flag): void
     {
         $job = $this->validLocalJob(['rsyncOptions' => [$key => 'abc']]);

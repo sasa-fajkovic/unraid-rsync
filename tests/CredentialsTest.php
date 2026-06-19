@@ -1,6 +1,7 @@
 <?php
 
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 /**
  * Tests for Credentials.php: round-trip + schemaVersion, defaults merge,
@@ -202,7 +203,7 @@ final class CredentialsTest extends TestCase
         $this->assertTrue($res['valid'], implode(' | ', $res['errors']));
     }
 
-    /** @dataProvider unsafeSshTokenProvider */
+    #[DataProvider('unsafeSshTokenProvider')]
     public function testValidateConnectionRejectsUnsafeHost(string $host): void
     {
         $creds = Credentials::defaults();
@@ -215,7 +216,7 @@ final class CredentialsTest extends TestCase
         $this->assertNotEmpty(array_filter($res['errors'], fn($e) => stripos($e, 'host') !== false));
     }
 
-    /** @dataProvider unsafeSshTokenProvider */
+    #[DataProvider('unsafeSshTokenProvider')]
     public function testValidateConnectionRejectsUnsafeUsername(string $user): void
     {
         $creds = Credentials::defaults();
@@ -228,7 +229,7 @@ final class CredentialsTest extends TestCase
         $this->assertNotEmpty(array_filter($res['errors'], fn($e) => stripos($e, 'username') !== false));
     }
 
-    public function unsafeSshTokenProvider(): array
+    public static function unsafeSshTokenProvider(): array
     {
         return [
             'leading dash'  => ['-oProxyCommand=evil'],
@@ -375,7 +376,7 @@ final class CredentialsTest extends TestCase
         $this->assertSame([], array_filter($res['errors'], fn($e) => stripos($e, 'select an SSH key') !== false));
     }
 
-    /** @dataProvider unsafeKeyFilePathProvider */
+    #[DataProvider('unsafeKeyFilePathProvider')]
     public function testValidateConnectionRejectsUnsafeKeyFilePath(string $path): void
     {
         $creds = Credentials::defaults();
@@ -387,7 +388,7 @@ final class CredentialsTest extends TestCase
         $this->assertFalse($res['valid'], "path '$path' must be rejected");
     }
 
-    public function unsafeKeyFilePathProvider(): array
+    public static function unsafeKeyFilePathProvider(): array
     {
         return [
             'relative'        => ['root/.ssh/id'],

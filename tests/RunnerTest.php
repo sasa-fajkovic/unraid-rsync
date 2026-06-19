@@ -1,6 +1,7 @@
 <?php
 
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 /**
  * Tests for Runner.php orchestration, driven with a FAKE rsync (Rsync::$runner)
@@ -655,9 +656,7 @@ final class RunnerTest extends TestCase
     // the run COMPLETING (not hard-failing) so the pair loop and finally behave.
     // =====================================================================
 
-    /**
-     * @dataProvider singlePairExitToStateProvider
-     */
+    #[DataProvider('singlePairExitToStateProvider')]
     public function testSinglePairExitMapsToRunStateThroughRun(int $exitCode, string $expectedState): void
     {
         Rsync::$runner = function (array $argv, $onOutput) use ($exitCode): int {
@@ -675,7 +674,7 @@ final class RunnerTest extends TestCase
         $this->assertSame($exitCode, $summary['exitCode']);
     }
 
-    public function singlePairExitToStateProvider(): array
+    public static function singlePairExitToStateProvider(): array
     {
         // Mirrors Rsync::exitToState, but asserted END-TO-END through Runner::run.
         return [

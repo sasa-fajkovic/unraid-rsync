@@ -1,6 +1,7 @@
 <?php
 
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 /**
  * A test double for Ssh that stubs the live-system seams (sshpass detection and
@@ -134,9 +135,8 @@ final class SshTest extends TestCase
      * SEC-01: a pure-dots token collapses to "unknown" in every tmpfs secret
      * path so a crafted token can never address a file outside keys/ /known_hosts
      * /pass. Mirrors ur_safe_job_id's pure-dots rejection.
-     *
-     * @dataProvider sshPureDotsProvider
      */
+    #[DataProvider('sshPureDotsProvider')]
     public function testSecretPathsCollapsePureDotsToken(string $token): void
     {
         foreach ([Ssh::keyPath($token), Ssh::knownHostsPath($token), Ssh::passFilePath($token)] as $p) {

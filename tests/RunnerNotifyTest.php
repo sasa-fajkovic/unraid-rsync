@@ -1,6 +1,7 @@
 <?php
 
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 /**
  * Tests for Runner::notifyHook (Phase 7) - the per-job notification dispatch.
@@ -111,9 +112,7 @@ final class RunnerNotifyTest extends TestCase
 
     // --- the full gating matrix: mode x state -> notify? ---------------------
 
-    /**
-     * @dataProvider gatingMatrixProvider
-     */
+    #[DataProvider('gatingMatrixProvider')]
     public function testGatingMatrix(string $mode, string $state, bool $expectNotify): void
     {
         $this->captured = [];
@@ -125,7 +124,7 @@ final class RunnerNotifyTest extends TestCase
         );
     }
 
-    public function gatingMatrixProvider(): array
+    public static function gatingMatrixProvider(): array
     {
         // isSuccess = {SUCCESS, WARNING}; isFailure = {FAILED, PARTIAL, TIMEOUT};
         // ABORTED is neither (only `always` fires on it).
@@ -176,9 +175,7 @@ final class RunnerNotifyTest extends TestCase
 
     // --- importance mapping --------------------------------------------------
 
-    /**
-     * @dataProvider importanceProvider
-     */
+    #[DataProvider('importanceProvider')]
     public function testImportanceMapping(string $state, string $expected): void
     {
         $this->assertSame($expected, Runner::notifyImportance($state));
@@ -191,7 +188,7 @@ final class RunnerNotifyTest extends TestCase
         $this->assertStringContainsString(escapeshellarg($expected), $this->captured[0]);
     }
 
-    public function importanceProvider(): array
+    public static function importanceProvider(): array
     {
         return [
             'SUCCESS->normal'  => ['SUCCESS', 'normal'],

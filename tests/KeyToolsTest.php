@@ -1,6 +1,7 @@
 <?php
 
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 /**
  * A KeyTools double that stubs ssh-keygen / ssh-keyscan with canned output keyed
@@ -208,13 +209,13 @@ final class KeyToolsTest extends TestCase
         $this->assertSame(2, substr_count($filtered, "\n") + 1);
     }
 
-    /** @dataProvider hostProvider */
+    #[DataProvider('hostProvider')]
     public function testIsValidHost(string $host, bool $expected): void
     {
         $this->assertSame($expected, KeyTools::isValidHost($host));
     }
 
-    public function hostProvider(): array
+    public static function hostProvider(): array
     {
         return [
             'dns'              => ['my-host.sub.example.net', true], // hyphenated + multi-label

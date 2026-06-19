@@ -1,6 +1,8 @@
 <?php
 
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\RunInSeparateProcess;
+use PHPUnit\Framework\Attributes\PreserveGlobalState;
 
 /**
  * Tests for the native inline help on the shared rsync-options renderer
@@ -194,10 +196,9 @@ final class OptionsFormHelpTest extends TestCase
      * fresh process to observe the first emit (other tests in this process would
      * otherwise have already consumed the guard). preserveGlobalState=false keeps
      * the child process clean; the partial is re-required by the bootstrap chain.
-     *
-     * @runInSeparateProcess
-     * @preserveGlobalState disabled
      */
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
     public function testRendererEmitsToggleAssetsExactlyOncePerPage(): void
     {
         require_once __DIR__ . '/../source/pages/_options_form.php';
@@ -238,10 +239,9 @@ final class OptionsFormHelpTest extends TestCase
      * applied. The page body now emits the assets explicitly at the top, before
      * any template. This test renders the real jobs.php body (empty config) and
      * asserts the `urOptionHelpWired` marker appears OUTSIDE the template block.
-     *
-     * @runInSeparateProcess
-     * @preserveGlobalState disabled
      */
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
     public function testJobsPageEmitsHelpAssetsLiveNotTrappedInTemplate(): void
     {
         $html = $this->renderPageBody(__DIR__ . '/../source/pages/jobs.php');
@@ -274,10 +274,9 @@ final class OptionsFormHelpTest extends TestCase
      * The Global Settings tab body must also emit the help assets in live DOM
      * (it renders only one option block and no template, but the assets must be
      * present whether this body is rendered alone or after the Jobs tab).
-     *
-     * @runInSeparateProcess
-     * @preserveGlobalState disabled
      */
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
     public function testSettingsPageEmitsHelpAssetsLive(): void
     {
         $html = $this->renderPageBody(__DIR__ . '/../source/pages/settings.php');
@@ -296,10 +295,9 @@ final class OptionsFormHelpTest extends TestCase
     /**
      * The shared robust-fetch helpers (window.urAjax) must be emitted exactly once
      * per page by ur_emit_ajax_helpers(), mirroring the option-help once-guard.
-     *
-     * @runInSeparateProcess
-     * @preserveGlobalState disabled
      */
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
     public function testAjaxHelpersEmittedExactlyOncePerPage(): void
     {
         require_once __DIR__ . '/../source/pages/_options_form.php';
@@ -327,10 +325,9 @@ final class OptionsFormHelpTest extends TestCase
      * read-only GET pollers — status/log tails — are out of that finding's scope
      * and keep their simple r.json() reads, so we assert the POST path's helpers
      * are present rather than a blanket absence of r.json().)
-     *
-     * @runInSeparateProcess
-     * @preserveGlobalState disabled
      */
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
     public function testJobsPageUsesRobustAjaxHelpers(): void
     {
         $html = $this->renderPageBody(__DIR__ . '/../source/pages/jobs.php');
@@ -352,10 +349,9 @@ final class OptionsFormHelpTest extends TestCase
     /**
      * The Global Settings tab must likewise emit + use the shared AJAX helpers and
      * drop the brittle r.json() parse. Regression guard for review finding #1.
-     *
-     * @runInSeparateProcess
-     * @preserveGlobalState disabled
      */
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
     public function testSettingsPageUsesRobustAjaxHelpers(): void
     {
         $html = $this->renderPageBody(__DIR__ . '/../source/pages/settings.php');
