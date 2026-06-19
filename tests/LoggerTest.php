@@ -1,6 +1,7 @@
 <?php
 
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 /**
  * Tests for Logger.php: run-log creation, append/event writers (run log + the
@@ -49,9 +50,8 @@ final class LoggerTest extends TestCase
      * strip but is a traversal segment (logsDir()/".." == base()). safeId must
      * collapse it to the literal "unknown" so the run log can never land outside
      * the per-job dir, matching ur_safe_job_id.
-     *
-     * @dataProvider pureDotsIdProvider
      */
+    #[DataProvider('pureDotsIdProvider')]
     public function testJobLogDirCollapsesPureDotsId(string $id): void
     {
         $dir = Logger::jobLogDir($id);

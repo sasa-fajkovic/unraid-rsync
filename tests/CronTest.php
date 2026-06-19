@@ -1,6 +1,7 @@
 <?php
 
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 /**
  * Tests for Cron.php:
@@ -608,9 +609,7 @@ final class CronTest extends TestCase
 
     // --- malformed -> null --------------------------------------------------
 
-    /**
-     * @dataProvider malformedExpressions
-     */
+    #[DataProvider('malformedExpressions')]
     public function testNextRunMalformedReturnsNull(string $expr): void
     {
         $this->assertNull(Cron::nextRun($expr, $this->from()), "expected null for: $expr");

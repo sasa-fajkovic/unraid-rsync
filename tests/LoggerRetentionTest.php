@@ -1,6 +1,7 @@
 <?php
 
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 /**
  * Phase 6 tests for Logger.php additions:
@@ -186,9 +187,7 @@ final class LoggerRetentionTest extends TestCase
         $this->assertSame(realpath($paths[0]), realpath($resolved2));
     }
 
-    /**
-     * @dataProvider traversalIds
-     */
+    #[DataProvider('traversalIds')]
     public function testRunLogPathByIdRejectsTraversalAndBadNames(string $bad): void
     {
         $this->assertNull(Logger::runLogPathById('j-x', $bad), "must reject: $bad");

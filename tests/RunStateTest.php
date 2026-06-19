@@ -1,6 +1,7 @@
 <?php
 
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 /**
  * A RunState test double that stubs the live-system seams (pidAlive / pidCmdline)
@@ -94,9 +95,8 @@ final class RunStateTest extends TestCase
     /**
      * SEC-01: a pure-dots id collapses to "unknown" across every state path so a
      * crafted id can never address a file outside the state dir.
-     *
-     * @dataProvider pureDotsIdProvider
      */
+    #[DataProvider('pureDotsIdProvider')]
     public function testStatePathsCollapsePureDotsId(string $id): void
     {
         foreach ([RunState::statePath($id), RunState::abortPath($id), RunState::lockPath($id)] as $p) {

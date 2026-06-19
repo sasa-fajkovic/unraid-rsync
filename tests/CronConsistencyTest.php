@@ -1,6 +1,7 @@
 <?php
 
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 /**
  * Drift-guard for the 5-field cron grammar across its two ENTRY POINTS:
@@ -107,9 +108,7 @@ final class CronConsistencyTest extends TestCase
         return array_map(static fn(string $e): array => [$e], $exprs);
     }
 
-    /**
-     * @dataProvider validExpressions
-     */
+    #[DataProvider('validExpressions')]
     public function testValidExpressionsAcceptedByBothParsers(string $expr): void
     {
         $from = $this->from();
@@ -131,9 +130,7 @@ final class CronConsistencyTest extends TestCase
         );
     }
 
-    /**
-     * @dataProvider invalidExpressions
-     */
+    #[DataProvider('invalidExpressions')]
     public function testInvalidExpressionsRejectedByBothParsers(string $expr): void
     {
         $this->assertFalse(

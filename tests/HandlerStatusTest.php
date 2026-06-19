@@ -1,6 +1,7 @@
 <?php
 
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 /**
  * Phase 6 tests for handler.php read-only GET pollers:
@@ -104,9 +105,7 @@ final class HandlerStatusTest extends TestCase
         $this->assertSame('j-Music_2.bak', ur_safe_job_id('j-Music_2.bak'));
     }
 
-    /**
-     * @dataProvider badJobIds
-     */
+    #[DataProvider('badJobIds')]
     public function testSafeJobIdRejectsUnsafe(string $bad): void
     {
         $this->assertSame('', ur_safe_job_id($bad));
@@ -586,9 +585,7 @@ final class HandlerStatusTest extends TestCase
     // id is rejected as "A job id is required." (422) before any config or
     // filesystem lookup — it can never reach the exact-match step at all.
 
-    /**
-     * @dataProvider unsafeRunAbortIds
-     */
+    #[DataProvider('unsafeRunAbortIds')]
     public function testRunJobRejectsUnsafeId(string $bad): void
     {
         $_POST = ['id' => $bad];
@@ -597,9 +594,7 @@ final class HandlerStatusTest extends TestCase
         $this->assertArrayHasKey('error', $body);
     }
 
-    /**
-     * @dataProvider unsafeRunAbortIds
-     */
+    #[DataProvider('unsafeRunAbortIds')]
     public function testAbortJobRejectsUnsafeId(string $bad): void
     {
         $_POST = ['id' => $bad];

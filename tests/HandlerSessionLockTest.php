@@ -1,6 +1,8 @@
 <?php
 
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\RunInSeparateProcess;
+use PHPUnit\Framework\Attributes\PreserveGlobalState;
 
 /**
  * Regression tests for the production wedge: a slow/stuck host-key discovery
@@ -73,10 +75,9 @@ final class HandlerSessionLockTest extends TestCase
      * Starting a real session needs a clean SAPI state (no headers sent yet),
      * which the PHPUnit CLI printer has already broken in the shared process -
      * so this runs in an isolated subprocess.
-     *
-     * @runInSeparateProcess
-     * @preserveGlobalState disabled
      */
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
     public function testReleaseSessionLockClosesAnActiveSession(): void
     {
         if (!function_exists('session_start')) {
@@ -107,10 +108,8 @@ final class HandlerSessionLockTest extends TestCase
 
     // --- dispatcher releases the lock before running the action --------------
 
-    /**
-     * @runInSeparateProcess
-     * @preserveGlobalState disabled
-     */
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
     public function testDispatchReleasesSessionLockBeforeAction(): void
     {
         if (!function_exists('session_start')) {
@@ -149,10 +148,8 @@ final class HandlerSessionLockTest extends TestCase
         @rmdir($dir);
     }
 
-    /**
-     * @runInSeparateProcess
-     * @preserveGlobalState disabled
-     */
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
     public function testDispatchDoesNotReleaseLockOnCsrfFailure(): void
     {
         if (!function_exists('session_start')) {
