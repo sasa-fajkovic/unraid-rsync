@@ -1,6 +1,7 @@
 <?php
 
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 /**
  * Tests for Config.php: round-trip, schemaVersion stamping, defaults merge, and
@@ -66,7 +67,7 @@ final class ConfigTest extends TestCase
         $this->assertSame('', Config::defaults()['global']['logDir']);
     }
 
-    /** @dataProvider validLogDirProvider */
+    #[DataProvider('validLogDirProvider')]
     public function testSanitizeLogDirAcceptsMntPaths(string $in, string $expected): void
     {
         $this->assertSame($expected, Config::sanitizeLogDir($in));
@@ -83,7 +84,7 @@ final class ConfigTest extends TestCase
         ];
     }
 
-    /** @dataProvider invalidLogDirProvider */
+    #[DataProvider('invalidLogDirProvider')]
     public function testSanitizeLogDirRejectsUnsafePaths($in): void
     {
         // Anything outside /mnt/<top>/<leaf>, relative, traversing, or non-string
