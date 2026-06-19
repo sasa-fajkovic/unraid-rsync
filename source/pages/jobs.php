@@ -270,16 +270,30 @@ function ur_render_job_card($job, $index): void
     echo '</select></dd>';
 
     // pre/post hooks. Both run as ROOT via `bash -c` and their stdout/stderr is
-    // captured into the per-run log, which is rendered in the browser. Surface
-    // that privilege/leak surface inline next to each textarea so the user does
-    // not echo secrets into a browser-visible, root-written log.
-    $hookHelp = ur_t('Runs as ROOT on this server, before/after the transfer (full privileges — be careful what you put here). Output is captured into the run log (visible in the UI) — do not echo secrets here.');
+    // captured into the per-run log, which is rendered in the browser. Users paste
+    // shell SCRIPTS here, so the textareas are styled as small code editors
+    // (monospace, resizable, no wrap/spellcheck) and a VISIBLE helper explains
+    // both hooks + the outcome env vars + the root/secret-leak warning. (The stock
+    // blockquote.inline_help is hidden by default unless help mode is on, so the
+    // explanation would otherwise be invisible.)
+    $hookEnvVars = 'UR_JOB_ID, UR_JOB_NAME, UR_DRY_RUN, UR_TRIGGER, UR_JOB_STATUS, UR_EXIT_CODE';
+    echo '<dt>' . ur_h(ur_t('Pre / post-run hooks')) . ':</dt>';
+    echo '<dd><div class="ur-hook-help">';
+    echo '<p>' . ur_h(ur_t('Optional shell commands run on THIS server as root (via bash -c) around the transfer: the pre-run hook just before rsync starts, the post-run hook just after it finishes. The post-run hook ALWAYS runs — even when the transfer fails or is aborted.')) . '</p>';
+    echo '<p>' . ur_h(ur_t('Use them to prepare or clean up around a backup — e.g. mount/unmount a share, spin a disk up or down, or send a custom notification. Write it like a small bash script (multiple lines are fine; no shebang needed).')) . '</p>';
+    echo '<p>' . ur_h(ur_t('Available to both hooks as environment variables')) . ': <code>' . ur_h($hookEnvVars) . '</code>. '
+        . ur_h(ur_t('UR_DRY_RUN is 0/1, UR_TRIGGER is manual/schedule; UR_JOB_STATUS and UR_EXIT_CODE hold the run outcome (post-run hook).')) . '</p>';
+    echo '<p class="ur-hook-warn">' . ur_h(ur_t('Hooks run with full root privileges — be careful what you put here. Their output is captured into the run log (visible in the UI), so do not echo passwords or keys.')) . '</p>';
+    echo '</div></dd>';
+
+    $preExample  = ur_t("# Runs before the transfer. Example:\n# mount /mnt/remotes/nas-backup");
+    $postExample = ur_t("# Runs after the transfer (always). Example:\n# [ \"\$UR_JOB_STATUS\" = SUCCESS ] && logger \"backup finished ok\"");
     echo '<dt><label for="' . ur_h($idb . '_pre') . '">' . ur_h(ur_t('Pre-run hook')) . '</label>:</dt>';
-    echo '<dd><textarea id="' . ur_h($idb . '_pre') . '" name="' . ur_h($p . '[preHook]') . '" rows="2">' . ur_h($preHook) . '</textarea>';
-    echo '<blockquote class="inline_help"><p>' . ur_h($hookHelp) . '</p></blockquote></dd>';
+    echo '<dd><textarea class="ur-hook-ta" id="' . ur_h($idb . '_pre') . '" name="' . ur_h($p . '[preHook]')
+        . '" rows="6" spellcheck="false" autocapitalize="off" autocomplete="off" wrap="off" placeholder="' . ur_h($preExample) . '">' . ur_h($preHook) . '</textarea></dd>';
     echo '<dt><label for="' . ur_h($idb . '_post') . '">' . ur_h(ur_t('Post-run hook')) . '</label>:</dt>';
-    echo '<dd><textarea id="' . ur_h($idb . '_post') . '" name="' . ur_h($p . '[postHook]') . '" rows="2">' . ur_h($postHook) . '</textarea>';
-    echo '<blockquote class="inline_help"><p>' . ur_h($hookHelp) . '</p></blockquote></dd>';
+    echo '<dd><textarea class="ur-hook-ta" id="' . ur_h($idb . '_post') . '" name="' . ur_h($p . '[postHook]')
+        . '" rows="6" spellcheck="false" autocapitalize="off" autocomplete="off" wrap="off" placeholder="' . ur_h($postExample) . '">' . ur_h($postHook) . '</textarea></dd>';
 
     echo '</dl>';
 
@@ -652,6 +666,46 @@ input.ur-switch:disabled { opacity: 0.5; cursor: default; }
 }
 .ur-toast.ur-toast-err { background: #c62828; }
 .ur-toast.ur-show { opacity: 1; }
+
+/* Pre/post hook editors: users paste shell snippets here, so the textareas read
+   as small code editors — monospace, resizable, soft-wrapping (so a long command
+   stays fully visible instead of hiding behind a horizontal scrollbar),
+   spellcheck off. The accompanying .ur-hook-help is a VISIBLE callout (the stock
+   blockquote.inline_help is hidden unless help mode is on).
+
+   The palette is a FIXED dark code-editor look, deliberately NOT theme vars: the
+   old `color: var(--font-color)` resolved to its #d0d0d0 fallback on Unraid's
+   white theme (--font-color is undefined there) while `--background-color` flipped
+   to #f2f2f2, leaving light-grey text on a light-grey box — the actual hook
+   content was all but invisible. An explicit dark terminal palette reads clearly
+   on BOTH the white and black webGui themes. */
+.ur-hook-ta {
+  width: 100%; box-sizing: border-box; min-height: 7em; resize: vertical;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: 12px; line-height: 1.5; tab-size: 2; -moz-tab-size: 2;
+  white-space: pre-wrap; word-break: break-word; overflow: auto;
+  /* !important so the dark palette survives FOCUS: the webGui theme ships a
+     `textarea:focus` rule that repaints the background light (#e8e8e8) on focus,
+     which against our light #e6e6e6 text left the focused box unreadable. An
+     !important background/color defeats that non-important focus rule, keeping
+     the editor dark and legible whether or not it has focus. */
+  background: #1e1e1e !important; color: #e6e6e6 !important;
+  border: 1px solid var(--border-color, #555); border-radius: 4px; padding: 8px 10px;
+}
+.ur-hook-ta::placeholder { color: #7d7d7d !important; opacity: 1; }
+.ur-hook-ta:focus { outline: none; border-color: var(--blue-500, #2196f3); background: #1e1e1e !important; color: #e6e6e6 !important; }
+.ur-hook-help {
+  margin: 4px 0 10px; padding: 10px 12px; border-radius: 4px;
+  background: var(--blue-100, #d9edf7); border: 1px solid var(--blue-200, #bce8f1);
+  color: var(--blockquote-text-color, #31708f); font-size: 0.9em;
+}
+.ur-hook-help p { margin: 0 0 6px; }
+.ur-hook-help p:last-child { margin-bottom: 0; }
+.ur-hook-help code {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  background: rgba(127,127,127,0.18); border-radius: 3px; padding: 0 4px; word-break: break-word;
+}
+.ur-hook-warn { font-weight: bold; }
 </style>
 <?php /* (the markup below re-opens output) */ ?>
 <?php

@@ -476,6 +476,20 @@ function ur_action_save_config(): void
     $allErrors   = [];
     $allWarnings = [];
 
+    // logDir (persistent log directory): validate/confine. A non-empty value that
+    // fails the rules is rejected (logs stay in RAM) WITH a warning so the user
+    // isn't left thinking persistence is on. Only when the field is present, so a
+    // partial (Jobs-only) POST never wipes it.
+    if ($hasGlobal && array_key_exists('logDir', $globalIn)) {
+        $rawLogDir   = is_string($globalIn['logDir']) ? trim($globalIn['logDir']) : '';
+        $cleanLogDir = Config::sanitizeLogDir($rawLogDir);
+        $config['global']['logDir'] = $cleanLogDir;
+        if ($rawLogDir !== '' && $cleanLogDir === '') {
+            $allWarnings[] = 'Log directory ignored: it must be an absolute path under /mnt '
+                . '(e.g. /mnt/user/appdata/unraid.rsync/logs). Logs will stay in RAM.';
+        }
+    }
+
     // Jobs (the Jobs tab) - only rebuild the jobs list when it was submitted.
     if (!$hasJobs) {
         // Settings-only save: persist the (validated-by-load) config with the
@@ -2012,6 +2026,13 @@ function ur_dispatch(): void
     } else {
         $action = isset($_GET['action']) ? (string) $_GET['action'] : '';
     }
+
+    // Point the Logger at the configured persistent log dir (if any) so the
+    // read actions (getJobLog / listRuns / downloadJobLog / getPluginLog) resolve
+    // logs from the SAME place the Runner writes them; '' => RAM/tmpfs default.
+    // Cheap: Config::logDir() reads the already-cached config and validates it.
+    $urLogDir = Config::logDir();
+    Logger::$logsDirOverride = ($urLogDir !== '') ? $urLogDir : null;
 
     switch ($action) {
         case 'saveConfig':

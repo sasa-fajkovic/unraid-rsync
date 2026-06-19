@@ -1,45 +1,60 @@
-Menu="Dashboard"
-Title="Rsync Backups"
-Icon="unraid.rsync.png"
-Tag="refresh"
+Menu="Dashboard:90"
+Cond="version_compare(parse_ini_file('/etc/unraid-version')['version'],'6.11.9','>')"
 ---
 <?php
 /**
  * UR.Dashboard.page - a tile on Unraid's built-in DASHBOARD page.
  *
- * Unraid's dashboard (dynamix/DashStats.page) collects every plugin .page whose
- * header is `Menu="Dashboard"` and echoes the string each sets in
- * $mytiles[<slug>]['columnN'] into that column (via customTiles()). So we build
- * our whole tile - markup + its own scoped CSS + a small live poller - as one
- * string and assign it; the dashboard renders it server-side, so the <script>
- * runs normally on page load.
+ * HOW THE DASHBOARD CONSUMES THIS (the contract, 6.12 - 7.3+):
+ * Unraid renders the Dashboard from dynamix/DashStats.page (itself a
+ * `Menu="Dashboard"` body). Plugin TILES are separate `Menu="Dashboard:<N>"`
+ * bodies whose ONLY job is to populate the global `$mytiles[<slug>][<column>]`
+ * string; DashStats then echoes each one server-side into the matching column's
+ * `<table class="dashboard">` via its customTiles('columnN') calls. Because the
+ * tile string is echoed server-side, the inline <style>/<script> below run
+ * normally on page load. See dynamix/DashboardCustomTileExample.page- for the
+ * reference implementation this mirrors.
+ *
+ * WHY THE HEADER MUST LOOK LIKE THIS (a 7.x regression we hit):
+ *   - `Menu="Dashboard:<N>"`, NOT `Menu="Dashboard"`. A tile populator carries a
+ *     position suffix so the framework includes it as a silent $mytiles
+ *     contributor that runs BEFORE DashStats' customTiles() echo. With a bare
+ *     `Menu="Dashboard"` (no suffix) the body sorted AFTER DashStats — so
+ *     customTiles() ran with an empty $mytiles (tile missing) and our body was
+ *     instead rendered as a standalone section, appended full-width at the very
+ *     bottom of the page.
+ *   - NO `Title=` (and no Icon/Tag). A `Title=` makes the framework wrap the body
+ *     in its own titled page section — that is what produced the empty full-width
+ *     "Rsync Backups" bar. The tile's visible title lives INSIDE the <tbody>
+ *     (the canonical `tile-header` block), exactly like every built-in tile.
  *
  * The tile is read-only: it lists each job with a colored last-execution badge,
- * polling our existing read-only getStatus GET endpoint (no CSRF needed). Users
- * show/hide and reorder it through the dashboard's own per-tile controls.
- *
- * This is the (undocumented but stable since 6.12) $mytiles convention. The
- * pre-7.2 webGui needs a tiny header fixup that 7.2+'s responsive layout does
- * not, so we branch on the Unraid version.
+ * polling our existing read-only getStatus GET endpoint (no CSRF needed). It is a
+ * normal sortable dashboard tile (the `title` attribute on the <tbody> is both
+ * its Content-Manager description and its sortable key), so users show/hide it
+ * and drag it to whatever position they like through the dashboard's own
+ * controls; the chosen position is remembered per user.
  */
 
 $slug = 'unraid.rsync';
 
-$tile = <<<'HTML'
+$mytiles[$slug]['column1'] = <<<'HTML'
 <tbody class="sortable" title="Rsync Backups">
   <tr><td>
-    <div class="tile-header" id="ur-dash-header">
-      <div class="tile-header-left">
-        <i class="fa fa-fw fa-refresh icon"></i>
+    <span class="tile-header" id="ur-dash-header">
+      <span class="tile-header-left">
+        <img src="/plugins/unraid.rsync/unraid.rsync.png" alt="" class="f32" style="width:32px;height:32px;border-radius:6px;vertical-align:middle;">
         <div class="section">
           <h3 class="tile-header-main">Rsync Backups</h3>
           <span><span id="ur-dash-count">0</span> jobs</span>
         </div>
-      </div>
-      <div class="tile-header-right"><div class="tile-header-right-controls">
-        <a href="/Utilities/UnraidRsync" title="Open Unraid Rsync"><i class="fa fa-fw fa-cog control"></i></a>
-      </div></div>
-    </div>
+      </span>
+      <span class="tile-header-right">
+        <span class="tile-header-right-controls">
+          <a href="/Utilities/UnraidRsync" title="Open Unraid Rsync"><i class="fa fa-fw fa-cog control"></i></a>
+        </span>
+      </span>
+    </span>
   </td></tr>
   <tr><td>
     <div id="ur-dash-body">
@@ -111,14 +126,4 @@ $tile = <<<'HTML'
 })();
 </script>
 HTML;
-
-// Pre-7.2 webGui needs a tiny header fixup (title line break) that the 7.2+
-// responsive layout handles itself.
-$verIni = @parse_ini_file('/etc/unraid-version');
-$ver    = is_array($verIni) ? (string) ($verIni['version'] ?? '') : '';
-if ($ver !== '' && version_compare($ver, '7.2', '<')) {
-    $tile .= "<script>jQuery(function(){jQuery('#ur-dash-header .tile-header-main').append('<br>');});</script>";
-}
-
-$mytiles[$slug]['column1'] = $tile;
 ?>
