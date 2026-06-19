@@ -12,6 +12,5 @@ Unraid Rsync — a native Unraid 7.x webGui plugin that schedules and monitors m
   </Profile>
   <Icon>https://raw.githubusercontent.com/sasa-fajkovic/unraid-rsync/main/unraid.rsync.png</Icon>
   <WebPage>https://github.com/sasa-fajkovic/unraid-rsync</WebPage>
-  <!-- No dedicated Unraid forum thread yet; support is via GitHub issues
-       (the .plg's support= URL). Add a <Forum> link here once a thread exists. -->
+  <Forum>https://forums.unraid.net/topic/199541-plugin-unraid-rsync-multi-job-rsync-backup-scheduler/</Forum>
 </CommunityApplications>
