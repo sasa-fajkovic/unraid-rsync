@@ -33,7 +33,7 @@
 ]>
 <PLUGIN name="&pluginName;" author="&gitUser;" version="&version;"
         launch="Settings/UnraidRsync" pluginURL="&pluginURL;" icon="&iconURL;"
-        min="7.0.0" support="https://github.com/&gitUser;/&repoName;/issues">
+        min="7.0.0" support="https://forums.unraid.net/topic/199541-plugin-unraid-rsync-multi-job-rsync-backup-scheduler/">
   <CHANGES>
 See the full per-release changelog (auto-generated from the merged PRs) at
 https://github.com/&gitUser;/&repoName;/releases

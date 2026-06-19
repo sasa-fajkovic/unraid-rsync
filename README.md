@@ -183,8 +183,8 @@ To remove it: **Plugins -> Installed Plugins -> Unraid Rsync -> Remove**.
 
 - **Bugs / feature requests:** open an issue at
   <https://github.com/sasa-fajkovic/unraid-rsync/issues>.
-- **Unraid forum thread:** _(coming soon — the Community Applications support
-  thread; this is also the `support=` URL CA links to.)_
+- **Unraid forum thread:** <https://forums.unraid.net/topic/199541-plugin-unraid-rsync-multi-job-rsync-backup-scheduler/>
+  (the Community Applications support thread; this is also the `support=` URL CA links to).
 
 ### Updating
 
