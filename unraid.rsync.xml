@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Containers>
+  <Plugin>True</Plugin>
+  <Name>Unraid Rsync</Name>
+  <PluginURL>https://github.com/sasa-fajkovic/unraid-rsync/releases/latest/download/unraid.rsync.plg</PluginURL>
+  <PluginAuthor>sasa-fajkovic</PluginAuthor>
+  <Category>Tools:System Backup:</Category>
+  <Beta>False</Beta>
+  <Icon>https://raw.githubusercontent.com/sasa-fajkovic/unraid-rsync/main/unraid.rsync.png</Icon>
+  <Support>https://forums.unraid.net/topic/199541-plugin-unraid-rsync-multi-job-rsync-backup-scheduler/</Support>
+  <Project>https://github.com/sasa-fajkovic/unraid-rsync</Project>
+  <Overview>
+A native Unraid 7.x webGUI plugin for scheduling and monitoring multiple independent rsync backup jobs, either over SSH to/from a remote host or locally between two paths on the server.
+  </Overview>
+  <Description>
+Unraid Rsync — a native Unraid 7.x webGui plugin that schedules and monitors multiple rsync backup jobs, either over SSH to/from a remote host or locally between two paths on the server. Per-job cron schedules (or manual-only run-on-demand), a whitelisted rsync option set with inline help, source-&gt;destination pairs, pre/post hooks, live status badges, a per-run log viewer with full-log download, paginated history across all jobs, native notifications, an Overview tab, and an Unraid Dashboard widget. Reusable SSH connections with existing-key-file / managed-key / password auth. Support: open an issue on the GitHub repository.
+  </Description>
+</Containers>
