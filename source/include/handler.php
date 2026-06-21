@@ -169,6 +169,8 @@ function sendResponse(array $payload, int $code = 200): void
 
 /**
  * Emit a JSON error response (a `{ "error": "..." }` envelope) and stop.
+ *
+ * @param array<string,mixed> $extra
  */
 function sendError(string $message, int $code = 400, array $extra = []): void
 {

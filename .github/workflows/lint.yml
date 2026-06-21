@@ -83,6 +83,8 @@ jobs:
         with:
           php-version: "8.4"
           tools: composer
+          # pcov: fast line-coverage driver (the report is emitted below).
+          coverage: pcov
 
       - name: Validate composer.json + composer.lock
         # Guards that the committed lock is in sync with composer.json (a stale
@@ -100,8 +102,11 @@ jobs:
         # file without modifying anything; run `composer cs-fix` locally to fix.
         run: vendor/bin/php-cs-fixer fix --dry-run --diff --using-cache=no
 
-      - name: Run PHPUnit
-        run: vendor/bin/phpunit --colors=never
+      - name: Run PHPUnit (with coverage report)
+        # --coverage-text prints a per-file line-coverage summary to the log
+        # (scope defined by <source> in phpunit.xml). No threshold gate yet - this
+        # is visibility for the existing 758-test suite.
+        run: vendor/bin/phpunit --colors=never --coverage-text
 
       - name: PHPStan static analysis
         # Analyses the proc_open/ssh/rsync shell-out classes + CLI scripts

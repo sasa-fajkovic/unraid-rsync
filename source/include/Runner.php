@@ -990,7 +990,11 @@ class Runner
         return $code < 0 ? 1 : $code;
     }
 
-    /** A minimal inherited environment for hooks (PATH + HOME). */
+    /**
+     * A minimal inherited environment for hooks (PATH + HOME).
+     *
+     * @return array<string,string>
+     */
     private static function inheritEnv(): array
     {
         $env = [];
@@ -1051,7 +1055,11 @@ class Runner
         }
     }
 
-    /** Read a job's last-run summary, or null when none exists/unreadable. */
+    /**
+     * Read a job's last-run summary, or null when none exists/unreadable.
+     *
+     * @return array<string,mixed>|null
+     */
     public static function readSummary(string $jobId): ?array
     {
         $clean = preg_replace('/[^A-Za-z0-9._-]/', '', $jobId);
