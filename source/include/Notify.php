@@ -1,5 +1,7 @@
 <?php
 
+declare(strict_types=1);
+
 /**
  * Notify.php - a thin, escapeshellarg-safe wrapper over Unraid's native
  * notification CLI (/usr/local/emhttp/webGui/scripts/notify). It is the single

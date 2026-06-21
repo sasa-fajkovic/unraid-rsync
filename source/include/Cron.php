@@ -1,5 +1,7 @@
 <?php
 
+declare(strict_types=1);
+
 /**
  * Cron.php - per-job scheduling for the Unraid Rsync plugin (Phase 5).
  *

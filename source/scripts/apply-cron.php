@@ -1,5 +1,7 @@
 <?php
 
+declare(strict_types=1);
+
 /**
  * apply-cron.php - the tiny CLI entry that (re)applies the plugin's per-job cron
  * schedules. Invoked by:

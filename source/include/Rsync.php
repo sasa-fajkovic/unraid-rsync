@@ -1,5 +1,7 @@
 <?php
 
+declare(strict_types=1);
+
 /**
  * Rsync.php - build the rsync invocation as an ARGV ARRAY (never a shell
  * string) from a job's whitelisted options, and map the resulting exit code to
@@ -28,6 +30,7 @@
 require_once __DIR__ . '/Config.php';
 require_once __DIR__ . '/Job.php';
 require_once __DIR__ . '/Ssh.php';
+require_once __DIR__ . '/ProcIO.php';
 
 class Rsync
 {
@@ -533,46 +536,14 @@ class Rsync
         }
 
         // Non-blocking reads so a slow/long transfer streams to the log rather
-        // than buffering until exit.
-        stream_set_blocking($pipes[1], false);
-        stream_set_blocking($pipes[2], false);
-
-        $open = [1 => $pipes[1], 2 => $pipes[2]];
-        while (!empty($open)) {
-            $read   = array_values($open);
-            $write  = null;
-            $except = null;
-            // Block up to 1s waiting for output on either pipe.
-            $n = @stream_select($read, $write, $except, 1);
-            if ($n === false) {
-                break;
-            }
-            foreach ($open as $fd => $stream) {
-                if (!in_array($stream, $read, true)) {
-                    continue;
-                }
-                $chunk = fread($stream, 8192);
-                if ($chunk === '' || $chunk === false) {
-                    if (feof($stream)) {
-                        fclose($stream);
-                        unset($open[$fd]);
-                    }
-                    continue;
-                }
+        // than buffering until exit. The shared drain loop selects across stdout
+        // and stderr (reading one to EOF first could deadlock). [ROB-01]
+        ProcIO::drainPipes(
+            [1 => $pipes[1], 2 => $pipes[2]],
+            static function (int $fd, string $chunk) use ($onOutput): void {
                 $onOutput($chunk);
             }
-        }
-
-        // Close any pipe stream_select left open (e.g. on a select error that
-        // broke the loop above before EOF). Leaking the fd would not hang the
-        // run - proc_close + the group SIGTERM still tear the child down - but
-        // closing them keeps the fd table tidy across a long-lived runner.
-        // Mirrors KeyTools::runArgv. [ROB-01]
-        foreach ($open as $stream) {
-            if (is_resource($stream)) {
-                fclose($stream);
-            }
-        }
+        );
 
         // Capture the final status BEFORE proc_close. proc_close only returns
         // the exit CODE and gives -1 once the child has already been reaped, so

@@ -1,5 +1,7 @@
 <?php
 
+declare(strict_types=1);
+
 /**
  * Runner.php - orchestrates a single job run: state, logging, the SSH transport,
  * preHook -> one rsync per pair -> postHook (ALWAYS), the abort poll, the
@@ -39,6 +41,7 @@ require_once __DIR__ . '/Job.php';
 require_once __DIR__ . '/Credentials.php';
 require_once __DIR__ . '/Ssh.php';
 require_once __DIR__ . '/Rsync.php';
+require_once __DIR__ . '/ProcIO.php';
 require_once __DIR__ . '/RunState.php';
 require_once __DIR__ . '/Logger.php';
 require_once __DIR__ . '/Notify.php';
@@ -938,43 +941,13 @@ class Runner
         // Drain stdout AND stderr concurrently with a non-blocking select loop.
         // Reading one pipe fully before the other can DEADLOCK: a hook that fills
         // the stderr pipe buffer while we are still blocked on stdout would hang
-        // forever (and vice versa).
-        stream_set_blocking($pipes[1], false);
-        stream_set_blocking($pipes[2], false);
-        $open = [1 => $pipes[1], 2 => $pipes[2]];
-        while (!empty($open)) {
-            $read = array_values($open);
-            $w = null;
-            $x = null;
-            $n = @stream_select($read, $w, $x, 1);
-            if ($n === false) {
-                break;
-            }
-            foreach ($open as $fd => $stream) {
-                if (!in_array($stream, $read, true)) {
-                    continue;
-                }
-                $chunk = fread($stream, 8192);
-                if ($chunk === '' || $chunk === false) {
-                    if (feof($stream)) {
-                        fclose($stream);
-                        unset($open[$fd]);
-                    }
-                    continue;
-                }
+        // forever (and vice versa). Shared with Rsync/KeyTools. [ROB-01]
+        ProcIO::drainPipes(
+            [1 => $pipes[1], 2 => $pipes[2]],
+            static function (int $fd, string $chunk) use ($onOutput): void {
                 $onOutput($chunk);
             }
-        }
-
-        // Close any pipe stream_select left open (e.g. on a select error that
-        // broke the loop before EOF), mirroring KeyTools::runArgv /
-        // Rsync::defaultRun. proc_close + the group SIGTERM still reap the child,
-        // so this is fd hygiene, not a deadlock fix. [ROB-01]
-        foreach ($open as $stream) {
-            if (is_resource($stream)) {
-                fclose($stream);
-            }
-        }
+        );
 
         // Capture signal status before proc_close (see Rsync::defaultRun).
         $status = @proc_get_status($proc);

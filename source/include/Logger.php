@@ -1,5 +1,7 @@
 <?php
 
+declare(strict_types=1);
+
 /**
  * Logger.php - the per-run and plugin log writers, plus a bounded, HTML-escaped
  * tail for the UI.

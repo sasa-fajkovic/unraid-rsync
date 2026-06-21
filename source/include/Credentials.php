@@ -1,5 +1,7 @@
 <?php
 
+declare(strict_types=1);
+
 /**
  * Credentials.php - load/save credentials.json for the Unraid Rsync plugin.
  *

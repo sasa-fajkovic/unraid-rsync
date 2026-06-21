@@ -1,5 +1,7 @@
 <?php
 
+declare(strict_types=1);
+
 /**
  * Job.php - the job model + validation for the Unraid Rsync plugin.
  *

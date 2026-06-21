@@ -1,5 +1,7 @@
 <?php
 
+declare(strict_types=1);
+
 /**
  * KeyTools.php - thin, testable wrappers around ssh-keygen / ssh-keyscan for the
  * Unraid Rsync Credentials tab.
@@ -20,6 +22,8 @@
  *     lives on world-readable FAT32 and is materialised to tmpfs 600 before use.
  *   - host-key discovery (ssh-keyscan) validates host/port and never shells.
  */
+
+require_once __DIR__ . '/ProcIO.php';
 
 class KeyTools
 {
@@ -699,43 +703,15 @@ class KeyTools
             return [127, '', 'Failed to start ' . ($argv[0] ?? 'command') . '.', false];
         }
 
-        // Drain stdout (fd 1) and stderr (fd 2) concurrently, non-blocking.
-        stream_set_blocking($pipes[1], false);
-        stream_set_blocking($pipes[2], false);
-        $buf  = [1 => '', 2 => ''];
-        $open = [1 => $pipes[1], 2 => $pipes[2]];
-        while (!empty($open)) {
-            $read   = array_values($open);
-            $write  = null;
-            $except = null;
-            $n = @stream_select($read, $write, $except, 1, 0);
-            if ($n === false) {
-                break; // interrupted/error - stop draining and reap below
-            }
-            if ($n === 0) {
-                continue; // tick; keep draining
-            }
-            foreach ($open as $fd => $stream) {
-                if (!in_array($stream, $read, true)) {
-                    continue;
-                }
-                $chunk = fread($stream, 8192);
-                if ($chunk === '' || $chunk === false) {
-                    if (feof($stream)) {
-                        fclose($stream);
-                        unset($open[$fd]);
-                    }
-                    continue;
-                }
+        // Drain stdout (fd 1) and stderr (fd 2) concurrently, non-blocking, into
+        // per-fd buffers. Shared with Rsync/Runner. [ROB-01]
+        $buf = [1 => '', 2 => ''];
+        ProcIO::drainPipes(
+            [1 => $pipes[1], 2 => $pipes[2]],
+            static function (int $fd, string $chunk) use (&$buf): void {
                 $buf[$fd] .= $chunk;
             }
-        }
-        // Close any pipe stream_select left open (e.g. on a select error).
-        foreach ($open as $stream) {
-            if (is_resource($stream)) {
-                fclose($stream);
-            }
-        }
+        );
 
         $code = proc_close($proc);
         return [(int) $code, $buf[1], $buf[2], false];

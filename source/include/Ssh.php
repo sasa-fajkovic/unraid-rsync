@@ -1,5 +1,7 @@
 <?php
 
+declare(strict_types=1);
+
 /**
  * Ssh.php - the SSH transport helper for the Unraid Rsync plugin.
  *
