@@ -51,7 +51,7 @@ $mytiles[$slug]['column1'] = <<<'HTML'
       </span>
       <span class="tile-header-right">
         <span class="tile-header-right-controls">
-          <a href="/Utilities/UnraidRsync" title="Open Unraid Rsync"><i class="fa fa-fw fa-cog control"></i></a>
+          <a href="/Settings/UnraidRsync" title="Open Unraid Rsync"><i class="fa fa-fw fa-cog control"></i></a>
         </span>
       </span>
     </span>
