@@ -69,6 +69,17 @@ if (!defined('UR_CRON_RUNNER_PATH')) {
     define('UR_CRON_RUNNER_PATH', '/usr/local/emhttp/plugins/' . UR_PLUGIN_NAME . '/scripts/runner.php');
 }
 
+// The php interpreter baked into each cron line. crond runs with a minimal
+// environment, so prefer an ABSOLUTE path over relying on its PATH; fall back to
+// bare 'php' only if none of the usual CLI locations exist (Unraid ships
+// /usr/bin/php). Overridable for tests (pinned so line assertions stay
+// deterministic regardless of the test host's php location).
+if (!defined('UR_CRON_PHP_PATH')) {
+    define('UR_CRON_PHP_PATH', is_executable('/usr/bin/php') ? '/usr/bin/php'
+        : (is_executable('/usr/local/bin/php') ? '/usr/local/bin/php'
+        : (is_executable('/bin/php') ? '/bin/php' : 'php')));
+}
+
 class Cron
 {
     /** Header line written at the top of the generated cron file. */
@@ -188,7 +199,7 @@ class Cron
             // load-bearing --job=<id> token stays followed by whitespace for
             // RunState::cmdlineMatchesJob.
             $lines[] = $schedule
-                . ' php ' . $runner
+                . ' ' . UR_CRON_PHP_PATH . ' ' . $runner
                 . ' --job=' . $id
                 . ' --trigger=schedule'
                 . ' >/dev/null 2>&1';

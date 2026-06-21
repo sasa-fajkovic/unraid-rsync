@@ -23,13 +23,24 @@
 PLUGIN="unraid.rsync"
 APPLY="/usr/local/emhttp/plugins/${PLUGIN}/scripts/apply-cron.php"
 
+# Prefer an absolute php interpreter over relying on this hook's PATH (Unraid
+# ships /usr/bin/php); fall back to bare 'php' if none of the usual locations
+# exist. Mirrors Cron's UR_CRON_PHP_PATH resolution.
+PHP_BIN="php"
+for cand in /usr/bin/php /usr/local/bin/php /bin/php; do
+  if [ -x "$cand" ]; then
+    PHP_BIN="$cand"
+    break
+  fi
+done
+
 # Route the apply output to syslog, NOT stdout: emhttpd captures an array-start
 # event hook's stdout and echoes it into the Main page footer status line (next
 # to "Array Started"), so the "cron applied (N job(s))" line would pollute the
 # footer on every boot/array start. The plugin surfaces real problems through
 # notifications, so the success line belongs in syslog only.
 if [ -f "$APPLY" ]; then
-  if out="$(php "$APPLY" 2>&1)"; then
+  if out="$("$PHP_BIN" "$APPLY" 2>&1)"; then
     [ -n "$out" ] && logger -t "$PLUGIN" "$out"
   else
     logger -t "$PLUGIN" "event/started: cron re-apply failed (non-fatal): $out"

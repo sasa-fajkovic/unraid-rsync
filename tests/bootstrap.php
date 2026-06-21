@@ -83,6 +83,13 @@ register_shutdown_function(static function () use ($urRuntimeBase) {
     }
 });
 
+// Pin the cron php interpreter so Cron line assertions are deterministic
+// regardless of where php lives on the test host (CI vs. macOS vs. Slackware).
+// On a live box this resolves to an absolute path; here it stays bare 'php'.
+if (!defined('UR_CRON_PHP_PATH')) {
+    define('UR_CRON_PHP_PATH', 'php');
+}
+
 // --- the code under test ---------------------------------------------------
 require_once __DIR__ . '/../source/include/ProcIO.php';
 require_once __DIR__ . '/../source/include/Config.php';
