@@ -89,12 +89,31 @@ class Credentials
     const OBFUSCATION_PAD = 'unraid.rsync/credentials/v1';
 
     /**
-     * Absolute path to credentials.json under the (possibly overridden) base
-     * dir. Reuses UR_CONFIG_BASE so it lives beside config.json.
+     * Optional override for the directory that holds credentials.json. When null
+     * (the default) credentials.json lives on /boot beside config.json
+     * (UR_CONFIG_BASE). When set to an array/pool path under /mnt (validated by
+     * Config::sanitizeSecretsDir), credentials.json is read/written there instead,
+     * so it gets real chmod 600 perms rather than world-readable FAT32.
+     *
+     * This class stays decoupled from Config (mirroring Logger::$logsDirOverride):
+     * the callers that have already loaded config (the Runner run path and the
+     * handler request dispatcher) PUSH the validated path in, so path() never has
+     * to read config itself and unit tests can set it directly.
+     *
+     * @var string|null
+     */
+    public static $secretsDirOverride = null;
+
+    /**
+     * Absolute path to credentials.json. Lives under $secretsDirOverride when set
+     * (an /mnt array/pool path), else beside config.json on /boot (UR_CONFIG_BASE).
      */
     public static function path(): string
     {
-        return rtrim(UR_CONFIG_BASE, '/') . '/credentials.json';
+        $base = (self::$secretsDirOverride !== null && self::$secretsDirOverride !== '')
+            ? self::$secretsDirOverride
+            : UR_CONFIG_BASE;
+        return rtrim($base, '/') . '/credentials.json';
     }
 
     /**
@@ -229,9 +248,11 @@ class Credentials
             @unlink($tmp);
             throw new RuntimeException("Failed to write temp credentials file: $tmp");
         }
-        // Best-effort tighten perms. FAT32 ignores this (the documented reason
-        // secrets are obfuscation-only and keys are materialised to tmpfs 600
-        // before use); on a real filesystem it at least keeps perms sane.
+        // Tighten perms to root-only. On the default /boot (FAT32) this is a
+        // no-op (the documented reason secrets are obfuscation-only and keys are
+        // materialised to tmpfs 600 before use). When $secretsDirOverride points
+        // at an /mnt array/pool (ext4/xfs/btrfs/zfs), this 600 STICKS and is the
+        // real at-rest protection for credentials.json.
         @chmod($tmp, 0600);
 
         if (!@rename($tmp, $path)) {

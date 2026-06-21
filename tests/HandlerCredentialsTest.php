@@ -34,11 +34,31 @@ final class HandlerCredentialsTest extends TestCase
         // begun (failOnWarning would fail the test). See sendResponse.
         $GLOBALS['ur_last_response_code'] = 200;
         $GLOBALS['var'] = ['csrf_token' => 'test-token'];
+        // Reset the secrets-dir override BEFORE resolving Credentials::path() so a
+        // leak from a prior migration test can't point cleanup at the wrong file.
+        Credentials::$secretsDirOverride = null;
         foreach ([Credentials::path(), Config::path()] as $p) {
             if (is_file($p)) {
                 unlink($p);
             }
         }
+    }
+
+    protected function tearDown(): void
+    {
+        Credentials::$secretsDirOverride = null;
+    }
+
+    /** A throwaway "array" secrets dir path (created by the code under test). */
+    private function tempSecretsDir(): string
+    {
+        return sys_get_temp_dir() . '/ur-secretsdir-' . getmypid() . '-' . bin2hex(random_bytes(4));
+    }
+
+    private function rmSecretsDir(string $dir): void
+    {
+        @unlink($dir . '/credentials.json');
+        @rmdir($dir);
     }
 
     private function runCapture(callable $fn): array
@@ -886,5 +906,169 @@ final class HandlerCredentialsTest extends TestCase
     {
         $this->assertSame([], ur_csrf_tokens_from_ini('/no/such/var.ini'));
         $this->assertSame([], ur_csrf_tokens_from_ini(''));
+    }
+
+    // --- secretsDir migration ----------------------------------------------
+    //
+    // The handler sanitises the POSTed path to /mnt/<top>/<leaf> (Config::
+    // sanitizeSecretsDir), so a real move to a writable directory can't be driven
+    // end-to-end from a unit test (no writable /mnt here) - that happy path is
+    // validated on the live tower. Here we cover (a) the handler glue + validation
+    // branches and (b) ur_migrate_credentials() mechanics directly, where the
+    // function takes raw dirs and does NOT sanitise.
+
+    public function testInvalidSecretsDirRejectedWithWarningAndNoMove(): void
+    {
+        $this->seedCreds(Credentials::defaults());
+        $_POST = [
+            'action'     => 'saveConfig',
+            'csrf_token' => 'test-token',
+            'global'     => ['secretsDir' => '/etc/evil'],
+        ];
+        [$body, $code] = $this->runCapture(fn() => ur_action_save_config());
+
+        $this->assertSame(200, $code, json_encode($body));
+        $this->assertNotEmpty($body['warnings']);
+        $this->assertStringContainsString('under /mnt', $body['warnings'][0]);
+        // Rejected -> stays on /boot.
+        $this->assertSame('', Config::load()['global']['secretsDir']);
+    }
+
+    public function testHandlerEnablesSecretsDirWhenNoCredentialsYet(): void
+    {
+        // Fresh install: no credentials.json anywhere. Enabling a valid /mnt path
+        // commits the pointer with nothing to move - exercises the full handler
+        // glue (sanitise -> migrate -> commit pointer -> update in-request override)
+        // without needing a writable /mnt.
+        $this->assertFileDoesNotExist(Credentials::path());
+
+        $_POST = [
+            'action'     => 'saveConfig',
+            'csrf_token' => 'test-token',
+            'global'     => ['secretsDir' => '/mnt/user/system/unraid.rsync'],
+        ];
+        [$body, $code] = $this->runCapture(fn() => ur_action_save_config());
+
+        $this->assertSame(200, $code, json_encode($body));
+        $this->assertTrue($body['ok']);
+        $this->assertSame([], $body['warnings']);
+        $this->assertSame('/mnt/user/system/unraid.rsync', Config::load()['global']['secretsDir']);
+        // The handler pushed the new path into the in-request override.
+        $this->assertSame('/mnt/user/system/unraid.rsync', Credentials::$secretsDirOverride);
+    }
+
+    public function testUnchangedSecretsDirDoesNotTouchFile(): void
+    {
+        // secretsDir already empty; re-saving an empty value is a no-op move.
+        $seed = Credentials::defaults();
+        $seed['connections'][] = ['id' => 'c-1', 'name' => 'stay', 'host' => 'h', 'username' => 'u'];
+        $this->seedCreds($seed);
+        $before = filemtime(Credentials::path());
+
+        $_POST = [
+            'action'     => 'saveConfig',
+            'csrf_token' => 'test-token',
+            'global'     => ['secretsDir' => ''],
+        ];
+        [$body, $code] = $this->runCapture(fn() => ur_action_save_config());
+        $this->assertSame(200, $code, json_encode($body));
+        $this->assertSame('', Config::load()['global']['secretsDir']);
+        clearstatcache();
+        $this->assertSame($before, filemtime(Credentials::path())); // untouched
+    }
+
+    public function testMigrationHelperNoSourceFileJustMovesPointer(): void
+    {
+        // No credentials.json anywhere yet: enabling secretsDir is allowed and the
+        // pointer moves with nothing to copy.
+        $dir = $this->tempSecretsDir();
+        $res = ur_migrate_credentials('', $dir);
+        $this->assertTrue($res['ok']);
+        $this->assertSame('', $res['warning']);
+        $this->assertFileDoesNotExist($dir . '/credentials.json');
+    }
+
+    public function testMigrationHelperMovesFileAndTightensPerms(): void
+    {
+        $src = $this->tempSecretsDir();
+        $dst = $this->tempSecretsDir();
+        mkdir($src, 0777, true);
+        $payload = "{\"schemaVersion\":1,\"keys\":[],\"connections\":[]}\n";
+        file_put_contents($src . '/credentials.json', $payload);
+
+        $res = ur_migrate_credentials($src, $dst);
+
+        $this->assertTrue($res['ok'], $res['warning']);
+        $this->assertSame('', $res['warning']);
+        // Moved: source gone, destination has the exact bytes, perms tightened.
+        $this->assertFileDoesNotExist($src . '/credentials.json');
+        $this->assertFileExists($dst . '/credentials.json');
+        $this->assertSame($payload, file_get_contents($dst . '/credentials.json'));
+        clearstatcache();
+        $this->assertSame(0600, fileperms($dst . '/credentials.json') & 0777);
+
+        $this->rmSecretsDir($src);
+        $this->rmSecretsDir($dst);
+    }
+
+    public function testMigrationHelperFromBootDefaultUsesConfigBase(): void
+    {
+        // $from === '' means the /boot config base (UR_CONFIG_BASE). Seed there.
+        Credentials::$secretsDirOverride = null;
+        $boot = Credentials::path();
+        file_put_contents($boot, "{\"schemaVersion\":1,\"keys\":[],\"connections\":[]}\n");
+
+        $dst = $this->tempSecretsDir();
+        $res = ur_migrate_credentials('', $dst);
+
+        $this->assertTrue($res['ok'], $res['warning']);
+        $this->assertFileDoesNotExist($boot);
+        $this->assertFileExists($dst . '/credentials.json');
+        $this->rmSecretsDir($dst);
+    }
+
+    public function testMigrationHelperNeverClobbersExistingDestination(): void
+    {
+        $src = $this->tempSecretsDir();
+        $dst = $this->tempSecretsDir();
+        mkdir($src, 0777, true);
+        mkdir($dst, 0777, true);
+        file_put_contents($src . '/credentials.json', "SOURCE\n");
+        file_put_contents($dst . '/credentials.json', "EXISTING\n");
+
+        $res = ur_migrate_credentials($src, $dst);
+
+        $this->assertFalse($res['ok']);
+        $this->assertStringContainsString('already contains', $res['warning']);
+        // Both files untouched.
+        $this->assertSame("SOURCE\n", file_get_contents($src . '/credentials.json'));
+        $this->assertSame("EXISTING\n", file_get_contents($dst . '/credentials.json'));
+
+        $this->rmSecretsDir($src);
+        $this->rmSecretsDir($dst);
+    }
+
+    public function testMigrationHelperFailsGracefullyWhenDestDirUncreatable(): void
+    {
+        // Destination parent is a regular FILE, so mkdir can never succeed - this
+        // deterministically exercises the "array not started / dir uncreatable"
+        // branch on any OS (no reliance on /mnt being unwritable).
+        $src = $this->tempSecretsDir();
+        mkdir($src, 0777, true);
+        file_put_contents($src . '/credentials.json', "SOURCE\n");
+
+        $blocker = sys_get_temp_dir() . '/ur-blocker-' . getmypid() . '-' . bin2hex(random_bytes(4));
+        file_put_contents($blocker, 'x'); // a file where a dir would need to be
+        $dst = $blocker . '/sub';
+
+        $res = ur_migrate_credentials($src, $dst);
+
+        $this->assertFalse($res['ok']);
+        $this->assertStringContainsString('could not create', $res['warning']);
+        // Source untouched - credentials never lost on a failed move.
+        $this->assertSame("SOURCE\n", file_get_contents($src . '/credentials.json'));
+
+        @unlink($blocker);
+        $this->rmSecretsDir($src);
     }
 }

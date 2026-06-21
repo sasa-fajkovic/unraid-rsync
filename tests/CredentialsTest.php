@@ -13,10 +13,18 @@ final class CredentialsTest extends TestCase
 {
     protected function setUp(): void
     {
+        // Reset the secrets-dir override BEFORE resolving path() so a leak from a
+        // prior test can't point us at the wrong file.
+        Credentials::$secretsDirOverride = null;
         $path = Credentials::path();
         if (is_file($path)) {
             unlink($path);
         }
+    }
+
+    protected function tearDown(): void
+    {
+        Credentials::$secretsDirOverride = null;
     }
 
     public function testLoadWithoutFileReturnsDefaults(): void
@@ -528,5 +536,73 @@ final class CredentialsTest extends TestCase
         $this->assertNull(Credentials::findKey($creds, 'nope'));
         $this->assertNotNull(Credentials::findConnection($creds, 'c-1'));
         $this->assertNull(Credentials::findConnection($creds, 'nope'));
+    }
+
+    // --- secrets-dir override (global.secretsDir) --------------------------
+
+    public function testPathDefaultsToConfigBaseWhenOverrideUnset(): void
+    {
+        Credentials::$secretsDirOverride = null;
+        $this->assertSame(rtrim(UR_CONFIG_BASE, '/') . '/credentials.json', Credentials::path());
+    }
+
+    public function testEmptyStringOverrideFallsBackToConfigBase(): void
+    {
+        // '' is the "unset" sentinel too, so it must not produce "/credentials.json".
+        Credentials::$secretsDirOverride = '';
+        $this->assertSame(rtrim(UR_CONFIG_BASE, '/') . '/credentials.json', Credentials::path());
+    }
+
+    public function testPathHonoursSecretsDirOverride(): void
+    {
+        $dir = sys_get_temp_dir() . '/ur-secrets-' . getmypid() . '-' . bin2hex(random_bytes(4));
+        Credentials::$secretsDirOverride = $dir;
+        $this->assertSame($dir . '/credentials.json', Credentials::path());
+        // Trailing slash is trimmed, exactly like the /boot base.
+        Credentials::$secretsDirOverride = $dir . '/';
+        $this->assertSame($dir . '/credentials.json', Credentials::path());
+    }
+
+    public function testSaveAndLoadUseOverrideDirNotBoot(): void
+    {
+        $dir = sys_get_temp_dir() . '/ur-secrets-' . getmypid() . '-' . bin2hex(random_bytes(4));
+        $bootFile = rtrim(UR_CONFIG_BASE, '/') . '/credentials.json';
+        $this->assertFileDoesNotExist($bootFile);
+
+        Credentials::$secretsDirOverride = $dir; // dir does not exist yet; save() mkdir's it
+        $creds = Credentials::defaults();
+        $creds['connections'][] = ['id' => 'c-x', 'name' => 'on-array', 'host' => 'h', 'username' => 'u'];
+        Credentials::save($creds);
+
+        // Written under the override, NOT on /boot.
+        $this->assertFileExists($dir . '/credentials.json');
+        $this->assertFileDoesNotExist($bootFile);
+
+        $loaded = Credentials::load();
+        $this->assertSame('on-array', $loaded['connections'][0]['name']);
+
+        // Clearing the override makes the /boot path authoritative again (empty
+        // keychain, since nothing was written there).
+        Credentials::$secretsDirOverride = null;
+        $this->assertSame([], Credentials::load()['connections']);
+
+        // cleanup the override dir
+        @unlink($dir . '/credentials.json');
+        @rmdir($dir);
+    }
+
+    public function testSaveUnderOverrideTightensPermsTo600(): void
+    {
+        $dir = sys_get_temp_dir() . '/ur-secrets-' . getmypid() . '-' . bin2hex(random_bytes(4));
+        Credentials::$secretsDirOverride = $dir;
+        Credentials::save(Credentials::defaults());
+        $file = $dir . '/credentials.json';
+        $this->assertFileExists($file);
+        // On a perms-respecting filesystem (the test temp dir) the chmod 600 sticks
+        // - this is the real at-rest protection an /mnt path gives over FAT32.
+        clearstatcache();
+        $this->assertSame(0600, fileperms($file) & 0777);
+        @unlink($file);
+        @rmdir($dir);
     }
 }
