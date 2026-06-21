@@ -82,6 +82,7 @@ register_shutdown_function(static function () use ($urRuntimeBase) {
 });
 
 // --- the code under test ---------------------------------------------------
+require_once __DIR__ . '/../source/include/ProcIO.php';
 require_once __DIR__ . '/../source/include/Config.php';
 require_once __DIR__ . '/../source/include/Job.php';
 require_once __DIR__ . '/../source/include/Credentials.php';
