@@ -10,4 +10,15 @@
             <directory>tests</directory>
         </testsuite>
     </testsuites>
+    <!-- Coverage scope = the unit-tested backend (matches the PHPStan and
+         php-cs-fixer scope). The mixed HTML/PHP page bodies aren't unit-tested, so
+         including them would only depress the number with untestable view code.
+         Coverage is reported in CI (pcov, via the phpunit coverage-text flag); a
+         local `composer test` needs no driver. -->
+    <source>
+        <include>
+            <directory>source/include</directory>
+            <directory>source/scripts</directory>
+        </include>
+    </source>
 </phpunit>

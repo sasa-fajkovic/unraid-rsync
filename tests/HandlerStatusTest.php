@@ -589,7 +589,9 @@ final class HandlerStatusTest extends TestCase
     public function testRunJobRejectsUnsafeId(string $bad): void
     {
         $_POST = ['id' => $bad];
-        [$body, $code] = $this->runCapture(function () { ur_action_run_job(false); });
+        [$body, $code] = $this->runCapture(function () {
+            ur_action_run_job(false);
+        });
         $this->assertSame(422, $code, json_encode($body));
         $this->assertArrayHasKey('error', $body);
     }
@@ -620,7 +622,9 @@ final class HandlerStatusTest extends TestCase
         // gate and fail at the exact-match step (404) — confirming the safe-id
         // routing did not break the real authority (exact match against config).
         $_POST = ['id' => 'j-does-not-exist'];
-        [$body, $code] = $this->runCapture(function () { ur_action_run_job(false); });
+        [$body, $code] = $this->runCapture(function () {
+            ur_action_run_job(false);
+        });
         $this->assertSame(404, $code, json_encode($body));
     }
 

@@ -1,4 +1,5 @@
 <?php
+
 /**
  * Ssh.php - the SSH transport helper for the Unraid Rsync plugin.
  *
@@ -71,6 +72,8 @@ class Ssh
      * tmpfs base for materialised secrets. RAM-backed, cleared on reboot. The
      * dir basename equals the plugin name to match the rest of the plugin's
      * runtime layout (/tmp/unraid.rsync/...). Overridable for tests.
+     *
+     * @var string
      */
     public static $runtimeBase = '/tmp/unraid.rsync';
 
@@ -258,6 +261,7 @@ class Ssh
      * tmpfs file (-f, never the command line / env so it can't leak via ps).
      * Returns [] for KEY auth or when sshpass is unavailable.
      *
+     * @param array<string,mixed> $conn
      * @return array<int,string>
      */
     public static function buildSshpassPrefix(array $conn, string $passFile): array

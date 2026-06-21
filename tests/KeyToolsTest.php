@@ -55,7 +55,7 @@ final class FakeKeyTools extends KeyTools
                 ];
             }
             $r = self::$keygenResponses['-y'] ?? [0, "ssh-ed25519 AAAAderived comment\n", '', false];
-        // -l lists a fingerprint.
+            // -l lists a fingerprint.
         } elseif (in_array('-lf', $argv, true)) {
             $r = self::$keygenResponses['-lf'] ?? [0, "256 SHA256:SAMPLEFINGERPRINT user@host (ED25519)\n", '', false];
         } else {

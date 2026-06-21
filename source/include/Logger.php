@@ -1,4 +1,5 @@
 <?php
+
 /**
  * Logger.php - the per-run and plugin log writers, plus a bounded, HTML-escaped
  * tail for the UI.
@@ -205,7 +206,11 @@ class Logger
      */
     const RUN_FILE_REGEX = '/^run-(\d{8}T\d{6}Z)\.log$/D';
 
-    /** Override the runtime base for tests (else UR_RUNTIME_BASE). */
+    /**
+     * Override the runtime base for tests (else UR_RUNTIME_BASE).
+     *
+     * @var string|null
+     */
     public static $baseOverride = null;
 
     /**
@@ -659,8 +664,8 @@ class Logger
      * Returns [] when the job has no run logs (or the dir is missing). Never
      * lists plugin.log or any non-run file (the basename pattern excludes them).
      *
-     * @param callable(string):(?array)|null $summaryReader override for tests;
-     *        fn(jobId): summary|null. null => Runner::readSummary.
+     * @param callable(string):(?array<string,mixed>)|null $summaryReader override
+     *        for tests; fn(jobId): summary|null. null => Runner::readSummary.
      * @return array<int,array{id:string,ts:int,state:string}>
      */
     public static function listRuns(string $jobId, int $limit = 0, ?callable $summaryReader = null): array

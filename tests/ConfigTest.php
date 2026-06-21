@@ -203,7 +203,7 @@ final class ConfigTest extends TestCase
         $cfg['jobs'][] = Job::normalize([
             'name'     => 'music',
             'schedule' => '0 3 * * *',
-            'transport'=> 'LOCAL',
+            'transport' => 'LOCAL',
             'pairs'    => [['local' => '/mnt/user/media/music/', 'remote' => '/mnt/disk1/backup/music/']],
             'rsyncOptions' => ['archive' => true, 'compress' => true],
         ]);

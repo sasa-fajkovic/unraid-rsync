@@ -13,11 +13,20 @@
 #
 # A baseline (phpstan-baseline.neon) absorbs the remaining pre-existing,
 # intentional findings so this gate catches NEW regressions from here on.
+#
+# Level 6 (raised from 5): adds missing-type-hint enforcement; every finding was
+# fixed with a real type annotation (no new baseline entries). Level 7 is NOT
+# used on purpose: its remaining findings are almost entirely offsetAccess on the
+# deliberate "discriminated array shape" results (e.g. {ok:bool, error?:string,
+# token?:string}) that this code guards at runtime by checking `ok` first.
+# Encoding that precisely isn't expressible for PHP arrays, so level 7 would
+# force either hollow suppressions or rewriting working defensive code - neither
+# is a quality win. Revisit if those results ever become value objects.
 includes:
     - phpstan-baseline.neon
 
 parameters:
-    level: 5
+    level: 6
     paths:
         - source/include
         - source/scripts

@@ -687,7 +687,7 @@ final class RunnerTest extends TestCase
             'maxdelete-25' => [25, Rsync::STATE_WARNING],
             'partial-23'   => [23, Rsync::STATE_PARTIAL],
             'iotimeout-30' => [30, Rsync::STATE_TIMEOUT],
-            'contimeout-35'=> [35, Rsync::STATE_TIMEOUT],
+            'contimeout-35' => [35, Rsync::STATE_TIMEOUT],
             'rsyncterm-20' => [20, Rsync::STATE_ABORTED],
             'failed-12'    => [12, Rsync::STATE_FAILED],
         ];
