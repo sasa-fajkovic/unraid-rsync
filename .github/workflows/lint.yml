@@ -94,6 +94,12 @@ jobs:
         # versions (incl. the phpunit dev dependency), so CI runs are reproducible.
         run: composer install --no-interaction --no-progress --prefer-dist
 
+      - name: Check code style (php-cs-fixer)
+        # PSR-12-based gate over the pure-PHP backend + tests (config in
+        # .php-cs-fixer.dist.php). --dry-run fails the build on any unformatted
+        # file without modifying anything; run `composer cs-fix` locally to fix.
+        run: vendor/bin/php-cs-fixer fix --dry-run --diff --using-cache=no
+
       - name: Run PHPUnit
         run: vendor/bin/phpunit --colors=never
 
