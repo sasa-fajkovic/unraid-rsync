@@ -1,4 +1,5 @@
 <?php
+
 /**
  * Logger.php - the per-run and plugin log writers, plus a bounded, HTML-escaped
  * tail for the UI.

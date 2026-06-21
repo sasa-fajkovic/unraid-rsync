@@ -468,10 +468,10 @@ final class HandlerTest extends TestCase
             $this->assertSame(3, $body['total']);
             // Newest-first across BOTH jobs, each row tagged with its job.
             $this->assertSame('a2.log', $body['runs'][0]['logRef']);
-            $this->assertSame('j-a',    $body['runs'][0]['jobId']);
-            $this->assertSame('Alpha',  $body['runs'][0]['jobName']);
+            $this->assertSame('j-a', $body['runs'][0]['jobId']);
+            $this->assertSame('Alpha', $body['runs'][0]['jobName']);
             $this->assertSame('b1.log', $body['runs'][1]['logRef']);
-            $this->assertSame('j-b',    $body['runs'][1]['jobId']);
+            $this->assertSame('j-b', $body['runs'][1]['jobId']);
             $this->assertSame('a1.log', $body['runs'][2]['logRef']);
         } finally {
             History::delete('j-a');

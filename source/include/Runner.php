@@ -1,4 +1,5 @@
 <?php
+
 /**
  * Runner.php - orchestrates a single job run: state, logging, the SSH transport,
  * preHook -> one rsync per pair -> postHook (ALWAYS), the abort poll, the

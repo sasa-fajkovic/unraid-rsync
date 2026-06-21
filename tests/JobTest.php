@@ -20,7 +20,7 @@ final class JobTest extends TestCase
             'direction' => 'PUSH',
             'pairs'     => [['local' => '/mnt/user/media/', 'remote' => '/mnt/disk1/backup/media/']],
             'logLevel'  => 'normal',
-            'notifyMode'=> 'failure-only',
+            'notifyMode' => 'failure-only',
         ], $overrides));
     }
 

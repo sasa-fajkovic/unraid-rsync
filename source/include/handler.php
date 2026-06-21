@@ -1,4 +1,5 @@
 <?php
+
 /**
  * handler.php - the single AJAX/REST endpoint for the Unraid Rsync plugin.
  *
@@ -2216,9 +2217,9 @@ function ur_dispatch(): void
             }
             return;
 
-        // Read-only GET pollers (no CSRF; side-effect-free reads). They must be
-        // GET so a poll never mutates state; reject a POST to one so the contract
-        // is explicit.
+            // Read-only GET pollers (no CSRF; side-effect-free reads). They must be
+            // GET so a poll never mutates state; reject a POST to one so the contract
+            // is explicit.
         case 'getStatus':
         case 'getJobLog':
         case 'downloadJobLog':

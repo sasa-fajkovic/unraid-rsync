@@ -1,4 +1,5 @@
 <?php
+
 /**
  * Config.php - the single source of truth for the Unraid Rsync plugin's
  * persistent configuration (config.json).

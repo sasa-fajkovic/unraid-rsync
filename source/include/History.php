@@ -1,4 +1,5 @@
 <?php
+
 /**
  * History.php - the persistent per-execution run history.
  *

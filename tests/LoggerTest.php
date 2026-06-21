@@ -68,7 +68,7 @@ final class LoggerTest extends TestCase
         $this->assertStringContainsString('[j-photos]', file_get_contents($extLogs . '/plugin.log'));
 
         // listRuns / latestRunLogPath resolve against the SAME external dir.
-        $runs = Logger::listRuns('j-photos', 10, static fn ($j) => null);
+        $runs = Logger::listRuns('j-photos', 10, static fn($j) => null);
         $this->assertCount(1, $runs);
         $this->assertSame(Logger::runIdFromPath($path), $runs[0]['id']);
         // latestRunLogPath realpath-confines, so compare canonicalised paths

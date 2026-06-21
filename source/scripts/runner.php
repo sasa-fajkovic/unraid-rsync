@@ -1,4 +1,5 @@
 <?php
+
 /**
  * runner.php - the CLI entry point that actually runs a job.
  *
