@@ -138,6 +138,26 @@ do not apply there. Consequences:
   and, when password auth is unavoidable, use a **dedicated low-privilege remote
   account**.
 
+#### Storing credentials on the array instead of the flash
+
+By default `credentials.json` lives on `/boot` for the reasons above. If you want
+real at-rest protection, set a **Secrets directory** on the **Global Settings**
+tab to an absolute path under `/mnt` (an array share or pool — ideally one that
+is **encrypted** and **not** exported over SMB/NFS), e.g.
+`/mnt/user/system/unraid.rsync`. The plugin then stores `credentials.json` there
+with real `chmod 600` permissions (ext4/xfs/btrfs/zfs honour Unix perms; FAT32
+does not). Changing the setting **moves** the existing file to the new location.
+
+This does **not** remove the run-time copy-to-`tmpfs` step — `ssh -i` still needs
+a discrete key file extracted from the JSON at mode `600`, and the materialised
+copy isolates concurrent runs and is path-redacted from logs. It changes the
+**at-rest** threat surface (root-only array file vs. world-readable flash).
+Caveats: the **array must be started** before any job can read its credentials;
+the standard **USB flash backup will no longer include them**; and **uninstalling
+the plugin does not delete** credentials stored under `/mnt` — remove them
+manually. Leave the field **empty** to keep the backward-compatible `/boot`
+behaviour.
+
 **Password auth requires `sshpass`**, which is not part of Unraid's base OS.
 The plugin **detects it at runtime**: if it is missing, the Connections tab and
 the connection test say so and point you at the **NerdTools** plugin (install

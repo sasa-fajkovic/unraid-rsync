@@ -61,11 +61,23 @@ on, forked from, or derived from any other plugin.
 - **rsync flags are a closed whitelist** (`Rsync::BOOL_FLAGS` / `SCALAR_FLAGS` /
   `LIST_FLAGS`, mirrored by `Job`'s normalisation and the options form). There is
   **no free-form flag field** anywhere — never add one.
-- **Secrets** (SSH keys, passwords) live on **FAT32 `/boot` (world-readable)**, so
-  Unix perms don't protect them. They are copied to **tmpfs at `chmod 600`**
-  immediately before use (OpenSSH refuses a world-readable key) and cleaned up in
-  a `finally`. Passwords are **XOR-obfuscated (reversible, NOT encryption)** —
-  always document them as such. **Never return secrets to the browser.**
+- **Secrets** (SSH keys, passwords) live in `credentials.json`, by default on
+  **FAT32 `/boot` (world-readable)**, so Unix perms don't protect them there. They
+  are copied to **tmpfs at `chmod 600`** immediately before use (OpenSSH refuses a
+  world-readable key) and cleaned up in a `finally`. Passwords are **XOR-obfuscated
+  (reversible, NOT encryption)** — always document them as such. **Never return
+  secrets to the browser.** **Opt-in relocation:** the `global.secretsDir` setting
+  (validated/confined to `/mnt/<top>/<leaf>` by `Config::sanitizeSecretsDir`, which
+  shares `Config::sanitizeMntDir` with `sanitizeLogDir`) moves `credentials.json`
+  to an array/pool path where `chmod 600` actually sticks. It's plumbed via
+  `Credentials::$secretsDirOverride` (Credentials stays decoupled from Config — the
+  Runner and the handler front controller push the validated path in, mirroring
+  `Logger::$logsDirOverride`); empty = `/boot`. Changing it migrates the file
+  (`ur_migrate_credentials`: copy+verify+`chmod 600`+unlink, never clobbers an
+  existing dest, never `rename` across the FAT32↔ext4 device boundary). The
+  **tmpfs materialisation is NOT removed** by this (still needed for a discrete
+  `ssh -i` key file + per-run isolation + redaction). Per-run tmpfs secrets +
+  run state ALWAYS stay in tmpfs regardless.
 - **HTML-escape all output**; the log viewer renders `Logger::tail()` output, which
   is already escaped (log-XSS guard). Captured run output is also **redacted** of
   per-run tmpfs secret paths and **size-capped** before it is written

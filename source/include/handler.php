@@ -415,6 +415,93 @@ function ur_release_session_lock(): void
 }
 
 /**
+ * Relocate credentials.json when the secrets directory changes, so the file
+ * always follows the secretsDir pointer. Moves it from $from to $to (each ''
+ * meaning the default /boot config dir, UR_CONFIG_BASE).
+ *
+ * Returns ['ok' => bool, 'warning' => string]. ok=false means the caller must
+ * NOT commit the new pointer - credentials stay at $from. A non-empty warning on
+ * an ok=true result is a non-fatal note (e.g. the old copy couldn't be removed).
+ *
+ * Safety:
+ *   - copy()+unlink, NOT rename(): /boot is FAT32 and /mnt is ext4/xfs/btrfs/zfs,
+ *     so a rename across devices fails (EXDEV); copy works either direction.
+ *   - never clobbers: if the destination already has a credentials.json we abort
+ *     rather than silently overwrite an existing keychain there.
+ *   - chmod 600 on the destination (sticks on /mnt; a documented no-op on /boot).
+ *   - removes the source only after the copy is verified, so a move OFF the
+ *     world-readable flash never leaves secrets lingering there.
+ *
+ * @param string $from validated source secrets dir ('' = /boot)
+ * @param string $to   validated destination secrets dir ('' = /boot)
+ * @return array{ok: bool, warning: string}
+ */
+function ur_migrate_credentials(string $from, string $to): array
+{
+    $base    = rtrim(UR_CONFIG_BASE, '/');
+    $srcDir  = ($from !== '') ? rtrim($from, '/') : $base;
+    $dstDir  = ($to !== '')   ? rtrim($to, '/')   : $base;
+    $srcFile = $srcDir . '/credentials.json';
+    $dstFile = $dstDir . '/credentials.json';
+
+    // Nothing stored yet: no file to move. The pointer can change freely; the
+    // load path returns an empty keychain at the new location.
+    if (!is_file($srcFile)) {
+        return ['ok' => true, 'warning' => ''];
+    }
+
+    // Never overwrite an existing keychain at the destination.
+    if (is_file($dstFile)) {
+        return [
+            'ok'      => false,
+            'warning' => 'Secrets directory not changed: ' . $dstDir
+                . ' already contains a credentials.json. Remove or rename it first.',
+        ];
+    }
+
+    // Ensure the destination dir exists. A missing /mnt share usually means the
+    // array is not started - surface that rather than failing obscurely.
+    if (!is_dir($dstDir) && !@mkdir($dstDir, 0755, true) && !is_dir($dstDir)) {
+        return [
+            'ok'      => false,
+            'warning' => 'Secrets directory not changed: could not create ' . $dstDir
+                . ' (is the array started?). Credentials stay where they are.',
+        ];
+    }
+
+    if (!@copy($srcFile, $dstFile)) {
+        @unlink($dstFile);
+        return [
+            'ok'      => false,
+            'warning' => 'Secrets directory not changed: failed to copy credentials to '
+                . $dstDir . '. Credentials stay where they are.',
+        ];
+    }
+    @chmod($dstFile, 0600);
+
+    // Verify the copy is byte-identical before removing the original.
+    if (@filesize($dstFile) !== @filesize($srcFile)) {
+        @unlink($dstFile);
+        return [
+            'ok'      => false,
+            'warning' => 'Secrets directory not changed: the copied credentials file did not '
+                . 'match the original, so it was discarded. Credentials stay where they are.',
+        ];
+    }
+
+    // Remove the old copy so secrets don't linger at the previous location.
+    if (!@unlink($srcFile)) {
+        return [
+            'ok'      => true,
+            'warning' => 'Credentials were copied to ' . $dstDir . ', but the old copy at '
+                . $srcDir . ' could not be removed - delete it manually.',
+        ];
+    }
+
+    return ['ok' => true, 'warning' => ''];
+}
+
+/**
  * Handle POST saveConfig: rebuild the config from the submission, validate
  * every job, and persist on success. Returns JSON describing the outcome.
  *
@@ -487,6 +574,41 @@ function ur_action_save_config(): void
         if ($rawLogDir !== '' && $cleanLogDir === '') {
             $allWarnings[] = 'Log directory ignored: it must be an absolute path under /mnt '
                 . '(e.g. /mnt/user/appdata/unraid.rsync/logs). Logs will stay in RAM.';
+        }
+    }
+
+    // secretsDir (where credentials.json lives): validate/confine. Changing it
+    // RELOCATES credentials.json so the file always follows the pointer (the load
+    // path reads it from wherever this points). The new pointer is committed only
+    // to match where the file actually ended up - if the move fails we keep the
+    // old location so connections never appear to vanish. Only when the field is
+    // present, so a partial (Jobs-only) POST never wipes it.
+    if ($hasGlobal && array_key_exists('secretsDir', $globalIn)) {
+        $oldSecretsDir   = Config::sanitizeSecretsDir($config['global']['secretsDir'] ?? '');
+        $rawSecretsDir   = is_string($globalIn['secretsDir']) ? trim($globalIn['secretsDir']) : '';
+        $cleanSecretsDir = Config::sanitizeSecretsDir($rawSecretsDir);
+        if ($rawSecretsDir !== '' && $cleanSecretsDir === '') {
+            // Non-empty but invalid: reject, keep the current location.
+            $allWarnings[] = 'Secrets directory ignored: it must be an absolute path under /mnt '
+                . '(e.g. /mnt/user/system/unraid.rsync). Credentials stay where they are.';
+            $config['global']['secretsDir'] = $oldSecretsDir;
+        } elseif ($cleanSecretsDir !== $oldSecretsDir) {
+            // Effective location changed: move credentials.json old -> new.
+            $mig = ur_migrate_credentials($oldSecretsDir, $cleanSecretsDir);
+            if ($mig['ok']) {
+                $config['global']['secretsDir'] = $cleanSecretsDir;
+                // Any later credential read in THIS request uses the new path.
+                Credentials::$secretsDirOverride = ($cleanSecretsDir !== '') ? $cleanSecretsDir : null;
+                if ($mig['warning'] !== '') {
+                    $allWarnings[] = $mig['warning'];
+                }
+            } else {
+                // Move failed: keep the old pointer so credentials stay reachable.
+                $config['global']['secretsDir'] = $oldSecretsDir;
+                $allWarnings[] = $mig['warning'];
+            }
+        } else {
+            $config['global']['secretsDir'] = $cleanSecretsDir; // unchanged
         }
     }
 
@@ -2033,6 +2155,13 @@ function ur_dispatch(): void
     // Cheap: Config::logDir() reads the already-cached config and validates it.
     $urLogDir = Config::logDir();
     Logger::$logsDirOverride = ($urLogDir !== '') ? $urLogDir : null;
+
+    // Point Credentials at the configured secrets dir (if any) so every action
+    // that reads/writes credentials.json resolves it from the SAME place the
+    // Runner does; '' => the default /boot config dir. (ur_action_save_config may
+    // update this again after migrating credentials.json to a new location.)
+    $urSecretsDir = Config::secretsDir();
+    Credentials::$secretsDirOverride = ($urSecretsDir !== '') ? $urSecretsDir : null;
 
     switch ($action) {
         case 'saveConfig':

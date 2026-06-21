@@ -132,6 +132,55 @@ final class ConfigTest extends TestCase
         $this->assertSame('/mnt/user/appdata/ur/logs', Config::logDir());
     }
 
+    public function testSecretsDirDefaultsEmpty(): void
+    {
+        // /boot is the default: credentials.json stays beside config.json.
+        $this->assertSame('', Config::defaults()['global']['secretsDir']);
+    }
+
+    #[DataProvider('validLogDirProvider')]
+    public function testSanitizeSecretsDirAcceptsMntPaths(string $in, string $expected): void
+    {
+        // Same confinement rule as the log dir (shared sanitizeMntDir).
+        $this->assertSame($expected, Config::sanitizeSecretsDir($in));
+    }
+
+    #[DataProvider('invalidLogDirProvider')]
+    public function testSanitizeSecretsDirRejectsUnsafePaths($in): void
+    {
+        $this->assertSame('', Config::sanitizeSecretsDir($in));
+    }
+
+    #[DataProvider('validLogDirProvider')]
+    #[DataProvider('invalidLogDirProvider')]
+    public function testSanitizeSecretsDirMatchesLogDir($in, $expected = null): void
+    {
+        // secrets and logs MUST share one confinement rule - guard against the
+        // two validators drifting apart. ($expected is unused; it lets this test
+        // accept both the 2-arg valid provider and the 1-arg invalid provider.)
+        $this->assertSame(Config::sanitizeLogDir($in), Config::sanitizeSecretsDir($in));
+    }
+
+    public function testMergeDefaultsSanitizesSecretsDir(): void
+    {
+        $ok = Config::mergeDefaults(['global' => ['secretsDir' => '/mnt/user/system/unraid.rsync']]);
+        $this->assertSame('/mnt/user/system/unraid.rsync', $ok['global']['secretsDir']);
+        // Invalid -> '' (/boot), never persisted as-is.
+        $bad = Config::mergeDefaults(['global' => ['secretsDir' => '/boot/config/plugins/unraid.rsync']]);
+        $this->assertSame('', $bad['global']['secretsDir']);
+        // Missing -> ''.
+        $none = Config::mergeDefaults(['global' => []]);
+        $this->assertSame('', $none['global']['secretsDir']);
+    }
+
+    public function testSecretsDirAccessorReadsSavedConfig(): void
+    {
+        $cfg = Config::defaults();
+        $cfg['global']['secretsDir'] = '/mnt/user/system/unraid.rsync';
+        Config::save($cfg);
+        $this->assertSame('/mnt/user/system/unraid.rsync', Config::secretsDir());
+    }
+
     public function testDefaultProfileIsRecursiveNonArchiveCopy(): void
     {
         // The shipped default profile (what a brand-new job inherits): recurse +

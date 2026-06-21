@@ -51,8 +51,11 @@ final class RunnerTest extends TestCase
         // Reset config to a clean empty install for each test.
         Config::save(Config::defaults());
 
+        // Reset the secrets-dir override so a leak can't redirect Credentials I/O.
+        Credentials::$secretsDirOverride = null;
+
         // Ensure no leftover state/abort for our test jobs.
-        foreach (['j-local', 'j-fail', 'j-pre', 'j-guard', 'j-delete', 'j-multi', 'j-redact'] as $jid) {
+        foreach (['j-local', 'j-fail', 'j-pre', 'j-guard', 'j-delete', 'j-multi', 'j-redact', 'j-secrets'] as $jid) {
             RunState::clear($jid);
             RunState::clearAbort($jid);
         }
@@ -64,6 +67,7 @@ final class RunnerTest extends TestCase
         Runner::$pidProvider = null;
         Rsync::$runner = null;
         Rsync::$rsyncPathOverride = null;
+        Credentials::$secretsDirOverride = null;
     }
 
     /** Build + persist a LOCAL job, returning its id. */
@@ -959,5 +963,75 @@ final class RunnerTest extends TestCase
                 "rsync exit $rsyncExit -> state {$res['state']} -> CLI exit $expectedCli"
             );
         }
+    }
+
+    // --- secretsDir plumbing -----------------------------------------------
+
+    public function testRunSetsCredentialsSecretsDirOverrideFromConfig(): void
+    {
+        $id = $this->saveLocalJob('j-local');
+        $cfg = Config::load();
+        $cfg['global']['secretsDir'] = '/mnt/user/system/unraid.rsync';
+        Config::save($cfg);
+
+        Rsync::$runner = function (array $argv, $onOutput): int {
+            return 0;
+        };
+        Runner::run($id, false);
+
+        // The run pushed the validated secrets dir into Credentials, exactly like
+        // it does for the Logger log dir.
+        $this->assertSame('/mnt/user/system/unraid.rsync', Credentials::$secretsDirOverride);
+    }
+
+    public function testRunFailsCleanlyWhenSecretsDirUnavailable(): void
+    {
+        // An SSH job whose connection lives in credentials.json, but secretsDir
+        // points at an /mnt path that doesn't exist (the array isn't started).
+        // The keychain reads back EMPTY from the missing dir, so the connection
+        // lookup fails with a clear "Connection not found" - NOT a PHP fatal.
+        $rsyncCalls = 0;
+        Rsync::$runner = function (array $argv, $onOutput) use (&$rsyncCalls): int {
+            $rsyncCalls++;
+            return 0;
+        };
+
+        // Seed the connection on the default /boot location.
+        $creds = Credentials::defaults();
+        $creds['connections'][] = Credentials::mergeConnection([
+            'id' => 'c-key', 'name' => 'k', 'host' => 'h.example', 'username' => 'root',
+            'authMethod' => 'KEYFILE', 'keyFilePath' => '/root/.ssh/id_ed25519',
+        ]);
+        Credentials::save($creds);
+
+        $config = Config::load();
+        $job = Config::defaultJob();
+        $job['id']           = 'j-secrets';
+        $job['name']         = 'j-secrets';
+        $job['transport']    = 'SSH';
+        $job['direction']    = 'PUSH';
+        $job['connectionId'] = 'c-key';
+        $job['pairs']        = [['local' => '/mnt/user/src/', 'remote' => '/data/dst/']];
+        // Simulate "array not started": secretsDir points at a missing /mnt path.
+        $config['global']['secretsDir'] = '/mnt/user/nope-' . bin2hex(random_bytes(4)) . '/ur';
+        $config['jobs'][] = $job;
+        Config::save($config);
+        RunState::clear('j-secrets');
+        RunState::clearAbort('j-secrets');
+
+        $res = Runner::run('j-secrets', false);
+
+        // Reset the override (the run left it pointing at the missing /mnt path)
+        // BEFORE any cleanup write, so the reset keychain lands back on /boot.
+        Credentials::$secretsDirOverride = null;
+
+        $this->assertIsArray($res);
+        $this->assertSame(Rsync::STATE_FAILED, $res['state']);
+        $this->assertSame(0, $rsyncCalls, 'rsync must not run when credentials are unreachable');
+        $log = @file_get_contents($res['runLog']);
+        $this->assertIsString($log);
+        $this->assertStringContainsString('Connection not found', $log);
+
+        Credentials::save(Credentials::defaults());
     }
 }

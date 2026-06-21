@@ -129,6 +129,13 @@ class Runner
         $logDir = Config::sanitizeLogDir($config['global']['logDir'] ?? '');
         Logger::$logsDirOverride = ($logDir !== '') ? $logDir : null;
 
+        // Secrets dir: when the user has relocated credentials.json to an /mnt
+        // array/pool path, point Credentials at it so this run reads keys/passwords
+        // from there (with real chmod 600 at rest); else null keeps it on /boot.
+        // Derived from the already-loaded config (no extra disk read).
+        $secretsDir = Config::sanitizeSecretsDir($config['global']['secretsDir'] ?? '');
+        Credentials::$secretsDirOverride = ($secretsDir !== '') ? $secretsDir : null;
+
         // 2. Concurrency guard. Acquire an ATOMIC per-job lock FIRST so two
         //    near-simultaneous launches can't both pass an isRunning() check and
         //    start duplicate concurrent rsync runs for one job (dangerous with

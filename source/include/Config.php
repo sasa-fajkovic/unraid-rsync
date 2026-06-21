@@ -121,6 +121,12 @@ class Config
                 // are cleared on reboot. When set, run logs + plugin.log are
                 // written here so they survive a reboot. See sanitizeLogDir().
                 'logDir' => '',
+                // Optional secrets directory (an array/pool path under /mnt).
+                // Empty (the default) = credentials.json lives on /boot (the USB
+                // flash). When set, credentials.json is relocated there so it gets
+                // real chmod 600 perms (and array-at-rest encryption if enabled)
+                // instead of world-readable FAT32. See sanitizeSecretsDir().
+                'secretsDir' => '',
             ],
             'jobs' => [],
         ];
@@ -168,10 +174,10 @@ class Config
     }
 
     /**
-     * Validate a user-supplied persistent log directory, returning the cleaned
-     * absolute path or '' (meaning "unset" -> logs stay in RAM/tmpfs). The rules
-     * confine it to an Unraid storage path so a stray value can't redirect
-     * root-written logs into a system location:
+     * Confine a user-supplied directory to an Unraid storage path, returning the
+     * cleaned absolute path or '' (meaning "unset"). Shared by sanitizeLogDir()
+     * and sanitizeSecretsDir() so both honour ONE confinement rule and can't
+     * redirect root-written data into a system location:
      *   - must be a non-empty, absolute (leading "/") string;
      *   - no control bytes (NUL/newline) - those could break a path or a header;
      *   - no "." / ".." traversal segments;
@@ -179,11 +185,11 @@ class Config
      *     Unassigned Devices mount) - never the bare /mnt, /mnt/user root, or a
      *     system path like /etc or /boot (flash wear).
      * Anything failing these returns '' rather than throwing, so an invalid value
-     * falls back to the safe RAM-only default; the save path surfaces a warning.
+     * falls back to the caller's safe default; the save path surfaces a warning.
      *
      * @param mixed $value
      */
-    public static function sanitizeLogDir($value): string
+    private static function sanitizeMntDir($value): string
     {
         if (!is_string($value)) {
             return '';
@@ -210,6 +216,18 @@ class Config
     }
 
     /**
+     * Validate a user-supplied persistent log directory, returning the cleaned
+     * absolute path or '' (meaning "unset" -> logs stay in RAM/tmpfs). See
+     * sanitizeMntDir() for the confinement rules.
+     *
+     * @param mixed $value
+     */
+    public static function sanitizeLogDir($value): string
+    {
+        return self::sanitizeMntDir($value);
+    }
+
+    /**
      * The effective persistent log dir from the loaded config (validated), or ''
      * when unset/invalid (RAM-only). Mirrors retention().
      */
@@ -221,6 +239,37 @@ class Config
             return '';
         }
         return self::sanitizeLogDir($cfg['global']['logDir'] ?? '');
+    }
+
+    /**
+     * Validate a user-supplied secrets directory (where credentials.json lives),
+     * returning the cleaned absolute path or '' (meaning "use the default /boot
+     * config dir"). Same confinement as the log dir (see sanitizeMntDir): an
+     * absolute path under /mnt, so credentials can sit on a permission-respecting
+     * (and optionally encrypted) array/pool filesystem with real chmod 600 instead
+     * of world-readable FAT32 flash. '' keeps credentials.json on /boot - the
+     * backward-compatible default that survives a reboot before the array starts
+     * and is captured by the standard USB flash backup.
+     *
+     * @param mixed $value
+     */
+    public static function sanitizeSecretsDir($value): string
+    {
+        return self::sanitizeMntDir($value);
+    }
+
+    /**
+     * The effective secrets dir from the loaded config (validated), or '' when
+     * unset/invalid (credentials.json stays on /boot). Mirrors logDir().
+     */
+    public static function secretsDir(): string
+    {
+        try {
+            $cfg = self::load();
+        } catch (Throwable $e) {
+            return '';
+        }
+        return self::sanitizeSecretsDir($cfg['global']['secretsDir'] ?? '');
     }
 
     /**
@@ -428,6 +477,8 @@ class Config
             'retention' => self::clampRetention($globalIn['retention'] ?? self::DEFAULT_RETENTION),
             // logDir: validate/confine; invalid or missing -> '' (RAM-only).
             'logDir' => self::sanitizeLogDir($globalIn['logDir'] ?? ''),
+            // secretsDir: validate/confine; invalid or missing -> '' (/boot).
+            'secretsDir' => self::sanitizeSecretsDir($globalIn['secretsDir'] ?? ''),
         ];
 
         // jobs: normalise each to the full default-job shape.
