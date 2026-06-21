@@ -9,10 +9,12 @@
  *     whitespace around `?>` could alter rendered output; their PHP is already
  *     linted by `php -l` in CI.
  *
- * Non-risky rules only (setRiskyAllowed(false)): purely cosmetic, behaviour-
- * preserving fixes. binary_operator_spaces is relaxed to "at_least_single_space"
- * so the codebase's intentional, readable column alignment of => / = is kept
- * (PSR-12 does not mandate single-spacing, and forcing it would be pure churn).
+ * Risky rules are allowed ONLY to enforce `declare_strict_types`; @PSR12 itself
+ * is a non-risky set, so no other behaviour-changing fixer activates. Everything
+ * else is purely cosmetic. binary_operator_spaces is relaxed to
+ * "at_least_single_space" so the codebase's intentional, readable column
+ * alignment of => / = is kept (PSR-12 does not mandate single-spacing, and
+ * forcing it would be pure churn).
  */
 
 $finder = PhpCsFixer\Finder::create()
@@ -22,9 +24,13 @@ $finder = PhpCsFixer\Finder::create()
     ->name('*.php');
 
 return (new PhpCsFixer\Config())
-    ->setRiskyAllowed(false)
+    ->setRiskyAllowed(true)
     ->setRules([
         '@PSR12' => true,
+        // Modern PHP best practice: enforce strict scalar typing in every backend
+        // file. The pages/*.page templates are out of scope (a declare can't
+        // follow their header/markup). This is the ONLY risky rule enabled.
+        'declare_strict_types' => true,
         // The code is already clean and CONSISTENT - it just isn't vanilla PSR-12
         // in a few deliberate, readable ways. Honour the existing house style so
         // the gate enforces standards (indentation, spacing, final newlines, no

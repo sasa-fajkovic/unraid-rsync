@@ -1,5 +1,7 @@
 <?php
 
+declare(strict_types=1);
+
 /**
  * ProcIO.php - shared, non-blocking pipe draining for proc_open() children.
  *

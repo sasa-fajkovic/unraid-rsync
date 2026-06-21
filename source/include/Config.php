@@ -1,5 +1,7 @@
 <?php
 
+declare(strict_types=1);
+
 /**
  * Config.php - the single source of truth for the Unraid Rsync plugin's
  * persistent configuration (config.json).

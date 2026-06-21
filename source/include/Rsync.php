@@ -1,5 +1,7 @@
 <?php
 
+declare(strict_types=1);
+
 /**
  * Rsync.php - build the rsync invocation as an ARGV ARRAY (never a shell
  * string) from a job's whitelisted options, and map the resulting exit code to

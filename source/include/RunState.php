@@ -1,5 +1,7 @@
 <?php
 
+declare(strict_types=1);
+
 /**
  * RunState.php - per-job RUNTIME state, held in RAM (tmpfs) so it never touches
  * the FAT32 flash and is cleared on reboot.

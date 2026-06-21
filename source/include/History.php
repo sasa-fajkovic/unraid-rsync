@@ -1,5 +1,7 @@
 <?php
 
+declare(strict_types=1);
+
 /**
  * History.php - the persistent per-execution run history.
  *

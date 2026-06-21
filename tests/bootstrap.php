@@ -1,5 +1,7 @@
 <?php
 
+declare(strict_types=1);
+
 /**
  * PHPUnit bootstrap for the Unraid Rsync plugin.
  *

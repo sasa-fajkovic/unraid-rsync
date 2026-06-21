@@ -1,5 +1,7 @@
 <?php
 
+declare(strict_types=1);
+
 /**
  * KeyTools.php - thin, testable wrappers around ssh-keygen / ssh-keyscan for the
  * Unraid Rsync Credentials tab.

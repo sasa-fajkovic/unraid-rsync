@@ -1,5 +1,7 @@
 <?php
 
+declare(strict_types=1);
+
 /**
  * handler.php - the single AJAX/REST endpoint for the Unraid Rsync plugin.
  *
