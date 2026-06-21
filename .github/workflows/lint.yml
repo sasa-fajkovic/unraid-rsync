@@ -32,19 +32,23 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
-      - name: Validate .plg is well-formed XML
+      - name: Validate XML (.plg + Community Applications feeds)
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq libxml2-utils
-          xmllint --noout unraid.rsync.plg
-          echo "unraid.rsync.plg: well-formed XML"
+          xmllint --noout unraid.rsync.plg ca_profile.xml unraid.rsync.xml
+          echo "unraid.rsync.plg, ca_profile.xml, unraid.rsync.xml: well-formed XML"
 
-      - name: Check pkg_build.sh syntax + shellcheck
+      - name: Check shell scripts syntax + shellcheck
         run: |
-          bash -n pkg_build.sh
           sudo apt-get install -y -qq shellcheck
-          shellcheck pkg_build.sh
-          echo "pkg_build.sh: syntax + shellcheck clean"
+          # pkg_build.sh (build) and source/event/started (the array-start hook,
+          # shipped 0755 - a syntax error here would package silently).
+          for f in pkg_build.sh source/event/started; do
+            bash -n "$f"
+            shellcheck "$f"
+          done
+          echo "pkg_build.sh + source/event/started: syntax + shellcheck clean"
 
       - name: Set up PHP
         uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2
