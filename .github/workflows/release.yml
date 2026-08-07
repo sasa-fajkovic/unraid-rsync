@@ -50,6 +50,11 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # gen-plg-changes.sh walks the full commit history and every past
+          # release tag to build the .plg's <CHANGES> block; the default
+          # shallow clone has neither.
+          fetch-depth: 0
 
       - name: Determine version + build ref
         id: version
@@ -133,6 +138,27 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "build_ref=$build_ref" >> "$GITHUB_OUTPUT"
           echo "Building version $version from ref $build_ref"
+
+      - name: Generate real per-release CHANGES from git history
+        # Regenerates unraid.rsync.plg's <CHANGES> block from every past
+        # release tag + this in-flight release's own commits (see
+        # gen-plg-changes.sh's header), so Community Applications shows a real
+        # changelog instead of the generic pointer committed on `main`. Must
+        # run before the Slackware build step so pkg_build.sh's version/md5
+        # rewrite (inside the container) lands on top of the already-populated
+        # file. Runs on the runner, not in the container - needs `git` with
+        # full history, which the minimal Slackware image has no reason to grow.
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          BUILD_REF: ${{ steps.version.outputs.build_ref }}
+        run: |
+          bash gen-plg-changes.sh -V "$VERSION" -r "$BUILD_REF"
+          # Fail loudly here rather than ship a broken manifest if the splice
+          # ever produced malformed XML (e.g. an unescaped character slipping
+          # past the CDATA guard).
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libxml2-utils
+          xmllint --noout unraid.rsync.plg
 
       - name: Build .txz inside Slackware container
         # VERSION (validated above) is passed into the container via -e and

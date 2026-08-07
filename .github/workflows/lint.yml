@@ -42,13 +42,15 @@ jobs:
       - name: Check shell scripts syntax + shellcheck
         run: |
           sudo apt-get install -y -qq shellcheck
-          # pkg_build.sh (build) and source/event/started (the array-start hook,
-          # shipped 0755 - a syntax error here would package silently).
-          for f in pkg_build.sh source/event/started; do
+          # pkg_build.sh (build), gen-plg-changes.sh (release-time <CHANGES>
+          # generation - see release.yml), and source/event/started (the
+          # array-start hook, shipped 0755 - a syntax error here would package
+          # silently).
+          for f in pkg_build.sh gen-plg-changes.sh source/event/started; do
             bash -n "$f"
             shellcheck "$f"
           done
-          echo "pkg_build.sh + source/event/started: syntax + shellcheck clean"
+          echo "pkg_build.sh + gen-plg-changes.sh + source/event/started: syntax + shellcheck clean"
 
       - name: Set up PHP
         uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2
