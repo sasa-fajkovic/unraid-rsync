@@ -135,9 +135,11 @@ final class HandlerTest extends TestCase
             'csrf_token' => 'test-token',
             'global'     => [
                 'defaultRsyncOptions' => [
-                    'archive'  => '1',
-                    'compress' => '0',
-                    'excludes' => ['*.tmp', ''],
+                    'archive'       => '1',
+                    'compress'      => '0',
+                    'omitDirTimes'  => '1',
+                    'omitLinkTimes' => '0',
+                    'excludes'      => ['*.tmp', ''],
                 ],
             ],
             'jobs' => [
@@ -195,6 +197,8 @@ final class HandlerTest extends TestCase
         $this->assertSame(['thumbs/'], $job['rsyncOptions']['excludes']);
         // Global defaults persisted + whitelisted.
         $this->assertTrue($cfg['global']['defaultRsyncOptions']['archive']);
+        $this->assertTrue($cfg['global']['defaultRsyncOptions']['omitDirTimes']);
+        $this->assertFalse($cfg['global']['defaultRsyncOptions']['omitLinkTimes']);
         $this->assertSame(['*.tmp'], $cfg['global']['defaultRsyncOptions']['excludes']);
     }
 
