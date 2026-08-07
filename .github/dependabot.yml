@@ -21,7 +21,7 @@ updates:
     schedule:
       interval: "weekly"
     commit-message:
-      prefix: "deps"
+      prefix: "chore"
     labels:
       - "dependencies"
       - "composer"
