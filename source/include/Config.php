@@ -66,11 +66,17 @@ class Config
             // mkpath (--mkpath) defaults ON so a brand-new destination path
             // (incl. missing parent dirs) is created automatically instead of
             // failing the first run with "mkdir failed: No such file or directory".
+            // omitDirTimes/omitLinkTimes (-O/-J) default OFF: they only matter
+            // on remote/network filesystems that cannot set times on
+            // directories or symlinks, letting a user keep Preserve times (-t)
+            // for regular files while excluding those entries.
             'recursive'       => true,
             'archive'         => false,
             'compress'        => false,
             'humanReadable'   => true,
             'times'           => true,
+            'omitDirTimes'    => false,
+            'omitLinkTimes'   => false,
             'perms'           => false,
             'xattrs'          => false,
             'acls'            => false,
