@@ -510,6 +510,94 @@ final class OptionsFormHelpTest extends TestCase
         $this->assertStringNotContainsString('action=getStatus', $html);
     }
 
+    // --- global.secretsDir must stay visible on page load (not just writes) ---
+    //
+    // Regression for: a custom Secrets directory (global.secretsDir) makes the
+    // handler write keys/connections to the configured /mnt path (handler.php
+    // pushes Credentials::$secretsDirOverride before every AJAX action - see
+    // handler.php's ur_dispatch(), around the "$urSecretsDir = Config::
+    // secretsDir()" line), but a plain page load previously never pushed that
+    // override, so Credentials::load() silently fell back to reading the
+    // (empty) /boot credentials.json and the Credentials/Connections/Jobs tabs
+    // looked empty even though the data was safely on disk at the configured
+    // path.
+    //
+    // Config::sanitizeSecretsDir() confines the value to /mnt/<top>/<leaf> (see
+    // Config.php), which doesn't exist on a dev/CI machine - like
+    // HandlerCredentialsTest's secretsDir-migration tests, we can't drive a
+    // real file move/read under /mnt here, only validate the push mechanism
+    // itself (asserting Credentials::$secretsDirOverride ends up matching the
+    // configured path after the page renders). The corresponding "override
+    // correctly selects which file loads" half is already covered by
+    // CredentialsTest::testSaveAndLoadUseOverrideDirNotBoot(); combined, the two
+    // fully cover the reported symptom. RunInSeparateProcess isolates the
+    // Credentials::$secretsDirOverride static mutation from other tests.
+
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testCredentialsPagePushesConfiguredSecretsDirOverride(): void
+    {
+        $secretsDir = '/mnt/user/rsync';
+        $cfg = Config::defaults();
+        $cfg['global']['secretsDir'] = $secretsDir;
+        Config::save($cfg);
+
+        Credentials::$secretsDirOverride = null; // simulate a fresh request
+        $this->renderPageBody(__DIR__ . '/../source/pages/credentials.php');
+
+        $this->assertSame(
+            $secretsDir,
+            Credentials::$secretsDirOverride,
+            'credentials.php must push the configured global.secretsDir onto '
+            . 'Credentials::$secretsDirOverride before loading keys, the same way '
+            . "handler.php's ur_dispatch() does for every AJAX action."
+        );
+    }
+
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testConnectionsPagePushesConfiguredSecretsDirOverride(): void
+    {
+        $secretsDir = '/mnt/user/rsync';
+        $cfg = Config::defaults();
+        $cfg['global']['secretsDir'] = $secretsDir;
+        Config::save($cfg);
+
+        Credentials::$secretsDirOverride = null; // simulate a fresh request
+        $this->renderPageBody(__DIR__ . '/../source/pages/connections.php');
+
+        $this->assertSame(
+            $secretsDir,
+            Credentials::$secretsDirOverride,
+            'connections.php must push the configured global.secretsDir onto '
+            . 'Credentials::$secretsDirOverride before loading keys/connections '
+            . "(feeds every 'SSH key' <select>), the same way handler.php's "
+            . 'ur_dispatch() does for every AJAX action.'
+        );
+    }
+
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testJobsPagePushesConfiguredSecretsDirOverride(): void
+    {
+        $secretsDir = '/mnt/user/rsync';
+        $cfg = Config::defaults();
+        $cfg['global']['secretsDir'] = $secretsDir;
+        Config::save($cfg);
+
+        Credentials::$secretsDirOverride = null; // simulate a fresh request
+        $this->renderPageBody(__DIR__ . '/../source/pages/jobs.php');
+
+        $this->assertSame(
+            $secretsDir,
+            Credentials::$secretsDirOverride,
+            'jobs.php must push the configured global.secretsDir onto '
+            . 'Credentials::$secretsDirOverride before loading connections '
+            . '(feeds the per-job Connection <select>), the same way '
+            . "handler.php's ur_dispatch() does for every AJAX action."
+        );
+    }
+
     /**
      * Render the shared options partial to a string.
      *
@@ -547,8 +635,10 @@ final class OptionsFormHelpTest extends TestCase
         // Remove the install-path require_once lines (already satisfied by
         // bootstrap). Keep the leading <?php so the temp file parses as a normal
         // PHP file. assertIsString guards against preg_replace() returning null.
+        // A trailing `// comment` after the semicolon (e.g. credentials.php's
+        // `// ur_h / ur_t`) is tolerated so those lines still match.
         $src = preg_replace(
-            "#^\\s*require_once\\s+'/usr/local/emhttp/plugins/unraid\\.rsync/[^']+';\\s*$#m",
+            "#^\\s*require_once\\s+'/usr/local/emhttp/plugins/unraid\\.rsync/[^']+';[ \\t]*(?://[^\\n]*)?$#m",
             '',
             $src
         );

@@ -49,7 +49,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # gen-plg-changes.sh walks the full commit history and every past
+          # release tag to build the .plg's <CHANGES> block; the default
+          # shallow clone has neither.
+          fetch-depth: 0
 
       - name: Determine version + build ref
         id: version
@@ -134,6 +139,27 @@ jobs:
           echo "build_ref=$build_ref" >> "$GITHUB_OUTPUT"
           echo "Building version $version from ref $build_ref"
 
+      - name: Generate real per-release CHANGES from git history
+        # Regenerates unraid.rsync.plg's <CHANGES> block from every past
+        # release tag + this in-flight release's own commits (see
+        # gen-plg-changes.sh's header), so Community Applications shows a real
+        # changelog instead of the generic pointer committed on `main`. Must
+        # run before the Slackware build step so pkg_build.sh's version/md5
+        # rewrite (inside the container) lands on top of the already-populated
+        # file. Runs on the runner, not in the container - needs `git` with
+        # full history, which the minimal Slackware image has no reason to grow.
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          BUILD_REF: ${{ steps.version.outputs.build_ref }}
+        run: |
+          bash gen-plg-changes.sh -V "$VERSION" -r "$BUILD_REF"
+          # Fail loudly here rather than ship a broken manifest if the splice
+          # ever produced malformed XML (e.g. an unescaped character slipping
+          # past the CDATA guard).
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libxml2-utils
+          xmllint --noout unraid.rsync.plg
+
       - name: Build .txz inside Slackware container
         # VERSION (validated above) is passed into the container via -e and
         # referenced as a shell variable rather than interpolated with ${{ }},
@@ -154,7 +180,7 @@ jobs:
         run: cp unraid.rsync.plg archive/unraid.rsync.plg
 
       - name: Create GitHub Release (.txz + .plg)
-        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           tag_name: ${{ steps.version.outputs.version }}
           # The tag does not exist yet (no tag trigger anymore); pin it to

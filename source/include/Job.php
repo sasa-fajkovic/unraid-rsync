@@ -66,7 +66,8 @@ class Job
      */
     const BOOL_OPTION_KEYS = [
         'recursive',
-        'archive', 'compress', 'humanReadable', 'times', 'perms', 'xattrs',
+        'archive', 'compress', 'humanReadable', 'times', 'omitDirTimes',
+        'omitLinkTimes', 'perms', 'xattrs',
         'acls', 'symlinks', 'hardlinks', 'sparse', 'numericIds', 'partial',
         'inplace', 'checksum', 'update', 'wholeFile', 'sizeOnly',
         'ignoreExisting', 'delete', 'deleteExcluded', 'mkpath',
