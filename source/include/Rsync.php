@@ -48,6 +48,8 @@ class Rsync
         'compress'        => '-z',
         'humanReadable'   => '-h',
         'times'           => '-t',
+        'omitDirTimes'    => '-O',
+        'omitLinkTimes'   => '-J',
         'perms'           => '-p',
         'xattrs'          => '-X',
         'acls'            => '-A',
