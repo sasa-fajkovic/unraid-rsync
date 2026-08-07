@@ -91,6 +91,23 @@ final class RsyncTest extends TestCase
         $this->assertContains('-h', $tokens);
         $this->assertNotContains('-a', $tokens);
         $this->assertNotContains('--delete', $tokens);
+        // -O/-J are opt-in only; the shipped default keeps preserving times
+        // everywhere (including directories/symlinks) unless the user opts out.
+        $this->assertNotContains('-O', $tokens);
+        $this->assertNotContains('-J', $tokens);
+    }
+
+    public function testOmitDirAndLinkTimesFlags(): void
+    {
+        // -O/--omit-dir-times and -J/--omit-link-times let a user keep -t
+        // (Preserve times) for regular files while opting directories/symlinks
+        // out, for remote filesystems that cannot set times on those entries.
+        $opts = $this->emptyOpts();
+        $opts['omitDirTimes']  = true;
+        $opts['omitLinkTimes'] = true;
+        $tokens = Rsync::optionTokens($opts);
+        $this->assertContains('-O', $tokens, 'omitDirTimes should emit -O');
+        $this->assertContains('-J', $tokens, 'omitLinkTimes should emit -J');
     }
 
     public function testScalarValueFlagsEmitWhenNonEmptyOnly(): void
