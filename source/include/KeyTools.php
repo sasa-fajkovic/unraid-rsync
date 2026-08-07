@@ -211,7 +211,7 @@ class KeyTools
         [$code, $stdout, $stderr] = static::runKeygen(['ssh-keygen', '-y', '-P', '', '-f', $keyFile]);
         self::rmTempDir($dir);
 
-        if ($code !== 0 || !is_string($stdout) || trim($stdout) === '') {
+        if ($code !== 0 || trim($stdout) === '') {
             $msg = self::firstLine($stderr);
             if (stripos($msg, 'passphrase') !== false || stripos($msg, 'incorrect') !== false) {
                 return ['ok' => false, 'error' => 'The private key is passphrase-protected. Provide a key with an empty passphrase (required for unattended runs).'];
@@ -245,7 +245,7 @@ class KeyTools
         }
         [$code, $stdout, ] = static::runKeygen(['ssh-keygen', '-lf', $pubFile]);
         self::rmTempDir($dir);
-        if ($code !== 0 || !is_string($stdout)) {
+        if ($code !== 0) {
             return '';
         }
         return self::parseFingerprint($stdout);
@@ -353,9 +353,9 @@ class KeyTools
             ];
         }
 
-        $hostKey = self::filterKeyscanOutput(is_string($stdout) ? $stdout : '');
+        $hostKey = self::filterKeyscanOutput($stdout);
         if ($hostKey === '') {
-            $msg = self::firstLine(is_string($stderr) ? $stderr : '');
+            $msg = self::firstLine($stderr);
             return [
                 'ok'    => false,
                 'error' => 'No host key returned. The host may be unreachable or not running SSH'
