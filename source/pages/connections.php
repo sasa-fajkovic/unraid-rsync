@@ -27,11 +27,17 @@
  *     are never sent to the browser.
  */
 
+require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Config.php';
 require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Credentials.php';
 require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Ssh.php';
 require_once '/usr/local/emhttp/plugins/unraid.rsync/pages/_options_form.php'; // ur_h / ur_t
 
 $csrf = ur_render_csrf_token();
+
+// Point Credentials at the configured secrets dir (if any) BEFORE loading, so
+// a custom global.secretsDir resolves credentials.json from the same place
+// the handler writes it - see ur_push_secrets_dir_override().
+ur_push_secrets_dir_override();
 
 // Load credentials for DISPLAY only; on a read error show defaults + a warning
 // (the handler will refuse to save, 409, until it's resolved). Never persist

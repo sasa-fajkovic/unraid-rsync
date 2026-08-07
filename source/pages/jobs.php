@@ -57,8 +57,12 @@ $globalOpts  = $config['global']['defaultRsyncOptions'] ?? Config::defaultRsyncO
 $handlerUrl  = '/plugins/unraid.rsync/include/handler.php';
 
 // Load the saved connections so the per-job Connection select can be populated.
-// A credentials read error here is non-fatal for the Jobs tab: we just render
-// an empty connection list (the Connections tab surfaces the real error).
+// Point Credentials at the configured secrets dir (if any) BEFORE loading, so
+// a custom global.secretsDir resolves credentials.json from the same place
+// the handler writes it - see ur_push_secrets_dir_override(). A credentials
+// read error here is non-fatal for the Jobs tab: we just render an empty
+// connection list (the Connections tab surfaces the real error).
+ur_push_secrets_dir_override();
 $urConnections = [];
 try {
     $credsForJobs = Credentials::load();

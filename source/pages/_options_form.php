@@ -47,6 +47,28 @@ if (!function_exists('ur_h')) {
     }
 }
 
+require_once __DIR__ . '/../include/Config.php';
+require_once __DIR__ . '/../include/Credentials.php';
+
+if (!function_exists('ur_push_secrets_dir_override')) {
+    /**
+     * Point Credentials at the configured secrets dir (if any) so a page-render
+     * read resolves credentials.json from the SAME place handler.php's AJAX
+     * actions and the Runner write it. Mirrors the push in
+     * handler.php's ur_dispatch() / Runner::run(); '' => the default /boot dir.
+     *
+     * Every page body that calls Credentials::load() for display must call this
+     * first - without it, a custom global.secretsDir makes the Credentials /
+     * Connections / Jobs tabs look empty even though the data is safely on disk
+     * at the configured path (only writes went through the push in handler.php).
+     */
+    function ur_push_secrets_dir_override(): void
+    {
+        $dir = Config::secretsDir();
+        Credentials::$secretsDirOverride = ($dir !== '') ? $dir : null;
+    }
+}
+
 if (!function_exists('ur_t')) {
     /**
      * Translation wrapper. On a live webGui the global _() is provided; under a
