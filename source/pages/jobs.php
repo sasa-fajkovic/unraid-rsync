@@ -349,10 +349,18 @@ function ur_render_job_card($job, $index): void
  * of collapsing to 1 line). Shared by the gutter and the `rows` attribute so
  * they always agree pre-JS-load; client-side JS keeps both in sync with what
  * the user actually types (see syncHookGutter()).
+ *
+ * Trailing blank lines in the SAVED value (e.g. a stray Enter left at the end
+ * from before the box auto-sized) are trimmed before counting: the caller
+ * already adds one buffer row on top of this count, so a value ending in "\n"
+ * would otherwise double up on blank space - one row for the saved trailing
+ * blank line, another for the buffer - which is exactly what looked like the
+ * box being "half empty".
  */
 function ur_hook_line_count(string $value, string $placeholder): int
 {
     $basis = ($value !== '') ? $value : $placeholder;
+    $basis = rtrim($basis, "\n");
 
     return max(1, substr_count($basis, "\n") + 1);
 }
@@ -1293,7 +1301,11 @@ ur_emit_form_enable_assets();
   function syncHookGutter(ta) {
     var gutter = urHookGutterFor(ta);
     var basis = ta.value !== '' ? ta.value : (ta.getAttribute('placeholder') || '');
-    var n = basis.split('\n').length;
+    /* Trim trailing blank lines before counting - see ur_hook_line_count() in
+     * jobs.php for why: the +1 buffer row below already covers that space, so
+     * counting a saved trailing "\n" too would double up on blank rows. */
+    var trimmed = basis.replace(/\n+$/, '');
+    var n = trimmed === '' ? 1 : trimmed.split('\n').length;
     if (gutter) {
       var nums = [];
       for (var i = 1; i <= n; i++) { nums.push(i); }
