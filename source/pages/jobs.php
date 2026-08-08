@@ -724,13 +724,18 @@ input.ur-switch:disabled { opacity: 0.5; cursor: default; }
    soft-wrap (white-space: pre) — a long one-liner stays on its own numbered
    row and scrolls HORIZONTALLY instead of folding across several visual rows,
    which would otherwise look like several separate lines (and would also
-   throw off the fixed-height row count). .ur-hook-dt/.ur-hook-dd escape the
-   shared dl label-column layout so the field stacks full-width under its
-   label instead of being squeezed into the narrow value column - webGui's
-   dl here is CSS GRID (`grid-template-columns: <label track> <value track>`),
-   NOT float, so that takes `grid-column: 1 / -1` (span both tracks), not
-   float/margin-left (kept anyway as a defensive fallback for any older/other
-   webGui dl that IS float-based). .ur-hook-ta additionally needs its own
+   throw off the fixed-height row count). .ur-hook-dd escapes the shared dl
+   label-column layout so the field spans the FULL row width instead of being
+   squeezed into the narrow value column - webGui's dl here is CSS GRID
+   (`grid-template-columns: <label track> <value track>`), NOT float, so that
+   takes `grid-column: 1 / -1` on the dd (span both tracks), not float/margin-
+   left (kept anyway as a defensive fallback for any older/other webGui dl
+   that IS float-based). .ur-hook-dt (the label) deliberately does NOT get the
+   same span - it stays in its normal label-column grid cell like every other
+   field's <dt>, right-aligned close to the field; spanning it too made its
+   text right-align against the far edge of the now-full-width row, floating
+   it away from the box underneath and breaking the label's visual pairing
+   with its field. .ur-hook-ta additionally needs its own
    `max-width: none` - webGui ships a generic `textarea { max-width: 400px }`
    (a sane default for ordinary text fields) that otherwise clamps the box to
    400px regardless of how wide its flex container actually is, leaving the
@@ -744,11 +749,11 @@ input.ur-switch:disabled { opacity: 0.5; cursor: default; }
    to #f2f2f2, leaving light-grey text on a light-grey box — the actual hook
    content was all but invisible. An explicit dark terminal palette reads clearly
    on BOTH the white and black webGui themes. */
-.ur-hook-dt, .ur-hook-dd {
+.ur-hook-dd {
   grid-column: 1 / -1 !important;
   float: none !important; width: auto !important; margin-left: 0 !important; clear: both;
+  display: block;
 }
-.ur-hook-dd { display: block; }
 .ur-hook-editor {
   display: flex; align-items: stretch; width: 100%; box-sizing: border-box;
   border: 1px solid var(--border-color, #555); border-radius: 4px; overflow: hidden;
