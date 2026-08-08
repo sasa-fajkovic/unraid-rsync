@@ -297,16 +297,18 @@ function ur_render_job_card($job, $index): void
 
     $preExample  = ur_t("# Runs before the transfer. Example:\n# mount /mnt/remotes/nas-backup");
     $postExample = ur_t("# Runs after the transfer (always). Example:\n# [ \"\$UR_JOB_STATUS\" = SUCCESS ] && logger \"backup finished ok\"");
+    $preLines    = ur_hook_line_count($preHook, $preExample);
+    $postLines   = ur_hook_line_count($postHook, $postExample);
     echo '<dt class="ur-hook-dt"><label for="' . ur_h($idb . '_pre') . '">' . ur_h(ur_t('Pre-run hook')) . '</label>:</dt>';
     echo '<dd class="ur-hook-dd"><div class="ur-hook-editor">'
-        . ur_hook_gutter_html($preHook, $preExample)
+        . ur_hook_gutter_html($preLines)
         . '<textarea class="ur-hook-ta" id="' . ur_h($idb . '_pre') . '" name="' . ur_h($p . '[preHook]')
-        . '" rows="6" spellcheck="false" autocapitalize="off" autocomplete="off" wrap="off" placeholder="' . ur_h($preExample) . '">' . ur_h($preHook) . '</textarea></div></dd>';
+        . '" rows="' . ur_h((string) ($preLines + 1)) . '" spellcheck="false" autocapitalize="off" autocomplete="off" wrap="off" placeholder="' . ur_h($preExample) . '">' . ur_h($preHook) . '</textarea></div></dd>';
     echo '<dt class="ur-hook-dt"><label for="' . ur_h($idb . '_post') . '">' . ur_h(ur_t('Post-run hook')) . '</label>:</dt>';
     echo '<dd class="ur-hook-dd"><div class="ur-hook-editor">'
-        . ur_hook_gutter_html($postHook, $postExample)
+        . ur_hook_gutter_html($postLines)
         . '<textarea class="ur-hook-ta" id="' . ur_h($idb . '_post') . '" name="' . ur_h($p . '[postHook]')
-        . '" rows="6" spellcheck="false" autocapitalize="off" autocomplete="off" wrap="off" placeholder="' . ur_h($postExample) . '">' . ur_h($postHook) . '</textarea></div></dd>';
+        . '" rows="' . ur_h((string) ($postLines + 1)) . '" spellcheck="false" autocapitalize="off" autocomplete="off" wrap="off" placeholder="' . ur_h($postExample) . '">' . ur_h($postHook) . '</textarea></div></dd>';
 
     echo '</dl>';
 
@@ -342,17 +344,25 @@ function ur_render_job_card($job, $index): void
 }
 
 /**
- * Build the line-number gutter markup for a hook textarea. Numbers 1..N where
- * N is the line count of the SAVED value, or of the placeholder text when the
- * value is empty (so an untouched field still shows a sensible gutter instead
- * of a lone "1"). This is only the pre-JS-load paint - client-side JS keeps it
- * in sync with what the user actually types (see syncHookGutter()).
+ * Line count of a hook textarea's SAVED value, or of the placeholder text
+ * when the value is empty (so an untouched field still sizes sensibly instead
+ * of collapsing to 1 line). Shared by the gutter and the `rows` attribute so
+ * they always agree pre-JS-load; client-side JS keeps both in sync with what
+ * the user actually types (see syncHookGutter()).
  */
-function ur_hook_gutter_html(string $value, string $placeholder): string
+function ur_hook_line_count(string $value, string $placeholder): int
 {
     $basis = ($value !== '') ? $value : $placeholder;
-    $n     = max(1, substr_count($basis, "\n") + 1);
-    $nums  = implode("\n", range(1, $n));
+
+    return max(1, substr_count($basis, "\n") + 1);
+}
+
+/**
+ * Build the line-number gutter markup for a hook textarea: numbers 1..N.
+ */
+function ur_hook_gutter_html(int $lines): string
+{
+    $nums = implode("\n", range(1, $lines));
 
     return '<div class="ur-hook-gutter" aria-hidden="true">' . ur_h($nums) . '</div>';
 }
@@ -697,13 +707,17 @@ input.ur-switch:disabled { opacity: 0.5; cursor: default; }
 .ur-toast.ur-show { opacity: 1; }
 
 /* Pre/post hook editors: users paste shell snippets here, so the textareas read
-   as small code editors — monospace, resizable, spellcheck off, with a
-   line-number gutter (.ur-hook-gutter) so a multi-line script and a single
-   long one-liner are unambiguous at a glance ("iterating gray line numbers").
-   Lines do NOT soft-wrap (white-space: pre) — a long one-liner stays on its
-   own numbered line and scrolls horizontally instead of folding across
-   several visual rows, which would otherwise look like several separate
-   lines. .ur-hook-dt/.ur-hook-dd escape the shared dl label-column layout
+   as small code editors — monospace, spellcheck off, with a line-number gutter
+   (.ur-hook-gutter) so a multi-line script and a single long one-liner are
+   unambiguous at a glance ("iterating gray line numbers"). Height is FIXED at
+   (line count + 1) rows - no drag-resize handle - and kept in sync with the
+   content by JS (rows attribute, set server-side on render and client-side on
+   every keystroke via syncHookGutter()); width is fixed too, and lines do NOT
+   soft-wrap (white-space: pre) — a long one-liner stays on its own numbered
+   row and scrolls HORIZONTALLY instead of folding across several visual rows,
+   which would otherwise look like several separate lines (and would also
+   throw off the fixed-height row count). .ur-hook-dt/.ur-hook-dd escape the
+   shared dl label-column layout
    (float/margin-left) so the field stacks full-width under its label instead
    of being squeezed into the narrow value column. The accompanying
    .ur-hook-help is a VISIBLE callout (the stock blockquote.inline_help is
@@ -731,10 +745,10 @@ input.ur-switch:disabled { opacity: 0.5; cursor: default; }
   color: #6e6e6e !important; background: #242424 !important; border-right: 1px solid #3a3a3a;
 }
 .ur-hook-ta {
-  flex: 1 1 auto; width: auto; min-width: 0; box-sizing: border-box; min-height: 7em; resize: vertical;
+  flex: 1 1 auto; width: auto; min-width: 0; box-sizing: border-box; resize: none;
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
   font-size: 12px; line-height: 1.5; tab-size: 2; -moz-tab-size: 2;
-  white-space: pre; overflow: auto;
+  white-space: pre; overflow-x: auto; overflow-y: hidden;
   /* !important so the dark palette survives FOCUS: the webGui theme ships a
      `textarea:focus` rule that repaints the background light (#e8e8e8) on focus,
      which against our light #e6e6e6 text left the focused box unreadable. An
@@ -1244,13 +1258,16 @@ ur_emit_form_enable_assets();
     Array.prototype.forEach.call(cbs, syncManualOnly);
   }
 
-  /* Line-number gutter for the pre/post hook editors (.ur-hook-ta). The
-   * gutter is the textarea's immediate previous sibling inside
-   * .ur-hook-editor (see ur_hook_gutter_html() in jobs.php); no id-matching
-   * needed. Line count comes from the LIVE value once the user has typed
-   * anything; while the field is still empty, it falls back to the
+  /* Line-number gutter + auto-height for the pre/post hook editors
+   * (.ur-hook-ta). The gutter is the textarea's immediate previous sibling
+   * inside .ur-hook-editor (see ur_hook_gutter_html() in jobs.php); no
+   * id-matching needed. Line count comes from the LIVE value once the user
+   * has typed anything; while the field is still empty, it falls back to the
    * placeholder text so an untouched field still shows a sensible gutter
-   * (matching the server-rendered initial paint). */
+   * (matching the server-rendered initial paint). The textarea has no
+   * drag-resize handle (CSS `resize: none`) - height is FIXED at
+   * (line count + 1) rows and only ever changes here, as content is typed or
+   * deleted, so it always exactly fits what's actually in the box. */
   function urHookGutterFor(ta) {
     var prev = ta.previousElementSibling;
     return (prev && prev.classList.contains('ur-hook-gutter')) ? prev : null;
@@ -1264,6 +1281,7 @@ ur_emit_form_enable_assets();
     for (var i = 1; i <= n; i++) { nums.push(i); }
     gutter.textContent = nums.join('\n');
     gutter.scrollTop = ta.scrollTop;
+    ta.rows = n + 1;
   }
   function syncAllHookGutters() {
     var tas = document.querySelectorAll('.ur-hook-ta');
