@@ -273,18 +273,23 @@ function ur_render_job_card($job, $index): void
     }
     echo '</select></dd>';
 
-    // pre/post hooks. Both run as ROOT via `bash -c` and their stdout/stderr is
-    // captured into the per-run log, which is rendered in the browser. Users paste
-    // shell SCRIPTS here, so the textareas are styled as small code editors
-    // (monospace, resizable, no wrap/spellcheck) and a VISIBLE helper explains
-    // both hooks + the outcome env vars + the root/secret-leak warning. (The stock
-    // blockquote.inline_help is hidden by default unless help mode is on, so the
-    // explanation would otherwise be invisible.)
+    // pre/post hooks. Both run as ROOT via a SINGLE `bash -c "$hook"` call
+    // (Runner::runHook) — the whole textarea value is one bash script, so
+    // multi-line hooks just execute top-to-bottom in one shell session
+    // (a variable set on line 1 is still set on line 5); it is NOT one
+    // process per line. The textareas are styled as small code editors
+    // (monospace, resizable, no wrap/spellcheck, line-numbered gutter so a
+    // multi-line script and a single long one-liner are unambiguous at a
+    // glance) and a VISIBLE helper explains both hooks + the outcome env
+    // vars + the root/secret-leak warning. (The stock blockquote.inline_help
+    // is hidden by default unless help mode is on, so the explanation would
+    // otherwise be invisible.)
     $hookEnvVars = 'UR_JOB_ID, UR_JOB_NAME, UR_DRY_RUN, UR_TRIGGER, UR_JOB_STATUS, UR_EXIT_CODE';
     echo '<dt>' . ur_h(ur_t('Pre / post-run hooks')) . ':</dt>';
     echo '<dd><div class="ur-hook-help">';
     echo '<p>' . ur_h(ur_t('Optional shell commands run on THIS server as root (via bash -c) around the transfer: the pre-run hook just before rsync starts, the post-run hook just after it finishes. The post-run hook ALWAYS runs — even when the transfer fails or is aborted.')) . '</p>';
-    echo '<p>' . ur_h(ur_t('Use them to prepare or clean up around a backup — e.g. mount/unmount a share, spin a disk up or down, or send a custom notification. Write it like a small bash script (multiple lines are fine; no shebang needed).')) . '</p>';
+    echo '<p>' . ur_h(ur_t('Use them to prepare or clean up around a backup — e.g. mount/unmount a share, spin a disk up or down, or send a custom notification. Write it like a small bash script: one command per line, or a single long one-liner — no shebang needed.')) . '</p>';
+    echo '<p>' . ur_h(ur_t('The whole box runs as ONE shell session, top to bottom, in order: line 1 finishes before line 2 starts, and a variable or `cd` from an earlier line still applies later — just like running a saved .sh file. The numbers on the left mark each line so you can see exactly what runs and in what order.')) . '</p>';
     echo '<p>' . ur_h(ur_t('Available to both hooks as environment variables')) . ': <code>' . ur_h($hookEnvVars) . '</code>. '
         . ur_h(ur_t('UR_DRY_RUN is 0/1, UR_TRIGGER is manual/schedule; UR_JOB_STATUS and UR_EXIT_CODE hold the run outcome (post-run hook).')) . '</p>';
     echo '<p class="ur-hook-warn">' . ur_h(ur_t('Hooks run with full root privileges — be careful what you put here. Their output is captured into the run log (visible in the UI), so do not echo passwords or keys.')) . '</p>';
@@ -292,12 +297,16 @@ function ur_render_job_card($job, $index): void
 
     $preExample  = ur_t("# Runs before the transfer. Example:\n# mount /mnt/remotes/nas-backup");
     $postExample = ur_t("# Runs after the transfer (always). Example:\n# [ \"\$UR_JOB_STATUS\" = SUCCESS ] && logger \"backup finished ok\"");
-    echo '<dt><label for="' . ur_h($idb . '_pre') . '">' . ur_h(ur_t('Pre-run hook')) . '</label>:</dt>';
-    echo '<dd><textarea class="ur-hook-ta" id="' . ur_h($idb . '_pre') . '" name="' . ur_h($p . '[preHook]')
-        . '" rows="6" spellcheck="false" autocapitalize="off" autocomplete="off" wrap="off" placeholder="' . ur_h($preExample) . '">' . ur_h($preHook) . '</textarea></dd>';
-    echo '<dt><label for="' . ur_h($idb . '_post') . '">' . ur_h(ur_t('Post-run hook')) . '</label>:</dt>';
-    echo '<dd><textarea class="ur-hook-ta" id="' . ur_h($idb . '_post') . '" name="' . ur_h($p . '[postHook]')
-        . '" rows="6" spellcheck="false" autocapitalize="off" autocomplete="off" wrap="off" placeholder="' . ur_h($postExample) . '">' . ur_h($postHook) . '</textarea></dd>';
+    echo '<dt class="ur-hook-dt"><label for="' . ur_h($idb . '_pre') . '">' . ur_h(ur_t('Pre-run hook')) . '</label>:</dt>';
+    echo '<dd class="ur-hook-dd"><div class="ur-hook-editor">'
+        . ur_hook_gutter_html($preHook, $preExample)
+        . '<textarea class="ur-hook-ta" id="' . ur_h($idb . '_pre') . '" name="' . ur_h($p . '[preHook]')
+        . '" rows="6" spellcheck="false" autocapitalize="off" autocomplete="off" wrap="off" placeholder="' . ur_h($preExample) . '">' . ur_h($preHook) . '</textarea></div></dd>';
+    echo '<dt class="ur-hook-dt"><label for="' . ur_h($idb . '_post') . '">' . ur_h(ur_t('Post-run hook')) . '</label>:</dt>';
+    echo '<dd class="ur-hook-dd"><div class="ur-hook-editor">'
+        . ur_hook_gutter_html($postHook, $postExample)
+        . '<textarea class="ur-hook-ta" id="' . ur_h($idb . '_post') . '" name="' . ur_h($p . '[postHook]')
+        . '" rows="6" spellcheck="false" autocapitalize="off" autocomplete="off" wrap="off" placeholder="' . ur_h($postExample) . '">' . ur_h($postHook) . '</textarea></div></dd>';
 
     echo '</dl>';
 
@@ -330,6 +339,22 @@ function ur_render_job_card($job, $index): void
 
     echo '</div>'; // .ur-job-body
     echo '</div>'; // .ur-job-card
+}
+
+/**
+ * Build the line-number gutter markup for a hook textarea. Numbers 1..N where
+ * N is the line count of the SAVED value, or of the placeholder text when the
+ * value is empty (so an untouched field still shows a sensible gutter instead
+ * of a lone "1"). This is only the pre-JS-load paint - client-side JS keeps it
+ * in sync with what the user actually types (see syncHookGutter()).
+ */
+function ur_hook_gutter_html(string $value, string $placeholder): string
+{
+    $basis = ($value !== '') ? $value : $placeholder;
+    $n     = max(1, substr_count($basis, "\n") + 1);
+    $nums  = implode("\n", range(1, $n));
+
+    return '<div class="ur-hook-gutter" aria-hidden="true">' . ur_h($nums) . '</div>';
 }
 
 /**
@@ -672,10 +697,17 @@ input.ur-switch:disabled { opacity: 0.5; cursor: default; }
 .ur-toast.ur-show { opacity: 1; }
 
 /* Pre/post hook editors: users paste shell snippets here, so the textareas read
-   as small code editors — monospace, resizable, soft-wrapping (so a long command
-   stays fully visible instead of hiding behind a horizontal scrollbar),
-   spellcheck off. The accompanying .ur-hook-help is a VISIBLE callout (the stock
-   blockquote.inline_help is hidden unless help mode is on).
+   as small code editors — monospace, resizable, spellcheck off, with a
+   line-number gutter (.ur-hook-gutter) so a multi-line script and a single
+   long one-liner are unambiguous at a glance ("iterating gray line numbers").
+   Lines do NOT soft-wrap (white-space: pre) — a long one-liner stays on its
+   own numbered line and scrolls horizontally instead of folding across
+   several visual rows, which would otherwise look like several separate
+   lines. .ur-hook-dt/.ur-hook-dd escape the shared dl label-column layout
+   (float/margin-left) so the field stacks full-width under its label instead
+   of being squeezed into the narrow value column. The accompanying
+   .ur-hook-help is a VISIBLE callout (the stock blockquote.inline_help is
+   hidden unless help mode is on).
 
    The palette is a FIXED dark code-editor look, deliberately NOT theme vars: the
    old `color: var(--font-color)` resolved to its #d0d0d0 fallback on Unraid's
@@ -683,21 +715,36 @@ input.ur-switch:disabled { opacity: 0.5; cursor: default; }
    to #f2f2f2, leaving light-grey text on a light-grey box — the actual hook
    content was all but invisible. An explicit dark terminal palette reads clearly
    on BOTH the white and black webGui themes. */
+.ur-hook-dt, .ur-hook-dd { float: none !important; width: auto !important; margin-left: 0 !important; clear: both; }
+.ur-hook-dd { display: block; }
+.ur-hook-editor {
+  display: flex; align-items: stretch; width: 100%; box-sizing: border-box;
+  border: 1px solid var(--border-color, #555); border-radius: 4px; overflow: hidden;
+  background: #1e1e1e;
+}
+.ur-hook-editor:focus-within { border-color: var(--blue-500, #2196f3); }
+.ur-hook-gutter {
+  flex: 0 0 auto; box-sizing: border-box; min-width: 2.5em; padding: 8px 8px 8px 0;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: 12px; line-height: 1.5; white-space: pre; overflow: hidden;
+  text-align: right; -webkit-user-select: none; user-select: none;
+  color: #6e6e6e !important; background: #242424 !important; border-right: 1px solid #3a3a3a;
+}
 .ur-hook-ta {
-  width: 100%; box-sizing: border-box; min-height: 7em; resize: vertical;
+  flex: 1 1 auto; width: auto; min-width: 0; box-sizing: border-box; min-height: 7em; resize: vertical;
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
   font-size: 12px; line-height: 1.5; tab-size: 2; -moz-tab-size: 2;
-  white-space: pre-wrap; word-break: break-word; overflow: auto;
+  white-space: pre; overflow: auto;
   /* !important so the dark palette survives FOCUS: the webGui theme ships a
      `textarea:focus` rule that repaints the background light (#e8e8e8) on focus,
      which against our light #e6e6e6 text left the focused box unreadable. An
      !important background/color defeats that non-important focus rule, keeping
      the editor dark and legible whether or not it has focus. */
   background: #1e1e1e !important; color: #e6e6e6 !important;
-  border: 1px solid var(--border-color, #555); border-radius: 4px; padding: 8px 10px;
+  border: 0; border-radius: 0; padding: 8px 10px;
 }
 .ur-hook-ta::placeholder { color: #7d7d7d !important; opacity: 1; }
-.ur-hook-ta:focus { outline: none; border-color: var(--blue-500, #2196f3); background: #1e1e1e !important; color: #e6e6e6 !important; }
+.ur-hook-ta:focus { outline: none; background: #1e1e1e !important; color: #e6e6e6 !important; }
 .ur-hook-help {
   margin: 4px 0 10px; padding: 10px 12px; border-radius: 4px;
   background: var(--blue-100, #d9edf7); border: 1px solid var(--blue-200, #bce8f1);
@@ -912,6 +959,7 @@ ur_emit_form_enable_assets();
     syncAllConnRequired();
     syncAllManualOnly();
     syncAllCronHuman();
+    syncAllHookGutters();
     /* A just-added card starts EXPANDED (the user wants to fill it in) and gets
      * focus on its name field. */
     setCardOpen(card, true);
@@ -1196,6 +1244,42 @@ ur_emit_form_enable_assets();
     Array.prototype.forEach.call(cbs, syncManualOnly);
   }
 
+  /* Line-number gutter for the pre/post hook editors (.ur-hook-ta). The
+   * gutter is the textarea's immediate previous sibling inside
+   * .ur-hook-editor (see ur_hook_gutter_html() in jobs.php); no id-matching
+   * needed. Line count comes from the LIVE value once the user has typed
+   * anything; while the field is still empty, it falls back to the
+   * placeholder text so an untouched field still shows a sensible gutter
+   * (matching the server-rendered initial paint). */
+  function urHookGutterFor(ta) {
+    var prev = ta.previousElementSibling;
+    return (prev && prev.classList.contains('ur-hook-gutter')) ? prev : null;
+  }
+  function syncHookGutter(ta) {
+    var gutter = urHookGutterFor(ta);
+    if (!gutter) { return; }
+    var basis = ta.value !== '' ? ta.value : (ta.getAttribute('placeholder') || '');
+    var n = basis.split('\n').length;
+    var nums = [];
+    for (var i = 1; i <= n; i++) { nums.push(i); }
+    gutter.textContent = nums.join('\n');
+    gutter.scrollTop = ta.scrollTop;
+  }
+  function syncAllHookGutters() {
+    var tas = document.querySelectorAll('.ur-hook-ta');
+    Array.prototype.forEach.call(tas, syncHookGutter);
+  }
+  /* 'scroll' does not bubble, so this listener must run in the CAPTURE phase
+   * to catch it from any .ur-hook-ta via delegation (including cloned cards
+   * added after load). */
+  document.addEventListener('scroll', function (ev) {
+    var t = ev.target;
+    if (t && t.classList && t.classList.contains('ur-hook-ta')) {
+      var gutter = urHookGutterFor(t);
+      if (gutter) { gutter.scrollTop = t.scrollTop; }
+    }
+  }, true);
+
   /* Keyboard toggle for the collapsible header (it is a role=button). */
   document.addEventListener('keydown', function (ev) {
     if (ev.key !== 'Enter' && ev.key !== ' ' && ev.key !== 'Spacebar') { return; }
@@ -1216,6 +1300,8 @@ ur_emit_form_enable_assets();
       if (title) { title.textContent = (t.value || '').trim() || '(unnamed job)'; }
     } else if (t.classList && t.classList.contains('ur-cron-input')) {
       updateCronHuman(t);
+    } else if (t.classList && t.classList.contains('ur-hook-ta')) {
+      syncHookGutter(t);
     }
   });
 
@@ -1660,11 +1746,13 @@ ur_emit_form_enable_assets();
     }
   });
 
-  /* Seed the Connection-required + manual-only + cron-reading state for all
-   * rendered cards. */
+  /* Seed the Connection-required + manual-only + cron-reading + hook-gutter
+   * state for all rendered cards. (The hook gutter is already correct from
+   * the server-side render; this just keeps JS and markup in lockstep.) */
   syncAllConnRequired();
   syncAllManualOnly();
   syncAllCronHuman();
+  syncAllHookGutters();
 
   /* Kick off polling on load only when something is already running (the
    * server-rendered badges tell us, but a cheap initial poll is simplest and

@@ -1,5 +1,9 @@
 # Unraid Rsync
 
+[![Install from Community Applications](https://img.shields.io/badge/Unraid-Install%20from%20Community%20Applications-f15a2c?logo=unraid&logoColor=white)](https://ca.unraid.net/apps/unraid-rsync-1q5v71x1vub5v5)
+[![GitHub release](https://img.shields.io/github/v/release/sasa-fajkovic/unraid-rsync)](https://github.com/sasa-fajkovic/unraid-rsync/releases/latest)
+[![GitHub release downloads](https://img.shields.io/github/downloads/sasa-fajkovic/unraid-rsync/total.svg)](https://github.com/sasa-fajkovic/unraid-rsync/releases)
+
 A native Unraid webGui plugin for scheduling and monitoring **rsync backup
 jobs** — either **over SSH** to/from a remote host or **locally** between two
 paths on the server — a multi-job scheduler rather than the usual
