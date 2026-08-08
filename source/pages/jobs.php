@@ -738,16 +738,25 @@ input.ur-switch:disabled { opacity: 0.5; cursor: default; }
 }
 .ur-hook-editor:focus-within { border-color: var(--blue-500, #2196f3); }
 .ur-hook-gutter {
-  flex: 0 0 auto; box-sizing: border-box; min-width: 2.5em; padding: 8px 8px 8px 0;
+  flex: 0 0 auto; box-sizing: border-box !important; min-width: 2.5em; padding: 8px 8px 8px 0 !important;
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
-  font-size: 12px; line-height: 1.5; white-space: pre; overflow: hidden;
+  font-size: 12px !important; line-height: 1.5 !important; white-space: pre; overflow: hidden;
   text-align: right; -webkit-user-select: none; user-select: none;
   color: #6e6e6e !important; background: #242424 !important; border-right: 1px solid #3a3a3a;
 }
 .ur-hook-ta {
-  flex: 1 1 auto; width: auto; min-width: 0; box-sizing: border-box; resize: none;
+  flex: 1 1 auto; width: auto; min-width: 0; box-sizing: border-box !important; resize: none !important;
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
-  font-size: 12px; line-height: 1.5; tab-size: 2; -moz-tab-size: 2;
+  /* font-size/line-height/padding are !important - the webGui theme ships a
+     generic `textarea { ... }` rule (same one the focus-repaint comment below
+     talks about) that otherwise wins on these too, inflating the box past
+     what our JS height calc (which reads these back via getComputedStyle -
+     see syncHookGutter()) assumes, so the box read as mostly-empty below the
+     actual text. Forcing our own metrics keeps JS's measurement and the
+     visible box in agreement. Extra right padding (vs left) gives scrolled-to
+     the long one-liners breathing room before the border instead of the text
+     butting right up against it. */
+  font-size: 12px !important; line-height: 1.5 !important; tab-size: 2; -moz-tab-size: 2;
   white-space: pre; overflow-x: auto; overflow-y: hidden;
   /* !important so the dark palette survives FOCUS: the webGui theme ships a
      `textarea:focus` rule that repaints the background light (#e8e8e8) on focus,
@@ -755,7 +764,7 @@ input.ur-switch:disabled { opacity: 0.5; cursor: default; }
      !important background/color defeats that non-important focus rule, keeping
      the editor dark and legible whether or not it has focus. */
   background: #1e1e1e !important; color: #e6e6e6 !important;
-  border: 0; border-radius: 0; padding: 8px 10px;
+  border: 0; border-radius: 0; padding: 8px 22px 8px 10px !important;
 }
 .ur-hook-ta::placeholder { color: #7d7d7d !important; opacity: 1; }
 .ur-hook-ta:focus { outline: none; background: #1e1e1e !important; color: #e6e6e6 !important; }
@@ -1267,21 +1276,38 @@ ur_emit_form_enable_assets();
    * (matching the server-rendered initial paint). The textarea has no
    * drag-resize handle (CSS `resize: none`) - height is FIXED at
    * (line count + 1) rows and only ever changes here, as content is typed or
-   * deleted, so it always exactly fits what's actually in the box. */
+   * deleted, so it always exactly fits what's actually in the box.
+   *
+   * Height is set as an explicit inline pixel height, NOT left to the native
+   * `rows` attribute alone: the `rows`-based intrinsic size is computed by
+   * the browser from the textarea's OWN metrics, so if anything upstream
+   * (webGui's own textarea CSS, a browser quirk) ever wins over one of our
+   * font-size/line-height/padding rules despite the !important guards, `rows`
+   * silently produces a box taller than the real text - inline height, read
+   * back from the SAME getComputedStyle() the browser itself would use, self-
+   * corrects instead of drifting out of sync. */
   function urHookGutterFor(ta) {
     var prev = ta.previousElementSibling;
     return (prev && prev.classList.contains('ur-hook-gutter')) ? prev : null;
   }
   function syncHookGutter(ta) {
     var gutter = urHookGutterFor(ta);
-    if (!gutter) { return; }
     var basis = ta.value !== '' ? ta.value : (ta.getAttribute('placeholder') || '');
     var n = basis.split('\n').length;
-    var nums = [];
-    for (var i = 1; i <= n; i++) { nums.push(i); }
-    gutter.textContent = nums.join('\n');
-    gutter.scrollTop = ta.scrollTop;
-    ta.rows = n + 1;
+    if (gutter) {
+      var nums = [];
+      for (var i = 1; i <= n; i++) { nums.push(i); }
+      gutter.textContent = nums.join('\n');
+      gutter.scrollTop = ta.scrollTop;
+    }
+    var rows = n + 1;
+    ta.rows = rows;
+    var cs = window.getComputedStyle(ta);
+    var lineHeight = parseFloat(cs.lineHeight);
+    if (isNaN(lineHeight)) { lineHeight = parseFloat(cs.fontSize) * 1.2; }
+    var boxExtra = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom)
+      + parseFloat(cs.borderTopWidth) + parseFloat(cs.borderBottomWidth);
+    ta.style.height = Math.ceil(rows * lineHeight + boxExtra) + 'px';
   }
   function syncAllHookGutters() {
     var tas = document.querySelectorAll('.ur-hook-ta');
