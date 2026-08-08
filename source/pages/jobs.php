@@ -725,11 +725,18 @@ input.ur-switch:disabled { opacity: 0.5; cursor: default; }
    row and scrolls HORIZONTALLY instead of folding across several visual rows,
    which would otherwise look like several separate lines (and would also
    throw off the fixed-height row count). .ur-hook-dt/.ur-hook-dd escape the
-   shared dl label-column layout
-   (float/margin-left) so the field stacks full-width under its label instead
-   of being squeezed into the narrow value column. The accompanying
-   .ur-hook-help is a VISIBLE callout (the stock blockquote.inline_help is
-   hidden unless help mode is on).
+   shared dl label-column layout so the field stacks full-width under its
+   label instead of being squeezed into the narrow value column - webGui's
+   dl here is CSS GRID (`grid-template-columns: <label track> <value track>`),
+   NOT float, so that takes `grid-column: 1 / -1` (span both tracks), not
+   float/margin-left (kept anyway as a defensive fallback for any older/other
+   webGui dl that IS float-based). .ur-hook-ta additionally needs its own
+   `max-width: none` - webGui ships a generic `textarea { max-width: 400px }`
+   (a sane default for ordinary text fields) that otherwise clamps the box to
+   400px regardless of how wide its flex container actually is, leaving the
+   remaining width as dead space the user can't see or scroll into. The
+   accompanying .ur-hook-help is a VISIBLE callout (the stock
+   blockquote.inline_help is hidden unless help mode is on).
 
    The palette is a FIXED dark code-editor look, deliberately NOT theme vars: the
    old `color: var(--font-color)` resolved to its #d0d0d0 fallback on Unraid's
@@ -737,7 +744,10 @@ input.ur-switch:disabled { opacity: 0.5; cursor: default; }
    to #f2f2f2, leaving light-grey text on a light-grey box — the actual hook
    content was all but invisible. An explicit dark terminal palette reads clearly
    on BOTH the white and black webGui themes. */
-.ur-hook-dt, .ur-hook-dd { float: none !important; width: auto !important; margin-left: 0 !important; clear: both; }
+.ur-hook-dt, .ur-hook-dd {
+  grid-column: 1 / -1 !important;
+  float: none !important; width: auto !important; margin-left: 0 !important; clear: both;
+}
 .ur-hook-dd { display: block; }
 .ur-hook-editor {
   display: flex; align-items: stretch; width: 100%; box-sizing: border-box;
@@ -753,7 +763,8 @@ input.ur-switch:disabled { opacity: 0.5; cursor: default; }
   color: #6e6e6e !important; background: #242424 !important; border-right: 1px solid #3a3a3a;
 }
 .ur-hook-ta {
-  flex: 1 1 auto; width: auto; min-width: 0; box-sizing: border-box !important; resize: none !important;
+  flex: 1 1 auto; width: auto; min-width: 0; max-width: none !important;
+  box-sizing: border-box !important; resize: none !important;
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
   /* font-size/line-height/padding are !important - the webGui theme ships a
      generic `textarea { ... }` rule (same one the focus-repaint comment below
