@@ -299,20 +299,16 @@ function ur_render_job_card($job, $index): void
     $postExample = ur_t("# Runs after the transfer (always). Example:\n# [ \"\$UR_JOB_STATUS\" = SUCCESS ] && logger \"backup finished ok\"");
     $preLines    = ur_hook_line_count($preHook, $preExample);
     $postLines   = ur_hook_line_count($postHook, $postExample);
-    echo '<div class="ur-hook-row">';
     echo '<dt class="ur-hook-dt"><label for="' . ur_h($idb . '_pre') . '">' . ur_h(ur_t('Pre-run hook')) . '</label>:</dt>';
     echo '<dd class="ur-hook-dd"><div class="ur-hook-editor">'
         . ur_hook_gutter_html($preLines)
         . '<textarea class="ur-hook-ta" id="' . ur_h($idb . '_pre') . '" name="' . ur_h($p . '[preHook]')
         . '" rows="' . ur_h((string) ($preLines + 1)) . '" spellcheck="false" autocapitalize="off" autocomplete="off" wrap="off" placeholder="' . ur_h($preExample) . '">' . ur_h($preHook) . '</textarea></div></dd>';
-    echo '</div>';
-    echo '<div class="ur-hook-row">';
     echo '<dt class="ur-hook-dt"><label for="' . ur_h($idb . '_post') . '">' . ur_h(ur_t('Post-run hook')) . '</label>:</dt>';
     echo '<dd class="ur-hook-dd"><div class="ur-hook-editor">'
         . ur_hook_gutter_html($postLines)
         . '<textarea class="ur-hook-ta" id="' . ur_h($idb . '_post') . '" name="' . ur_h($p . '[postHook]')
         . '" rows="' . ur_h((string) ($postLines + 1)) . '" spellcheck="false" autocapitalize="off" autocomplete="off" wrap="off" placeholder="' . ur_h($postExample) . '">' . ur_h($postHook) . '</textarea></div></dd>';
-    echo '</div>';
 
     echo '</dl>';
 
@@ -728,32 +724,34 @@ input.ur-switch:disabled { opacity: 0.5; cursor: default; }
    soft-wrap (white-space: pre) — a long one-liner stays on its own numbered
    row and scrolls HORIZONTALLY instead of folding across several visual rows,
    which would otherwise look like several separate lines (and would also
-   throw off the fixed-height row count). webGui's dl here is CSS GRID
-   (`grid-template-columns: <label track> <value track>`), where each direct
-   dt/dd CHILD of the dl is its own grid item auto-placed into a row - so a
-   bare dt (label track) immediately followed by a dd forced to span both
-   tracks (`grid-column: 1 / -1`, needed so the field is full row width, not
-   squeezed into the narrow value column) can never share a row: the dd's
-   span collides with the dt already sitting in column 1, so grid placement
-   bumps the dd onto the NEXT row - label alone above, full-width box below.
-   There is no way to fix this by tuning dt/dd separately; they have to stop
-   being two independent grid items. Each hook's dt+dd is instead wrapped in
-   a `<div class="ur-hook-row">` (HTML5 explicitly allows a div grouping a
-   dt/dd pair as a direct child of dl) - THAT div is the one actual grid
-   item, given `grid-column: 1 / -1` for the full-width row, and internally
-   it's `display: flex` so the dt (auto width, own column) and dd (flex: 1,
-   fills the rest) sit inline on one row same as a normal field's two grid
-   columns would. .ur-hook-ta additionally needs its own
-   `max-width: none` - webGui ships a generic `textarea { max-width: 400px }`
-   (a sane default for ordinary text fields) that otherwise clamps the box to
-   400px regardless of how wide its flex container actually is, leaving the
-   remaining width as dead space the user can't see or scroll into. Even so,
-   .ur-hook-editor caps at max-width: 960px - letting it ride .ur-hook-dd's
-   full row span all the way out looked oversized/disproportionate next to
-   every other (narrow) field on the page; 960px is comfortably wider than
-   the old 400px clamp for long one-liners without spanning edge-to-edge. The
-   accompanying .ur-hook-help is a VISIBLE callout (the stock
-   blockquote.inline_help is hidden unless help mode is on).
+   throw off the fixed-height row count). .ur-hook-dt/.ur-hook-dd are PLAIN
+   dt/dd - no grid-column span, no wrapper, nothing - same as every other
+   field's, same as the plain intro dt/dd right above them (the "Pre / post-
+   run hooks:" help row). That's deliberate, and the product of getting this
+   wrong twice: webGui's dl here is CSS GRID (`grid-template-columns: <label
+   track> <value track>`), and it was tempting to assume the value track
+   must be narrow, forcing .ur-hook-dd to `grid-column: 1 / -1` to "escape"
+   it - but that forces the dd onto a SEPARATE row (a dt sitting normally in
+   column 1 collides with a dd spanning columns 1 through -1 on the same
+   row, so grid auto-placement bumps the dd down), which is exactly the
+   "label stacked above the field" bug this fought for six commits. Wrapping
+   dt+dd in an extra flex div to get them back onto one row (tried once)
+   traded that bug for a worse one: the wrapper has no idea what width the
+   dl's real label column is, so the label renders flush against the page's
+   left edge instead of aligned under every other field's label. The value
+   track was never actually narrow - `git log` for this block turns up a
+   commit that live-measured it directly against the real deployed page:
+   ~933px, out of a ~1466px full row. The ONLY real narrowing culprit was
+   .ur-hook-ta's own `max-width: none` need - webGui ships a generic
+   `textarea { max-width: 400px }` (a sane default for ordinary text
+   fields) that clamps the box to 400px regardless of how wide its flex
+   container actually is, leaving the remaining width as dead space the
+   user can't see or scroll into - and that fix stands on its own, doesn't
+   need any dt/dd override to work. .ur-hook-editor keeps a max-width: 960px
+   ceiling as a defensive cap for very wide screens; it doesn't bind at the
+   ~933px natural track width. The accompanying .ur-hook-help is a VISIBLE
+   callout (the stock blockquote.inline_help is hidden unless help mode is
+   on).
 
    The palette is a FIXED dark code-editor look, deliberately NOT theme vars: the
    old `color: var(--font-color)` resolved to its #d0d0d0 fallback on Unraid's
