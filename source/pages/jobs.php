@@ -299,16 +299,20 @@ function ur_render_job_card($job, $index): void
     $postExample = ur_t("# Runs after the transfer (always). Example:\n# [ \"\$UR_JOB_STATUS\" = SUCCESS ] && logger \"backup finished ok\"");
     $preLines    = ur_hook_line_count($preHook, $preExample);
     $postLines   = ur_hook_line_count($postHook, $postExample);
+    echo '<div class="ur-hook-row">';
     echo '<dt class="ur-hook-dt"><label for="' . ur_h($idb . '_pre') . '">' . ur_h(ur_t('Pre-run hook')) . '</label>:</dt>';
     echo '<dd class="ur-hook-dd"><div class="ur-hook-editor">'
         . ur_hook_gutter_html($preLines)
         . '<textarea class="ur-hook-ta" id="' . ur_h($idb . '_pre') . '" name="' . ur_h($p . '[preHook]')
         . '" rows="' . ur_h((string) ($preLines + 1)) . '" spellcheck="false" autocapitalize="off" autocomplete="off" wrap="off" placeholder="' . ur_h($preExample) . '">' . ur_h($preHook) . '</textarea></div></dd>';
+    echo '</div>';
+    echo '<div class="ur-hook-row">';
     echo '<dt class="ur-hook-dt"><label for="' . ur_h($idb . '_post') . '">' . ur_h(ur_t('Post-run hook')) . '</label>:</dt>';
     echo '<dd class="ur-hook-dd"><div class="ur-hook-editor">'
         . ur_hook_gutter_html($postLines)
         . '<textarea class="ur-hook-ta" id="' . ur_h($idb . '_post') . '" name="' . ur_h($p . '[postHook]')
         . '" rows="' . ur_h((string) ($postLines + 1)) . '" spellcheck="false" autocapitalize="off" autocomplete="off" wrap="off" placeholder="' . ur_h($postExample) . '">' . ur_h($postHook) . '</textarea></div></dd>';
+    echo '</div>';
 
     echo '</dl>';
 
@@ -724,18 +728,22 @@ input.ur-switch:disabled { opacity: 0.5; cursor: default; }
    soft-wrap (white-space: pre) — a long one-liner stays on its own numbered
    row and scrolls HORIZONTALLY instead of folding across several visual rows,
    which would otherwise look like several separate lines (and would also
-   throw off the fixed-height row count). .ur-hook-dd escapes the shared dl
-   label-column layout so the field spans the FULL row width instead of being
-   squeezed into the narrow value column - webGui's dl here is CSS GRID
-   (`grid-template-columns: <label track> <value track>`), NOT float, so that
-   takes `grid-column: 1 / -1` on the dd (span both tracks), not float/margin-
-   left (kept anyway as a defensive fallback for any older/other webGui dl
-   that IS float-based). .ur-hook-dt (the label) deliberately does NOT get the
-   same span - it stays in its normal label-column grid cell like every other
-   field's <dt>, right-aligned close to the field; spanning it too made its
-   text right-align against the far edge of the now-full-width row, floating
-   it away from the box underneath and breaking the label's visual pairing
-   with its field. .ur-hook-ta additionally needs its own
+   throw off the fixed-height row count). webGui's dl here is CSS GRID
+   (`grid-template-columns: <label track> <value track>`), where each direct
+   dt/dd CHILD of the dl is its own grid item auto-placed into a row - so a
+   bare dt (label track) immediately followed by a dd forced to span both
+   tracks (`grid-column: 1 / -1`, needed so the field is full row width, not
+   squeezed into the narrow value column) can never share a row: the dd's
+   span collides with the dt already sitting in column 1, so grid placement
+   bumps the dd onto the NEXT row - label alone above, full-width box below.
+   There is no way to fix this by tuning dt/dd separately; they have to stop
+   being two independent grid items. Each hook's dt+dd is instead wrapped in
+   a `<div class="ur-hook-row">` (HTML5 explicitly allows a div grouping a
+   dt/dd pair as a direct child of dl) - THAT div is the one actual grid
+   item, given `grid-column: 1 / -1` for the full-width row, and internally
+   it's `display: flex` so the dt (auto width, own column) and dd (flex: 1,
+   fills the rest) sit inline on one row same as a normal field's two grid
+   columns would. .ur-hook-ta additionally needs its own
    `max-width: none` - webGui ships a generic `textarea { max-width: 400px }`
    (a sane default for ordinary text fields) that otherwise clamps the box to
    400px regardless of how wide its flex container actually is, leaving the
@@ -749,9 +757,20 @@ input.ur-switch:disabled { opacity: 0.5; cursor: default; }
    to #f2f2f2, leaving light-grey text on a light-grey box — the actual hook
    content was all but invisible. An explicit dark terminal palette reads clearly
    on BOTH the white and black webGui themes. */
-.ur-hook-dd {
+.ur-hook-row {
   grid-column: 1 / -1 !important;
   float: none !important; width: auto !important; margin-left: 0 !important; clear: both;
+  display: flex; align-items: flex-start; gap: 10px;
+}
+.ur-hook-dt {
+  flex: 0 0 auto; white-space: nowrap;
+  padding-top: 8px; /* lines the label up with the editor's first text row */
+}
+.ur-hook-dd {
+  flex: 1 1 auto; min-width: 0; /* let the box shrink below its content's
+    width so the textarea's own overflow-x:auto scroller kicks in instead
+    of the row stretching the page wide */
+  float: none !important; width: auto !important; margin-left: 0 !important;
   display: block;
 }
 .ur-hook-editor {
