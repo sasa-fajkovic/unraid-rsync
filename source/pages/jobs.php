@@ -747,7 +747,11 @@ input.ur-switch:disabled { opacity: 0.5; cursor: default; }
    `max-width: none` - webGui ships a generic `textarea { max-width: 400px }`
    (a sane default for ordinary text fields) that otherwise clamps the box to
    400px regardless of how wide its flex container actually is, leaving the
-   remaining width as dead space the user can't see or scroll into. The
+   remaining width as dead space the user can't see or scroll into. Even so,
+   .ur-hook-editor caps at max-width: 960px - letting it ride .ur-hook-dd's
+   full row span all the way out looked oversized/disproportionate next to
+   every other (narrow) field on the page; 960px is comfortably wider than
+   the old 400px clamp for long one-liners without spanning edge-to-edge. The
    accompanying .ur-hook-help is a VISIBLE callout (the stock
    blockquote.inline_help is hidden unless help mode is on).
 
@@ -774,7 +778,7 @@ input.ur-switch:disabled { opacity: 0.5; cursor: default; }
   display: block;
 }
 .ur-hook-editor {
-  display: flex; align-items: stretch; width: 100%; box-sizing: border-box;
+  display: flex; align-items: stretch; width: 100%; max-width: 960px; box-sizing: border-box;
   border: 1px solid var(--border-color, #555); border-radius: 4px; overflow: hidden;
   background: #1e1e1e;
 }
