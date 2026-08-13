@@ -255,7 +255,7 @@ final class HandlerTest extends TestCase
             ['--include=*/', '--include=A*', '--exclude=*'],
             array_values(array_filter(
                 $tokens,
-                static fn (string $t): bool => str_starts_with($t, '--include=') || str_starts_with($t, '--exclude=')
+                static fn(string $t): bool => str_starts_with($t, '--include=') || str_starts_with($t, '--exclude=')
             ))
         );
         // And the unticked archive-implied option really is negated, after -a.

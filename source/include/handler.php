@@ -2212,9 +2212,9 @@ function ur_dispatch(): void
             ur_action_save_config();
             return;
 
-        // previewOptions rides with the POST actions for its CSRF check even
-        // though it is read-only: it only maps a submitted options block to its
-        // flag tokens and writes nothing.
+            // previewOptions rides with the POST actions for its CSRF check even
+            // though it is read-only: it only maps a submitted options block to its
+            // flag tokens and writes nothing.
         case 'previewOptions':
         case 'saveCredentials':
         case 'generateKey':

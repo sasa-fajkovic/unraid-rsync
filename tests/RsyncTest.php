@@ -185,7 +185,7 @@ final class RsyncTest extends TestCase
         // The three filter tokens, in order, with nothing reordered between them.
         $filters = array_values(array_filter(
             $tokens,
-            static fn (string $t): bool => str_starts_with($t, '--include=') || str_starts_with($t, '--exclude=')
+            static fn(string $t): bool => str_starts_with($t, '--include=') || str_starts_with($t, '--exclude=')
         ));
         $this->assertSame(['--include=*/', '--include=A*', '--exclude=*'], $filters);
     }
@@ -220,7 +220,7 @@ final class RsyncTest extends TestCase
             ['--exclude=thumbs/', '--include=*.tmp'],
             array_values(array_filter(
                 $tokens,
-                static fn (string $t): bool => str_starts_with($t, '--include=') || str_starts_with($t, '--exclude=')
+                static fn(string $t): bool => str_starts_with($t, '--include=') || str_starts_with($t, '--exclude=')
             ))
         );
         $this->assertNotContains('--exclude=', $tokens);
