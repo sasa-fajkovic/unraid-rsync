@@ -51,6 +51,11 @@ class Rsync
         'omitDirTimes'    => '-O',
         'omitLinkTimes'   => '-J',
         'perms'           => '-p',
+        'owner'           => '-o',
+        'group'           => '-g',
+        // -D is the pair --devices --specials; it has no long positive form in
+        // rsync's option table, and its negation --no-D clears both.
+        'devices'         => '-D',
         'xattrs'          => '-X',
         'acls'            => '-A',
         'symlinks'        => '-l',
@@ -92,14 +97,42 @@ class Rsync
     ];
 
     /**
-     * Whitelisted LIST value key -> repeatable rsync flag. Each non-empty entry
-     * emits one `<flag>=<entry>` token.
+     * The options `-a` IMPLIES, mapped to the flag that turns each back OFF.
+     *
+     * rsync applies -a at PARSE TIME (options.c `case 'a'`: it sets recurse,
+     * preserve_links, preserve_perms, preserve_mtimes, preserve_gid,
+     * preserve_uid, preserve_devices and preserve_specials), so merely OMITTING
+     * the positive flag for an option the user unticked does NOTHING - -a has
+     * already turned it on. The only way to turn one back off is an explicit
+     * --no-* AFTER the -a, which is why optionTokens() emits these immediately
+     * after -a. From the man page: "The order of the options is important: if
+     * you specify --no-r -a, the -r option would end up being turned on, the
+     * opposite of -a --no-r."
+     *
+     * Every key here must also be a key of BOOL_FLAGS (asserted by
+     * RsyncTest::testArchiveImpliedKeysAreAllRealBooleanOptions).
      *
      * @var array<string,string>
      */
-    const LIST_FLAGS = [
-        'excludes' => '--exclude',
-        'includes' => '--include',
+    const ARCHIVE_IMPLIED = [
+        'recursive' => '--no-recursive',
+        'symlinks'  => '--no-links',
+        'perms'     => '--no-perms',
+        'times'     => '--no-times',
+        'owner'     => '--no-owner',
+        'group'     => '--no-group',
+        'devices'   => '--no-D',
+    ];
+
+    /**
+     * Filter rule type -> rsync flag. Each stored filter emits one
+     * `<flag>=<pattern>` token, IN STORED ORDER - see optionTokens().
+     *
+     * @var array<string,string>
+     */
+    const FILTER_FLAGS = [
+        'include' => '--include',
+        'exclude' => '--exclude',
     ];
 
     /**
@@ -250,9 +283,14 @@ class Rsync
     }
 
     /**
-     * Map a (canonical) options object to its rsync flag tokens, in a stable
-     * order: booleans (in BOOL_FLAGS order), then scalars (SCALAR_FLAGS order),
-     * then list flags (excludes, then includes). PURE.
+     * Map a (canonical) options object to its rsync flag tokens: booleans (in
+     * BOOL_FLAGS order, with any -a negations right after -a), then scalars
+     * (SCALAR_FLAGS order), then the filter rules IN STORED ORDER. PURE.
+     *
+     * Only two things here are order-SENSITIVE to rsync, and both are load-
+     * bearing: the --no-* negations must follow -a, and the filter rules must
+     * keep the order the user put them in. Everything else is emitted at most
+     * once and rsync does not care where it lands.
      *
      * @param array<string,mixed> $opts a canonical whitelist options object
      * @return array<int,string>
@@ -264,6 +302,18 @@ class Rsync
         foreach (self::BOOL_FLAGS as $key => $flag) {
             if (!empty($opts[$key])) {
                 $tokens[] = $flag;
+            }
+            // Negate anything -a implies but the user left off. Emitted here,
+            // directly after the -a token, because a --no-* only wins if rsync
+            // parses it AFTER the -a that set it (see ARCHIVE_IMPLIED). An
+            // implied option that IS on needs nothing: -a already turned it on,
+            // and its own positive flag is emitted by this same loop.
+            if ($key === 'archive' && !empty($opts['archive'])) {
+                foreach (self::ARCHIVE_IMPLIED as $impliedKey => $noFlag) {
+                    if (empty($opts[$impliedKey])) {
+                        $tokens[] = $noFlag;
+                    }
+                }
             }
         }
 
@@ -280,16 +330,13 @@ class Rsync
             $tokens[] = $flag . '=' . $val;
         }
 
-        foreach (self::LIST_FLAGS as $key => $flag) {
-            if (!isset($opts[$key]) || !is_array($opts[$key])) {
-                continue;
-            }
-            foreach ($opts[$key] as $entry) {
-                $val = trim((string) $entry);
-                if ($val !== '') {
-                    $tokens[] = $flag . '=' . $val;
-                }
-            }
+        // Filter rules, in STORED ORDER. rsync builds one ordered filter list
+        // and acts on the FIRST rule that matches, so this loop must never
+        // reorder or group by type: emitting all the excludes before all the
+        // includes is exactly what made `exclude *` + `include A*` transfer
+        // nothing (issue #128).
+        foreach (Config::normalizeFilters($opts['filters'] ?? []) as $entry) {
+            $tokens[] = self::FILTER_FLAGS[$entry['type']] . '=' . $entry['pattern'];
         }
 
         return $tokens;

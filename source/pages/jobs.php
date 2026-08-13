@@ -18,7 +18,8 @@
  *   jobs[<i>][name]
  *   jobs[<i>][pairs][<k>][local]
  *   jobs[<i>][rsyncOptions][archive]
- *   jobs[<i>][rsyncOptions][excludes][]
+ *   jobs[<i>][rsyncOptions][filters][type][]
+ *   jobs[<i>][rsyncOptions][filters][pattern][]
  *
  * New jobs / pair rows are created client-side by cloning a hidden template and
  * rewriting the row index placeholders, so the indices stay contiguous and the
@@ -1028,6 +1029,10 @@ ur_emit_form_enable_assets();
     syncAllManualOnly();
     syncAllCronHuman();
     syncAllHookGutters();
+    /* Filter reorder arrows + the "implied by -a" group in the cloned card
+     * (owned by the shared options partial; its listeners are delegated, only
+     * this initial state needs a nudge). */
+    if (window.urOptionsForm) { window.urOptionsForm.sync(); }
     /* A just-added card starts EXPANDED (the user wants to fill it in) and gets
      * focus on its name field. */
     setCardOpen(card, true);
@@ -1050,23 +1055,8 @@ ur_emit_form_enable_assets();
     rowsEl.appendChild(row);
   }
 
-  function addOptRow(rowsEl) {
-    var name = rowsEl.getAttribute('data-name');
-    var row = document.createElement('div');
-    row.className = 'ur-row';
-    var input = document.createElement('input');
-    input.type = 'text';
-    input.name = name;
-    input.value = '';
-    var del = document.createElement('button');
-    del.type = 'button';
-    del.className = 'ur-row-del';
-    del.innerHTML = '&minus;';
-    row.appendChild(input);
-    row.appendChild(document.createTextNode(' '));
-    row.appendChild(del);
-    rowsEl.appendChild(row);
-  }
+  /* Filter rows (add / remove / reorder) are handled by the shared options
+   * partial's delegated listeners, so there is no per-page row builder here. */
 
   var HANDLER_URL = <?=ur_js($handlerUrl)?>;
   var CSRF_TOKEN  = <?=ur_js($csrf)?>;
@@ -1248,13 +1238,9 @@ ur_emit_form_enable_assets();
     } else if (t.classList.contains('ur-job-del')) {
       var card = t.closest ? t.closest('.ur-job-card') : null;
       if (card) { askRemoveJob(card); }
-    } else if (t.classList.contains('ur-row-add')) {
-      var or = document.getElementById(t.getAttribute('data-rows'));
-      if (or) { addOptRow(or); }
-    } else if (t.classList.contains('ur-row-del')) {
-      var orow = t.closest ? t.closest('.ur-row') : null;
-      if (orow && orow.parentNode) { orow.parentNode.removeChild(orow); }
     }
+    /* ur-row-add / -del / -up / -down (the filter rules) are handled by the
+     * shared options partial, which owns that markup. */
   });
 
   /* Toggle the Connection select's `required` attribute + its visual marker to

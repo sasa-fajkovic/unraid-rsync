@@ -122,40 +122,11 @@ ur_emit_form_enable_assets();
 </div><!-- .ur-settings-page -->
 
 <script type="text/javascript">
-/* Repeatable --exclude/--include rows: add/remove client-side. The template is
- * cloned from the first row's input name so the nested POST name round-trips. */
+/* Global Settings form submit. The repeatable filter-rule rows (add / remove /
+ * reorder) are owned by the shared options partial (_options_form.php), which
+ * emits one set of delegated listeners for both this page and the Jobs tab. */
 (function () {
   'use strict';
-
-  function urAddRow(rowsEl) {
-    var name = rowsEl.getAttribute('data-name');
-    var row = document.createElement('div');
-    row.className = 'ur-row';
-    var input = document.createElement('input');
-    input.type = 'text';
-    input.name = name;
-    input.value = '';
-    var del = document.createElement('button');
-    del.type = 'button';
-    del.className = 'ur-row-del';
-    del.innerHTML = '&minus;';
-    row.appendChild(input);
-    row.appendChild(document.createTextNode(' '));
-    row.appendChild(del);
-    rowsEl.appendChild(row);
-  }
-
-  document.addEventListener('click', function (ev) {
-    var t = ev.target;
-    if (t && t.classList && t.classList.contains('ur-row-add')) {
-      var rowsId = t.getAttribute('data-rows');
-      var rowsEl = document.getElementById(rowsId);
-      if (rowsEl) { urAddRow(rowsEl); }
-    } else if (t && t.classList && t.classList.contains('ur-row-del')) {
-      var row = t.closest ? t.closest('.ur-row') : null;
-      if (row && row.parentNode) { row.parentNode.removeChild(row); }
-    }
-  });
 
   /* Submit via fetch so we can show validation errors/warnings inline rather
    * than navigating away from the tab. Uses the shared robust text->JSON parse

@@ -317,6 +317,183 @@ final class ConfigTest extends TestCase
         $this->assertSame(Config::SCHEMA_VERSION, $migrated2['schemaVersion']);
     }
 
+    /**
+     * A v1 rsync-options object, as the pre-2026.08 plugin stored it: separate
+     * excludes/includes lists, no owner/group/devices keys, and (here) archive
+     * on with perms/symlinks off - the shipped defaults, which is exactly the
+     * combination v1 handled wrongly.
+     *
+     * @return array<string,mixed>
+     */
+    private function v1Options(): array
+    {
+        return [
+            'recursive' => true,
+            'archive'   => true,
+            'perms'     => false,
+            'symlinks'  => false,
+            'times'     => true,
+            'excludes'  => ['*', 'thumbs/'],
+            'includes'  => ['A*'],
+        ];
+    }
+
+    public function testMigrateV1FoldsExcludesAndIncludesIntoOrderedFilters(): void
+    {
+        $migrated = Config::migrate([
+            'schemaVersion' => 1,
+            'global' => ['defaultRsyncOptions' => $this->v1Options()],
+            'jobs'   => [['id' => 'j1', 'rsyncOptions' => $this->v1Options()]],
+        ]);
+
+        foreach ([
+            $migrated['global']['defaultRsyncOptions'],
+            $migrated['jobs'][0]['rsyncOptions'],
+        ] as $opts) {
+            // Includes come FIRST: in v1 they were emitted after the excludes
+            // and so could never override them (issue #128).
+            $this->assertSame([
+                ['type' => 'include', 'pattern' => 'A*'],
+                ['type' => 'exclude', 'pattern' => '*'],
+                ['type' => 'exclude', 'pattern' => 'thumbs/'],
+            ], $opts['filters']);
+            $this->assertArrayNotHasKey('excludes', $opts);
+            $this->assertArrayNotHasKey('includes', $opts);
+        }
+
+        $this->assertSame(2, $migrated['schemaVersion']);
+    }
+
+    public function testMigrateV1ForcesArchiveImpliedOptionsOn(): void
+    {
+        $migrated = Config::migrate([
+            'schemaVersion' => 1,
+            'global' => ['defaultRsyncOptions' => $this->v1Options()],
+            'jobs'   => [['id' => 'j1', 'rsyncOptions' => $this->v1Options()]],
+        ]);
+
+        foreach ([
+            $migrated['global']['defaultRsyncOptions'],
+            $migrated['jobs'][0]['rsyncOptions'],
+        ] as $opts) {
+            foreach (Config::ARCHIVE_IMPLIED_KEYS as $key) {
+                $this->assertTrue($opts[$key], "-a already implied '$key', so v2 must record it as on");
+            }
+        }
+    }
+
+    /**
+     * The whole point of forcing the implied options on: an upgrade must not
+     * change what rsync actually does. v1 emitted a bare -a (silently
+     * preserving perms/links/owner/group/devices); the migrated v2 config must
+     * emit no --no-* negation at all, so the effective behaviour is identical.
+     */
+    public function testMigrateV1PreservesEffectiveArchiveBehaviour(): void
+    {
+        $migrated = Config::migrate([
+            'schemaVersion' => 1,
+            'global' => ['defaultRsyncOptions' => $this->v1Options()],
+            'jobs'   => [],
+        ]);
+        $tokens = Rsync::optionTokens(
+            Config::mergeRsyncOptions($migrated['global']['defaultRsyncOptions'])
+        );
+
+        $this->assertContains('-a', $tokens);
+        foreach (Rsync::ARCHIVE_IMPLIED as $noFlag) {
+            $this->assertNotContains(
+                $noFlag,
+                $tokens,
+                "migrating must not start negating $noFlag on an existing archive job"
+            );
+        }
+    }
+
+    public function testMigrateV1AddsNewBooleanKeysWhenArchiveIsOff(): void
+    {
+        $migrated = Config::migrate([
+            'schemaVersion' => 1,
+            'global' => ['defaultRsyncOptions' => ['archive' => false, 'compress' => true]],
+            'jobs'   => [],
+        ]);
+        $opts = $migrated['global']['defaultRsyncOptions'];
+
+        foreach (['owner', 'group', 'devices'] as $key) {
+            $this->assertArrayHasKey($key, $opts);
+            $this->assertFalse($opts[$key]);
+        }
+        // Nothing is forced on when -a is off; the user's own choices stand.
+        $this->assertFalse($opts['perms']);
+        $this->assertSame([], $opts['filters']);
+    }
+
+    public function testMigrateIsANoOpOnAV2Config(): void
+    {
+        $v2 = [
+            'schemaVersion' => 2,
+            'global' => ['defaultRsyncOptions' => [
+                'archive' => true,
+                'perms'   => false,   // deliberate in v2: means "emit --no-perms"
+                'filters' => [['type' => 'exclude', 'pattern' => '*']],
+            ]],
+            'jobs' => [],
+        ];
+        $migrated = Config::migrate($v2);
+        $this->assertSame($v2, $migrated);
+        // A deliberate v2 negation must survive - re-running the v1 arm would
+        // silently flip perms back on and undo the user's choice.
+        $this->assertFalse($migrated['global']['defaultRsyncOptions']['perms']);
+    }
+
+    public function testLoadMigratesAV1FileOnDisk(): void
+    {
+        file_put_contents(Config::path(), json_encode([
+            'schemaVersion' => 1,
+            'global' => ['defaultRsyncOptions' => $this->v1Options()],
+            'jobs'   => [],
+        ]));
+        $cfg = Config::load();
+
+        $this->assertSame(2, $cfg['schemaVersion']);
+        $this->assertSame([
+            ['type' => 'include', 'pattern' => 'A*'],
+            ['type' => 'exclude', 'pattern' => '*'],
+            ['type' => 'exclude', 'pattern' => 'thumbs/'],
+        ], $cfg['global']['defaultRsyncOptions']['filters']);
+        $this->assertTrue($cfg['global']['defaultRsyncOptions']['perms']);
+    }
+
+    public function testNormalizeFiltersAcceptsTheParallelFormShape(): void
+    {
+        // What the options form posts: parallel type[]/pattern[] arrays, paired
+        // by index, so the reorder buttons never have to renumber field names.
+        $this->assertSame(
+            [
+                ['type' => 'include', 'pattern' => '*/'],
+                ['type' => 'exclude', 'pattern' => '*'],
+            ],
+            Config::normalizeFilters([
+                'type'    => ['include', 'exclude', 'exclude'],
+                'pattern' => ['*/', '*', '   '],   // blank row dropped
+            ])
+        );
+    }
+
+    public function testNormalizeFiltersRejectsUnknownTypesAndJunk(): void
+    {
+        $this->assertSame(
+            [['type' => 'exclude', 'pattern' => 'keep']],
+            Config::normalizeFilters([
+                ['type' => 'protect', 'pattern' => 'nope'],   // not whitelisted
+                ['type' => 'exclude', 'pattern' => 'keep'],
+                ['type' => 'exclude'],                        // no pattern
+                'a string, not an entry',
+                ['type' => ['nested'], 'pattern' => 'x'],
+            ])
+        );
+        $this->assertSame([], Config::normalizeFilters('not an array'));
+    }
+
     public function testLoadThrowsOnMalformedJson(): void
     {
         file_put_contents(Config::path(), '{ this is not json ');

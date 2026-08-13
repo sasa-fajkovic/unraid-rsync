@@ -407,7 +407,12 @@ final class JobTest extends TestCase
             'rsyncPath'      => '/evil',              // not whitelisted
             'removeSource'   => true,                 // not whitelisted
             'filesFrom'      => '/x',                 // not whitelisted
-            'excludes'       => ['thumbs/', '', 'cache/'],
+            'excludes'       => ['thumbs/', 'cache/'], // v1 key, gone in v2
+            'filters'        => [
+                ['type' => 'exclude', 'pattern' => 'thumbs/'],
+                ['type' => 'exclude', 'pattern' => ''],   // blank -> stripped
+                ['type' => 'exclude', 'pattern' => 'cache/'],
+            ],
             'maxDelete'      => '50',
         ]);
 
@@ -419,8 +424,13 @@ final class JobTest extends TestCase
         $this->assertTrue($opts['archive']);
         $this->assertTrue($opts['compress']);   // '1' -> true
         $this->assertSame('50', $opts['maxDelete']);
-        // Empty exclude entry stripped.
-        $this->assertSame(['thumbs/', 'cache/'], $opts['excludes']);
+        // Blank filter row stripped, order preserved.
+        $this->assertSame([
+            ['type' => 'exclude', 'pattern' => 'thumbs/'],
+            ['type' => 'exclude', 'pattern' => 'cache/'],
+        ], $opts['filters']);
+        // The v1 excludes/includes keys are no longer part of the whitelist.
+        $this->assertArrayNotHasKey('excludes', $opts);
         // Dangerous keys absent.
         $this->assertArrayNotHasKey('rsh', $opts);
         $this->assertArrayNotHasKey('rsyncPath', $opts);

@@ -2114,6 +2114,34 @@ function ur_action_get_rsync_status(): void
 }
 
 /**
+ * previewOptions: compose the rsync flag tokens for ONE submitted rsync-options
+ * block and hand them back, so the options form can show what it is about to
+ * save before the user saves it.
+ *
+ * READ-ONLY: it touches no config, no disk, no process - it normalises the
+ * posted block exactly as saveConfig would (Job::normalizeRsyncOptions) and runs
+ * the same pure mapper the runner uses (Rsync::optionTokens). Going through the
+ * real code path rather than reimplementing the whitelist in JavaScript is the
+ * point: a preview built from a second, drifting copy of the flag rules would be
+ * worse than no preview. It is a POST (options blocks are large and nested, and
+ * the CSRF check is uniform for POSTs) even though it changes nothing.
+ *
+ * Returns only the OPTION tokens. The log-level flags, --log-file, -e ssh, the
+ * -- separator and the paths are added later by Rsync::buildArgv() and depend on
+ * run-time state the form does not have.
+ */
+function ur_action_preview_options(): void
+{
+    $optsIn = (isset($_POST['rsyncOptions']) && is_array($_POST['rsyncOptions']))
+        ? $_POST['rsyncOptions']
+        : [];
+
+    $tokens = Rsync::optionTokens(Job::normalizeRsyncOptions($optsIn));
+
+    sendResponse(['ok' => true, 'tokens' => array_values($tokens)], 200);
+}
+
+/**
  * Front-controller dispatch. Skipped when included by the test harness
  * (UR_HANDLER_TESTING defined), which calls the individual functions directly.
  *
@@ -2184,6 +2212,10 @@ function ur_dispatch(): void
             ur_action_save_config();
             return;
 
+        // previewOptions rides with the POST actions for its CSRF check even
+        // though it is read-only: it only maps a submitted options block to its
+        // flag tokens and writes nothing.
+        case 'previewOptions':
         case 'saveCredentials':
         case 'generateKey':
         case 'importKey':
@@ -2208,6 +2240,7 @@ function ur_dispatch(): void
             // same-session POST inside session_start(). See ur_release_session_lock.
             ur_release_session_lock();
             switch ($action) {
+                case 'previewOptions':    ur_action_preview_options();     return;
                 case 'saveCredentials':   ur_action_save_credentials();   return;
                 case 'generateKey':       ur_action_generate_key();       return;
                 case 'importKey':         ur_action_import_key();          return;

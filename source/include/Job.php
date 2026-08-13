@@ -67,7 +67,7 @@ class Job
     const BOOL_OPTION_KEYS = [
         'recursive',
         'archive', 'compress', 'humanReadable', 'times', 'omitDirTimes',
-        'omitLinkTimes', 'perms', 'xattrs',
+        'omitLinkTimes', 'perms', 'owner', 'group', 'devices', 'xattrs',
         'acls', 'symlinks', 'hardlinks', 'sparse', 'numericIds', 'partial',
         'inplace', 'checksum', 'update', 'wholeFile', 'sizeOnly',
         'ignoreExisting', 'delete', 'deleteExcluded', 'mkpath',
@@ -79,8 +79,12 @@ class Job
         'chmod', 'tempDir', 'backupDir', 'compressLevel', 'modifyWindow',
     ];
 
-    /** Whitelisted list value-input keys (stored as lists of non-empty strings). */
-    const LIST_OPTION_KEYS = ['excludes', 'includes'];
+    /**
+     * The whitelisted filter rule types. Aliased from Config (which owns the
+     * normaliser, because Config cannot depend on Job - the dependency runs the
+     * other way) so callers reading the whitelist have one place to look.
+     */
+    const FILTER_TYPES = Config::FILTER_TYPES;
 
     /** Scalar option keys whose value must be a non-negative whole number. */
     const INTEGER_SCALAR_KEYS = ['maxDelete', 'timeout', 'contimeout', 'compressLevel', 'modifyWindow'];
@@ -226,22 +230,10 @@ class Job
         foreach (self::SCALAR_OPTION_KEYS as $key) {
             $out[$key] = isset($opts[$key]) ? trim((string) $opts[$key]) : '';
         }
-        foreach (self::LIST_OPTION_KEYS as $key) {
-            $list = [];
-            if (isset($opts[$key]) && is_array($opts[$key])) {
-                foreach ($opts[$key] as $item) {
-                    // ignore nested arrays; only scalars become entries
-                    if (is_array($item)) {
-                        continue;
-                    }
-                    $val = trim((string) $item);
-                    if ($val !== '') {
-                        $list[] = $val;
-                    }
-                }
-            }
-            $out[$key] = $list;
-        }
+        // The ordered filter list. Config owns the normaliser because it also
+        // has to run on the config-LOAD path (mergeRsyncOptions), and it accepts
+        // both the stored shape and the parallel-array shape the form posts.
+        $out['filters'] = Config::normalizeFilters($opts['filters'] ?? []);
 
         return $out;
     }

@@ -59,8 +59,29 @@ on, forked from, or derived from any other plugin.
   are: `Notify` exec (every arg `escapeshellarg`'d, incl. `-i`), user pre/post
   **hooks** (`bash -c "$hook"`), and the detached runner launcher.
 - **rsync flags are a closed whitelist** (`Rsync::BOOL_FLAGS` / `SCALAR_FLAGS` /
-  `LIST_FLAGS`, mirrored by `Job`'s normalisation and the options form). There is
+  `FILTER_FLAGS`, mirrored by `Job`'s normalisation and the options form). There is
   **no free-form flag field** anywhere — never add one.
+- **Only two things in the emitted argv are order-sensitive, and both are
+  load-bearing** (everything else is emitted at most once and rsync ignores its
+  position — do NOT add reordering UI for other flags):
+  1. **Filter rules.** rsync builds ONE ordered filter list and acts on the FIRST
+     rule that matches. They are stored as an ordered `filters` list of
+     `{type, pattern}` (NOT separate `excludes`/`includes` lists — that shape
+     made every include inert behind a broad exclude, issue #128) and
+     `Rsync::optionTokens()` emits them verbatim in stored order. **Never sort,
+     group by type, or dedupe them.**
+  2. **`-a` negations.** `-a` sets its implied options at PARSE TIME, so omitting
+     an unticked option's positive flag does nothing — it must be negated with an
+     explicit `--no-*` emitted **after** the `-a`. `Rsync::ARCHIVE_IMPLIED` maps
+     each implied key to its negation; `Config::ARCHIVE_IMPLIED_KEYS` holds the
+     same keys for the migration (Config cannot depend on Rsync), and `RsyncTest`
+     asserts the two stay in lockstep.
+- **`config.json` is schemaVersion 2.** `Config::migrate()` has a real `case 1:`
+  arm now: it folds `excludes`/`includes` into ordered `filters` (includes first)
+  and, where `archive` is on, forces every `ARCHIVE_IMPLIED_KEYS` option true so
+  an upgrade does not silently start emitting `--no-perms`/`--no-links` and change
+  what existing backups preserve. Migration MUST keep running before
+  `mergeDefaults()` (which drops unknown keys).
 - **Secrets** (SSH keys, passwords) live in `credentials.json`, by default on
   **FAT32 `/boot` (world-readable)**, so Unix perms don't protect them there. They
   are copied to **tmpfs at `chmod 600`** immediately before use (OpenSSH refuses a

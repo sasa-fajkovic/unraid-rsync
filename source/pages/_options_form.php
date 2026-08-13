@@ -49,6 +49,10 @@ if (!function_exists('ur_h')) {
 
 require_once __DIR__ . '/../include/Config.php';
 require_once __DIR__ . '/../include/Credentials.php';
+// For the server-rendered initial state of the options preview, so a page with
+// many job cards costs zero requests on load (the script only re-previews a
+// block the user actually edits).
+require_once __DIR__ . '/../include/Rsync.php';
 
 if (!function_exists('ur_push_secrets_dir_override')) {
     /**
@@ -163,17 +167,20 @@ if (!function_exists('ur_option_help')) {
     {
         return [
             // --- boolean flags ---------------------------------------------
-            'recursive'      => 'Copy directories and everything inside them (-r). Required for any folder backup — without it (and without Archive) rsync copies only the top-level files and silently skips every sub-directory. On by default.',
-            'archive'        => 'Recurse into directories and preserve symlinks, permissions, modification times, group, owner and device files (-a). A faithful clone, but the owner/group/permission preservation needs root on both ends and can fail across hosts — off by default in favour of plain Recurse + Preserve times.',
+            'recursive'      => 'Copy directories and everything inside them (-r). Required for any folder backup — without it (and without Archive) rsync copies only the top-level files and silently skips every sub-directory. On by default. Implied by Archive; unticking it while Archive is on sends --no-recursive.',
+            'archive'        => 'A faithful clone: recurse into directories and preserve symlinks, permissions, modification times, group, owner and device files (-a). Ticking this turns ON every option in the group below it, all at once. To keep Archive but drop one of them, untick it there and the plugin adds the matching --no- flag (e.g. -a --no-owner --no-group, the usual fix when pushing to a host where you are not root). Off by default in favour of plain Recurse + Preserve times, because owner/group/permission preservation needs root on both ends and can fail across hosts.',
             'compress'       => 'Compress file data while it is in transit (-z). Helps over slow or metered links; little benefit on a fast local network.',
             'humanReadable'  => 'Show sizes in a human-readable format such as 1.5K or 2.3M instead of raw bytes (-h).',
-            'times'          => 'Preserve modification times on the destination (-t). Without it, every file looks changed on the next run.',
+            'times'          => 'Preserve modification times on the destination (-t). Without it, every file looks changed on the next run. Implied by Archive; unticking it while Archive is on sends --no-times.',
             'omitDirTimes'   => 'Do not set modification times on directories, even when Preserve times is on (-O). Enable this if the destination filesystem cannot set times on directories (some network/cloud-backed mounts) and you are seeing directory-time errors or warnings.',
             'omitLinkTimes'  => 'Do not set modification times on symlinks, even when Preserve times is on (-J). Enable this if the destination filesystem cannot set times on symlinks.',
-            'perms'          => 'Preserve file permissions on the destination (-p).',
+            'perms'          => 'Preserve file permissions on the destination (-p). Implied by Archive — untick it while Archive is on to send --no-perms and let the destination apply its own permissions instead.',
+            'owner'          => 'Preserve the owner of each file (-o). Implied by Archive. Needs root on the receiving side: pushing to a normal user account with this on typically fails with a chown error, so untick it (which sends --no-owner) for cross-host backups.',
+            'group'          => 'Preserve the group of each file (-g). Implied by Archive. Like Preserve owner, this generally needs privileges on the receiving side — untick it to send --no-group.',
+            'devices'        => 'Preserve device files and special files such as sockets and FIFOs (-D). Implied by Archive. Only meaningful when copying a system directory as root; unticking it while Archive is on sends --no-D.',
             'xattrs'         => 'Preserve extended attributes (-X). Both the source and destination filesystems must support xattrs.',
             'acls'           => 'Preserve Access Control Lists (-A). This implies preserving permissions (-p) as well.',
-            'symlinks'       => 'Copy symbolic links as symbolic links rather than following them (-l).',
+            'symlinks'       => 'Copy symbolic links as symbolic links rather than following them (-l). Implied by Archive; unticking it while Archive is on sends --no-links, which skips symlinks entirely.',
             'hardlinks'      => 'Detect hard-linked files in the source and re-create those links on the destination (-H).',
             'sparse'         => 'Handle sparse files efficiently so they take up less space on the destination (-S).',
             'numericIds'     => 'Transfer numeric user and group IDs rather than mapping them by name (--numeric-ids). Useful when the two systems do not share users.',
@@ -187,10 +194,9 @@ if (!function_exists('ur_option_help')) {
             'mkpath'         => 'Create the destination path, including any missing parent directories, before transferring (--mkpath). On by default so backing up to a brand-new target does not fail with a missing-directory error. Needs rsync 3.2.3 or newer on the receiving side — turn it off if a push fails against an older host.',
             // --- destructive flags -----------------------------------------
             'delete'         => 'DELETE files on the destination that no longer exist in the source (--delete). Destructive: it removes data from the destination — pair it with a Max delete cap.',
-            'deleteExcluded' => 'Also DELETE files on the destination that match your exclude patterns (--delete-excluded). Destructive: excluded files are removed from the destination, not just skipped.',
-            // --- excludes / includes ---------------------------------------
-            'excludes'       => 'Skip files and directories matching each pattern (--exclude=PATTERN). Add one pattern per row, e.g. *.tmp or .cache/.',
-            'includes'       => 'Force matching files to be transferred even when a later exclude pattern would skip them (--include=PATTERN). Add one pattern per row.',
+            'deleteExcluded' => 'Also DELETE files on the destination that match your exclude filter rules (--delete-excluded). Destructive: excluded files are removed from the destination, not just skipped.',
+            // --- filter rules ----------------------------------------------
+            'filters'        => 'One ordered list of rules deciding which files are transferred. An exclude row skips everything matching its pattern (--exclude=PATTERN); an include row transfers it anyway (--include=PATTERN). ORDER MATTERS: rsync checks the rules top to bottom and acts on the FIRST one that matches, so an include only overrides an exclude if it sits ABOVE it — an exclude of * at the top makes every rule below it pointless. Also note that an excluded directory is never even scanned, so to keep only A* while excluding the rest you need three rows in this order: include */ (so rsync still descends into subdirectories), include A*, exclude *. Use the Add button and the up/down arrows to get the order right.',
             // --- scalar value inputs ---------------------------------------
             'maxDelete'      => 'Refuse to delete more than this many files on the destination (--max-delete=N): the run aborts (exit 25) instead of deleting more. LEAVE BLANK for no cap — any number may be deleted. Note 0 is NOT unlimited: it means delete nothing and only warn. Only applies when a Delete option is on; the form pre-fills 25 as a safe starting point the first time you enable delete.',
             'bwlimit'        => 'Cap the transfer bandwidth in KB/s (--bwlimit=RATE), e.g. 5000 for about 5 MB/s. Leave blank for no limit (full speed).',
@@ -302,19 +308,30 @@ if (!function_exists('ur_render_rsync_options')) {
      */
     function ur_render_rsync_options(array $opts, string $prefix, string $idBase): void
     {
-        // key => [label, flag] for the boolean checkboxes, in display order.
-        $bools = [
+        // The options -a IMPLIES, rendered as a sub-group under the Archive box.
+        // They are ordinary standalone options too (a plain -r -t copy uses two
+        // of them), but grouping them is the only way the UI can be honest about
+        // -a: ticking Archive turns every one of these on, and unticking one
+        // while Archive is on emits the matching --no-* to turn it back off.
+        // Keys and order mirror Rsync::ARCHIVE_IMPLIED / Config::ARCHIVE_IMPLIED_KEYS.
+        $archiveImplied = [
             'recursive'      => ['Recurse into directories', '-r'],
-            'archive'        => ['Archive', '-a'],
+            'symlinks'       => ['Copy symlinks as symlinks', '-l'],
+            'perms'          => ['Preserve permissions', '-p'],
+            'times'          => ['Preserve times', '-t'],
+            'owner'          => ['Preserve owner', '-o'],
+            'group'          => ['Preserve group', '-g'],
+            'devices'        => ['Preserve devices and special files', '-D'],
+        ];
+        // key => [label, flag] for the remaining boolean checkboxes, in display
+        // order. Nothing here is affected by -a.
+        $bools = [
             'compress'       => ['Compress', '-z'],
             'humanReadable'  => ['Human-readable', '-h'],
-            'times'          => ['Preserve times', '-t'],
             'omitDirTimes'   => ['Omit directory times', '-O'],
             'omitLinkTimes'  => ['Omit symlink times', '-J'],
-            'perms'          => ['Preserve permissions', '-p'],
             'xattrs'         => ['Preserve extended attributes', '-X'],
             'acls'           => ['Preserve ACLs', '-A'],
-            'symlinks'       => ['Copy symlinks as symlinks', '-l'],
             'hardlinks'      => ['Preserve hard links', '-H'],
             'sparse'         => ['Handle sparse files efficiently', '-S'],
             'numericIds'     => ['Use numeric user/group IDs', '--numeric-ids'],
@@ -352,8 +369,35 @@ if (!function_exists('ur_render_rsync_options')) {
         // plus the hidden template). Guarding here keeps the help UI self-contained
         // in this partial, so both including pages get it with no extra wiring.
         ur_emit_option_help_assets();
+        ur_emit_ajax_helpers();
 
-        echo '<div class="ur-rsync-options">';
+        // data-prefix lets the live preview rewrite this block's field names
+        // (jobs[3][rsyncOptions][x] / global[defaultRsyncOptions][x]) down to the
+        // plain rsyncOptions[x] the previewOptions action expects, without the
+        // script having to know which page it is on.
+        echo '<div class="ur-rsync-options" data-prefix="' . ur_h($prefix) . '">';
+
+        // --- archive + the options it implies ------------------------------
+        // Archive first, then its implied options indented beneath it, so the
+        // relationship is visible instead of a footgun: -a silently turns all
+        // seven on, and the only way to turn one back off is the --no-* that
+        // Rsync::optionTokens() emits for an unticked box. The note is marked
+        // active by JS while Archive is ticked.
+        $archiveOn = !empty($opts['archive']);
+        echo '<dl>';
+        ur_render_bool_row($prefix, $idBase, 'archive', 'Archive', '-a', $archiveOn);
+        echo '</dl>';
+        echo '<div class="ur-implied' . ($archiveOn ? ' ur-implied-active' : '') . '"'
+            . ' data-archive="' . ur_h($idBase . '_archive') . '">';
+        echo '<p class="ur-implied-note">'
+            . ur_h(ur_t('Implied by Archive (-a): ticking Archive turns all of these on. Untick one while Archive is on and the plugin adds the matching --no- flag to genuinely turn it off. Each also works on its own with Archive off.'))
+            . '</p>';
+        echo '<dl>';
+        foreach ($archiveImplied as $key => [$label, $flag]) {
+            ur_render_bool_row($prefix, $idBase, $key, $label, $flag, !empty($opts[$key]));
+        }
+        echo '</dl>';
+        echo '</div>';
 
         // --- boolean flags -------------------------------------------------
         // One native dl row per flag: label on the left (<dt>), the checkbox
@@ -376,35 +420,44 @@ if (!function_exists('ur_render_rsync_options')) {
         }
         echo '</dl>';
 
-        // --- excludes / includes (repeatable rows) -------------------------
-        foreach (['excludes' => '--exclude=', 'includes' => '--include='] as $key => $flag) {
-            $name      = $prefix . '[' . $key . '][]';
-            $rowsId    = $idBase . '_' . $key . '_rows';
-            $helpId    = $idBase . '_' . $key . '_help';
-            $values    = (isset($opts[$key]) && is_array($opts[$key])) ? $opts[$key] : [];
-            $labelText = ($key === 'excludes') ? 'Excludes' : 'Includes';
-            echo '<dl>';
-            echo '<dt class="ur-dt">' . ur_h(ur_t($labelText)) . ' <code>' . ur_h($flag) . '</code>'
-                . ur_option_help_affordance($key, $helpId) . '</dt>';
-            echo '<dd>';
-            echo '<div class="ur-rows" id="' . ur_h($rowsId) . '" data-name="' . ur_h($name) . '">';
-            if (empty($values)) {
-                // one empty starter row
-                echo '<div class="ur-row"><input type="text" name="' . ur_h($name) . '" value=""> '
-                    . '<button type="button" class="ur-row-del">&minus;</button></div>';
-            } else {
-                foreach ($values as $val) {
-                    echo '<div class="ur-row"><input type="text" name="' . ur_h($name) . '" value="' . ur_h($val) . '"> '
-                        . '<button type="button" class="ur-row-del">&minus;</button></div>';
-                }
+        // --- filter rules (ONE ordered, reorderable list) ------------------
+        // Deliberately a single list rather than separate Excludes/Includes
+        // boxes: rsync builds one ordered filter list and acts on the FIRST rule
+        // that matches, so the interleaving IS the ruleset. Two boxes could only
+        // ever emit one fixed grouping, which is what made every include inert
+        // behind a broad exclude (issue #128).
+        $filters  = (isset($opts['filters']) && is_array($opts['filters'])) ? $opts['filters'] : [];
+        $rowsId   = $idBase . '_filters_rows';
+        $helpId   = $idBase . '_filters_help';
+        $typeName = $prefix . '[filters][type][]';
+        $patName  = $prefix . '[filters][pattern][]';
+        echo '<dl>';
+        echo '<dt class="ur-dt">' . ur_h(ur_t('Filters')) . ' <code>--include= / --exclude=</code>'
+            . ur_option_help_affordance('filters', $helpId) . '</dt>';
+        echo '<dd>';
+        echo '<p class="ur-implied-note">'
+            . ur_h(ur_t('Evaluated top to bottom; the first rule that matches a file wins. Put an include ABOVE the exclude it is meant to override.'))
+            . '</p>';
+        // data-type-name / data-pattern-name let the client-side row builder add
+        // rows without duplicating the prefix logic.
+        echo '<div class="ur-rows ur-filter-rows" id="' . ur_h($rowsId) . '"'
+            . ' data-type-name="' . ur_h($typeName) . '"'
+            . ' data-pattern-name="' . ur_h($patName) . '">';
+        if (empty($filters)) {
+            echo ur_render_filter_row($typeName, $patName, 'exclude', '');   // one empty starter row
+        } else {
+            foreach ($filters as $entry) {
+                $type    = (is_array($entry) && isset($entry['type'])) ? (string) $entry['type'] : 'exclude';
+                $pattern = (is_array($entry) && isset($entry['pattern'])) ? (string) $entry['pattern'] : '';
+                echo ur_render_filter_row($typeName, $patName, $type, $pattern);
             }
-            echo '</div>';
-            echo '<div><button type="button" class="ur-row-add" data-rows="' . ur_h($rowsId) . '">'
-                . ur_h(ur_t('Add')) . '</button></div>';
-            echo ur_option_help_block($key, $helpId);
-            echo '</dd>';
-            echo '</dl>';
         }
+        echo '</div>';
+        echo '<div><button type="button" class="ur-row-add" data-rows="' . ur_h($rowsId) . '">'
+            . ur_h(ur_t('Add')) . '</button></div>';
+        echo ur_option_help_block('filters', $helpId);
+        echo '</dd>';
+        echo '</dl>';
 
         // --- scalar value inputs -------------------------------------------
         // Numeric scalars get an inputmode hint mirroring the server-side
@@ -431,7 +484,73 @@ if (!function_exists('ur_render_rsync_options')) {
         }
         echo '</dl>';
 
+        // --- live command preview ------------------------------------------
+        // Shows the flags these controls actually produce. It matters most for
+        // the two things whose ORDER changes their meaning - the filter rules,
+        // and the --no-* flags an unticked box under Archive emits - because
+        // neither is visible from the controls alone.
+        //
+        // Rendered server-side from the SAME pure mapper the runner uses, so it
+        // is correct on load with no request (a Jobs tab with 20 cards would
+        // otherwise fire 20 of them) and it still reads correctly with
+        // JavaScript off. The script re-renders a block only once the user edits
+        // it, by posting to the read-only previewOptions action - which calls
+        // that same mapper, so there is never a JS copy of the flag whitelist to
+        // drift out of sync.
+        $previewTokens = Rsync::optionTokens(Config::mergeRsyncOptions($opts));
+        echo '<div class="ur-preview">';
+        echo '<div class="ur-preview-label">' . ur_h(ur_t('rsync options preview')) . '</div>';
+        echo '<code class="ur-preview-out" aria-live="polite">'
+            . ur_h($previewTokens ? implode(' ', $previewTokens) : ur_t('(no options set)'))
+            . '</code>';
+        echo '<div class="ur-preview-note">'
+            . ur_h(ur_t('These option flags only. The log-level flags, --log-file, the SSH transport and the source/destination paths are added when the job runs.'))
+            . '</div>';
         echo '</div>';
+
+        echo '</div>';
+    }
+}
+
+if (!function_exists('ur_render_filter_row')) {
+    /**
+     * Render one filter-rule row: an include/exclude select, the pattern input,
+     * and the reorder/remove buttons.
+     *
+     * The two fields post as PARALLEL arrays (`…[filters][type][]` and
+     * `…[filters][pattern][]`) rather than indexed pairs
+     * (`…[filters][0][type]`). Browsers submit fields in document order and PHP
+     * appends to each `[]` array in arrival order, so index i of one lines up
+     * with index i of the other - which means the up/down buttons only have to
+     * move a DOM node, with no field-name renumbering. Config::normalizeFilters()
+     * zips them back into {type, pattern} maps.
+     *
+     * @param string $typeName    the `[filters][type][]` field name
+     * @param string $patternName the `[filters][pattern][]` field name
+     * @param string $type        'include' or 'exclude' (anything else -> exclude)
+     * @param string $pattern     the rule's pattern
+     */
+    function ur_render_filter_row(string $typeName, string $patternName, string $type, string $pattern): string
+    {
+        $type = ($type === 'include') ? 'include' : 'exclude';
+        $html = '<div class="ur-row ur-filter-row">';
+        $html .= '<select name="' . ur_h($typeName) . '" class="ur-filter-type" aria-label="' . ur_h(ur_t('Rule type')) . '">';
+        foreach (['include' => '+ include', 'exclude' => '- exclude'] as $val => $label) {
+            $html .= '<option value="' . ur_h($val) . '"' . ($type === $val ? ' selected' : '') . '>'
+                . ur_h(ur_t($label)) . '</option>';
+        }
+        $html .= '</select> ';
+        $html .= '<input type="text" name="' . ur_h($patternName) . '" value="' . ur_h($pattern) . '"'
+            . ' placeholder="' . ur_h(ur_t('pattern, e.g. *.tmp')) . '"'
+            . ' aria-label="' . ur_h(ur_t('Pattern')) . '"> ';
+        $html .= '<button type="button" class="ur-row-up" title="' . ur_h(ur_t('Move up')) . '"'
+            . ' aria-label="' . ur_h(ur_t('Move up')) . '">&uarr;</button>';
+        $html .= '<button type="button" class="ur-row-down" title="' . ur_h(ur_t('Move down')) . '"'
+            . ' aria-label="' . ur_h(ur_t('Move down')) . '">&darr;</button>';
+        $html .= '<button type="button" class="ur-row-del" title="' . ur_h(ur_t('Remove')) . '"'
+            . ' aria-label="' . ur_h(ur_t('Remove')) . '">&minus;</button>';
+        $html .= '</div>';
+        return $html;
     }
 }
 
@@ -540,6 +659,53 @@ if (!function_exists('ur_emit_option_help_assets')) {
 .ur-help-text { display: none; }
 .ur-help-text.ur-open { display: block; }
 .ur-rsync-options .inline_help { margin: .4rem 0; }
+
+/* The options -a implies, indented under the Archive row so the relationship is
+   visible. The note reads dim until Archive is actually ticked (ur-implied-active,
+   toggled by the script below), because that is the only state in which unticking
+   one of these changes the emitted command. */
+.ur-implied {
+  margin: 0 0 .6rem 0; padding: .1rem 0 .1rem .9rem;
+  border-left: 3px solid var(--blue-200, #bce8f1);
+}
+.ur-implied-note {
+  margin: .3rem 0 .5rem 0; font-size: .85em; line-height: 1.45;
+  color: var(--blockquote-text-color, #31708f); opacity: .65;
+}
+.ur-implied.ur-implied-active > .ur-implied-note { opacity: 1; font-weight: 600; }
+
+/* Filter rows: the type select stays narrow so the pattern field gets the space,
+   and the reorder/remove buttons shed the heavy webGui button chrome (min-width
+   86px, uppercase) that would otherwise make three tiny arrows enormous. */
+.ur-filter-row { display: flex; align-items: center; gap: .35rem; margin-bottom: .35rem; flex-wrap: wrap; }
+.ur-filter-row .ur-filter-type { width: auto; min-width: 9em; flex: 0 0 auto; margin: 0; }
+.ur-filter-row input[type="text"] { flex: 1 1 12em; min-width: 8em; margin: 0; }
+.ur-filter-row .ur-row-up,
+.ur-filter-row .ur-row-down,
+.ur-filter-row .ur-row-del {
+  flex: 0 0 auto;
+  min-width: 0; width: 2em; padding: 0; margin: 0;
+  line-height: 1.8; text-transform: none; font-weight: normal;
+}
+/* First row cannot move up, last cannot move down; the script keeps these in
+   sync so the buttons never look available when they would do nothing. */
+.ur-filter-row .ur-row-up[disabled],
+.ur-filter-row .ur-row-down[disabled] { opacity: .35; cursor: default; }
+
+/* Live preview of the composed option flags. Deliberately plain and quiet: it
+   is a read-out, not a control. Wraps rather than scrolls so a long flag list
+   stays fully readable. */
+.ur-preview { margin: .8rem 0 .2rem 0; }
+.ur-preview-label { font-size: .85em; font-weight: 600; opacity: .8; margin-bottom: .25rem; }
+.ur-rsync-options .ur-preview-out {
+  display: block; white-space: pre-wrap; word-break: break-word;
+  padding: .5rem .6rem; min-height: 1.4em; line-height: 1.6;
+  border: 1px solid rgba(127, 127, 127, 0.30);
+  background: rgba(127, 127, 127, 0.10);
+  border-radius: 4px;
+}
+.ur-preview-out.ur-preview-err { color: var(--red-500, #a94442); }
+.ur-preview-note { font-size: .8em; opacity: .6; margin-top: .25rem; line-height: 1.45; }
 </style>
 <script type="text/javascript">
 /* Native-style inline help: one delegated listener toggles the blue
@@ -623,6 +789,221 @@ if (!function_exists('ur_emit_option_help_assets')) {
     var md = box.querySelector('input[name$="[maxDelete]"]');
     if (md && String(md.value).trim() === '') { md.value = '25'; }
   });
+
+  /* ---- Filter rules: add / remove / reorder ------------------------------
+   * Lives here rather than in jobs.php + settings.php so both pages get the
+   * same behaviour from one implementation, and so job cards cloned
+   * client-side are covered with no per-card wiring (all listeners are
+   * delegated on document).
+   *
+   * Reordering is a plain DOM node swap. That works because the two fields
+   * post as PARALLEL arrays (filters[type][] / filters[pattern][]) rather
+   * than indexed pairs: submit order follows document order, so moving the
+   * row is the whole operation — no field names to renumber. */
+  function filterRowHtml(rowsEl) {
+    var typeName = rowsEl.getAttribute('data-type-name') || '';
+    var patName  = rowsEl.getAttribute('data-pattern-name') || '';
+    var row = document.createElement('div');
+    row.className = 'ur-row ur-filter-row';
+
+    var sel = document.createElement('select');
+    sel.name = typeName;
+    sel.className = 'ur-filter-type';
+    [['include', '+ include'], ['exclude', '- exclude']].forEach(function (pair) {
+      var o = document.createElement('option');
+      o.value = pair[0];
+      o.textContent = pair[1];
+      sel.appendChild(o);
+    });
+    sel.value = 'exclude';
+
+    var input = document.createElement('input');
+    input.type = 'text';
+    input.name = patName;
+    input.value = '';
+    input.placeholder = 'pattern, e.g. *.tmp';
+
+    row.appendChild(sel);
+    row.appendChild(document.createTextNode(' '));
+    row.appendChild(input);
+    [['ur-row-up', '↑', 'Move up'],
+     ['ur-row-down', '↓', 'Move down'],
+     ['ur-row-del', '−', 'Remove']].forEach(function (spec) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = spec[0];
+      b.textContent = spec[1];
+      b.title = spec[2];
+      b.setAttribute('aria-label', spec[2]);
+      row.appendChild(b);
+    });
+    return row;
+  }
+
+  /* Grey out the arrows that would do nothing (first row's up, last row's
+   * down) so the control never looks available when it is a no-op. */
+  function syncArrows(rowsEl) {
+    if (!rowsEl) { return; }
+    var rows = rowsEl.querySelectorAll('.ur-filter-row');
+    for (var i = 0; i < rows.length; i++) {
+      var up = rows[i].querySelector('.ur-row-up');
+      var dn = rows[i].querySelector('.ur-row-down');
+      if (up) { up.disabled = (i === 0); }
+      if (dn) { dn.disabled = (i === rows.length - 1); }
+    }
+  }
+
+  function syncAllArrows() {
+    var all = document.querySelectorAll('.ur-filter-rows');
+    for (var i = 0; i < all.length; i++) { syncArrows(all[i]); }
+  }
+
+  document.addEventListener('click', function (ev) {
+    var t = ev.target;
+    if (!t || !t.classList) { return; }
+
+    if (t.classList.contains('ur-row-add')) {
+      var rowsEl = document.getElementById(t.getAttribute('data-rows'));
+      if (!rowsEl) { return; }
+      rowsEl.appendChild(filterRowHtml(rowsEl));
+      syncArrows(rowsEl);
+      return;
+    }
+
+    var row = t.closest ? t.closest('.ur-filter-row') : null;
+    if (!row || !row.parentNode) { return; }
+    var parent = row.parentNode;
+
+    if (t.classList.contains('ur-row-del')) {
+      parent.removeChild(row);
+      syncArrows(parent);
+    } else if (t.classList.contains('ur-row-up')) {
+      var prev = row.previousElementSibling;
+      if (prev) { parent.insertBefore(row, prev); syncArrows(parent); }
+    } else if (t.classList.contains('ur-row-down')) {
+      var next = row.nextElementSibling;
+      if (next) { parent.insertBefore(next, row); syncArrows(parent); }
+    }
+  });
+
+  /* ---- Archive (-a) implied-options group --------------------------------
+   * Highlight the "implied by -a" note only while Archive is actually ticked,
+   * since that is the only state in which unticking one of the grouped boxes
+   * changes the command (it starts emitting the matching --no-* flag). */
+  function syncImplied(group) {
+    if (!group) { return; }
+    var cb = document.getElementById(group.getAttribute('data-archive'));
+    if (cb && cb.checked) { group.classList.add('ur-implied-active'); }
+    else { group.classList.remove('ur-implied-active'); }
+  }
+
+  function syncAllImplied() {
+    var groups = document.querySelectorAll('.ur-implied');
+    for (var i = 0; i < groups.length; i++) { syncImplied(groups[i]); }
+  }
+
+  document.addEventListener('change', function (ev) {
+    var t = ev.target;
+    if (!t || t.type !== 'checkbox') { return; }
+    if (!/\[archive\]$/.test(t.getAttribute('name') || '')) { return; }
+    var box = t.closest ? t.closest('.ur-rsync-options') : null;
+    if (box) { syncImplied(box.querySelector('.ur-implied')); }
+  });
+
+  /* Job cards are cloned client-side from a hidden template, so their filter
+   * arrows and implied-group state need re-syncing after the clone lands.
+   * Interactions are all delegated and need no wiring; only this initial state
+   * does. Exposed for jobs.php's addJob(). */
+  /* ---- Live "rsync options preview" -------------------------------------
+   * Posts this block's controls to the read-only previewOptions action and
+   * renders what Rsync::optionTokens() actually produces. The server does the
+   * mapping on purpose: a JavaScript copy of the flag whitelist would be a
+   * second source of truth, and a preview that drifts from the real command is
+   * worse than none.
+   *
+   * Field names are rewritten from this block's prefix (jobs[3][rsyncOptions]
+   * or global[defaultRsyncOptions]) to the plain rsyncOptions[...] the action
+   * reads, so one implementation serves both pages. */
+  var PREVIEW_URL  = <?=ur_js('/plugins/unraid.rsync/include/handler.php')?>;
+  var PREVIEW_CSRF = <?=ur_js(ur_render_csrf_token())?>;
+
+  function previewParams(box) {
+    var prefix = box.getAttribute('data-prefix') || '';
+    var params = new URLSearchParams();
+    params.append('action', 'previewOptions');
+    if (PREVIEW_CSRF) { params.append('csrf_token', PREVIEW_CSRF); }
+
+    var fields = box.querySelectorAll('input[name], select[name]');
+    for (var i = 0; i < fields.length; i++) {
+      var f = fields[i];
+      var name = f.getAttribute('name') || '';
+      if (name.indexOf(prefix) !== 0) { continue; }
+      /* An unchecked checkbox submits nothing; the hidden "0" input that
+       * precedes it (same name) carries the falsey value, exactly as a real
+       * form submission would. */
+      if (f.type === 'checkbox' && !f.checked) { continue; }
+      params.append('rsyncOptions' + name.slice(prefix.length), f.value);
+    }
+    return params;
+  }
+
+  /* One in-flight request per block, and a trailing debounce so typing a
+   * pattern does not fire a request per keystroke. */
+  function refreshPreview(box) {
+    var out = box.querySelector('.ur-preview-out');
+    if (!out) { return; }
+    if (box._urPreviewPending) { return; }
+    box._urPreviewPending = true;
+
+    fetch(PREVIEW_URL, {
+      method: 'POST',
+      body: previewParams(box),
+      credentials: 'same-origin'
+    })
+      .then(window.urAjax.parseResponse)
+      .then(function (res) {
+        box._urPreviewPending = false;
+        if (res.ok && res.body && res.body.ok && res.body.tokens) {
+          out.classList.remove('ur-preview-err');
+          out.textContent = res.body.tokens.length ? res.body.tokens.join(' ') : '(no options set)';
+        } else {
+          out.classList.add('ur-preview-err');
+          out.textContent = window.urAjax.errText(res, 'Preview failed');
+        }
+      })
+      .catch(function () {
+        box._urPreviewPending = false;
+        out.classList.add('ur-preview-err');
+        out.textContent = 'Preview failed: could not reach the server.';
+      });
+  }
+
+  function schedulePreview(box) {
+    if (!box) { return; }
+    if (box._urPreviewTimer) { clearTimeout(box._urPreviewTimer); }
+    box._urPreviewTimer = setTimeout(function () { refreshPreview(box); }, 400);
+  }
+
+  /* Any edit inside a block re-previews that block. 'input' covers typing and
+   * 'change' covers checkboxes/selects; 'click' catches the add/remove/reorder
+   * buttons, which change the command without changing any field's value. */
+  ['input', 'change', 'click'].forEach(function (evt) {
+    document.addEventListener(evt, function (ev) {
+      var box = ev.target && ev.target.closest ? ev.target.closest('.ur-rsync-options') : null;
+      if (box) { schedulePreview(box); }
+    });
+  });
+
+  /* Previews are server-rendered, so sync() only has to fix up the reorder
+   * arrows and the implied-group state (both of which a cloned card gets wrong
+   * until the DOM settles). */
+  window.urOptionsForm = { sync: function () { syncAllArrows(); syncAllImplied(); } };
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', window.urOptionsForm.sync);
+  } else {
+    window.urOptionsForm.sync();
+  }
 })();
 </script>
         <?php

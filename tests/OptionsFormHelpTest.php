@@ -174,11 +174,14 @@ final class OptionsFormHelpTest extends TestCase
         // names/values, and the descriptions start hidden (revealed on click).
         $html = $this->renderOptions(Config::defaultRsyncOptions(), 'jobs[0][rsyncOptions]', 'ur_t2');
 
-        // A representative boolean, a scalar, and a repeatable row keep their
-        // exact POST names.
+        // A representative boolean, a scalar, and a filter row keep their exact
+        // POST names. The filter row posts as PARALLEL type[]/pattern[] arrays
+        // (paired by index) so the reorder buttons never renumber field names -
+        // see Config::normalizeFilters().
         $this->assertStringContainsString('name="jobs[0][rsyncOptions][archive]"', $html);
         $this->assertStringContainsString('name="jobs[0][rsyncOptions][bwlimit]"', $html);
-        $this->assertStringContainsString('name="jobs[0][rsyncOptions][excludes][]"', $html);
+        $this->assertStringContainsString('name="jobs[0][rsyncOptions][filters][type][]"', $html);
+        $this->assertStringContainsString('name="jobs[0][rsyncOptions][filters][pattern][]"', $html);
 
         // The descriptions render in the NATIVE Unraid help element: a
         // blockquote.inline_help blue box. The base dynamix stylesheet ships

@@ -44,9 +44,9 @@ final class RsyncTest extends TestCase
             'Rsync::SCALAR_FLAGS keys must equal Job::SCALAR_OPTION_KEYS'
         );
         $this->assertSame(
-            Job::LIST_OPTION_KEYS,
-            array_keys(Rsync::LIST_FLAGS),
-            'Rsync::LIST_FLAGS keys must equal Job::LIST_OPTION_KEYS'
+            Job::FILTER_TYPES,
+            array_keys(Rsync::FILTER_FLAGS),
+            'Rsync::FILTER_FLAGS keys must equal Job::FILTER_TYPES'
         );
     }
 
@@ -65,13 +65,32 @@ final class RsyncTest extends TestCase
 
     public function testBooleanTokenOrderFollowsMap(): void
     {
+        // Deliberately NOT using archive here: -a additionally emits a --no-*
+        // for each implied option left off, which is its own contract (see the
+        // testArchive* cases). This case is only about BOOL_FLAGS map order.
         $opts = $this->emptyOpts();
-        $opts['archive']  = true; // -a
         $opts['compress'] = true; // -z
         $opts['delete']   = true; // --delete
+        $opts['mkpath']   = true; // --mkpath
         $tokens = Rsync::optionTokens($opts);
-        // archive precedes compress precedes delete (map order).
-        $this->assertSame(['-a', '-z', '--delete'], $tokens);
+        // compress precedes delete precedes mkpath (map order).
+        $this->assertSame(['-z', '--delete', '--mkpath'], $tokens);
+    }
+
+    /** -a itself still lands in map order; the negations follow it, not precede. */
+    public function testArchiveTokenKeepsItsMapPositionAheadOfLaterFlags(): void
+    {
+        $opts = $this->emptyOpts();
+        $opts['archive']  = true;
+        $opts['compress'] = true;
+        foreach (array_keys(Rsync::ARCHIVE_IMPLIED) as $key) {
+            $opts[$key] = true;   // silence the negations
+        }
+        $tokens = Rsync::optionTokens($opts);
+        $this->assertLessThan(
+            array_search('-z', $tokens, true),
+            array_search('-a', $tokens, true)
+        );
     }
 
     public function testRecursiveKeyEmitsDashR(): void
@@ -146,17 +165,131 @@ final class RsyncTest extends TestCase
         $this->assertSame($iDir - 1, $iBackup);
     }
 
-    public function testRepeatableExcludesAndIncludes(): void
+    /**
+     * The filter rules must reach the argv in EXACTLY the stored order. rsync
+     * acts on the FIRST filter rule that matches, so re-ordering them changes
+     * which files transfer - this is the regression guard for issue #128, where
+     * every --exclude was emitted before every --include and so `--exclude=*`
+     * killed the user's `--include=A*` before it was ever considered.
+     */
+    public function testFiltersAreEmittedInStoredOrder(): void
     {
         $opts = $this->emptyOpts();
-        $opts['excludes'] = ['thumbs/', '*.tmp', ''];   // empty entry dropped
-        $opts['includes'] = ['keep/'];
+        $opts['filters'] = [
+            ['type' => 'include', 'pattern' => '*/'],
+            ['type' => 'include', 'pattern' => 'A*'],
+            ['type' => 'exclude', 'pattern' => '*'],
+        ];
         $tokens = Rsync::optionTokens($opts);
-        $this->assertContains('--exclude=thumbs/', $tokens);
-        $this->assertContains('--exclude=*.tmp', $tokens);
-        $this->assertContains('--include=keep/', $tokens);
-        // No empty-valued exclude leaked through.
+
+        // The three filter tokens, in order, with nothing reordered between them.
+        $filters = array_values(array_filter(
+            $tokens,
+            static fn (string $t): bool => str_starts_with($t, '--include=') || str_starts_with($t, '--exclude=')
+        ));
+        $this->assertSame(['--include=*/', '--include=A*', '--exclude=*'], $filters);
+    }
+
+    /** The reverse order must survive too - nothing may sort or group by type. */
+    public function testFiltersPreserveAnExcludeFirstOrdering(): void
+    {
+        $opts = $this->emptyOpts();
+        $opts['filters'] = [
+            ['type' => 'exclude', 'pattern' => '*'],
+            ['type' => 'include', 'pattern' => 'A*'],
+        ];
+        $tokens = Rsync::optionTokens($opts);
+        $iExclude = array_search('--exclude=*', $tokens, true);
+        $iInclude = array_search('--include=A*', $tokens, true);
+        $this->assertIsInt($iExclude);
+        $this->assertIsInt($iInclude);
+        $this->assertLessThan($iInclude, $iExclude, 'exclude-first ordering must be preserved verbatim');
+    }
+
+    public function testFiltersDropEmptyPatternsAndUnknownTypes(): void
+    {
+        $opts = $this->emptyOpts();
+        $opts['filters'] = [
+            ['type' => 'exclude', 'pattern' => 'thumbs/'],
+            ['type' => 'exclude', 'pattern' => '   '],       // blank -> dropped
+            ['type' => 'protect', 'pattern' => 'keep'],      // not whitelisted -> dropped
+            ['type' => 'include', 'pattern' => '*.tmp'],
+        ];
+        $tokens = Rsync::optionTokens(Config::mergeRsyncOptions($opts));
+        $this->assertSame(
+            ['--exclude=thumbs/', '--include=*.tmp'],
+            array_values(array_filter(
+                $tokens,
+                static fn (string $t): bool => str_starts_with($t, '--include=') || str_starts_with($t, '--exclude=')
+            ))
+        );
         $this->assertNotContains('--exclude=', $tokens);
+        $this->assertNotContains('--protect=keep', $tokens);
+    }
+
+    /**
+     * -a implies -rlptgoD at PARSE TIME, so simply omitting the positive flag
+     * for an unticked box does nothing - the box silently lies. Each unticked
+     * implied option must emit its --no-* negation, and that negation only wins
+     * if it comes AFTER the -a that set it (rsync man page: "if you specify
+     * --no-r -a, the -r option would end up being turned on").
+     */
+    public function testArchiveNegatesUntickedImpliedOptions(): void
+    {
+        $opts = $this->emptyOpts();
+        $opts['archive'] = true;   // every implied option left OFF
+        $tokens = Rsync::optionTokens($opts);
+
+        $iArchive = array_search('-a', $tokens, true);
+        $this->assertIsInt($iArchive, '-a must be emitted');
+
+        foreach (Rsync::ARCHIVE_IMPLIED as $key => $noFlag) {
+            $i = array_search($noFlag, $tokens, true);
+            $this->assertIsInt($i, "unticked '$key' under -a must emit $noFlag");
+            $this->assertGreaterThan($iArchive, $i, "$noFlag must come AFTER -a or rsync ignores it");
+        }
+    }
+
+    public function testArchiveEmitsNoNegationsWhenEveryImpliedOptionIsOn(): void
+    {
+        $opts = $this->emptyOpts();
+        $opts['archive'] = true;
+        foreach (array_keys(Rsync::ARCHIVE_IMPLIED) as $key) {
+            $opts[$key] = true;
+        }
+        $tokens = Rsync::optionTokens($opts);
+        foreach (Rsync::ARCHIVE_IMPLIED as $noFlag) {
+            $this->assertNotContains($noFlag, $tokens);
+        }
+    }
+
+    /** Without -a nothing is implied, so an unticked option is simply absent. */
+    public function testNoNegationsWithoutArchive(): void
+    {
+        $opts = $this->emptyOpts();   // archive OFF, every implied option OFF
+        $tokens = Rsync::optionTokens($opts);
+        foreach (Rsync::ARCHIVE_IMPLIED as $noFlag) {
+            $this->assertNotContains($noFlag, $tokens, "$noFlag must not appear without -a");
+        }
+    }
+
+    public function testArchiveImpliedKeysAreAllRealBooleanOptions(): void
+    {
+        foreach (array_keys(Rsync::ARCHIVE_IMPLIED) as $key) {
+            $this->assertArrayHasKey(
+                $key,
+                Rsync::BOOL_FLAGS,
+                "ARCHIVE_IMPLIED key '$key' must be a whitelisted boolean option"
+            );
+        }
+        // Config owns the same list (it cannot depend on Rsync) and the v1 -> v2
+        // migration keys off it. If the two drift, an upgraded config would stop
+        // matching what -a actually turns on.
+        $this->assertSame(
+            Config::ARCHIVE_IMPLIED_KEYS,
+            array_keys(Rsync::ARCHIVE_IMPLIED),
+            'Config::ARCHIVE_IMPLIED_KEYS must equal the keys of Rsync::ARCHIVE_IMPLIED'
+        );
     }
 
     public function testAllScalarKeysHaveDistinctFlags(): void

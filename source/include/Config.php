@@ -32,8 +32,14 @@ if (!defined('UR_CONFIG_BASE')) {
 
 class Config
 {
-    /** Current schema version this code writes. */
-    const SCHEMA_VERSION = 1;
+    /**
+     * Current schema version this code writes.
+     *
+     * v2 replaced the separate `excludes`/`includes` option lists with one
+     * ORDERED `filters` list, and added the owner/group/devices booleans so
+     * everything -a implies is individually controllable. See migrateV1ToV2().
+     */
+    const SCHEMA_VERSION = 2;
 
     /**
      * Absolute path to config.json under the (possibly overridden) base dir.
@@ -78,6 +84,16 @@ class Config
             'omitDirTimes'    => false,
             'omitLinkTimes'   => false,
             'perms'           => false,
+            // owner/group/devices (-o/-g/-D) exist so the options -a IMPLIES are
+            // all individually controllable: without them, ticking Archive
+            // silently forced ownership and device preservation with no way to
+            // turn it back off (Rsync::ARCHIVE_IMPLIED emits the --no-* form for
+            // any of these left off under -a). They default OFF to match the
+            // default profile, which is a plain -r -t copy with no ownership -
+            // preserving owner/group needs root on the receiving side.
+            'owner'           => false,
+            'group'           => false,
+            'devices'         => false,
             'xattrs'          => false,
             'acls'            => false,
             'symlinks'        => false,
@@ -95,8 +111,11 @@ class Config
             'deleteExcluded'  => false,
             'mkpath'          => true,
             // value inputs
-            'excludes'        => [],
-            'includes'        => [],
+            // ONE ordered filter list, not separate exclude/include lists: rsync
+            // acts on the FIRST filter rule that matches, so the relative order
+            // of includes and excludes is the whole meaning of the ruleset. See
+            // normalizeFilters() and Rsync::FILTER_FLAGS.
+            'filters'         => [],
             'maxDelete'       => '',
             'bwlimit'         => '',
             'timeout'         => '',
@@ -443,7 +462,10 @@ class Config
         // $data from version N to N+1, then falls through to the next.
         while ($version < self::SCHEMA_VERSION) {
             switch ($version) {
-                // case 1: ... transform v1 -> v2 ...; $version = 2; break;
+                case 1:
+                    $data = self::migrateV1ToV2($data);
+                    $version = 2;
+                    break;
                 default:
                     // No migration path defined; stop to avoid an infinite loop.
                     $version = self::SCHEMA_VERSION;
@@ -453,6 +475,85 @@ class Config
 
         $data['schemaVersion'] = self::SCHEMA_VERSION;
         return $data;
+    }
+
+    /**
+     * v1 -> v2: rewrite every rsync-options object in the config (the global
+     * defaults and each job's own) to the v2 shape.
+     *
+     * @param array<string,mixed> $data
+     * @return array<string,mixed>
+     */
+    private static function migrateV1ToV2(array $data): array
+    {
+        if (isset($data['global']['defaultRsyncOptions']) && is_array($data['global']['defaultRsyncOptions'])) {
+            $data['global']['defaultRsyncOptions'] =
+                self::migrateRsyncOptionsV1ToV2($data['global']['defaultRsyncOptions']);
+        }
+        if (isset($data['jobs']) && is_array($data['jobs'])) {
+            foreach ($data['jobs'] as $i => $job) {
+                if (is_array($job) && isset($job['rsyncOptions']) && is_array($job['rsyncOptions'])) {
+                    $data['jobs'][$i]['rsyncOptions'] =
+                        self::migrateRsyncOptionsV1ToV2($job['rsyncOptions']);
+                }
+            }
+        }
+        return $data;
+    }
+
+    /**
+     * v1 -> v2 for a SINGLE rsync-options object. Two transformations:
+     *
+     * 1. `excludes` + `includes` -> one ordered `filters` list, with all the
+     *    INCLUDES FIRST and the excludes after them. v1 emitted the opposite
+     *    order, which made every include inert as soon as a broad exclude was
+     *    present (issue #128) - includes-first is the order that actually does
+     *    what those users were configuring, an include being an exception to a
+     *    broader exclude.
+     *
+     * 2. Where `archive` is on, force every option -a implies to ON. v1 emitted
+     *    a bare -a and silently ignored the unticked boxes, so -a's implied
+     *    options were ALREADY in effect; v2 would now emit --no-* for each one
+     *    left off. Without this step an upgrade would silently stop preserving
+     *    perms and symlinks on every existing archive job (both default to
+     *    false in defaultRsyncOptions). Forcing them on makes the stored config
+     *    describe what rsync was already doing, so the emitted argv is
+     *    unchanged and only the checkboxes become truthful.
+     *
+     * @param array<string,mixed> $opts
+     * @return array<string,mixed>
+     */
+    private static function migrateRsyncOptionsV1ToV2(array $opts): array
+    {
+        $filters = [];
+        foreach (['includes' => 'include', 'excludes' => 'exclude'] as $key => $type) {
+            if (isset($opts[$key]) && is_array($opts[$key])) {
+                foreach ($opts[$key] as $pattern) {
+                    if (!is_array($pattern) && trim((string) $pattern) !== '') {
+                        $filters[] = ['type' => $type, 'pattern' => trim((string) $pattern)];
+                    }
+                }
+            }
+            unset($opts[$key]);
+        }
+        // Only introduce `filters` from the old keys; never clobber one that is
+        // somehow already present (a partially-migrated or hand-edited file).
+        if (!isset($opts['filters'])) {
+            $opts['filters'] = $filters;
+        }
+
+        $archiveOn = !empty($opts['archive']);
+        foreach (self::ARCHIVE_IMPLIED_KEYS as $key) {
+            if ($archiveOn) {
+                $opts[$key] = true;
+            } elseif (!array_key_exists($key, $opts)) {
+                // New in v2 (owner/group/devices) and not implied by anything:
+                // record the explicit default rather than leaving a hole.
+                $opts[$key] = false;
+            }
+        }
+
+        return $opts;
     }
 
     /**
@@ -517,6 +618,83 @@ class Config
         $out = [];
         foreach ($defaults as $key => $default) {
             $out[$key] = array_key_exists($key, $opts) ? $opts[$key] : $default;
+        }
+        // filters is the one structured value, so it is normalised on the READ
+        // path too: a hand-edited config.json must never reach the UI or
+        // Rsync::optionTokens() as a ragged array.
+        $out['filters'] = self::normalizeFilters($out['filters']);
+        return $out;
+    }
+
+    /** The filter rule types the plugin will emit. Mirrors Rsync::FILTER_FLAGS. */
+    const FILTER_TYPES = ['include', 'exclude'];
+
+    /**
+     * The boolean option keys that `-a` implies. Config cannot depend on Rsync
+     * (the dependency runs the other way), so the list lives here and
+     * Rsync::ARCHIVE_IMPLIED maps these same keys to their --no-* flags;
+     * RsyncTest asserts the two stay in lockstep. Used by the v1 -> v2
+     * migration, which has to know what -a was silently turning on.
+     */
+    const ARCHIVE_IMPLIED_KEYS = ['recursive', 'symlinks', 'perms', 'times', 'owner', 'group', 'devices'];
+
+    /**
+     * Normalise a filter list to the canonical stored shape: a re-indexed list
+     * of ['type' => 'include'|'exclude', 'pattern' => '<non-empty>'], in the
+     * SAME ORDER it came in. Order is the point - rsync acts on the first rule
+     * that matches - so this must never sort, group or dedupe.
+     *
+     * Two input shapes are accepted:
+     *   - the stored shape, a list of {type, pattern} maps;
+     *   - the FORM shape, parallel arrays {type: [...], pattern: [...]}, which
+     *     is what the options form posts. Parallel arrays are used there so the
+     *     up/down reorder buttons only have to move a DOM node - indexed names
+     *     (filters[0][type]) would need renumbering on every move. Browsers
+     *     submit fields in document order and PHP appends to each [] array in
+     *     arrival order, so index i of type[] pairs with index i of pattern[].
+     *
+     * Entries with an unknown type or a blank pattern are DROPPED (the same
+     * "unknown input simply cannot be emitted" rule the flag whitelist follows).
+     *
+     * @param mixed $raw
+     * @return array<int,array{type:string,pattern:string}>
+     */
+    public static function normalizeFilters($raw): array
+    {
+        if (!is_array($raw)) {
+            return [];
+        }
+
+        // Parallel-array (form) shape -> zip into the stored shape first.
+        if (isset($raw['type']) || isset($raw['pattern'])) {
+            $types    = (isset($raw['type']) && is_array($raw['type'])) ? array_values($raw['type']) : [];
+            $patterns = (isset($raw['pattern']) && is_array($raw['pattern'])) ? array_values($raw['pattern']) : [];
+            $zipped   = [];
+            $count    = max(count($types), count($patterns));
+            for ($i = 0; $i < $count; $i++) {
+                $zipped[] = [
+                    'type'    => $types[$i] ?? '',
+                    'pattern' => $patterns[$i] ?? '',
+                ];
+            }
+            $raw = $zipped;
+        }
+
+        $out = [];
+        foreach ($raw as $entry) {
+            if (!is_array($entry)) {
+                continue;
+            }
+            $type = isset($entry['type']) && !is_array($entry['type'])
+                ? strtolower(trim((string) $entry['type']))
+                : '';
+            $pattern = isset($entry['pattern']) && !is_array($entry['pattern'])
+                ? trim((string) $entry['pattern'])
+                : '';
+            if ($pattern === '' || !in_array($type, self::FILTER_TYPES, true)) {
+                continue;
+            }
+            $out[] = ['type' => $type, 'pattern' => $pattern];
         }
         return $out;
     }

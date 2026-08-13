@@ -139,7 +139,13 @@ final class HandlerTest extends TestCase
                     'compress'      => '0',
                     'omitDirTimes'  => '1',
                     'omitLinkTimes' => '0',
-                    'excludes'      => ['*.tmp', ''],
+                    // Exactly what the form posts: parallel type[]/pattern[]
+                    // arrays paired by index, with the empty starter row still
+                    // in place (it must be dropped, not stored blank).
+                    'filters'       => [
+                        'type'    => ['exclude', 'exclude'],
+                        'pattern' => ['*.tmp', ''],
+                    ],
                 ],
             ],
             'jobs' => [
@@ -157,7 +163,12 @@ final class HandlerTest extends TestCase
                     'rsyncOptions' => [
                         'archive'  => '1',
                         'delete'   => '0',
-                        'excludes' => ['thumbs/'],
+                        // Order is the whole point: the include must survive
+                        // AHEAD of the exclude it is meant to override.
+                        'filters'  => [
+                            'type'    => ['include', 'exclude'],
+                            'pattern' => ['keep/', 'thumbs/'],
+                        ],
                         'bwlimit'  => '2000',
                         'rsh'      => 'ssh -i /evil', // not whitelisted -> dropped
                     ],
@@ -194,12 +205,94 @@ final class HandlerTest extends TestCase
         // rsyncOptions whitelisted only.
         $this->assertArrayNotHasKey('rsh', $job['rsyncOptions']);
         $this->assertSame('2000', $job['rsyncOptions']['bwlimit']);
-        $this->assertSame(['thumbs/'], $job['rsyncOptions']['excludes']);
+        // The parallel type[]/pattern[] arrays are zipped back into ordered
+        // {type, pattern} entries, with the include still first.
+        $this->assertSame([
+            ['type' => 'include', 'pattern' => 'keep/'],
+            ['type' => 'exclude', 'pattern' => 'thumbs/'],
+        ], $job['rsyncOptions']['filters']);
         // Global defaults persisted + whitelisted.
         $this->assertTrue($cfg['global']['defaultRsyncOptions']['archive']);
         $this->assertTrue($cfg['global']['defaultRsyncOptions']['omitDirTimes']);
         $this->assertFalse($cfg['global']['defaultRsyncOptions']['omitLinkTimes']);
-        $this->assertSame(['*.tmp'], $cfg['global']['defaultRsyncOptions']['excludes']);
+        // Blank starter row dropped.
+        $this->assertSame(
+            [['type' => 'exclude', 'pattern' => '*.tmp']],
+            $cfg['global']['defaultRsyncOptions']['filters']
+        );
+    }
+
+    /**
+     * previewOptions must return the tokens the runner would actually build,
+     * in order - that is the whole reason it exists rather than the form
+     * reimplementing the whitelist in JavaScript.
+     */
+    public function testPreviewOptionsReturnsOrderedTokens(): void
+    {
+        $_POST = [
+            'action'       => 'previewOptions',
+            'csrf_token'   => 'test-token',
+            'rsyncOptions' => [
+                'archive' => '1',
+                'perms'   => '0',   // unticked under -a -> must negate
+                'filters' => [
+                    'type'    => ['include', 'include', 'exclude'],
+                    'pattern' => ['*/', 'A*', '*'],
+                ],
+            ],
+        ];
+
+        [$body, $code] = $this->runCapture(function () {
+            ur_action_preview_options();
+        });
+
+        $this->assertSame(200, $code);
+        $this->assertTrue($body['ok']);
+
+        $tokens = $body['tokens'];
+        // The issue-#128 ruleset, still in the order the user arranged it.
+        $this->assertSame(
+            ['--include=*/', '--include=A*', '--exclude=*'],
+            array_values(array_filter(
+                $tokens,
+                static fn (string $t): bool => str_starts_with($t, '--include=') || str_starts_with($t, '--exclude=')
+            ))
+        );
+        // And the unticked archive-implied option really is negated, after -a.
+        $this->assertGreaterThan(
+            array_search('-a', $tokens, true),
+            array_search('--no-perms', $tokens, true)
+        );
+    }
+
+    public function testPreviewOptionsWritesNothing(): void
+    {
+        $_POST = [
+            'action'       => 'previewOptions',
+            'csrf_token'   => 'test-token',
+            'rsyncOptions' => ['compress' => '1'],
+        ];
+
+        $this->runCapture(function () {
+            ur_action_preview_options();
+        });
+
+        // It is a read-only action: it must not create or touch config.json.
+        $this->assertFileDoesNotExist(Config::path());
+    }
+
+    public function testPreviewOptionsToleratesAnEmptySubmission(): void
+    {
+        $_POST = ['action' => 'previewOptions', 'csrf_token' => 'test-token'];
+
+        [$body, $code] = $this->runCapture(function () {
+            ur_action_preview_options();
+        });
+
+        $this->assertSame(200, $code);
+        $this->assertTrue($body['ok']);
+        // Missing block -> every option off/empty -> no flags at all.
+        $this->assertSame([], $body['tokens']);
     }
 
     public function testSaveConfigRejectsInvalidJobWith422(): void
