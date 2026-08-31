@@ -844,6 +844,9 @@ ur_emit_ajax_helpers();
 /* Re-enable the plugin's own Apply button once the form is edited (Unraid's
  * framework disables it on load and won't re-enable our custom forms). */
 ur_emit_form_enable_assets();
+/* UR_TZ + window.urFmtLocal, so the JS-updated cells render in the SERVER's
+ * timezone and agree with the PHP-rendered ones above them. */
+ur_emit_time_helpers();
 ?>
 <div class="ur-jobs-page">
 <div class="title">
@@ -1562,12 +1565,9 @@ ur_emit_form_enable_assets();
     }
     return parts.join(' ') + ' ago';
   }
-  function fmtLocal(epoch) {
-    var d = new Date(epoch * 1000);
-    function p(n) { return (n < 10 ? '0' : '') + n; }
-    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate())
-      + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
-  }
+  /* Formats in the SERVER's timezone so a live-polled cell matches the
+   * PHP-rendered one it replaces - see ur_emit_time_helpers(). */
+  var fmtLocal = window.urFmtLocal;
 
   /* Coarse forward "in 3h 5m" label for a future epoch (seconds) — mirrors
    * jobs.php ur_relative_time() so a JS-updated next-run cell reads like the
@@ -1737,7 +1737,11 @@ ur_emit_form_enable_assets();
         runs.forEach(function (run, idx) {
           var opt = document.createElement('option');
           opt.value = run.id;            // run-<stamp>.log (server-whitelisted)
-          var lbl = run.id.replace(/^run-/, '').replace(/\.log$/, '');
+          /* Label from run.ts (a UTC epoch listRuns() already returns) rendered
+           * in the server timezone. The run.id stamp is UTC by design, so
+           * showing it raw put a third timezone in front of the user. */
+          var lbl = run.ts ? fmtLocal(run.ts, true)
+                           : run.id.replace(/^run-/, '').replace(/\.log$/, '');
           if (run.state) { lbl += '  [' + run.state + ']'; }
           if (idx === 0) { lbl += '  (latest)'; }
           opt.textContent = lbl;          // textContent: never raw innerHTML

@@ -421,6 +421,33 @@ final class CronTest extends TestCase
         return mktime(12, 34, 0, 6, 13, 2026);
     }
 
+    /**
+     * Issue #135 / problem 4: nextRun() walks the calendar with date()/mktime(),
+     * so it evaluates in the PROCESS timezone. Config.php pins that to the system
+     * zone precisely because PHP defaults to UTC when php.ini leaves
+     * date.timezone unset - in which case "0 3 * * *" would be reported as firing
+     * at 03:00 UTC while crond fires it at 03:00 local, an offset apart.
+     *
+     * Asserts the fire time is 03:00 IN THE PINNED ZONE, for a zone whose offset
+     * is neither zero nor a whole-day multiple.
+     */
+    public function testNextRunEvaluatesInTheProcessTimezone(): void
+    {
+        $tz = date_default_timezone_get();
+        try {
+            date_default_timezone_set('Australia/Sydney');
+            // 2026-06-13 12:34 Sydney -> the next 03:00 Sydney is the 14th.
+            $next = Cron::nextRun('0 3 * * *', mktime(12, 34, 0, 6, 13, 2026));
+            $this->assertNotNull($next);
+            $this->assertSame('2026-06-14 03:00', date('Y-m-d H:i', $next));
+            // Same instant in UTC is 17:00 the day before - i.e. the epoch really
+            // is the Sydney 03:00, not a UTC 03:00 mislabelled.
+            $this->assertSame('2026-06-13 17:00', gmdate('Y-m-d H:i', $next));
+        } finally {
+            date_default_timezone_set($tz);
+        }
+    }
+
     public function testNextRunDaily(): void
     {
         // 0 3 * * *  -> next 03:00. From 12:34 on the 13th -> 03:00 on the 14th.

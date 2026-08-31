@@ -99,6 +99,28 @@ on, forked from, or derived from any other plugin.
   **tmpfs materialisation is NOT removed** by this (still needed for a discrete
   `ssh -i` key file + per-run isolation + redaction). Per-run tmpfs secrets +
   run state ALWAYS stay in tmpfs regardless.
+- **Timezone: store UTC, display system-local.** Two conventions, both
+  deliberate (issue #135). **Stored/interchange** values stay UTC: the
+  `startedAt`/`finishedAt` in `runs/<jobid>.summary.json` + History records
+  (`gmdate('Y-m-d\TH:i:s\Z')`) and the `run-YYYYmmddTHHMMSSZ.log` filenames —
+  the filename is an identifier that must sort lexically and never repeat across
+  a DST fold, so **never** localise it. **Everything a user reads** is the
+  server's timezone: `Logger::event()` stamps lines as `date('Y-m-d\TH:i:sP')`
+  (offset kept, so it stays unambiguous) to match the rsync lines interleaved
+  beside them in the same file. `Config.php` resolves the system zone
+  (`Config::systemTimezone()`: `$TZ` → `/etc/localtime` → ambient, validated
+  against `DateTimeZone::listIdentifiers()`) and calls
+  `date_default_timezone_set()` **at file load** — it is the ONLY place that does,
+  and it is why `Cron::nextRun()`'s bare `date()`/`mktime()` walk is correct: PHP
+  defaults to UTC whenever php.ini leaves `date.timezone` unset, which would
+  compute every next-run a full UTC offset away from when crond actually fires.
+  Config.php is required transitively by every entry point (pages, `handler.php`,
+  `scripts/runner.php`, `scripts/apply-cron.php`), which is what makes one call
+  enough. **Client-side, never use the browser's zone** — `new Date(...).getHours()`
+  renders wherever the admin's laptop is, which disagreed with the PHP-rendered
+  cells. All JS formatting goes through `window.urFmtLocal` from
+  `ur_emit_time_helpers()` (`_options_form.php`), pinned to the `UR_TZ` the server
+  emits.
 - **HTML-escape all output**; the log viewer renders `Logger::tail()` output, which
   is already escaped (log-XSS guard). Captured run output is also **redacted** of
   per-run tmpfs secret paths and **size-capped** before it is written

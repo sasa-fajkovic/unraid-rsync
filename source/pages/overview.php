@@ -90,6 +90,7 @@ try {
   </tbody>
 </table>
 
+<?php ur_emit_time_helpers(); /* UR_TZ + window.urFmtLocal (server timezone) */ ?>
 <script type="text/javascript">
 (function () {
   'use strict';
@@ -113,13 +114,9 @@ try {
     return s ? s.charAt(0) + s.slice(1).toLowerCase() : 'Pending';
   }
 
-  function pad(n) { return (n < 10 ? '0' : '') + n; }
-  function fmtLocal(epoch) {
-    if (!epoch) { return '—'; }
-    var d = new Date(epoch * 1000);
-    if (isNaN(d.getTime())) { return '—'; }
-    return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
-  }
+  /* Formats in the SERVER's timezone, not the browser's - see
+   * ur_emit_time_helpers() in _options_form.php. */
+  var fmtLocal = window.urFmtLocal;
   function isoToEpoch(iso) {
     if (!iso) { return 0; }
     var t = Date.parse(iso);

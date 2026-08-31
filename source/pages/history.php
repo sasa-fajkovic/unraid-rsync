@@ -162,6 +162,7 @@ try {
   </div>
 </div>
 
+<?php ur_emit_time_helpers(); /* UR_TZ + window.urFmtLocal (server timezone) */ ?>
 <script type="text/javascript">
 (function () {
   'use strict';
@@ -199,13 +200,13 @@ try {
     }
   }
 
+  /* Records store startedAt as a UTC "...Z" string (Runner.php); render it in
+   * the SERVER's timezone, not the browser's - see ur_emit_time_helpers(). */
   function fmtWhen(iso) {
     if (!iso) { return '—'; }
-    var d = new Date(iso);
-    if (isNaN(d.getTime())) { return iso; }
-    var p = function (n) { return (n < 10 ? '0' : '') + n; };
-    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) +
-           ' ' + p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+    var t = Date.parse(iso);
+    if (isNaN(t)) { return iso; }
+    return window.urFmtLocal(Math.floor(t / 1000), true);
   }
 
   function fmtDuration(sec) {
@@ -274,6 +275,10 @@ try {
         btn.textContent = 'View';
         btn.setAttribute('data-run', r.logRef);
         btn.setAttribute('data-jobid', r.jobId || '');
+        /* Title the modal with the run's local start time, not r.logRef - that
+         * is the UTC-stamped FILENAME and showing it raw put a second timezone
+         * in front of the user (issue #135). */
+        btn.setAttribute('data-when', fmtWhen(r.startedAt));
         logTd.appendChild(btn);
 
         var dl = document.createElement('a');
@@ -349,9 +354,9 @@ try {
   }
 
   /* ---- log modal ---- */
-  function openLog(runRef, job) {
+  function openLog(runRef, job, when) {
     if (!job || !runRef) { return; }
-    modalTit.textContent = 'Run log — ' + runRef;
+    modalTit.textContent = 'Run log — ' + (when || runRef);
     modalPre.textContent = 'Loading…';
     modal.classList.add('ur-open');
     modal.setAttribute('aria-hidden', 'false');
@@ -432,7 +437,7 @@ try {
   nextBtn.addEventListener('click', function () { if (offset + PAGE_SIZE < total) { offset += PAGE_SIZE; load(); } });
   rowsEl.addEventListener('click', function (ev) {
     var t = ev.target;
-    if (t && t.classList && t.classList.contains('ur-hist-viewlog')) { openLog(t.getAttribute('data-run'), t.getAttribute('data-jobid')); }
+    if (t && t.classList && t.classList.contains('ur-hist-viewlog')) { openLog(t.getAttribute('data-run'), t.getAttribute('data-jobid'), t.getAttribute('data-when')); }
   });
   document.getElementById('ur-hist-modal-close').addEventListener('click', closeLog);
 

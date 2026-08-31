@@ -1134,6 +1134,59 @@ if (!function_exists('ur_emit_ajax_helpers')) {
     }
 }
 
+if (!function_exists('ur_emit_time_helpers')) {
+    /**
+     * Emit (once per page) the shared client-side time formatter, mirroring
+     * ur_emit_ajax_helpers()'s once-guard.
+     *
+     * WHY this is not just `new Date(...).getHours()`: the browser formats in the
+     * BROWSER's timezone, but every timestamp this plugin shows means something
+     * in the SERVER's - that is the zone crond fires in, rsync stamps in, and the
+     * PHP-rendered cells on the Jobs tab already print in. Administering the box
+     * from a laptop in another zone made the JS-rendered tabs (Overview, History,
+     * live Jobs polling) disagree with the PHP-rendered ones by the offset
+     * between them (issue #135). So we ship the server's zone to the page and
+     * pin every client-side render to it.
+     *
+     * urFmtLocal(epochSeconds, withSeconds) -> "2026-08-30 19:40[:10]" in UR_TZ,
+     * or the em-dash for a falsy/unparseable value. 'sv-SE' is chosen purely
+     * because its locale format is already ISO-shaped, so no manual zero-padding
+     * is needed.
+     */
+    function ur_emit_time_helpers(): void
+    {
+        static $done = false;
+        if ($done) {
+            return;
+        }
+        $done = true;
+        echo '<script type="text/javascript">var UR_TZ = ' . ur_js(Config::systemTimezone()) . ";\n"
+            . <<<'JS'
+/* Render an epoch in the SERVER's timezone (never the browser's). See
+ * ur_emit_time_helpers() for why. */
+window.urFmtLocal = function (epoch, withSeconds) {
+  var n = parseInt(epoch, 10);
+  if (!n) { return '\u2014'; }
+  var d = new Date(n * 1000);
+  if (isNaN(d.getTime())) { return '\u2014'; }
+  var opts = {
+    timeZone: UR_TZ,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit'
+  };
+  if (withSeconds) { opts.second = '2-digit'; }
+  try {
+    return d.toLocaleString('sv-SE', opts);
+  } catch (e) {
+    /* An ICU build that rejects the zone must not blank the whole column. */
+    return d.toLocaleString('sv-SE');
+  }
+};
+JS
+            . "\n</script>\n";
+    }
+}
+
 if (!function_exists('ur_emit_form_enable_assets')) {
     /**
      * Emit (once per page) a tiny delegated handler that RE-ENABLES the plugin's

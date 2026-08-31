@@ -34,6 +34,53 @@ final class ConfigTest extends TestCase
         );
     }
 
+    /**
+     * Config pins the process timezone to the SERVER's at load (issue #135):
+     * PHP falls back to UTC when php.ini leaves date.timezone unset, which would
+     * make Cron::nextRun() compute an entire UTC offset away from when crond
+     * actually fires. $TZ is the first source, ahead of /etc/localtime.
+     */
+    public function testSystemTimezonePrefersTzEnv(): void
+    {
+        $prev = getenv('TZ');
+        try {
+            putenv('TZ=Australia/Sydney');
+            $this->assertSame('Australia/Sydney', Config::systemTimezone());
+        } finally {
+            putenv($prev === false ? 'TZ' : "TZ=$prev");
+        }
+    }
+
+    /**
+     * The zone is interpolated into page JS and handed to
+     * toLocaleString({timeZone}), which throws RangeError on an unknown zone -
+     * so an unrecognised value must never be returned. It falls through to the
+     * next source (/etc/localtime, then the ambient default, then UTC).
+     */
+    public function testSystemTimezoneRejectsUnknownZone(): void
+    {
+        $prev = getenv('TZ');
+        try {
+            putenv('TZ=Not/AZone');
+            $tz = Config::systemTimezone();
+            $this->assertNotSame('Not/AZone', $tz);
+            $this->assertContains($tz, DateTimeZone::listIdentifiers());
+            // Always usable as a real zone.
+            $this->assertNotNull(new DateTimeZone($tz));
+        } finally {
+            putenv($prev === false ? 'TZ' : "TZ=$prev");
+        }
+    }
+
+    public function testSystemTimezoneIsAlwaysAValidIdentifier(): void
+    {
+        foreach (['', 'UTC', 'Europe/Berlin', '../../etc/passwd', "UTC\n"] as $candidate) {
+            putenv("TZ=$candidate");
+            $this->assertContains(Config::systemTimezone(), DateTimeZone::listIdentifiers());
+        }
+        putenv('TZ=UTC'); // restore the suite-wide pin from bootstrap.php
+    }
+
     public function testRetentionDefaultAndClamp(): void
     {
         // Default retention is 100; clamp to [1, 9999]; non-numeric -> default.

@@ -244,6 +244,50 @@ class Config
     }
 
     /**
+     * The IANA timezone the SERVER runs in - the one Unraid's crond fires jobs
+     * in, rsync stamps its own output in, and therefore the one every timestamp
+     * the plugin shows a user must be rendered in.
+     *
+     * Resolved rather than assumed: PHP falls back to "UTC" when php.ini leaves
+     * date.timezone unset, so relying on the ambient zone would silently compute
+     * Cron::nextRun() in UTC while crond fires in local time - the displayed next
+     * run would be off by the whole UTC offset. Sources, in order:
+     *   1. $TZ            - what crond/rsync themselves honour
+     *   2. /etc/localtime - the system zone (a symlink into .../zoneinfo/<Zone>)
+     *   3. the ambient PHP default, as a last resort
+     *
+     * The result is validated against the tz database before being returned: it
+     * is interpolated into page JS and handed to toLocaleString({timeZone}),
+     * which throws RangeError on an unknown zone. Anything unrecognised -> UTC.
+     */
+    public static function systemTimezone(): string
+    {
+        $candidates = [];
+
+        $tz = getenv('TZ');
+        if (is_string($tz)) {
+            $candidates[] = trim($tz);
+        }
+
+        // Not every /etc/localtime is a symlink (some systems copy the zone file
+        // in place), so a miss here just falls through to the next candidate.
+        $link = @readlink('/etc/localtime');
+        if (is_string($link) && preg_match('#(?:^|/)zoneinfo/(.+)$#', $link, $m)) {
+            $candidates[] = $m[1];
+        }
+
+        $candidates[] = date_default_timezone_get();
+
+        $known = DateTimeZone::listIdentifiers();
+        foreach ($candidates as $cand) {
+            if ($cand !== '' && in_array($cand, $known, true)) {
+                return $cand;
+            }
+        }
+        return 'UTC';
+    }
+
+    /**
      * Validate a user-supplied persistent log directory, returning the cleaned
      * absolute path or '' (meaning "unset" -> logs stay in RAM/tmpfs). See
      * sanitizeMntDir() for the confinement rules.
@@ -733,3 +777,10 @@ class Config
         return $out;
     }
 }
+
+// Pin the process timezone to the server's, at load. Config.php is required -
+// directly or transitively - by every entry point (all page bodies, handler.php,
+// scripts/runner.php via Runner.php, scripts/apply-cron.php via Cron.php), so
+// this one call covers the crond-invoked runner and the php-fpm web request
+// alike, which would otherwise inherit two different ambient zones.
+date_default_timezone_set(Config::systemTimezone());
