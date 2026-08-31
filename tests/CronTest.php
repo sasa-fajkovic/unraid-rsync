@@ -421,6 +421,111 @@ final class CronTest extends TestCase
         return mktime(12, 34, 0, 6, 13, 2026);
     }
 
+    /**
+     * Issue #135 / problem 4: nextRun() walks the calendar with date()/mktime(),
+     * so it evaluates in the PROCESS timezone. Config.php pins that to the system
+     * zone precisely because PHP defaults to UTC when php.ini leaves
+     * date.timezone unset - in which case "0 3 * * *" would be reported as firing
+     * at 03:00 UTC while crond fires it at 03:00 local, an offset apart.
+     *
+     * Asserts the fire time is 03:00 IN THE PINNED ZONE, for a zone whose offset
+     * is neither zero nor a whole-day multiple.
+     */
+    public function testNextRunEvaluatesInTheProcessTimezone(): void
+    {
+        $tz = date_default_timezone_get();
+        try {
+            date_default_timezone_set('Australia/Sydney');
+            // 2026-06-13 12:34 Sydney -> the next 03:00 Sydney is the 14th.
+            $next = Cron::nextRun('0 3 * * *', mktime(12, 34, 0, 6, 13, 2026));
+            $this->assertNotNull($next);
+            $this->assertSame('2026-06-14 03:00', date('Y-m-d H:i', $next));
+            // Same instant in UTC is 17:00 the day before - i.e. the epoch really
+            // is the Sydney 03:00, not a UTC 03:00 mislabelled.
+            $this->assertSame('2026-06-13 17:00', gmdate('Y-m-d H:i', $next));
+        } finally {
+            date_default_timezone_set($tz);
+        }
+    }
+
+    /**
+     * Pinning a REAL zone (rather than the UTC PHP silently fell back to) exposes
+     * nextRun()'s minute-walk to DST transitions for the first time. These lock in
+     * the behaviour at both folds so a future refactor of the coarse month/day/hour
+     * jumps cannot silently change it.
+     *
+     * SPRING-FORWARD: the wall clock skips 02:00 -> 03:00, so 02:30 simply does
+     * not exist that day. A daily "30 2 * * *" therefore SKIPS the gap day and
+     * fires the next day - the same thing vixie-cron does with a fixed-time job
+     * that falls in the gap. It must not fire at a shifted hour, and must not hang.
+     */
+    public function testNextRunSkipsANonexistentLocalTimeAtSpringForward(): void
+    {
+        $tz = date_default_timezone_get();
+        try {
+            // Sydney 2027-10-03: 02:00 -> 03:00. 02:30 does not exist that day.
+            date_default_timezone_set('Australia/Sydney');
+            $next = Cron::nextRun('30 2 * * *', strtotime('2027-10-02 12:00'));
+            $this->assertNotNull($next);
+            $this->assertSame('2027-10-04 02:30', date('Y-m-d H:i', $next));
+
+            // Berlin 2027-03-28: 02:00 -> 03:00, same rule.
+            date_default_timezone_set('Europe/Berlin');
+            $next = Cron::nextRun('30 2 * * *', strtotime('2027-03-27 12:00'));
+            $this->assertNotNull($next);
+            $this->assertSame('2027-03-29 02:30', date('Y-m-d H:i', $next));
+        } finally {
+            date_default_timezone_set($tz);
+        }
+    }
+
+    /**
+     * A schedule pinned to ONLY the nonexistent hour of the gap day must still
+     * TERMINATE (returning the next year's real occurrence) rather than spinning
+     * to the 5-year horizon or looping forever.
+     */
+    public function testNextRunTerminatesWhenTheOnlyMatchIsInTheSpringForwardGap(): void
+    {
+        $tz = date_default_timezone_get();
+        try {
+            date_default_timezone_set('Australia/Sydney');
+            $next = Cron::nextRun('30 2 3 10 *', strtotime('2027-01-01 12:00'));
+            $this->assertNotNull($next);
+            // 2027-10-03 02:30 does not exist, so the next real one is a year on.
+            $this->assertSame('2028-10-03 02:30', date('Y-m-d H:i', $next));
+        } finally {
+            date_default_timezone_set($tz);
+        }
+    }
+
+    /**
+     * FALL-BACK: the wall clock repeats 02:00-02:59, so "30 2 * * *" matches twice
+     * that day. The guarantee that matters for a "Next run" cell is that it
+     * resolves to ONE instant - not two fires, not a skipped day.
+     *
+     * Which of the two it picks is decided by mktime()'s resolution of an
+     * ambiguous local time during the coarse hour-jump: it lands on the SECOND
+     * occurrence (the post-transition +10:00 one). Pinned here so the choice is
+     * visible rather than accidental. Only the displayed hint is affected once a
+     * year; crond, not this function, is what actually fires the job.
+     */
+    public function testNextRunResolvesToOneInstantAtFallBack(): void
+    {
+        $tz = date_default_timezone_get();
+        try {
+            // Sydney 2027-04-04: 03:00 -> 02:00, so 02:30 happens twice.
+            date_default_timezone_set('Australia/Sydney');
+            $next = Cron::nextRun('30 2 * * *', strtotime('2027-04-03 12:00'));
+            $this->assertNotNull($next);
+            $this->assertSame('2027-04-04 02:30', date('Y-m-d H:i', $next));
+            // The LATER of the two 02:30s: post-transition +10:00, i.e. 16:30 UTC
+            // the day before (the earlier, +11:00 one would be 15:30).
+            $this->assertSame('2027-04-03 16:30', gmdate('Y-m-d H:i', $next));
+        } finally {
+            date_default_timezone_set($tz);
+        }
+    }
+
     public function testNextRunDaily(): void
     {
         // 0 3 * * *  -> next 03:00. From 12:34 on the 13th -> 03:00 on the 14th.

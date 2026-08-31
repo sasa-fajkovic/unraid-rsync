@@ -160,6 +160,8 @@ class Runner
         //    escape - it would contradict the contract (no structured result, no
         //    postHook/summary/markStopped). Catch it and hard-fail cleanly.
         $startedAtTs = time();
+        // STORAGE timestamp: UTC, always. Display is system-local (see CLAUDE.md
+        // "Timezone: store UTC, display system-local") - do NOT switch this to date().
         $startedAt   = gmdate('Y-m-d\TH:i:s\Z', $startedAtTs);
         try {
             $runLog = Logger::openRun($jobId, $startedAtTs);
@@ -191,6 +193,12 @@ class Runner
             $dryRun ? ' [DRY-RUN]' : '',
             $trigger
         ));
+        // Name the zone every stamp below is in. Config::systemTimezone() falls
+        // back to UTC when every source misses, which would silently reproduce
+        // issue #135 (our stamps UTC, rsync's own lines local) - stating it here,
+        // in the same file as the rsync lines to compare against, is what makes
+        // that case reportable instead of invisible.
+        Logger::event($runLog, $jobId, 'Timestamps in timezone: ' . Config::systemTimezone() . '.');
 
         // Survive the abort SIGTERM so we can record an ABORTED outcome.
         //
@@ -424,6 +432,7 @@ class Runner
 
             // 9. Persist the last-run summary to /boot + clear running state.
             $finishedAtTs = time();
+            // STORAGE timestamp: UTC, always (see the startedAt note above).
             $finishedAt  = gmdate('Y-m-d\TH:i:s\Z', $finishedAtTs);
             $durationSec = max(0, $finishedAtTs - $startedAtTs);
             self::writeSummary($jobId, [
