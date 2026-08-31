@@ -368,7 +368,6 @@ class Rsync
      * Compose the FULL rsync argv array for a single source->dest pair.
      *
      * Order:
-     *   [sshpassPrefix...]                         (PASSWORD auth only; [] otherwise)
      *   <rsyncPath()>                              (the resolved binary, default /usr/bin/rsync)
      *   <whitelisted option tokens>
      *   <log-level verbosity flags>
@@ -380,16 +379,16 @@ class Rsync
      *
      * The leading `--` ends rsync option parsing so a path beginning with '-'
      * can never be read as a flag (option-injection guard on top of Job.php's
-     * path guardrails). The sshpass prefix wraps the WHOLE rsync process (it is
-     * the program rsync runs under), so it is prepended to the argv, NOT folded
-     * into -e (see Ssh.php).
+     * path guardrails). PASSWORD auth adds NOTHING to this argv: it is carried
+     * entirely by the child ENVIRONMENT (Ssh::buildAuthEnv), so there is no
+     * wrapper program to prepend (see Ssh.php).
      *
      * @param array<string,mixed> $opts    canonical whitelist options
      * @param string              $logLevel one of Job::LOG_LEVELS
      * @param string              $runLog   absolute path of the per-run log file
      * @param string              $src      source operand (already direction-resolved)
      * @param string              $dest     destination operand
-     * @param array{dashE?:string,sshpassPrefix?:array<int,string>}|null $ssh
+     * @param array{dashE?:string,sshEnv?:array<string,string>}|null $ssh
      *        SSH transport pieces from Ssh::materialize(); null/[] for LOCAL.
      * @param bool                $dryRun
      * @return array<int,string>
@@ -403,21 +402,12 @@ class Rsync
         ?array $ssh = null,
         bool $dryRun = false
     ): array {
-        $sshpassPrefix = [];
-        $dashE         = '';
-        if (is_array($ssh)) {
-            if (isset($ssh['sshpassPrefix']) && is_array($ssh['sshpassPrefix'])) {
-                $sshpassPrefix = $ssh['sshpassPrefix'];
-            }
-            if (isset($ssh['dashE']) && is_string($ssh['dashE'])) {
-                $dashE = $ssh['dashE'];
-            }
+        $dashE = '';
+        if (is_array($ssh) && isset($ssh['dashE']) && is_string($ssh['dashE'])) {
+            $dashE = $ssh['dashE'];
         }
 
         $argv = [];
-        foreach ($sshpassPrefix as $tok) {
-            $argv[] = (string) $tok;
-        }
 
         // Use the SAME resolved binary the presence check validates
         // (rsyncPath(), default /usr/bin/rsync) as argv[0], rather than the bare
@@ -534,23 +524,28 @@ class Rsync
      * ARGV ARRAY directly (no shell), so nothing is re-parsed.
      *
      * The spawn is injectable for tests: set Rsync::$runner to a callable
-     * `fn(array $argv, callable $onOutput): int` and this method delegates to it
-     * instead of touching a real binary. The default $runner uses proc_open.
+     * `fn(array $argv, callable $onOutput, ?array $env): int` and this method
+     * delegates to it instead of touching a real binary. A stub declaring only
+     * the first two parameters still works - PHP ignores the extra argument.
+     * The default $runner uses proc_open.
      *
-     * @param array<int,string>          $argv     full rsync argv (incl. any sshpass prefix)
+     * @param array<int,string>          $argv     full rsync argv
      * @param callable(string):void|null $onOutput called with each output chunk
+     * @param array<string,string>|null  $env      full child environment, or null
+     *        to inherit. PASSWORD auth passes the SSH_ASKPASS vars here; rsync
+     *        hands them to the ssh it spawns.
      * @return int the process exit code (128+signal when terminated by a signal)
      */
-    public static function run(array $argv, ?callable $onOutput = null): int
+    public static function run(array $argv, ?callable $onOutput = null, ?array $env = null): int
     {
         $sink = $onOutput ?? static function (string $_chunk): void {
             // default: discard (the run log is fed by rsync's own --log-file).
         };
 
         if (self::$runner !== null) {
-            return (self::$runner)($argv, $sink);
+            return (self::$runner)($argv, $sink, $env);
         }
-        return self::defaultRun($argv, $sink);
+        return self::defaultRun($argv, $sink, $env);
     }
 
     /**
@@ -567,10 +562,11 @@ class Rsync
      * proc_close result (signalled child) is normalised to 128+signal so the
      * SIGTERM abort path maps cleanly to 143 -> ABORTED.
      *
-     * @param array<int,string>   $argv
-     * @param callable(string):void $onOutput
+     * @param array<int,string>        $argv
+     * @param callable(string):void     $onOutput
+     * @param array<string,string>|null $env full child environment, or null to inherit
      */
-    private static function defaultRun(array $argv, callable $onOutput): int
+    private static function defaultRun(array $argv, callable $onOutput, ?array $env = null): int
     {
         $descriptors = [
             0 => ['file', '/dev/null', 'r'],
@@ -578,7 +574,7 @@ class Rsync
             2 => ['pipe', 'w'],
         ];
         $pipes = [];
-        $proc  = @proc_open($argv, $descriptors, $pipes);
+        $proc  = @proc_open($argv, $descriptors, $pipes, null, $env);
         if (!is_resource($proc)) {
             $onOutput("Failed to start rsync.\n");
             return 127;

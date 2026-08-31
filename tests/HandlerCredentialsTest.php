@@ -478,46 +478,35 @@ final class HandlerCredentialsTest extends TestCase
         $this->assertSame([], $body['disabledJobs']);
     }
 
-    public function testSaveCredentialsWarnsWhenPasswordConnAndSshpassMissing(): void
+    public function testSaveCredentialsWarnsAboutTheRsyncDaemonPort(): void
     {
-        // Saving a PASSWORD connection while sshpass is unavailable still
-        // succeeds, but the response carries a clear warning so the user knows
-        // password auth won't work yet.
-        Ssh::$sshpassPathOverride = ''; // simulate "sshpass not installed"
-        try {
-            $_POST = [
-                'action' => 'saveCredentials', 'csrf_token' => 'test-token',
-                'connections_present' => '1',
-                'connections' => [0 => ['id' => '', 'name' => 'pw', 'host' => 'h.example', 'username' => 'u', 'authMethod' => 'PASSWORD', 'password' => 'secret']],
-            ];
-            [$body, $code] = $this->runCapture(fn() => ur_action_save_credentials());
-            $this->assertSame(200, $code, json_encode($body));
-            $this->assertTrue($body['ok']);
-            $this->assertNotEmpty($body['warnings']);
-            $this->assertNotEmpty(array_filter($body['warnings'], fn($w) => stripos($w, 'sshpass') !== false));
-        } finally {
-            Ssh::$sshpassPathOverride = null;
-        }
+        // Port 873 is rsyncd, not SSH. The save still succeeds (running sshd on
+        // 873 is legal, just unusual) but the response must say so - otherwise
+        // the mistake only surfaces much later as an opaque "not running SSH".
+        $_POST = [
+            'action' => 'saveCredentials', 'csrf_token' => 'test-token',
+            'connections_present' => '1',
+            'connections' => [0 => ['id' => '', 'name' => 'QNAP', 'host' => 'h.example', 'port' => '873', 'username' => 'rsync', 'authMethod' => 'PASSWORD', 'password' => 'secret']],
+        ];
+        [$body, $code] = $this->runCapture(fn() => ur_action_save_credentials());
+        $this->assertSame(200, $code, json_encode($body));
+        $this->assertTrue($body['ok']);
+        $this->assertNotEmpty(array_filter($body['warnings'], fn($w) => strpos($w, '873') !== false));
     }
 
-    public function testSaveCredentialsKeyOnlyHasNoSshpassWarning(): void
+    public function testSaveCredentialsSshPortHasNoWarning(): void
     {
-        Ssh::$sshpassPathOverride = '';
-        try {
-            $seed = Credentials::defaults();
-            $seed['keys'][] = ['id' => 'k-1', 'name' => 'kk', 'publicKey' => 'p'];
-            $this->seedCreds($seed);
-            $_POST = [
-                'action' => 'saveCredentials', 'csrf_token' => 'test-token',
-                'connections_present' => '1',
-                'connections' => [0 => ['id' => '', 'name' => 'web', 'host' => 'h', 'username' => 'u', 'authMethod' => 'KEY', 'keyId' => 'k-1']],
-            ];
-            [$body, $code] = $this->runCapture(fn() => ur_action_save_credentials());
-            $this->assertSame(200, $code, json_encode($body));
-            $this->assertSame([], $body['warnings']); // KEY auth -> no sshpass warning
-        } finally {
-            Ssh::$sshpassPathOverride = null;
-        }
+        $seed = Credentials::defaults();
+        $seed['keys'][] = ['id' => 'k-1', 'name' => 'kk', 'publicKey' => 'p'];
+        $this->seedCreds($seed);
+        $_POST = [
+            'action' => 'saveCredentials', 'csrf_token' => 'test-token',
+            'connections_present' => '1',
+            'connections' => [0 => ['id' => '', 'name' => 'web', 'host' => 'h', 'port' => '22', 'username' => 'u', 'authMethod' => 'KEY', 'keyId' => 'k-1']],
+        ];
+        [$body, $code] = $this->runCapture(fn() => ur_action_save_credentials());
+        $this->assertSame(200, $code, json_encode($body));
+        $this->assertSame([], $body['warnings']);
     }
 
     // --- generateKey input validation (no ssh-keygen needed) ---------------

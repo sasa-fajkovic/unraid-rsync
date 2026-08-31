@@ -43,10 +43,12 @@ jobs:
         run: |
           sudo apt-get install -y -qq shellcheck
           # pkg_build.sh (build), gen-plg-changes.sh (release-time <CHANGES>
-          # generation - see release.yml), and source/event/started (the
-          # array-start hook, shipped 0755 - a syntax error here would package
-          # silently).
-          for f in pkg_build.sh gen-plg-changes.sh source/event/started; do
+          # generation - see release.yml), source/event/started (the array-start
+          # hook, shipped 0755) and source/scripts/askpass.sh (the SSH_ASKPASS
+          # helper, shipped 0755 - ssh execs it to read the password, so a syntax
+          # error here breaks password auth). All ship 0755, and a syntax error
+          # in any of them would package silently.
+          for f in pkg_build.sh gen-plg-changes.sh source/event/started source/scripts/askpass.sh; do
             bash -n "$f"
             shellcheck "$f"
           done

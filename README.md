@@ -45,7 +45,7 @@ Run multiple **independent** rsync jobs, each with:
 - Jobs CRUD + Global Settings (config persisted to `config.json`).
 - A **Connections** tab (see [Credentials](#credentials)): SSH connections with
   three auth methods — **existing key file** (default), a **managed key** (from
-  the Credentials tab), and **password** (via `sshpass`) — plus **Discover host
+  the Credentials tab), and **password** (no extra packages needed) — plus **Discover host
   key**, selectable strict-host-key modes, and a per-connection **Test
   connection** probe.
 - A **Credentials** tab: a managed SSH key keychain you can **generate** or
@@ -121,7 +121,8 @@ Each connection picks one of three **auth methods**:
   the plugin's store; it uses the file in place.
 - **Managed key** — use a key from the plugin's **Keys** keychain (generated or
   imported through the UI).
-- **Password** — authenticate with a stored password via `sshpass` (see below).
+- **Password** — authenticate with a stored password (see below). Works on a
+  stock Unraid box; nothing to install.
 
 ### Credential security (read this)
 
@@ -161,10 +162,18 @@ the plugin does not delete** credentials stored under `/mnt` — remove them
 manually. Leave the field **empty** to keep the backward-compatible `/boot`
 behaviour.
 
-**Password auth requires `sshpass`**, which is not part of Unraid's base OS.
-The plugin **detects it at runtime**: if it is missing, the Connections tab and
-the connection test say so and point you at the **NerdTools** plugin (install
-it and enable its `sshpass` package). Key auth works regardless.
+**Password auth needs nothing installed.** It uses OpenSSH's own
+`SSH_ASKPASS` mechanism: ssh runs the plugin's `scripts/askpass.sh`, which reads
+the password from a per-run RAM file created at mode `600` and deleted when the
+run ends. The password never appears in a command line, in an environment
+variable, or in `ps` — only the path of that file does.
+
+> Earlier versions shelved this out to `sshpass` and told you to install the
+> **NerdTools** plugin. NerdTools was archived by its authors in March 2024 and
+> is unavailable on Unraid 7, which left password auth impossible to use on a
+> stock box. That dependency is gone.
+
+Key auth is still the recommended method.
 
 - **Pre/post hooks run as `root`** (via `bash -c`) before/after the transfer,
   and their stdout/stderr is **captured into the per-run log, which is rendered
@@ -179,8 +188,7 @@ there is no clean Slackware artifact to pin, and a bundled copy would shadow the
 base binary. Instead it performs a **defensive presence check**: before a job
 runs, it verifies the binary is executable, and the **Status** tab shows the
 detected rsync path plus the first line of `rsync --version` (or a clear warning
-if it is somehow absent — a sign your system is misconfigured). This mirrors the
-`sshpass` detect-and-degrade approach, except rsync is expected to be present.
+if it is somehow absent — a sign your system is misconfigured).
 
 ## Install
 

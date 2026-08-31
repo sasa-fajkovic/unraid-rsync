@@ -328,7 +328,7 @@ final class RsyncTest extends TestCase
         $opts = $this->emptyOpts();
         $opts['archive'] = true;
         $argv = Rsync::buildArgv($opts, 'normal', '/rt/logs/j/run.log', '/mnt/user/src/', '/mnt/disk1/dst/');
-        $this->assertSame(Rsync::rsyncPath(), $argv[0], 'LOCAL: no sshpass prefix, the resolved rsync binary is first');
+        $this->assertSame(Rsync::rsyncPath(), $argv[0], 'LOCAL: the resolved rsync binary is first');
         $this->assertContains('-a', $argv);
         $this->assertContains('--log-file=/rt/logs/j/run.log', $argv);
         $this->assertNotContains('-e', $argv, 'LOCAL has no -e transport');
@@ -342,10 +342,10 @@ final class RsyncTest extends TestCase
     public function testBuildArgvSshKeyAuthInjectsDashE(): void
     {
         // Simulate the KEY-auth pieces Ssh::materialize hands back: a dashE, no
-        // sshpass prefix.
+        // password env.
         $ssh = [
             'dashE'         => "'ssh' '-i' '/tmp/k' '-o' 'BatchMode=yes'",
-            'sshpassPrefix' => [],
+            'sshEnv' => [],
         ];
         $opts = $this->emptyOpts();
         $argv = Rsync::buildArgv($opts, 'quiet', '/rt/run.log', '/mnt/user/s/', 'user@host:/data/', $ssh);
@@ -358,18 +358,29 @@ final class RsyncTest extends TestCase
         $this->assertLessThan($ddIdx, $eIdx);
     }
 
-    public function testBuildArgvSshPasswordPrependsSshpassPrefix(): void
+    public function testBuildArgvSshPasswordAddsNothingToTheArgv(): void
     {
-        // PASSWORD-auth pieces: a sshpass prefix wraps the WHOLE rsync argv.
+        // PASSWORD auth is carried entirely by the child ENVIRONMENT (the
+        // SSH_ASKPASS vars), so there is no wrapper program: rsync is still
+        // argv[0], exactly as for KEY auth. Nothing about the password - not
+        // the secret, not the passfile path - may appear in the argv.
         $ssh = [
-            'dashE'         => "'ssh' '-o' 'PubkeyAuthentication=no'",
-            'sshpassPrefix' => ['/usr/bin/sshpass', '-f', '/tmp/pass/tok'],
+            'dashE'  => "'ssh' '-o' 'PubkeyAuthentication=no'",
+            'sshEnv' => [
+                'SSH_ASKPASS'         => '/usr/local/emhttp/plugins/unraid.rsync/scripts/askpass.sh',
+                'SSH_ASKPASS_REQUIRE' => 'force',
+                'UR_ASKPASS_FILE'     => '/tmp/pass/tok',
+            ],
         ];
-        $opts = $this->emptyOpts();
-        $argv = Rsync::buildArgv($opts, 'normal', '/rt/run.log', '/mnt/user/s/', 'user@host:/d/', $ssh);
-        $this->assertSame(['/usr/bin/sshpass', '-f', '/tmp/pass/tok'], array_slice($argv, 0, 3));
-        $this->assertSame(Rsync::rsyncPath(), $argv[3], 'the rsync binary follows the sshpass prefix');
+        $argv = Rsync::buildArgv($this->emptyOpts(), 'normal', '/rt/run.log', '/mnt/user/s/', 'user@host:/d/', $ssh);
+        $this->assertSame(Rsync::rsyncPath(), $argv[0], 'rsync is argv[0]; nothing wraps it');
         $this->assertContains('-e', $argv);
+        foreach (['askpass.sh', '/tmp/pass/tok', 'SSH_ASKPASS'] as $needle) {
+            $this->assertEmpty(
+                array_filter($argv, fn($t) => strpos((string) $t, $needle) !== false),
+                "argv must not carry $needle"
+            );
+        }
     }
 
     public function testBuildArgvAppendsDryRun(): void
