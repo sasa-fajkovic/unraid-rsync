@@ -8,7 +8,7 @@ declare(strict_types=1);
  * Two responsibilities, both shared with Phase 4 (Rsync.php) and the
  * Credentials tab's "Test connection" button:
  *
- *   1. Build the ssh / sshpass invocation as an ARGV ARRAY (never a shell
+ *   1. Build the ssh invocation as an ARGV ARRAY (never a shell
  *      string). rsync consumes the ssh transport via its `-e` option, whose
  *      VALUE is itself a small command line; we expose both the argv pieces
  *      (for proc_open without a shell) and the joined `-e` string value so
@@ -39,29 +39,36 @@ declare(strict_types=1);
  *         -o StrictHostKeyChecking=<mode> -o UserKnownHostsFile=<kh>
  *         -o ConnectTimeout=<n> -p <port>
  *   PASSWORD:
- *     sshpass -f <tmp-passfile>   (PREFIX, prepended to the rsync/ssh argv)
  *       wrapping
  *     ssh -o PubkeyAuthentication=no -o PreferredAuthentications=password
  *         -o StrictHostKeyChecking=<mode> -o UserKnownHostsFile=<kh>
  *         -o ConnectTimeout=<n> -p <port>
- *     (NO BatchMode with sshpass - BatchMode disables the password prompt
- *      sshpass is there to answer.)
+ *     (NO BatchMode for PASSWORD auth - BatchMode disables the very password
+ *      prompt the askpass helper is there to answer.)
  *
- * SSHPASS AVAILABILITY (decision: detect-and-degrade)
- *   sshpass is NOT part of Unraid's base OS, and we deliberately DO NOT bundle a
- *   third-party binary we cannot independently build and verify (committing an
- *   unverified artifact + scraped checksum is the supply-chain risk the plan
- *   warns against). Instead we detect it at runtime via `command -v sshpass`:
- *   if present, password auth works; if absent, the Credentials UI and
- *   testConnection()/save surface a clear notice telling the user to install
- *   the NerdTools plugin and add sshpass, or to use key auth. KEY AUTH IS FULLY
- *   FUNCTIONAL REGARDLESS - it is the primary, tested path.
+ * PASSWORD AUTH (decision: OpenSSH's own askpass, NO external dependency)
+ *   This used to shell out to `sshpass`, which is not part of Unraid's base OS.
+ *   The UI told users to install it via the NerdTools plugin - but NerdTools was
+ *   archived by its owner in March 2024 and is unavailable on Unraid 7, so
+ *   password auth was advertised in the UI while being impossible to actually
+ *   use on a stock box.
+ *
+ *   We now use OpenSSH's built-in SSH_ASKPASS mechanism instead: ssh execs the
+ *   helper at scripts/askpass.sh, which prints the password from the per-run
+ *   tmpfs file named by $UR_ASKPASS_FILE. SSH_ASKPASS_REQUIRE=force (OpenSSH
+ *   8.4+) makes ssh use it regardless of TTY/DISPLAY; DISPLAY is also set so
+ *   older OpenSSH still reaches the helper (pre-8.4 it is used when DISPLAY is
+ *   set and there is no controlling TTY - true for both of our call sites).
+ *
+ *   The password still NEVER appears in argv or in an environment variable -
+ *   only the PATH of the 0600 tmpfs file does. Nothing to install; key auth
+ *   remains the recommended, primary path.
  *
  * TESTABILITY
  *   Every action that touches the live system - running ssh/ssh-keygen/
- *   ssh-keyscan, probing for sshpass, choosing the tmpfs base - goes through a
+ *   ssh-keyscan, locating the askpass helper, choosing the tmpfs base - goes through a
  *   small, overridable seam (the protected static run* / locate* methods, plus
- *   $runtimeBase / $sshpassPathOverride). Tests subclass Ssh, override those,
+ *   $runtimeBase / $askpassPathOverride). Tests subclass Ssh, override those,
  *   and assert on the argv ARRAYS the pure builders return without ever opening
  *   a socket. The exit-code -> failure-mode mapping is likewise a pure function.
  */
@@ -80,24 +87,16 @@ class Ssh
     public static $runtimeBase = '/tmp/unraid.rsync';
 
     /**
-     * Optional explicit sshpass path. When null, sshpassPath() probes PATH.
-     * Tests set this (or set it to '' to simulate "not installed").
+     * Optional explicit path to the SSH_ASKPASS helper. When null, askpassPath()
+     * resolves it next to this file. Tests set this to a stub script.
      *
      * @var string|null
      */
-    public static $sshpassPathOverride = null;
+    public static $askpassPathOverride = null;
 
     // ssh exit code that means "ssh itself failed to connect/authenticate"
     // (as opposed to a remote command's own non-zero exit).
     const SSH_EXIT_ERROR = 255;
-    // sshpass-specific exit codes (man sshpass):
-    const SSHPASS_INVALID_ARGS   = 1;
-    const SSHPASS_CONFLICT       = 2;
-    const SSHPASS_RUNTIME_ERROR  = 3;
-    const SSHPASS_PARSE_ERROR    = 4;
-    const SSHPASS_INCORRECT_PASS = 5;   // authentication failed
-    const SSHPASS_HOSTKEY_UNKNOWN = 6;  // host public key is unknown
-    const SSHPASS_HOSTKEY_CHANGED = 7;  // host public key has changed
 
     // --- runtime paths ------------------------------------------------------
     //
@@ -160,33 +159,19 @@ class Ssh
         return $clean;
     }
 
-    // --- sshpass detection (detect-and-degrade) -----------------------------
+    // --- askpass helper -----------------------------------------------------
 
     /**
-     * Resolve the sshpass executable path, or '' when not installed. Honors the
-     * test override. Live detection scans $PATH for an executable "sshpass"
-     * WITHOUT a shell, via the locateSshpass() seam.
+     * Absolute path to the shipped SSH_ASKPASS helper. It lives beside this file
+     * in the plugin's install dir (NOT in tmpfs) so it is executable at install
+     * time and unaffected by a noexec mount on /tmp. Overridable in tests.
      */
-    public static function sshpassPath(): string
+    public static function askpassPath(): string
     {
-        if (static::$sshpassPathOverride !== null) {
-            return (string) static::$sshpassPathOverride;
+        if (static::$askpassPathOverride !== null) {
+            return (string) static::$askpassPathOverride;
         }
-        return static::locateSshpass();
-    }
-
-    /** True when password auth is usable on this box (sshpass present). */
-    public static function sshpassAvailable(): bool
-    {
-        return static::sshpassPath() !== '';
-    }
-
-    /** The user-facing notice shown when password auth is requested but sshpass is missing. */
-    public static function sshpassMissingMessage(): string
-    {
-        return 'Password authentication requires the "sshpass" command, which is not part of '
-            . 'Unraid\'s base OS. Install the NerdTools plugin and enable its sshpass package, '
-            . 'or use key authentication (recommended).';
+        return dirname(__DIR__) . '/scripts/askpass.sh';
     }
 
     // --- argv builders (PURE: no I/O, return argv ARRAYS) -------------------
@@ -221,12 +206,18 @@ class Ssh
         $argv = ['ssh'];
 
         if ($auth === 'PASSWORD') {
-            // Force interactive password auth; sshpass feeds the prompt. No
-            // BatchMode (it would suppress the very prompt we answer).
+            // Force interactive password auth; the SSH_ASKPASS helper feeds the
+            // prompt (see buildAuthEnv). No BatchMode - it would suppress the
+            // very prompt we answer.
             $argv[] = '-o';
             $argv[] = 'PubkeyAuthentication=no';
             $argv[] = '-o';
             $argv[] = 'PreferredAuthentications=password';
+            // Ask once. Without this a wrong password re-invokes the helper
+            // three times, which just re-feeds the SAME wrong password and turns
+            // one clean failure into a slow triple retry.
+            $argv[] = '-o';
+            $argv[] = 'NumberOfPasswordPrompts=1';
         } else {
             // KEY / KEYFILE auth: use ONLY the supplied key, non-interactively.
             // For KEYFILE the path is the connection's existing key file (OpenSSH
@@ -259,24 +250,52 @@ class Ssh
     }
 
     /**
-     * The sshpass PREFIX argv for PASSWORD auth, reading the password from a
-     * tmpfs file (-f, never the command line / env so it can't leak via ps).
-     * Returns [] for KEY auth or when sshpass is unavailable.
+     * The ENVIRONMENT additions that let OpenSSH answer its own password prompt,
+     * for PASSWORD auth. Returns [] for KEY / KEYFILE.
+     *
+     * The password itself is NOT here - only $UR_ASKPASS_FILE, the PATH of the
+     * per-run 0600 tmpfs file the helper cats. So the secret still never reaches
+     * argv or the environment, exactly as with the old `sshpass -f` file.
+     *
+     * SSH_ASKPASS_REQUIRE=force (OpenSSH 8.4+) makes ssh use the helper whether
+     * or not there is a TTY or DISPLAY. DISPLAY is set as well so a pre-8.4 ssh
+     * still reaches it: there the helper is used when DISPLAY is set and the
+     * process has no controlling terminal, which holds for both call sites (the
+     * runner is setsid-detached; the probe reads stdin from /dev/null).
      *
      * @param array<string,mixed> $conn
-     * @return array<int,string>
+     * @return array<string,string>
      */
-    public static function buildSshpassPrefix(array $conn, string $passFile): array
+    public static function buildAuthEnv(array $conn, string $passFile): array
     {
         $conn = Credentials::mergeConnection($conn);
-        if ($conn['authMethod'] !== 'PASSWORD') {
+        if ($conn['authMethod'] !== 'PASSWORD' || $passFile === '') {
             return [];
         }
-        $bin = static::sshpassPath();
-        if ($bin === '') {
-            return [];
+        return [
+            'SSH_ASKPASS'         => static::askpassPath(),
+            'SSH_ASKPASS_REQUIRE' => 'force',
+            'DISPLAY'             => ':0',
+            'UR_ASKPASS_FILE'     => $passFile,
+        ];
+    }
+
+    /**
+     * Merge env additions over the CURRENT environment for proc_open. Passing an
+     * env array REPLACES the child's environment outright, so we must inherit
+     * first - ssh needs PATH and HOME. Returns null when there is nothing to add,
+     * so the caller can omit the argument and keep plain inheritance.
+     *
+     * @param array<string,string> $extra
+     * @return array<string,string>|null
+     */
+    public static function childEnv(array $extra): ?array
+    {
+        if ($extra === []) {
+            return null;
         }
-        return [$bin, '-f', $passFile];
+        $base = getenv();
+        return array_merge(is_array($base) ? $base : [], $extra);
     }
 
     /**
@@ -286,9 +305,9 @@ class Ssh
      * the ONE place a string is produced, and it is produced by quoting an argv
      * array, never by interpolating raw user data.
      *
-     * NB: any sshpass prefix is NOT part of the -e value; sshpass wraps the
-     * whole rsync process (it is the program rsync runs under), so Phase 4
-     * prepends buildSshpassPrefix() to the rsync argv, not to -e.
+     * NB: password auth adds nothing here. It is carried by the ENVIRONMENT
+     * (buildAuthEnv), which rsync passes to the ssh it spawns - so there is no
+     * wrapper program and nothing extra in either the -e value or the argv.
      *
      * @param array<int,string> $sshArgv from buildSshArgv()
      */
@@ -321,7 +340,7 @@ class Ssh
      *   - for KEY auth: write the referenced (managed) key's private material to
      *     keys/<token> at mode 600 (OpenSSH refuses world-readable keys);
      *   - for PASSWORD auth: write the de-obfuscated password to a 600 passfile
-     *     (only when sshpass is available);
+     *     for the SSH_ASKPASS helper to read;
      *   - write the connection's pinned remoteHostKey to a 600 known_hosts file.
      *
      * @param array<string,mixed> $creds loaded credentials structure
@@ -332,7 +351,7 @@ class Ssh
      *   token?: string,
      *   conn?: array<string,mixed>,
      *   sshArgv?: array<int,string>,
-     *   sshpassPrefix?: array<int,string>,
+     *   sshEnv?: array<string,string>,
      *   dashE?: string,
      *   keyPath?: string,
      *   passFile?: string,
@@ -384,26 +403,23 @@ class Ssh
             $keyPath = static::keyPath($token);
             self::writePrivateKey($keyPath, $priv);
         } else { // PASSWORD
-            if (!static::sshpassAvailable()) {
-                self::cleanupRuntime($token);
-                return ['ok' => false, 'error' => static::sshpassMissingMessage()];
-            }
+            // No availability gate any more: the askpass helper ships with the
+            // plugin, so password auth needs nothing installed.
             $passFile = self::writePassFile($token, Credentials::deobfuscate((string) $conn['password']));
         }
 
-        $sshArgv       = self::buildSshArgv($conn, $keyPath, $knownHosts);
-        $sshpassPrefix = self::buildSshpassPrefix($conn, $passFile);
+        $sshArgv = self::buildSshArgv($conn, $keyPath, $knownHosts);
 
         return [
-            'ok'            => true,
-            'token'         => $token,
-            'conn'          => $conn,
-            'sshArgv'       => $sshArgv,
-            'sshpassPrefix' => $sshpassPrefix,
-            'dashE'         => self::rsyncDashE($sshArgv),
-            'keyPath'       => $keyPath,
-            'passFile'      => $passFile,
-            'knownHosts'    => $knownHosts,
+            'ok'         => true,
+            'token'      => $token,
+            'conn'       => $conn,
+            'sshArgv'    => $sshArgv,
+            'sshEnv'     => self::buildAuthEnv($conn, $passFile),
+            'dashE'      => self::rsyncDashE($sshArgv),
+            'keyPath'    => $keyPath,
+            'passFile'   => $passFile,
+            'knownHosts' => $knownHosts,
         ];
     }
 
@@ -540,12 +556,12 @@ class Ssh
         self::safeWriteSecret($path, rtrim($privateKey, "\r\n") . "\n", 'private key');
     }
 
-    /** Write a password to a tmpfs file at mode 600 for `sshpass -f`. */
+    /** Write a password to a tmpfs file at mode 600 for the askpass helper to cat. */
     private static function writePassFile(string $token, string $password): string
     {
         $path = static::passFilePath($token);
-        // sshpass -f reads the first line as the password; no trailing newline
-        // needed, but a single one is tolerated. Write exactly the password.
+        // The helper cats this file verbatim and ssh strips one trailing
+        // newline, so write exactly the password and nothing else.
         self::safeWriteSecret($path, $password, 'password file');
         return $path;
     }
@@ -582,17 +598,20 @@ class Ssh
      *   ok      bool    - the probe succeeded (authenticated + ran `true`)
      *   message string  - a human message
      *   reason  string  - a machine token: 'ok' | 'auth' | 'hostkey' |
-     *                      'unreachable' | 'config' | 'sshpass-missing'
+     *                      'unreachable' | 'config'
      *
-     * Failure-mode distinction (per the plan):
-     *   - sshpass exit 5            -> auth failure
-     *   - sshpass exit 6/7          -> host-key unknown/changed
-     *   - ssh exit 255             -> connect/auth error; we sniff stderr to
+     * Failure-mode distinction:
+     *   - ssh exit 255              -> connect/auth error; we sniff stderr to
      *                                  split auth vs host-key vs unreachable
      *   - exit 0                    -> success
-     *   - other                    -> treated as success-ish remote error but
-     *                                  reported (the remote `true` shouldn't
-     *                                  fail, so anything else is surfaced).
+     *   - other                     -> the remote `true` returned non-zero,
+     *                                  which shouldn't happen; surfaced as-is.
+     *
+     * There is no longer a separate password code path here: ssh is the outer
+     * process for every auth method now, so one set of ssh semantics covers
+     * both. (Under sshpass, exits 5/6/7 carried auth / host-key-unknown /
+     * host-key-changed; ssh reports all three as 255 and sniffStderr splits
+     * them into the same reasons.)
      *
      * @param array<string,mixed> $creds  loaded credentials structure
      * @return array{ok:bool,message:string,reason:string}
@@ -608,9 +627,6 @@ class Ssh
         if ($conn['host'] === '' || $conn['username'] === '') {
             return ['ok' => false, 'reason' => 'config', 'message' => 'Host and username are required to test a connection.'];
         }
-        if ($conn['authMethod'] === 'PASSWORD' && !static::sshpassAvailable()) {
-            return ['ok' => false, 'reason' => 'sshpass-missing', 'message' => static::sshpassMissingMessage()];
-        }
 
         try {
             $mat = self::materialize($creds, $connId);
@@ -618,16 +634,14 @@ class Ssh
             return ['ok' => false, 'reason' => 'config', 'message' => 'Could not prepare connection: ' . $e->getMessage()];
         }
         if (empty($mat['ok'])) {
-            $reason = (strpos((string) ($mat['error'] ?? ''), 'sshpass') !== false) ? 'sshpass-missing' : 'config';
-            return ['ok' => false, 'reason' => $reason, 'message' => (string) $mat['error']];
+            return ['ok' => false, 'reason' => 'config', 'message' => (string) $mat['error']];
         }
 
-        // Compose the full probe argv: [sshpass-prefix] ssh <opts> -- user@host true
+        // Compose the probe argv: ssh <opts> -- user@host true
         // The `--` ends ssh option parsing so a host/username starting with '-'
         // can never be read as an ssh option (option-injection guard, on top of
         // the validation guard in Credentials::validateConnection).
         $argv = array_merge(
-            $mat['sshpassPrefix'],
             $mat['sshArgv'],
             ['--', $conn['username'] . '@' . $conn['host'], 'true']
         );
@@ -642,7 +656,7 @@ class Ssh
             // diagnostics. If anyone ever adds -v here, ssh WILL log the identity
             // file path (and more), so the stderr must then be redacted (see
             // Logger::setRedaction) before it is returned to the browser.
-            [$exitCode, $stderr] = static::runProbe($argv);
+            [$exitCode, $stderr] = static::runProbe($argv, self::childEnv($mat['sshEnv'] ?? []));
         } finally {
             self::cleanupRuntime((string) $mat['token']);
         }
@@ -660,48 +674,17 @@ class Ssh
      */
     public static function classifyProbe(array $conn, int $exitCode, string $stderr): array
     {
-        $isPassword = (($conn['authMethod'] ?? 'KEY') === 'PASSWORD');
-
         if ($exitCode === 0) {
             return ['ok' => true, 'reason' => 'ok', 'message' => 'Connection succeeded.'];
         }
 
-        // sshpass owns 5/6/7 ONLY for the PASSWORD path (it's the outer process
-        // there). For KEY auth those same small codes would be a remote
-        // command's own exit and must NOT be read as sshpass semantics.
-        if ($isPassword) {
-            switch ($exitCode) {
-                case self::SSHPASS_INCORRECT_PASS:
-                    return ['ok' => false, 'reason' => 'auth', 'message' => 'Authentication failed: incorrect password.'];
-                case self::SSHPASS_HOSTKEY_UNKNOWN:
-                    return ['ok' => false, 'reason' => 'hostkey', 'message' => 'Host key is unknown. Use "Discover host key" and save, then retry.'];
-                case self::SSHPASS_HOSTKEY_CHANGED:
-                    return ['ok' => false, 'reason' => 'hostkey', 'message' => 'Host key has CHANGED since it was pinned. Verify the remote host, then re-discover the host key.'];
-                case self::SSHPASS_INVALID_ARGS:
-                case self::SSHPASS_CONFLICT:
-                case self::SSHPASS_RUNTIME_ERROR:
-                case self::SSHPASS_PARSE_ERROR:
-                    // Fall through to the stderr-sniffing path below; sshpass
-                    // ran ssh and the failure is really ssh's.
-                    break;
-            }
-        }
-
-        // Sniff stderr only when the failure is genuinely an ssh-level
-        // connect/auth error (exit 255), or - on the PASSWORD path - one of
-        // sshpass's own internal-error codes (1-4). sshpass otherwise propagates
-        // the WRAPPED ssh / remote-command exit status verbatim, so a non-255
-        // password-path exit (e.g. a remote `true` that somehow exits 2) is a
-        // real remote exit and must NOT be misreported as a connect/auth
-        // failure - that was the bug in keying this branch on `|| $isPassword`.
-        $sshpassInternal = $isPassword && in_array($exitCode, [
-            self::SSHPASS_INVALID_ARGS,
-            self::SSHPASS_CONFLICT,
-            self::SSHPASS_RUNTIME_ERROR,
-            self::SSHPASS_PARSE_ERROR,
-        ], true);
-
-        if ($exitCode === self::SSH_EXIT_ERROR || $sshpassInternal) {
+        // ssh is the outer process for EVERY auth method now, so there is one
+        // rule: 255 means ssh itself could not connect or authenticate, and
+        // anything else is the remote command's own exit status. (The old
+        // password path went through sshpass, whose exits 5/6/7 named the cause
+        // directly; ssh reports all of them as 255 and sniffStderr recovers the
+        // same auth / hostkey / unreachable split from its diagnostics.)
+        if ($exitCode === self::SSH_EXIT_ERROR) {
             // ssh failed to connect/authenticate. Split the cause by sniffing
             // its stderr (the most reliable signal we have without a live host).
             $reason = self::sniffStderr($stderr);
@@ -796,50 +779,16 @@ class Ssh
     // --- live-system seams (overridden in tests) ----------------------------
 
     /**
-     * Locate sshpass WITHOUT invoking a shell. Scans the directories on $PATH
-     * (plus the common sbin/usr locations) for an executable file named
-     * "sshpass" and returns its absolute path, or '' when not found. This avoids
-     * shell_exec / a shell builtin entirely, matching the no-shell design used
-     * for every other invocation. Overridable in tests.
-     */
-    protected static function locateSshpass(): string
-    {
-        $pathEnv = getenv('PATH');
-        $dirs = ($pathEnv !== false && $pathEnv !== '')
-            ? explode(PATH_SEPARATOR, $pathEnv)
-            : [];
-        // Defensive fallbacks for Unraid/Slackware where PATH may be minimal in
-        // the webGui context.
-        foreach (['/usr/bin', '/bin', '/usr/local/bin', '/usr/sbin', '/sbin'] as $extra) {
-            if (!in_array($extra, $dirs, true)) {
-                $dirs[] = $extra;
-            }
-        }
-        foreach ($dirs as $dir) {
-            // Ignore empty and NON-ABSOLUTE PATH entries (e.g. "." or a relative
-            // dir): a relative entry could let an attacker-controlled directory
-            // supply a rogue "sshpass". Only trust absolute directories.
-            if ($dir === '' || $dir[0] !== '/') {
-                continue;
-            }
-            $candidate = rtrim($dir, '/') . '/sshpass';
-            if (is_file($candidate) && is_executable($candidate)) {
-                return $candidate;
-            }
-        }
-        return '';
-    }
-
-    /**
      * Run the ssh probe argv (no shell) and return [exitCode, stderr]. Live
      * implementation uses proc_open with the argv ARRAY so nothing is parsed by
      * a shell. Overridable in tests so the classification logic is exercised
      * without opening a socket.
      *
-     * @param array<int,string> $argv
+     * @param array<int,string>        $argv
+     * @param array<string,string>|null $env  full child environment, or null to inherit
      * @return array{0:int,1:string}
      */
-    protected static function runProbe(array $argv): array
+    protected static function runProbe(array $argv, ?array $env = null): array
     {
         $descriptors = [
             0 => ['file', '/dev/null', 'r'],
@@ -848,7 +797,7 @@ class Ssh
         ];
         $pipes = [];
         // Pass the argv ARRAY form so PHP execs directly without /bin/sh.
-        $proc = @proc_open($argv, $descriptors, $pipes);
+        $proc = @proc_open($argv, $descriptors, $pipes, null, $env);
         if (!is_resource($proc)) {
             return [self::SSH_EXIT_ERROR, 'Failed to start ssh.'];
         }

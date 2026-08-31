@@ -1000,19 +1000,20 @@ function ur_action_save_credentials(): void
         return;
     }
 
-    // If any saved connection uses PASSWORD auth but sshpass isn't available,
-    // warn now (not just in the UI / testConnection) so the user knows password
-    // auth won't work until sshpass is installed - the save still succeeds.
+    // Warn (without failing the save) about a connection pointed at the rsync
+    // DAEMON rather than SSH - the single most confusing way to misconfigure
+    // this plugin, since the daemon accepts the TCP connection and then closes
+    // it, which surfaces much later as an opaque "not running SSH" error.
     $warnings = [];
-    $hasPasswordConn = false;
     foreach ($creds['connections'] as $c) {
-        if (($c['authMethod'] ?? '') === 'PASSWORD') {
-            $hasPasswordConn = true;
-            break;
+        $note = Credentials::rsyncDaemonNote(
+            (int) ($c['port'] ?? 0),
+            (string) ($c['host'] ?? '')
+        );
+        if ($note !== '') {
+            $label = trim((string) ($c['name'] ?? '')) !== '' ? (string) $c['name'] : (string) ($c['host'] ?? '');
+            $warnings[] = ($label !== '' ? $label . ': ' : '') . $note;
         }
-    }
-    if ($hasPasswordConn && !Ssh::sshpassAvailable()) {
-        $warnings[] = Ssh::sshpassMissingMessage();
     }
 
     sendResponse([
@@ -1336,7 +1337,16 @@ function ur_action_discover_host_key(): void
         // validation failure: surface it as a 504 (Gateway Timeout) so the UI
         // can show the elapsed-time message. The body is still clean JSON.
         $code = !empty($res['timedOut']) ? 504 : 422;
-        sendError((string) ($res['error'] ?? 'Host key discovery failed.'), $code);
+        $msg  = (string) ($res['error'] ?? 'Host key discovery failed.');
+        // This is where an rsync-daemon port actually bites: rsyncd accepts the
+        // connection, refuses to speak SSH and drops it, so keyscan reports a
+        // bare "not running SSH". Name the real cause instead of leaving the
+        // user to guess (support-forum report).
+        $note = Credentials::rsyncDaemonNote($port, $host);
+        if ($note !== '') {
+            $msg .= ' ' . $note;
+        }
+        sendError($msg, $code);
         return;
     }
     sendResponse([

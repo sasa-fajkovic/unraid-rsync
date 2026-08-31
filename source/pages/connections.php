@@ -53,9 +53,6 @@ $keys        = (isset($creds['keys']) && is_array($creds['keys'])) ? $creds['key
 $connections = (isset($creds['connections']) && is_array($creds['connections'])) ? $creds['connections'] : [];
 $handlerUrl  = '/plugins/unraid.rsync/include/handler.php';
 
-// Whether password auth is usable on this box right now (detect-and-degrade).
-$sshpassOk      = Ssh::sshpassAvailable();
-$sshpassMissing = Ssh::sshpassMissingMessage();
 
 /**
  * Render one connection card. $index is an int row index or "__CIDX__" for the
@@ -66,7 +63,7 @@ $sshpassMissing = Ssh::sshpassMissingMessage();
  * @param int|string          $index
  * @param array<int,array<string,mixed>> $keys
  */
-function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk): void
+function ur_render_connection_card($conn, $index, array $keys): void
 {
     $conn = is_array($conn) ? Credentials::mergeConnection($conn) : Credentials::defaultConnection();
     $p    = 'connections[' . $index . ']';
@@ -104,7 +101,9 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
 
     // port (required - has a sensible default of 22, but must not be blank)
     echo '<dt><label for="' . ur_h($idb . '_port') . '">' . ur_h(ur_t('Port')) . '</label>' . ur_required_mark() . ':</dt>';
-    echo '<dd><input type="number" min="1" max="65535" id="' . ur_h($idb . '_port') . '" name="' . ur_h($p . '[port]') . '" value="' . ur_h($port) . '" placeholder="22" required></dd>';
+    echo '<dd><input type="number" min="1" max="65535" id="' . ur_h($idb . '_port') . '" name="' . ur_h($p . '[port]') . '" value="' . ur_h($port) . '" placeholder="22" required>';
+    echo '<blockquote class="inline_help"><p>' . ur_h(ur_t('The remote host\'s SSH port (usually 22). This is NOT the "Rsync Server" / rsyncd port 873 that NAS appliances expose — that is a different protocol which this plugin does not speak.')) . '</p></blockquote>';
+    echo '</dd>';
 
     // username (required)
     echo '<dt><label for="' . ur_h($idb . '_user') . '">' . ur_h(ur_t('Username')) . '</label>' . ur_required_mark() . ':</dt>';
@@ -187,9 +186,6 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
         . ur_h(ur_t('Passwords are stored OBFUSCATED (reversible), not encrypted, on the world-readable USB flash. '
             . 'Anyone with flash access can recover them. Prefer key auth, and use a dedicated low-privilege remote account.'))
         . '</p></blockquote>';
-    if (!$sshpassOk) {
-        echo '<blockquote class="inline_help"><p>' . ur_h(Ssh::sshpassMissingMessage()) . '</p></blockquote>';
-    }
     echo '</dd>';
 
     // strict host key
@@ -290,12 +286,6 @@ function ur_render_connection_card($conn, $index, array $keys, bool $sshpassOk):
   </p>
 </blockquote>
 
-<?php if (!$sshpassOk): ?>
-<blockquote class="inline_help">
-  <p><?=htmlspecialchars($sshpassMissing, ENT_QUOTES, 'UTF-8')?></p>
-</blockquote>
-<?php endif; ?>
-
 <table class="tablesorter ur-conn-list">
   <thead>
     <tr>
@@ -336,7 +326,7 @@ ur_emit_form_enable_assets();
 
   <div id="ur-conns-container">
     <?php foreach ($connections as $i => $c) {
-        ur_render_connection_card($c, (int) $i, $keys, $sshpassOk);
+        ur_render_connection_card($c, (int) $i, $keys);
     } ?>
   </div>
 
@@ -350,7 +340,7 @@ ur_emit_form_enable_assets();
 
 <!-- Hidden connection-card template for client-side cloning. -->
 <script type="text/html" id="ur-conn-template">
-<?php ur_render_connection_card(Credentials::defaultConnection(), '__CIDX__', $keys, $sshpassOk); ?>
+<?php ur_render_connection_card(Credentials::defaultConnection(), '__CIDX__', $keys); ?>
 </script>
 
 <script type="text/javascript">

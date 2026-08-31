@@ -1134,6 +1134,89 @@ if (!function_exists('ur_emit_ajax_helpers')) {
     }
 }
 
+if (!function_exists('ur_tz_note')) {
+    /**
+     * A short "times are shown in <Zone>" sentence for the tabs that print
+     * absolute times.
+     *
+     * WHY it is worth the pixels: times used to render in the BROWSER's zone and
+     * now render in the server's, so a remote admin sees every timestamp shift by
+     * their offset with no explanation - which reads as a regression. It is also
+     * the only surface where Config::systemTimezone() falling all the way back to
+     * UTC (every source missed) is visible to the person who can report it.
+     *
+     * Returns ESCAPED HTML.
+     */
+    function ur_tz_note(): string
+    {
+        return ur_h(sprintf(ur_t('Times are shown in the server timezone (%s).'), Config::systemTimezone()));
+    }
+}
+
+if (!function_exists('ur_emit_time_helpers')) {
+    /**
+     * Emit (once per page) the shared client-side time formatter, mirroring
+     * ur_emit_ajax_helpers()'s once-guard.
+     *
+     * WHY this is not just `new Date(...).getHours()`: the browser formats in the
+     * BROWSER's timezone, but every timestamp this plugin shows means something
+     * in the SERVER's - that is the zone crond fires in, rsync stamps in, and the
+     * PHP-rendered cells on the Jobs tab already print in. Administering the box
+     * from a laptop in another zone made the JS-rendered tabs (Overview, History,
+     * live Jobs polling) disagree with the PHP-rendered ones by the offset
+     * between them (issue #135). So we ship the server's zone to the page and
+     * pin every client-side render to it.
+     *
+     * urFmtLocal(epochSeconds, withSeconds) -> "2026-08-30 19:40[:10]" in UR_TZ,
+     * or the em-dash for a falsy/unparseable value. 'sv-SE' is chosen purely
+     * because its locale format is already ISO-shaped, so no manual zero-padding
+     * is needed.
+     */
+    function ur_emit_time_helpers(): void
+    {
+        static $done = false;
+        if ($done) {
+            return;
+        }
+        $done = true;
+        echo '<script type="text/javascript">var UR_TZ = ' . ur_js(Config::systemTimezone()) . ";\n"
+            . <<<'JS'
+/* Render an epoch in the SERVER's timezone (never the browser's). See
+ * ur_emit_time_helpers() for why. */
+window.urFmtLocal = function (epoch, withSeconds) {
+  var n = parseInt(epoch, 10);
+  if (!n) { return '\u2014'; }
+  var d = new Date(n * 1000);
+  if (isNaN(d.getTime())) { return '\u2014'; }
+  var opts = {
+    timeZone: UR_TZ,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit'
+  };
+  if (withSeconds) { opts.second = '2-digit'; }
+  try {
+    /* 'sv-SE' is picked only because its format is already ISO-shaped. Some ICU
+     * builds still put a comma between date and time for a component bag, so
+     * normalise it - the column is fixed-width. */
+    return d.toLocaleString('sv-SE', opts).replace(',', '');
+  } catch (e) {
+    /* An ICU build that does not know UR_TZ must not silently fall back to the
+     * BROWSER's zone - that is exactly the bug this function exists to prevent,
+     * and it would look like correct output. Render UTC and SAY so, so a wrong
+     * time is visibly wrong. */
+    opts.timeZone = 'UTC';
+    try {
+      return d.toLocaleString('sv-SE', opts).replace(',', '') + ' UTC';
+    } catch (e2) {
+      return d.toISOString().replace('T', ' ').slice(0, withSeconds ? 19 : 16) + ' UTC';
+    }
+  }
+};
+JS
+            . "\n</script>\n";
+    }
+}
+
 if (!function_exists('ur_emit_form_enable_assets')) {
     /**
      * Emit (once per page) a tiny delegated handler that RE-ENABLES the plugin's

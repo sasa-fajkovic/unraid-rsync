@@ -844,6 +844,9 @@ ur_emit_ajax_helpers();
 /* Re-enable the plugin's own Apply button once the form is edited (Unraid's
  * framework disables it on load and won't re-enable our custom forms). */
 ur_emit_form_enable_assets();
+/* UR_TZ + window.urFmtLocal, so the JS-updated cells render in the SERVER's
+ * timezone and agree with the PHP-rendered ones above them. */
+ur_emit_time_helpers();
 ?>
 <div class="ur-jobs-page">
 <div class="title">
@@ -862,7 +865,7 @@ ur_emit_form_enable_assets();
 <p>
   <?=_('Define independent rsync backup jobs. Each job has its own schedule and runs one rsync per source -> destination pair (no cartesian product)')?>.
   <?=_('Enabled jobs run automatically on their cron schedule; the Next run column shows when each will fire. You can also Run or Dry-run a job on demand')?>.
-  <?=_('The State column shows each job\'s live status (updated automatically while a job runs); use the Logs button to view per-run output. Per-job notifications are sent through Unraid\'s notification system — pick when to notify with each job\'s Notify setting')?>.
+  <?=_('The State column shows each job\'s live status (updated automatically while a job runs); use the Logs button to view per-run output. Per-job notifications are sent through Unraid\'s notification system — pick when to notify with each job\'s Notify setting')?>. <?=ur_tz_note()?>
 </p>
 
 <!-- Summary list ------------------------------------------------------------>
@@ -1562,12 +1565,11 @@ ur_emit_form_enable_assets();
     }
     return parts.join(' ') + ' ago';
   }
-  function fmtLocal(epoch) {
-    var d = new Date(epoch * 1000);
-    function p(n) { return (n < 10 ? '0' : '') + n; }
-    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate())
-      + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
-  }
+  /* Formats in the SERVER's timezone so a live-polled cell matches the
+   * PHP-rendered one it replaces - see ur_emit_time_helpers(). */
+  /* Late-bound: never capture window.urFmtLocal by value, so a page that emits
+   * the helper AFTER its own script still works. */
+  function fmtLocal(e, s) { return window.urFmtLocal(e, s); }
 
   /* Coarse forward "in 3h 5m" label for a future epoch (seconds) — mirrors
    * jobs.php ur_relative_time() so a JS-updated next-run cell reads like the
@@ -1737,10 +1739,15 @@ ur_emit_form_enable_assets();
         runs.forEach(function (run, idx) {
           var opt = document.createElement('option');
           opt.value = run.id;            // run-<stamp>.log (server-whitelisted)
-          var lbl = run.id.replace(/^run-/, '').replace(/\.log$/, '');
+          /* Label from run.ts (a UTC epoch listRuns() already returns) rendered
+           * in the server timezone. The run.id stamp is UTC by design, so
+           * showing it raw put a third timezone in front of the user. */
+          var lbl = run.ts ? fmtLocal(run.ts, true)
+                           : run.id.replace(/^run-/, '').replace(/\.log$/, '');
           if (run.state) { lbl += '  [' + run.state + ']'; }
           if (idx === 0) { lbl += '  (latest)'; }
           opt.textContent = lbl;          // textContent: never raw innerHTML
+          opt.title = run.id;             // raw id still reachable for support
           modalSel.appendChild(opt);
         });
         /* Default to the latest run unless the user had picked one still listed. */

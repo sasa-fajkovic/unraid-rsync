@@ -416,7 +416,11 @@ class Cron
      * When both are "*", every day matches.
      *
      * Evaluation is in the server's local timezone (the same timezone crond uses
-     * to fire the job), minute-by-minute from the minute after $fromTs.
+     * to fire the job), minute-by-minute from the minute after $fromTs. That
+     * zone is PINNED, not assumed: Config.php calls date_default_timezone_set()
+     * at load with the resolved system zone, because PHP otherwise defaults to
+     * UTC whenever php.ini leaves date.timezone unset - which would compute
+     * every next-run an entire UTC offset away from when crond actually fires.
      *
      * @param string $expr   a 5-field cron expression
      * @param int    $fromTs the reference time (seconds since epoch)
@@ -444,8 +448,16 @@ class Cron
         $ts = $start;
 
         // We iterate by minute but short-circuit on coarser fields to keep the
-        // loop bounded in practice. Using date() honours the local timezone /
-        // DST exactly as crond does.
+        // loop bounded in practice. date()/mktime() honour the process timezone,
+        // which Config.php has pinned to the system zone - so this walks the
+        // calendar in the same zone as crond.
+        //
+        // DST (behaviour pinned by CronTest, not incidental): at a spring-forward
+        // gap a time that does not exist that day is simply not matched, so a
+        // daily job scheduled inside the gap skips to the next day - what
+        // vixie-cron does with a fixed-time job in the gap. At a fall-back repeat
+        // mktime() resolves the ambiguous hour to the SECOND occurrence, so the
+        // walk yields one instant rather than two. Both folds terminate.
         while ($ts <= $horizon) {
             $min   = (int) date('i', $ts);
             $hour  = (int) date('G', $ts);

@@ -452,6 +452,46 @@ class Credentials
         return ['valid' => count($errors) === 0, 'errors' => $errors];
     }
 
+    /** The TCP port the rsync DAEMON (rsyncd) listens on. Not an SSH port. */
+    public const RSYNCD_PORT = 873;
+
+    /**
+     * A warning when a connection looks like it is aimed at an rsync DAEMON
+     * rather than at SSH, or '' when it looks fine.
+     *
+     * WHY this exists: NAS appliances ship an "Rsync Server" toggle (QNAP HBS 3,
+     * Synology) that enables rsyncd on 873 - a DIFFERENT protocol from the
+     * rsync-over-SSH this plugin speaks. Port 873 passes the 1-65535 check and
+     * silently becomes `ssh -p 873`, so the daemon accepts the TCP connection,
+     * fails to speak SSH and drops it. The user then sees an opaque "not running
+     * SSH / connection closed" much later, at Discover-host-key or first run,
+     * with nothing linking it back to the port they typed. Reported on the
+     * support forum; this is advisory only, because running sshd on 873 is
+     * unusual but perfectly legal.
+     */
+    public static function rsyncDaemonNote(int $port, string $host = ''): string
+    {
+        $h = strtolower(trim($host));
+        // An IPv6 literal is FULL of colons ("fe80::1", "::1", "[2001:db8::1]")
+        // and is a perfectly good SSH host, so it must be excluded before the
+        // double-colon test below - otherwise every IPv6 user gets this warning.
+        $bare    = trim($h, '[]');
+        $isIpv6  = filter_var($bare, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) !== false;
+        // "rsync://host/module" or the daemon's "host::module" double-colon form
+        // pasted into the Host field - neither is an SSH target.
+        if (strpos($h, 'rsync://') === 0 || (!$isIpv6 && strpos($h, '::') !== false)) {
+            return 'This looks like an rsync daemon address (rsync:// or host::module). '
+                . 'This plugin transfers over SSH, so enter just the hostname or IP here '
+                . 'and put the remote path on the job\'s pair.';
+        }
+        if ($port === self::RSYNCD_PORT) {
+            return 'Port 873 is the rsync daemon (rsyncd) port, which is a different protocol '
+                . 'from the rsync-over-SSH this plugin uses. Enable SSH on the remote host and '
+                . 'use its SSH port (usually 22).';
+        }
+        return '';
+    }
+
     /**
      * Validate a NORMALISED (merged) connection entry against a loaded
      * credentials structure (so a KEY-auth connection's keyId is checked to

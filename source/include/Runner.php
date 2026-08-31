@@ -94,7 +94,7 @@ class Runner
      * Run a job end-to-end. Returns a structured result describing the outcome
      * (the CLI maps `state` to an exit code). Does its own logging; throws only
      * for truly unexpected internal failures (the orchestration failures - bad
-     * job, sshpass missing, guardrail violation, rsync non-zero - are reported
+     * job, unusable credentials, guardrail violation, rsync non-zero - are reported
      * IN the result, not thrown, so postHook still runs and a summary is still
      * written).
      *
@@ -160,6 +160,8 @@ class Runner
         //    escape - it would contradict the contract (no structured result, no
         //    postHook/summary/markStopped). Catch it and hard-fail cleanly.
         $startedAtTs = time();
+        // STORAGE timestamp: UTC, always. Display is system-local (see CLAUDE.md
+        // "Timezone: store UTC, display system-local") - do NOT switch this to date().
         $startedAt   = gmdate('Y-m-d\TH:i:s\Z', $startedAtTs);
         try {
             $runLog = Logger::openRun($jobId, $startedAtTs);
@@ -191,6 +193,12 @@ class Runner
             $dryRun ? ' [DRY-RUN]' : '',
             $trigger
         ));
+        // Name the zone every stamp below is in. Config::systemTimezone() falls
+        // back to UTC when every source misses, which would silently reproduce
+        // issue #135 (our stamps UTC, rsync's own lines local) - stating it here,
+        // in the same file as the rsync lines to compare against, is what makes
+        // that case reportable instead of invisible.
+        Logger::event($runLog, $jobId, 'Timestamps in timezone: ' . Config::systemTimezone() . '.');
 
         // Survive the abort SIGTERM so we can record an ABORTED outcome.
         //
@@ -237,7 +245,7 @@ class Runner
             if ($transport === 'SSH') {
                 $matResult = self::materializeSsh($job, $runLog, $jobId);
                 if ($matResult['ok'] !== true) {
-                    // Materialisation failure (e.g. sshpass-missing) fails the run.
+                    // Materialisation failure fails the run.
                     $state    = Rsync::STATE_FAILED;
                     $exitCode = 1;
                     $reason   = (string) $matResult['reason'];
@@ -246,8 +254,10 @@ class Runner
                     $token     = (string) $matResult['token'];
                     $mat       = $matResult['mat'];
                     $sshPieces = [
-                        'dashE'         => (string) $mat['dashE'],
-                        'sshpassPrefix' => (array) $mat['sshpassPrefix'],
+                        'dashE'  => (string) $mat['dashE'],
+                        // PASSWORD auth rides in the child ENVIRONMENT (the
+                        // SSH_ASKPASS vars), never in the argv.
+                        'sshEnv' => (array) ($mat['sshEnv'] ?? []),
                     ];
                     // F1: arm secret-path redaction BEFORE any captured rsync/ssh
                     // output reaches the log. At `debug` level rsync echoes the
@@ -358,7 +368,11 @@ class Runner
                     // Stream rsync's captured stdout/stderr through Logger::sink,
                     // which REDACTS armed per-run secret paths (F1) and enforces
                     // the per-run-log byte cap (F3) before bytes hit the log.
-                    $pairExit = Rsync::run($argv, Logger::sink($runLog));
+                    $pairExit = Rsync::run(
+                        $argv,
+                        Logger::sink($runLog),
+                        Ssh::childEnv(is_array($sshPieces) ? $sshPieces['sshEnv'] : [])
+                    );
                     // rsync ALSO writes the run log directly via --log-file, which
                     // bypasses the sink's cap; trim the file to the cap now that
                     // this pair's rsync has closed --log-file (F3, complete).
@@ -418,6 +432,7 @@ class Runner
 
             // 9. Persist the last-run summary to /boot + clear running state.
             $finishedAtTs = time();
+            // STORAGE timestamp: UTC, always (see the startedAt note above).
             $finishedAt  = gmdate('Y-m-d\TH:i:s\Z', $finishedAtTs);
             $durationSec = max(0, $finishedAtTs - $startedAtTs);
             self::writeSummary($jobId, [
@@ -736,9 +751,8 @@ class Runner
             return ['ok' => false, 'reason' => 'materialize-failed', 'message' => $e->getMessage()];
         }
         if (empty($mat['ok'])) {
-            $msg    = (string) ($mat['error'] ?? 'SSH transport could not be prepared.');
-            $reason = (strpos($msg, 'sshpass') !== false) ? 'sshpass-missing' : 'ssh-config';
-            return ['ok' => false, 'reason' => $reason, 'message' => $msg];
+            $msg = (string) ($mat['error'] ?? 'SSH transport could not be prepared.');
+            return ['ok' => false, 'reason' => 'ssh-config', 'message' => $msg];
         }
         return ['ok' => true, 'token' => (string) $mat['token'], 'mat' => $mat];
     }
