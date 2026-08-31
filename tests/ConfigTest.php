@@ -74,11 +74,76 @@ final class ConfigTest extends TestCase
 
     public function testSystemTimezoneIsAlwaysAValidIdentifier(): void
     {
-        foreach (['', 'UTC', 'Europe/Berlin', '../../etc/passwd', "UTC\n"] as $candidate) {
-            putenv("TZ=$candidate");
-            $this->assertContains(Config::systemTimezone(), DateTimeZone::listIdentifiers());
+        try {
+            foreach (['', 'UTC', 'Europe/Berlin', '../../etc/passwd', "UTC\n", 'right/Europe/Berlin'] as $candidate) {
+                putenv("TZ=$candidate");
+                $this->assertContains(Config::systemTimezone(), DateTimeZone::listIdentifiers());
+            }
+        } finally {
+            // Restore the suite-wide pin from bootstrap.php even on failure - a
+            // leaked TZ would cascade into every other date-sensitive test.
+            putenv('TZ=UTC');
         }
-        putenv('TZ=UTC'); // restore the suite-wide pin from bootstrap.php
+    }
+
+    /**
+     * The critical regression guard for the C1 failure mode: on a stock Unraid
+     * box php-fpm may scrub $TZ, Slackware may write /etc/localtime as a plain
+     * COPY (so readlink misses), and php.ini may leave date.timezone unset - all
+     * three rungs miss, we fall back to UTC, and issue #135 silently reproduces
+     * (our stamps UTC, rsync's own lines local) while looking fixed.
+     *
+     * Unraid's own ident.cfg is the source that survives that, so it must be
+     * consulted BEFORE the ambient PHP default.
+     */
+    public function testSystemTimezoneFallsBackToUnraidIdentCfg(): void
+    {
+        $prev = getenv('TZ');
+        $dir  = sys_get_temp_dir() . '/ur-ident-' . getmypid() . '-' . bin2hex(random_bytes(4));
+        mkdir($dir, 0700, true);
+        $file = $dir . '/ident.cfg';
+        try {
+            putenv('TZ'); // unset: emulate a scrubbed php-fpm environment
+            file_put_contents($file, "NAME=\"Tower\"\ntimeZone=\"Australia/Sydney\"\nUSE_SSL=\"no\"\n");
+            $this->assertSame('Australia/Sydney', Config::systemTimezoneFrom([$file]));
+
+            // Unquoted and oddly-spaced forms parse too.
+            file_put_contents($file, "timeZone = Europe/Lisbon\n");
+            $this->assertSame('Europe/Lisbon', Config::systemTimezoneFrom([$file]));
+
+            // A garbage value must not be returned; it falls through.
+            file_put_contents($file, "timeZone=\"Mars/Olympus\"\n");
+            $this->assertNotSame('Mars/Olympus', Config::systemTimezoneFrom([$file]));
+            $this->assertContains(Config::systemTimezoneFrom([$file]), DateTimeZone::listIdentifiers());
+
+            // A missing file is simply skipped.
+            $this->assertContains(
+                Config::systemTimezoneFrom([$dir . '/nope.cfg']),
+                DateTimeZone::listIdentifiers()
+            );
+        } finally {
+            putenv($prev === false ? 'TZ' : "TZ=$prev");
+            @unlink($file);
+            @rmdir($dir);
+        }
+    }
+
+    /** $TZ still wins over ident.cfg - it is what libc hands rsync and crond. */
+    public function testTzEnvBeatsIdentCfg(): void
+    {
+        $prev = getenv('TZ');
+        $dir  = sys_get_temp_dir() . '/ur-ident2-' . getmypid() . '-' . bin2hex(random_bytes(4));
+        mkdir($dir, 0700, true);
+        $file = $dir . '/ident.cfg';
+        try {
+            file_put_contents($file, "timeZone=\"Australia/Sydney\"\n");
+            putenv('TZ=Europe/Lisbon');
+            $this->assertSame('Europe/Lisbon', Config::systemTimezoneFrom([$file]));
+        } finally {
+            putenv($prev === false ? 'TZ' : "TZ=$prev");
+            @unlink($file);
+            @rmdir($dir);
+        }
     }
 
     public function testRetentionDefaultAndClamp(): void

@@ -111,6 +111,13 @@ on, forked from, or derived from any other plugin.
   (`Config::systemTimezone()`: `$TZ` → `/etc/localtime` → ambient, validated
   against `DateTimeZone::listIdentifiers()`) and calls
   `date_default_timezone_set()` **at file load** — it is the ONLY place that does,
+  reading `$TZ` → Unraid's `ident.cfg`/`var.ini` `timeZone` → `/etc/localtime`(`-copied-from`)
+  → ambient. **Do not drop the ident.cfg rung**: php-fpm may scrub `$TZ` and
+  Slackware may write `/etc/localtime` as a plain copy rather than a zoneinfo
+  symlink, so without it a stock box can miss every source and fall back to UTC —
+  silently reproducing #135 while looking fixed. The Runner logs the resolved zone
+  at the top of every run and the UI labels it (`ur_tz_note()`) precisely so that
+  fallback is visible rather than invisible,
   and it is why `Cron::nextRun()`'s bare `date()`/`mktime()` walk is correct: PHP
   defaults to UTC whenever php.ini leaves `date.timezone` unset, which would
   compute every next-run a full UTC offset away from when crond actually fires.

@@ -865,7 +865,7 @@ ur_emit_time_helpers();
 <p>
   <?=_('Define independent rsync backup jobs. Each job has its own schedule and runs one rsync per source -> destination pair (no cartesian product)')?>.
   <?=_('Enabled jobs run automatically on their cron schedule; the Next run column shows when each will fire. You can also Run or Dry-run a job on demand')?>.
-  <?=_('The State column shows each job\'s live status (updated automatically while a job runs); use the Logs button to view per-run output. Per-job notifications are sent through Unraid\'s notification system — pick when to notify with each job\'s Notify setting')?>.
+  <?=_('The State column shows each job\'s live status (updated automatically while a job runs); use the Logs button to view per-run output. Per-job notifications are sent through Unraid\'s notification system — pick when to notify with each job\'s Notify setting')?>. <?=ur_tz_note()?>
 </p>
 
 <!-- Summary list ------------------------------------------------------------>
@@ -1567,7 +1567,9 @@ ur_emit_time_helpers();
   }
   /* Formats in the SERVER's timezone so a live-polled cell matches the
    * PHP-rendered one it replaces - see ur_emit_time_helpers(). */
-  var fmtLocal = window.urFmtLocal;
+  /* Late-bound: never capture window.urFmtLocal by value, so a page that emits
+   * the helper AFTER its own script still works. */
+  function fmtLocal(e, s) { return window.urFmtLocal(e, s); }
 
   /* Coarse forward "in 3h 5m" label for a future epoch (seconds) — mirrors
    * jobs.php ur_relative_time() so a JS-updated next-run cell reads like the
@@ -1745,6 +1747,7 @@ ur_emit_time_helpers();
           if (run.state) { lbl += '  [' + run.state + ']'; }
           if (idx === 0) { lbl += '  (latest)'; }
           opt.textContent = lbl;          // textContent: never raw innerHTML
+          opt.title = run.id;             // raw id still reachable for support
           modalSel.appendChild(opt);
         });
         /* Default to the latest run unless the user had picked one still listed. */

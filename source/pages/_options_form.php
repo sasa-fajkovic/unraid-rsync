@@ -1134,6 +1134,25 @@ if (!function_exists('ur_emit_ajax_helpers')) {
     }
 }
 
+if (!function_exists('ur_tz_note')) {
+    /**
+     * A short "times are shown in <Zone>" sentence for the tabs that print
+     * absolute times.
+     *
+     * WHY it is worth the pixels: times used to render in the BROWSER's zone and
+     * now render in the server's, so a remote admin sees every timestamp shift by
+     * their offset with no explanation - which reads as a regression. It is also
+     * the only surface where Config::systemTimezone() falling all the way back to
+     * UTC (every source missed) is visible to the person who can report it.
+     *
+     * Returns ESCAPED HTML.
+     */
+    function ur_tz_note(): string
+    {
+        return ur_h(sprintf(ur_t('Times are shown in the server timezone (%s).'), Config::systemTimezone()));
+    }
+}
+
 if (!function_exists('ur_emit_time_helpers')) {
     /**
      * Emit (once per page) the shared client-side time formatter, mirroring
@@ -1176,10 +1195,21 @@ window.urFmtLocal = function (epoch, withSeconds) {
   };
   if (withSeconds) { opts.second = '2-digit'; }
   try {
-    return d.toLocaleString('sv-SE', opts);
+    /* 'sv-SE' is picked only because its format is already ISO-shaped. Some ICU
+     * builds still put a comma between date and time for a component bag, so
+     * normalise it - the column is fixed-width. */
+    return d.toLocaleString('sv-SE', opts).replace(',', '');
   } catch (e) {
-    /* An ICU build that rejects the zone must not blank the whole column. */
-    return d.toLocaleString('sv-SE');
+    /* An ICU build that does not know UR_TZ must not silently fall back to the
+     * BROWSER's zone - that is exactly the bug this function exists to prevent,
+     * and it would look like correct output. Render UTC and SAY so, so a wrong
+     * time is visibly wrong. */
+    opts.timeZone = 'UTC';
+    try {
+      return d.toLocaleString('sv-SE', opts).replace(',', '') + ' UTC';
+    } catch (e2) {
+      return d.toISOString().replace('T', ' ').slice(0, withSeconds ? 19 : 16) + ' UTC';
+    }
   }
 };
 JS

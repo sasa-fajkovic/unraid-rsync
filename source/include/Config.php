@@ -244,6 +244,22 @@ class Config
     }
 
     /**
+     * Files that may carry Unraid's configured timezone, most authoritative
+     * first. ident.cfg on the USB flash is what the Date and Time settings page
+     * writes (timeZone="Europe/Berlin"); var.ini is the running emhttp state.
+     * Overridable in tests via UR_IDENT_CFG_PATHS, mirroring UR_VAR_INI_PATHS.
+     *
+     * @return array<int,string>
+     */
+    private static function identCfgCandidates(): array
+    {
+        if (defined('UR_IDENT_CFG_PATHS') && is_array(UR_IDENT_CFG_PATHS)) {
+            return UR_IDENT_CFG_PATHS;
+        }
+        return ['/boot/config/ident.cfg', '/var/local/emhttp/var.ini'];
+    }
+
+    /**
      * The IANA timezone the SERVER runs in - the one Unraid's crond fires jobs
      * in, rsync stamps its own output in, and therefore the one every timestamp
      * the plugin shows a user must be rendered in.
@@ -252,9 +268,24 @@ class Config
      * date.timezone unset, so relying on the ambient zone would silently compute
      * Cron::nextRun() in UTC while crond fires in local time - the displayed next
      * run would be off by the whole UTC offset. Sources, in order:
-     *   1. $TZ            - what crond/rsync themselves honour
-     *   2. /etc/localtime - the system zone (a symlink into .../zoneinfo/<Zone>)
-     *   3. the ambient PHP default, as a last resort
+     *
+     *   1. $TZ - what libc gives rsync and crond. Deliberately FIRST, and
+     *      deliberately ahead of an explicit php.ini date.timezone: the point of
+     *      this function is to agree with the rsync lines interleaved in our own
+     *      log, and rsync follows tzset(), not php.ini. Since rsync is spawned as
+     *      a CHILD of whichever PHP process resolved this, honouring $TZ first is
+     *      what keeps parent and child on one zone.
+     *   2. Unraid's own setting (ident.cfg / var.ini). Authoritative, and
+     *      identical in both execution contexts - which $TZ is not, because
+     *      php-fpm may scrub the environment while crond does not.
+     *   3. /etc/localtime. Slackware (so Unraid) may write it as a symlink to
+     *      /etc/localtime-copied-from rather than into .../zoneinfo/<Zone>, so
+     *      both are read; a plain copy with no symlink at all just falls through.
+     *   4. the ambient PHP default, as a last resort.
+     *
+     * If EVERY source misses we return UTC, which reproduces the very bug this
+     * exists to fix - so Runner logs the resolved zone at the top of each run and
+     * the UI labels it, making that case visible instead of silent.
      *
      * The result is validated against the tz database before being returned: it
      * is interpolated into page JS and handed to toLocaleString({timeZone}),
@@ -262,21 +293,40 @@ class Config
      */
     public static function systemTimezone(): string
     {
+        return self::systemTimezoneFrom(self::identCfgCandidates());
+    }
+
+    /**
+     * systemTimezone() with the Unraid config files injected, so a test can
+     * exercise the ident.cfg rung without a real /boot. Not for production use -
+     * call systemTimezone().
+     *
+     * @param array<int,string> $identFiles
+     */
+    public static function systemTimezoneFrom(array $identFiles): string
+    {
         $candidates = [];
 
         // An empty or whitespace-only TZ is deliberately NOT treated as UTC: it
         // means "unset" far more often than it means UTC, so it falls through to
-        // /etc/localtime below (the candidate loop skips '').
+        // the next source (the candidate loop skips '').
         $tz = getenv('TZ');
         if (is_string($tz)) {
-            $candidates[] = trim($tz);
+            $candidates[] = self::normaliseZoneName(trim($tz));
         }
 
-        // Not every /etc/localtime is a symlink (some systems copy the zone file
-        // in place), so a miss here just falls through to the next candidate.
-        $link = @readlink('/etc/localtime');
-        if (is_string($link) && preg_match('#(?:^|/)zoneinfo/(.+)$#', $link, $m)) {
-            $candidates[] = $m[1];
+        foreach ($identFiles as $file) {
+            $raw = @file_get_contents($file);
+            if (is_string($raw) && preg_match('/^\s*timeZone\s*=\s*"?([^"\r\n]+)"?/mi', $raw, $m)) {
+                $candidates[] = self::normaliseZoneName(trim($m[1]));
+            }
+        }
+
+        foreach (['/etc/localtime', '/etc/localtime-copied-from'] as $file) {
+            $link = @readlink($file);
+            if (is_string($link) && preg_match('#(?:^|/)zoneinfo/(.+)$#', $link, $m)) {
+                $candidates[] = self::normaliseZoneName($m[1]);
+            }
         }
 
         $candidates[] = date_default_timezone_get();
@@ -288,6 +338,17 @@ class Config
             }
         }
         return 'UTC';
+    }
+
+    /**
+     * Strip the zoneinfo sub-tree prefixes that are NOT part of the zone name.
+     * A symlink into .../zoneinfo/right/Europe/Berlin (leap-second tables) or
+     * .../zoneinfo/posix/... would otherwise yield "right/Europe/Berlin", which
+     * is absent from listIdentifiers() and would silently fail validation.
+     */
+    private static function normaliseZoneName(string $zone): string
+    {
+        return preg_replace('#^(?:right|posix)/#', '', $zone) ?? $zone;
     }
 
     /**

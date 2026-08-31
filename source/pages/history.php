@@ -104,7 +104,7 @@ try {
 </div>
 
 <p>
-  <?=_('Past executions across all jobs — real runs and dry-runs, started manually or on schedule. Use the filter to narrow to one job. How many are kept per job is the "Keep last N executions" setting on the Global Settings tab')?>.
+  <?=_('Past executions across all jobs — real runs and dry-runs, started manually or on schedule. Use the filter to narrow to one job. How many are kept per job is the "Keep last N executions" setting on the Global Settings tab')?>. <?=ur_tz_note()?>
 </p>
 
 <?php if (empty($jobs)): ?>
