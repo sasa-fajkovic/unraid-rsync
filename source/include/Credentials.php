@@ -472,9 +472,14 @@ class Credentials
     public static function rsyncDaemonNote(int $port, string $host = ''): string
     {
         $h = strtolower(trim($host));
+        // An IPv6 literal is FULL of colons ("fe80::1", "::1", "[2001:db8::1]")
+        // and is a perfectly good SSH host, so it must be excluded before the
+        // double-colon test below - otherwise every IPv6 user gets this warning.
+        $bare    = trim($h, '[]');
+        $isIpv6  = filter_var($bare, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) !== false;
         // "rsync://host/module" or the daemon's "host::module" double-colon form
         // pasted into the Host field - neither is an SSH target.
-        if (strpos($h, 'rsync://') === 0 || strpos($h, '::') !== false) {
+        if (strpos($h, 'rsync://') === 0 || (!$isIpv6 && strpos($h, '::') !== false)) {
             return 'This looks like an rsync daemon address (rsync:// or host::module). '
                 . 'This plugin transfers over SSH, so enter just the hostname or IP here '
                 . 'and put the remote path on the job\'s pair.';

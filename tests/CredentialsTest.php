@@ -607,4 +607,32 @@ final class CredentialsTest extends TestCase
         @unlink($file);
         @rmdir($dir);
     }
+    // --- rsync daemon (rsyncd) detection ------------------------------------
+
+    public function testRsyncDaemonNoteFlagsPort873(): void
+    {
+        $note = Credentials::rsyncDaemonNote(873, 'nas.local');
+        $this->assertStringContainsString('873', $note);
+        $this->assertSame('', Credentials::rsyncDaemonNote(22, 'nas.local'));
+        $this->assertSame('', Credentials::rsyncDaemonNote(2222, 'nas.local'));
+    }
+
+    public function testRsyncDaemonNoteFlagsDaemonStyleHosts(): void
+    {
+        $this->assertNotSame('', Credentials::rsyncDaemonNote(22, 'rsync://nas/module'));
+        $this->assertNotSame('', Credentials::rsyncDaemonNote(22, 'nas::module'));
+    }
+
+    /**
+     * An IPv6 literal is full of colons but is a perfectly ordinary SSH host.
+     * Matching a bare "::" would warn on EVERY IPv6 connection.
+     */
+    public function testRsyncDaemonNoteDoesNotFlagIpv6Hosts(): void
+    {
+        foreach (['fe80::1', '2001:db8::1', '::1', '[2001:db8::1]', '2001:DB8::1'] as $host) {
+            $this->assertSame('', Credentials::rsyncDaemonNote(22, $host), "IPv6 host $host must not warn");
+        }
+        // ...but an IPv6 host on the daemon PORT still warns, on the port.
+        $this->assertStringContainsString('873', Credentials::rsyncDaemonNote(873, '2001:db8::1'));
+    }
 }
