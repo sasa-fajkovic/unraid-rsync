@@ -450,7 +450,14 @@ class Cron
         // We iterate by minute but short-circuit on coarser fields to keep the
         // loop bounded in practice. date()/mktime() honour the process timezone,
         // which Config.php has pinned to the system zone - so this walks the
-        // calendar in the same zone (and across the same DST folds) as crond.
+        // calendar in the same zone as crond.
+        //
+        // DST (behaviour pinned by CronTest, not incidental): at a spring-forward
+        // gap a time that does not exist that day is simply not matched, so a
+        // daily job scheduled inside the gap skips to the next day - what
+        // vixie-cron does with a fixed-time job in the gap. At a fall-back repeat
+        // mktime() resolves the ambiguous hour to the SECOND occurrence, so the
+        // walk yields one instant rather than two. Both folds terminate.
         while ($ts <= $horizon) {
             $min   = (int) date('i', $ts);
             $hour  = (int) date('G', $ts);

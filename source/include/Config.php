@@ -264,6 +264,9 @@ class Config
     {
         $candidates = [];
 
+        // An empty or whitespace-only TZ is deliberately NOT treated as UTC: it
+        // means "unset" far more often than it means UTC, so it falls through to
+        // /etc/localtime below (the candidate loop skips '').
         $tz = getenv('TZ');
         if (is_string($tz)) {
             $candidates[] = trim($tz);
