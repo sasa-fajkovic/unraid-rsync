@@ -90,6 +90,15 @@ if (!defined('UR_CRON_PHP_PATH')) {
     define('UR_CRON_PHP_PATH', 'php');
 }
 
+// Pin the timezone. Config.php resolves the SERVER's zone at load ($TZ first,
+// then /etc/localtime) and calls date_default_timezone_set() with it, so the
+// suite would otherwise run in whatever zone the test host happens to be in
+// (CI vs. a developer's laptop). UTC makes any assertion that mixes a gmdate()
+// expectation with a date() render agree, and keeps the local-stamp assertions
+// deterministic. Tests that care about a non-UTC zone set one themselves and
+// restore it in tearDown.
+putenv('TZ=UTC');
+
 // --- the code under test ---------------------------------------------------
 require_once __DIR__ . '/../source/include/ProcIO.php';
 require_once __DIR__ . '/../source/include/Config.php';

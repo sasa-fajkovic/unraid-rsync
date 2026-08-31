@@ -347,6 +347,73 @@ final class LoggerTest extends TestCase
         $this->assertFalse(Logger::enforceRunLogCap(Logger::pluginLogPath()));
     }
 
+    /**
+     * Issue #135: rsync writes its own lines into the run log in SYSTEM LOCAL
+     * time, so the plugin's own stamps must be local too - a UTC "...Z" stamp
+     * put two timezones in one file. The stamp keeps an explicit UTC offset so
+     * it stays unambiguous ISO-8601.
+     */
+    public function testEventStampIsLocalWithOffsetNotUtcZ(): void
+    {
+        $path = Logger::openRun('j-tz', 1750000000);
+        Logger::event($path, 'j-tz', 'timezone check');
+
+        foreach ([file_get_contents($path), file_get_contents(Logger::pluginLogPath())] as $body) {
+            $this->assertMatchesRegularExpression(
+                '/^\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}\] /m',
+                $body
+            );
+            // The old UTC "...Z" form must not come back.
+            $this->assertDoesNotMatchRegularExpression(
+                '/^\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\] /m',
+                $body
+            );
+        }
+    }
+
+    /**
+     * The stamp must track the process timezone (which Config.php pins to the
+     * system zone), not UTC. Same instant, two zones, two different hours.
+     */
+    public function testEventStampFollowsTheProcessTimezone(): void
+    {
+        $tz = date_default_timezone_get();
+        try {
+            date_default_timezone_set('Australia/Sydney');
+            $path = Logger::openRun('j-tz-syd', 1750000000);
+            Logger::event($path, 'j-tz-syd', 'sydney');
+            $syd = file_get_contents($path);
+            $this->assertStringContainsString('+10:00', $syd);
+
+            date_default_timezone_set('UTC');
+            Logger::event($path, 'j-tz-syd', 'utc');
+            $both = file_get_contents($path);
+            $this->assertStringContainsString('+00:00', $both);
+        } finally {
+            date_default_timezone_set($tz);
+        }
+    }
+
+    /**
+     * The run-log FILENAME stays UTC on purpose: it is an identifier that has to
+     * sort lexically and never repeat across a DST fold. Guards against a future
+     * refactor sweeping it into local time along with the in-file stamps and
+     * quietly breaking RUN_FILE_REGEX ordering.
+     */
+    public function testRunLogFilenameStaysUtcRegardlessOfTimezone(): void
+    {
+        $tz = date_default_timezone_get();
+        try {
+            date_default_timezone_set('Australia/Sydney');
+            $this->assertStringEndsWith(
+                '/run-' . gmdate('Ymd\THis\Z', 1750000000) . '.log',
+                Logger::newRunLogPath('j-tz-name', 1750000000)
+            );
+        } finally {
+            date_default_timezone_set($tz);
+        }
+    }
+
     public function testPluginLogIsNotSizeCapped(): void
     {
         // The cap applies only to per-run logs; plugin.log is the rolling
