@@ -6,10 +6,10 @@ use PHPUnit\Framework\TestCase;
 use PHPUnit\Framework\Attributes\DataProvider;
 
 /**
- * A test double for Ssh that stubs the live-system seams (sshpass detection and
- * the ssh probe) so the argv-construction, materialisation and probe-
- * classification logic is exercised entirely offline - no socket, no real
- * ssh/sshpass binary. The probe result is injected per test.
+ * A test double for Ssh that stubs the one live-system seam (the ssh probe) so
+ * the argv-construction, materialisation and probe-classification logic is
+ * exercised entirely offline - no socket, no real ssh binary. The probe result
+ * is injected per test, and the argv + env it was called with are captured.
  */
 final class FakeSsh extends Ssh
 {
@@ -17,40 +17,21 @@ final class FakeSsh extends Ssh
     public static $nextProbe = [0, ''];
     /** @var array<int,string>|null the argv runProbe was last called with */
     public static $lastProbeArgv = null;
+    /** @var array<string,string>|null the env runProbe was last called with */
+    public static $lastProbeEnv = null;
 
-    protected static function locateSshpass(): string
-    {
-        // Honour the override; otherwise pretend sshpass IS present so the
-        // PASSWORD argv path can be exercised without the real binary.
-        if (static::$sshpassPathOverride !== null) {
-            return (string) static::$sshpassPathOverride;
-        }
-        return '/usr/bin/sshpass';
-    }
-
-    protected static function runProbe(array $argv): array
+    protected static function runProbe(array $argv, ?array $env = null): array
     {
         self::$lastProbeArgv = $argv;
+        self::$lastProbeEnv  = $env;
         return self::$nextProbe;
-    }
-}
-
-/**
- * Exposes the REAL (no-shell, PATH-scanning) locateSshpass() so it can be tested
- * directly against a temp PATH dir without a shell or a real sshpass binary.
- */
-final class RealLocateSsh extends Ssh
-{
-    public static function publicLocateSshpass(): string
-    {
-        return static::locateSshpass();
     }
 }
 
 /**
  * Tests for Ssh.php: argv assembly for KEY vs PASSWORD (incl. strictHostKey
  * modes, port, timeout, known_hosts wiring), the rsync -e value, materialise +
- * cleanup against a tmpfs override, sshpass detect-and-degrade, and the probe
+ * cleanup against a tmpfs override, the SSH_ASKPASS password wiring, and the probe
  * failure-mode classification - all asserted as ARRAYS without a live host.
  */
 final class SshTest extends TestCase
@@ -63,10 +44,11 @@ final class SshTest extends TestCase
         $this->rtBase = sys_get_temp_dir() . '/ur-ssh-test-' . getmypid() . '-' . bin2hex(random_bytes(4));
         Ssh::$runtimeBase = $this->rtBase;
         FakeSsh::$runtimeBase = $this->rtBase;
-        Ssh::$sshpassPathOverride = null;
-        FakeSsh::$sshpassPathOverride = null;
+        Ssh::$askpassPathOverride = null;
+        FakeSsh::$askpassPathOverride = null;
         FakeSsh::$nextProbe = [0, ''];
         FakeSsh::$lastProbeArgv = null;
+        FakeSsh::$lastProbeEnv = null;
     }
 
     protected function tearDown(): void
@@ -74,8 +56,8 @@ final class SshTest extends TestCase
         $this->rmrf($this->rtBase);
         Ssh::$runtimeBase = '/tmp/unraid.rsync';
         FakeSsh::$runtimeBase = '/tmp/unraid.rsync';
-        Ssh::$sshpassPathOverride = null;
-        FakeSsh::$sshpassPathOverride = null;
+        Ssh::$askpassPathOverride = null;
+        FakeSsh::$askpassPathOverride = null;
     }
 
     private function rmrf(string $dir): void
@@ -170,9 +152,9 @@ final class SshTest extends TestCase
         $this->assertNotContains('PubkeyAuthentication=no', $argv);
     }
 
-    public function testKeyfileHasNoSshpassPrefix(): void
+    public function testKeyfileHasNoAuthEnv(): void
     {
-        $this->assertSame([], Ssh::buildSshpassPrefix($this->keyfileConn(), '/tmp/pass'));
+        $this->assertSame([], Ssh::buildAuthEnv($this->keyfileConn(), '/tmp/pass'));
     }
 
     public function testMaterializeKeyfileUsesExistingFileNoTmpfsKey(): void
@@ -201,7 +183,7 @@ final class SshTest extends TestCase
         $i = array_search('-i', $mat['sshArgv'], true);
         $this->assertSame($keyPath, $mat['sshArgv'][$i + 1]);
         $this->assertStringContainsString("'-i' '" . $keyPath . "'", $mat['dashE']);
-        $this->assertSame([], $mat['sshpassPrefix']);
+        $this->assertSame([], $mat['sshEnv']);
 
         // cleanupRuntime must NOT delete the user's real key file.
         Ssh::cleanupRuntime((string) $mat['token']);
@@ -299,9 +281,9 @@ final class SshTest extends TestCase
         }
     }
 
-    public function testKeyHasNoSshpassPrefix(): void
+    public function testKeyHasNoAuthEnv(): void
     {
-        $this->assertSame([], Ssh::buildSshpassPrefix($this->keyConn(), '/tmp/pass'));
+        $this->assertSame([], Ssh::buildAuthEnv($this->keyConn(), '/tmp/pass'));
     }
 
     // --- PASSWORD argv -----------------------------------------------------
@@ -314,7 +296,7 @@ final class SshTest extends TestCase
         $this->assertSame('ssh', $argv[0]);
         $this->assertContains('PubkeyAuthentication=no', $argv);
         $this->assertContains('PreferredAuthentications=password', $argv);
-        // PASSWORD must NOT use BatchMode (it would suppress the prompt sshpass answers)
+        // PASSWORD must NOT use BatchMode (it would suppress the prompt askpass answers)
         $this->assertNotContains('BatchMode=yes', $argv);
         // and must not carry -i
         $this->assertNotContains('-i', $argv);
@@ -326,17 +308,22 @@ final class SshTest extends TestCase
         $this->assertSame('2200', $argv[$p + 1]);
     }
 
-    public function testPasswordSshpassPrefixWhenAvailable(): void
+    public function testPasswordAuthEnvWiresAskpass(): void
     {
-        FakeSsh::$sshpassPathOverride = '/usr/bin/sshpass';
-        $prefix = FakeSsh::buildSshpassPrefix($this->passConn(), '/tmp/pass/c-pw');
-        $this->assertSame(['/usr/bin/sshpass', '-f', '/tmp/pass/c-pw'], $prefix);
+        FakeSsh::$askpassPathOverride = '/opt/askpass.sh';
+        $env = FakeSsh::buildAuthEnv($this->passConn(), '/tmp/pass/c-pw');
+        $this->assertSame('/opt/askpass.sh', $env['SSH_ASKPASS']);
+        // force = use the helper regardless of TTY/DISPLAY (OpenSSH 8.4+).
+        $this->assertSame('force', $env['SSH_ASKPASS_REQUIRE']);
+        // DISPLAY keeps pre-8.4 ssh reaching the helper too.
+        $this->assertNotSame('', $env['DISPLAY']);
+        $this->assertSame('/tmp/pass/c-pw', $env['UR_ASKPASS_FILE']);
     }
 
-    public function testPasswordSshpassPrefixEmptyWhenUnavailable(): void
+    public function testPasswordAuthEnvIsEmptyWithoutAPassFile(): void
     {
-        FakeSsh::$sshpassPathOverride = ''; // simulate "not installed"
-        $this->assertSame([], FakeSsh::buildSshpassPrefix($this->passConn(), '/tmp/pass/c-pw'));
+        // No materialised passfile => nothing to point the helper at.
+        $this->assertSame([], FakeSsh::buildAuthEnv($this->passConn(), ''));
     }
 
     // --- rsync -e value ----------------------------------------------------
@@ -373,7 +360,7 @@ final class SshTest extends TestCase
         // argv references the materialised paths
         $this->assertContains('-i', $mat['sshArgv']);
         $this->assertContains('UserKnownHostsFile=' . $mat['knownHosts'], $mat['sshArgv']);
-        $this->assertSame([], $mat['sshpassPrefix']); // KEY auth
+        $this->assertSame([], $mat['sshEnv']); // KEY auth
 
         // On a real (non-FAT32) filesystem the key must be 0600.
         if (DIRECTORY_SEPARATOR === '/') {
@@ -489,9 +476,9 @@ final class SshTest extends TestCase
         $this->assertStringContainsString('no longer exists', $mat['error']);
     }
 
-    public function testMaterializePasswordWritesPassFileWhenAvailable(): void
+    public function testMaterializePasswordWritesPassFile(): void
     {
-        FakeSsh::$sshpassPathOverride = '/usr/bin/sshpass';
+        FakeSsh::$askpassPathOverride = '/opt/askpass.sh';
         $creds = Credentials::defaults();
         $creds['connections'][] = $this->passConn(['password' => Credentials::obfuscate('hunter2')]);
 
@@ -499,107 +486,69 @@ final class SshTest extends TestCase
         $this->assertTrue($mat['ok'], $mat['error'] ?? '');
         $this->assertNotSame('', $mat['passFile']);
         $this->assertFileExists($mat['passFile']);
-        // The de-obfuscated plaintext is written for sshpass -f.
+        // The de-obfuscated plaintext is written for the askpass helper to cat.
         $this->assertSame('hunter2', file_get_contents($mat['passFile']));
-        $this->assertSame(['/usr/bin/sshpass', '-f', $mat['passFile']], $mat['sshpassPrefix']);
+        $this->assertSame($mat['passFile'], $mat['sshEnv']['UR_ASKPASS_FILE']);
+        $this->assertSame('/opt/askpass.sh', $mat['sshEnv']['SSH_ASKPASS']);
+        // THE point of the whole mechanism: the password is in the file, and the
+        // env carries only its PATH - never the secret itself.
+        $this->assertNotContains('hunter2', array_values($mat['sshEnv']));
+        $this->assertNotContains('hunter2', $mat['sshArgv']);
 
         FakeSsh::cleanupRuntime((string) $mat['token']);
         $this->assertFileDoesNotExist($mat['passFile']);
     }
 
-    public function testMaterializePasswordFailsWhenSshpassMissing(): void
+    public function testMaterializePasswordNeedsNothingInstalled(): void
     {
-        FakeSsh::$sshpassPathOverride = '';
+        // The whole point of moving off sshpass: password auth must materialise
+        // on a stock box with no extra package present.
         $creds = Credentials::defaults();
         $creds['connections'][] = $this->passConn(['password' => Credentials::obfuscate('x')]);
         $mat = FakeSsh::materialize($creds, 'c-pw');
-        $this->assertFalse($mat['ok']);
-        $this->assertStringContainsString('sshpass', $mat['error']);
+        $this->assertTrue($mat['ok'], $mat['error'] ?? '');
     }
 
-    // --- sshpass detect-and-degrade ----------------------------------------
+    // --- the shipped askpass helper (real script, really executed) ----------
 
-    public function testSshpassAvailabilityHonoursOverride(): void
-    {
-        Ssh::$sshpassPathOverride = '/usr/bin/sshpass';
-        $this->assertTrue(Ssh::sshpassAvailable());
-        Ssh::$sshpassPathOverride = '';
-        $this->assertFalse(Ssh::sshpassAvailable());
-    }
-
-    public function testSshpassMissingMessageMentionsNerdTools(): void
-    {
-        $this->assertStringContainsString('NerdTools', Ssh::sshpassMissingMessage());
-    }
-
-    public function testLocateSshpassFindsExecutableOnPathWithoutShell(): void
+    public function testAskpassHelperIsShippedExecutableAndReturnsThePassword(): void
     {
         if (DIRECTORY_SEPARATOR !== '/') {
-            $this->markTestSkipped('POSIX-only path/exec test');
+            $this->markTestSkipped('POSIX-only exec test');
         }
-        $origPath = getenv('PATH');
-        $dir = sys_get_temp_dir() . '/ur-path-' . getmypid() . '-' . bin2hex(random_bytes(4));
-        mkdir($dir, 0700, true);
-        try {
-            // Put our temp dir FIRST on PATH and drop an executable "sshpass" in
-            // it. The no-shell scanner must find it at its absolute path. (We
-            // don't assert the negative case because the scanner also probes
-            // standard fallback dirs that may legitimately contain sshpass on
-            // some hosts.)
-            putenv('PATH=' . $dir . PATH_SEPARATOR . ($origPath !== false ? $origPath : ''));
-            $bin = $dir . '/sshpass';
-            file_put_contents($bin, "#!/bin/sh\nexit 0\n");
-            chmod($bin, 0755);
-            $found = RealLocateSsh::publicLocateSshpass();
-            $this->assertSame($bin, $found);
-            $this->assertTrue(is_executable($found));
+        $helper = dirname(__DIR__) . '/source/scripts/askpass.sh';
+        $this->assertFileExists($helper);
+        // It ships 0755 and ssh EXECS it - a lost exec bit silently breaks
+        // password auth, and packaging preserves whatever mode git records.
+        $this->assertTrue(is_executable($helper), 'askpass.sh must be executable');
+        $this->assertSame('0755', substr(sprintf('%o', fileperms($helper)), -4));
 
-            // A non-executable file of the same name is ignored (must be +x).
-            unlink($bin);
-            file_put_contents($bin, "not a program\n");
-            chmod($bin, 0644);
-            // It either falls through to a real sshpass elsewhere or returns ''
-            // - in both cases it must NOT return our non-executable file.
-            $this->assertNotSame($bin, RealLocateSsh::publicLocateSshpass());
+        // Really run it: a password with shell metacharacters must come back
+        // byte-for-byte (the helper cats a file; it must never interpolate).
+        $pass = 'p@ss "w0rd" $(id) \'q\' `x`';
+        $file = $this->rtBase . '-askpass-pw';
+        file_put_contents($file, $pass);
+        try {
+            $out = [];
+            $rc  = 0;
+            exec('UR_ASKPASS_FILE=' . escapeshellarg($file) . ' ' . escapeshellarg($helper) . ' 2>/dev/null', $out, $rc);
+            $this->assertSame(0, $rc);
+            $this->assertSame($pass, implode("\n", $out));
         } finally {
-            if ($origPath !== false) {
-                putenv('PATH=' . $origPath);
-            }
-            @unlink($dir . '/sshpass');
-            @rmdir($dir);
+            @unlink($file);
         }
     }
 
-    public function testLocateSshpassIgnoresRelativePathEntries(): void
+    public function testAskpassHelperRefusesWithoutTheEnvVar(): void
     {
         if (DIRECTORY_SEPARATOR !== '/') {
-            $this->markTestSkipped('POSIX-only path/exec test');
+            $this->markTestSkipped('POSIX-only exec test');
         }
-        $origPath = getenv('PATH');
-        $origCwd  = getcwd();
-        $dir = sys_get_temp_dir() . '/ur-relpath-' . getmypid() . '-' . bin2hex(random_bytes(4));
-        mkdir($dir, 0700, true);
-        try {
-            // Drop an executable "sshpass" in the cwd, and put a RELATIVE "."
-            // entry on PATH. The scanner must ignore non-absolute PATH entries,
-            // so it must NOT return "./sshpass".
-            chdir($dir);
-            $rogue = $dir . '/sshpass';
-            file_put_contents($rogue, "#!/bin/sh\nexit 0\n");
-            chmod($rogue, 0755);
-            putenv('PATH=.');
-            $this->assertNotSame('./sshpass', RealLocateSsh::publicLocateSshpass());
-            $this->assertNotSame($rogue, RealLocateSsh::publicLocateSshpass());
-        } finally {
-            if ($origCwd !== false) {
-                chdir($origCwd);
-            }
-            if ($origPath !== false) {
-                putenv('PATH=' . $origPath);
-            }
-            @unlink($dir . '/sshpass');
-            @rmdir($dir);
-        }
+        $helper = dirname(__DIR__) . '/source/scripts/askpass.sh';
+        $out = [];
+        $rc  = 0;
+        exec('unset UR_ASKPASS_FILE; ' . escapeshellarg($helper) . ' 2>/dev/null', $out, $rc);
+        $this->assertNotSame(0, $rc, 'must not print anything when no passfile is named');
     }
 
     // --- probe classification (pure) ---------------------------------------
@@ -632,36 +581,35 @@ final class SshTest extends TestCase
         $this->assertSame('unreachable', $res['reason']);
     }
 
-    public function testClassifyPasswordSshpassAuthExit5(): void
+    public function testClassifyPasswordAuthFailureViaStderr(): void
     {
-        // sshpass exit 5 == incorrect password (PASSWORD path only).
-        $res = Ssh::classifyProbe($this->passConn(), Ssh::SSHPASS_INCORRECT_PASS, '');
+        // ssh is the outer process now, so a wrong password is exit 255 with
+        // "Permission denied" - the same path KEY auth already used. (sshpass
+        // used to signal this as its own exit 5.)
+        $res = Ssh::classifyProbe($this->passConn(), Ssh::SSH_EXIT_ERROR, 'Permission denied (publickey,password).');
         $this->assertFalse($res['ok']);
         $this->assertSame('auth', $res['reason']);
     }
 
-    public function testClassifyPasswordSshpassHostKeyExit6(): void
+    public function testClassifyPasswordHostKeyFailureViaStderr(): void
     {
-        $res = Ssh::classifyProbe($this->passConn(), Ssh::SSHPASS_HOSTKEY_UNKNOWN, '');
+        $res = Ssh::classifyProbe($this->passConn(), Ssh::SSH_EXIT_ERROR, 'Host key verification failed.');
         $this->assertFalse($res['ok']);
         $this->assertSame('hostkey', $res['reason']);
     }
 
-    public function testClassifyPasswordSshpassHostKeyChangedExit7(): void
+    public function testSmallExitCodesAreRemoteExitsForEveryAuthMethod(): void
     {
-        $res = Ssh::classifyProbe($this->passConn(), Ssh::SSHPASS_HOSTKEY_CHANGED, '');
-        $this->assertFalse($res['ok']);
-        $this->assertSame('hostkey', $res['reason']);
-    }
-
-    public function testKeyAuthExit5IsNotTreatedAsSshpassSemantics(): void
-    {
-        // For KEY auth, exit code 5 is a remote command's own exit, NOT sshpass
-        // "incorrect password". It must not be classified as an auth failure
-        // via the sshpass table (it falls through to the unexpected-code path).
-        $res = Ssh::classifyProbe($this->keyConn(), 5, '');
-        $this->assertFalse($res['ok']);
-        $this->assertSame('unreachable', $res['reason']); // unexpected exit code
+        // With no wrapper process, a small exit code is ALWAYS the remote
+        // command's own status - for PASSWORD exactly as for KEY. It must never
+        // be read as an auth/host-key signal (that only held under sshpass).
+        foreach ([$this->keyConn(), $this->passConn()] as $conn) {
+            foreach ([5, 6, 7] as $code) {
+                $res = Ssh::classifyProbe($conn, $code, '');
+                $this->assertFalse($res['ok']);
+                $this->assertSame('unreachable', $res['reason']);
+            }
+        }
     }
 
     // --- testConnection end-to-end (stubbed probe) -------------------------
@@ -688,37 +636,47 @@ final class SshTest extends TestCase
         $destIdx = array_search('sasa@h.example', $argv, true);
         $this->assertNotFalse($destIdx);
         $this->assertSame('--', $argv[$destIdx - 1], 'destination must be preceded by --');
-        // KEY auth: no sshpass prefix in front of ssh.
+        // ssh is argv[0] for every auth method now - no wrapper program.
         $this->assertSame('ssh', $argv[0]);
     }
 
-    public function testClassifyPasswordNon255RemoteExitIsNotAuthFailure(): void
+    public function testTestConnectionPasswordPassesAskpassEnvToTheProbe(): void
     {
-        // sshpass propagates the wrapped ssh/remote exit verbatim. A non-255,
-        // non-sshpass-internal exit on the PASSWORD path is a real remote exit,
-        // NOT a connect/auth failure - it must not be sniffed as 'auth'.
-        $res = Ssh::classifyProbe($this->passConn(), 2, 'some remote stderr');
-        $this->assertFalse($res['ok']);
-        $this->assertSame('unreachable', $res['reason']); // unexpected code, not auth
-    }
-
-    public function testClassifyPasswordSshpassInternalErrorSniffsStderr(): void
-    {
-        // sshpass internal error 3 (runtime) with an ssh host-key message ->
-        // classified via stderr as a host-key problem.
-        $res = Ssh::classifyProbe($this->passConn(), Ssh::SSHPASS_RUNTIME_ERROR, 'Host key verification failed.');
-        $this->assertFalse($res['ok']);
-        $this->assertSame('hostkey', $res['reason']);
-    }
-
-    public function testTestConnectionPasswordMissingSshpass(): void
-    {
-        FakeSsh::$sshpassPathOverride = '';
+        // The probe must carry the askpass wiring, or a PASSWORD connection can
+        // never authenticate - and the password must NOT be in the argv.
+        FakeSsh::$askpassPathOverride = '/opt/askpass.sh';
+        FakeSsh::$nextProbe = [0, ''];
         $creds = Credentials::defaults();
-        $creds['connections'][] = $this->passConn(['password' => Credentials::obfuscate('x')]);
+        $creds['connections'][] = $this->passConn(['password' => Credentials::obfuscate('hunter2')]);
+
         $res = FakeSsh::testConnection($creds, 'c-pw');
-        $this->assertFalse($res['ok']);
-        $this->assertSame('sshpass-missing', $res['reason']);
+        $this->assertTrue($res['ok'], $res['message']);
+
+        $env = FakeSsh::$lastProbeEnv;
+        $this->assertIsArray($env);
+        $this->assertSame('/opt/askpass.sh', $env['SSH_ASKPASS']);
+        $this->assertSame('force', $env['SSH_ASKPASS_REQUIRE']);
+        $this->assertArrayHasKey('UR_ASKPASS_FILE', $env);
+        // Inherited vars survive - proc_open REPLACES the env, so ssh would
+        // lose PATH/HOME if childEnv() ever stopped merging.
+        $this->assertArrayHasKey('PATH', $env);
+        // The secret itself is nowhere near argv or env.
+        $this->assertNotContains('hunter2', array_values($env));
+        $this->assertNotContains('hunter2', (array) FakeSsh::$lastProbeArgv);
+    }
+
+    public function testTestConnectionKeyAuthPassesNoEnvOverride(): void
+    {
+        FakeSsh::$nextProbe = [0, ''];
+        $creds = Credentials::defaults();
+        $creds['keys'][] = [
+            'id' => 'k-1', 'name' => 'k', 'privateKey' => "KEY\n",
+            'publicKey' => 'ssh-ed25519 AAAA', 'fingerprint' => 'SHA256:x',
+        ];
+        $creds['connections'][] = $this->keyConn();
+        FakeSsh::testConnection($creds, 'c-key');
+        // Nothing to add => null, so the child just inherits normally.
+        $this->assertNull(FakeSsh::$lastProbeEnv);
     }
 
     public function testTestConnectionUnknownIdIsConfigError(): void

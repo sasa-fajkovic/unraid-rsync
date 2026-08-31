@@ -54,10 +54,22 @@ on, forked from, or derived from any other plugin.
 
 - **Slug `unraid.rsync` is identical everywhere** — `.plg` name, install dir,
   `/boot` config dir, and cron pickup. Do not diverge it.
-- **Build rsync/ssh/sshpass invocations as argv ARRAYS, never shell strings**, and
+- **Build rsync/ssh invocations as argv ARRAYS, never shell strings**, and
   run them through `proc_open` without a shell. The ONLY intentional shell uses
   are: `Notify` exec (every arg `escapeshellarg`'d, incl. `-i`), user pre/post
   **hooks** (`bash -c "$hook"`), and the detached runner launcher.
+- **Password auth uses OpenSSH's `SSH_ASKPASS`, NOT `sshpass`** — the old
+  dependency told users to install **NerdTools**, archived by its authors in
+  March 2024 and gone from Unraid 7, so password auth was advertised in the UI
+  while being impossible on a stock box. `Ssh::buildAuthEnv()` sets
+  `SSH_ASKPASS` → the shipped `source/scripts/askpass.sh` (committed **0755**,
+  like `source/event/started`; it lives in the install dir, NOT tmpfs, so a
+  `noexec` `/tmp` cannot break it), plus `SSH_ASKPASS_REQUIRE=force` and
+  `DISPLAY` for pre-8.4 OpenSSH. The helper cats the existing per-run 0600
+  tmpfs passfile named by `UR_ASKPASS_FILE`, so **the password still reaches
+  neither argv nor env — only its path does.** Do not re-add a wrapper binary:
+  ssh is `argv[0]` for every auth method now, which is why `classifyProbe` has
+  one set of ssh semantics instead of a separate sshpass exit-code table.
 - **rsync flags are a closed whitelist** (`Rsync::BOOL_FLAGS` / `SCALAR_FLAGS` /
   `FILTER_FLAGS`, mirrored by `Job`'s normalisation and the options form). There is
   **no free-form flag field** anywhere — never add one.
