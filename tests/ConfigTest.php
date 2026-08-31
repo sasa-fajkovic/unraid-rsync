@@ -42,10 +42,12 @@ final class ConfigTest extends TestCase
      */
     public function testSystemTimezonePrefersTzEnv(): void
     {
+        // systemTimezoneFrom([]) is the UNCACHED seam with no ident.cfg sources,
+        // so this asserts the resolution order rather than systemTimezone()'s memo.
         $prev = getenv('TZ');
         try {
             putenv('TZ=Australia/Sydney');
-            $this->assertSame('Australia/Sydney', Config::systemTimezone());
+            $this->assertSame('Australia/Sydney', Config::systemTimezoneFrom([]));
         } finally {
             putenv($prev === false ? 'TZ' : "TZ=$prev");
         }
@@ -62,7 +64,7 @@ final class ConfigTest extends TestCase
         $prev = getenv('TZ');
         try {
             putenv('TZ=Not/AZone');
-            $tz = Config::systemTimezone();
+            $tz = Config::systemTimezoneFrom([]);
             $this->assertNotSame('Not/AZone', $tz);
             $this->assertContains($tz, DateTimeZone::listIdentifiers());
             // Always usable as a real zone.
@@ -77,7 +79,7 @@ final class ConfigTest extends TestCase
         try {
             foreach (['', 'UTC', 'Europe/Berlin', '../../etc/passwd', "UTC\n", 'right/Europe/Berlin'] as $candidate) {
                 putenv("TZ=$candidate");
-                $this->assertContains(Config::systemTimezone(), DateTimeZone::listIdentifiers());
+                $this->assertContains(Config::systemTimezoneFrom([]), DateTimeZone::listIdentifiers());
             }
         } finally {
             // Restore the suite-wide pin from bootstrap.php even on failure - a
@@ -143,6 +145,27 @@ final class ConfigTest extends TestCase
             putenv($prev === false ? 'TZ' : "TZ=$prev");
             @unlink($file);
             @rmdir($dir);
+        }
+    }
+
+    /**
+     * systemTimezone() is memoised because it is called several times per page
+     * render and each resolution touches the USB flash and builds the whole tz
+     * database list. Prove the cache actually holds - a regression here is
+     * invisible except as flash I/O.
+     */
+    public function testSystemTimezoneIsMemoised(): void
+    {
+        $prev  = getenv('TZ');
+        $first = Config::systemTimezone();
+        try {
+            // Change the highest-priority source; the cached answer must persist.
+            putenv('TZ=Pacific/Kiritimati');
+            $this->assertSame($first, Config::systemTimezone());
+            // ...while the uncached seam does observe the change.
+            $this->assertSame('Pacific/Kiritimati', Config::systemTimezoneFrom([]));
+        } finally {
+            putenv($prev === false ? 'TZ' : "TZ=$prev");
         }
     }
 

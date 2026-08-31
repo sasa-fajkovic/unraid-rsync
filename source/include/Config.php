@@ -287,13 +287,30 @@ class Config
      * exists to fix - so Runner logs the resolved zone at the top of each run and
      * the UI labels it, making that case visible instead of silent.
      *
+     * We deliberately do NOT putenv('TZ=<resolved>') to force the resolution onto
+     * rsync/ssh/hook children. It would make "one file, one timezone" structural
+     * rather than a consequence of parent and child reading the same sources -
+     * but php-fpm workers are long-lived, so the next request on that worker
+     * would read our own exported value back as source 1 and keep serving a
+     * STALE zone after the admin changes it in the GUI. Logging the resolved zone
+     * per run (see Runner) buys the diagnosability without that trade.
+     *
      * The result is validated against the tz database before being returned: it
      * is interpolated into page JS and handed to toLocaleString({timeZone}),
      * which throws RangeError on an unknown zone. Anything unrecognised -> UTC.
      */
     public static function systemTimezone(): string
     {
-        return self::systemTimezoneFrom(self::identCfgCandidates());
+        // Memoised: this is called several times per page render (the UI note,
+        // the JS emitter, the load-time pin, the Runner's log line) and each
+        // resolution reads the USB flash and builds the ~400-entry tz-database
+        // list. The answer cannot change within one request. Tests exercising
+        // the resolution ORDER call systemTimezoneFrom(), which is not cached.
+        static $cached = null;
+        if ($cached === null) {
+            $cached = self::systemTimezoneFrom(self::identCfgCandidates());
+        }
+        return $cached;
     }
 
     /**

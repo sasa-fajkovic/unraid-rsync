@@ -357,6 +357,10 @@ try {
   function openLog(runRef, job, when) {
     if (!job || !runRef) { return; }
     modalTit.textContent = 'Run log — ' + (when || runRef);
+    /* The heading shows local time now, but the downloaded file is still named
+     * with the UTC run id - keep the raw id reachable on hover so a support
+     * thread can match the two without a mental offset conversion. */
+    modalTit.title = runRef;
     modalPre.textContent = 'Loading…';
     modal.classList.add('ur-open');
     modal.setAttribute('aria-hidden', 'false');
