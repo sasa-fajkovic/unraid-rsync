@@ -63,7 +63,7 @@ try {
   <span class="left"><i class="fa fa-dashboard title"></i>&nbsp;<?=_('Overview')?></span>
 </div>
 
-<p><?=_('Last-execution status of every job at a glance. Updated automatically; open the Jobs or History tab for details and actions')?>.</p>
+<p><?=_('Last-execution status of every job at a glance. Updated automatically; open the Jobs or History tab for details and actions')?>. <?=ur_tz_note()?></p>
 
 <?php if (empty($jobs)): ?>
 <div class="ur-empty-state"><?=_('No jobs configured yet — add one in the Jobs tab')?>.</div>
@@ -90,6 +90,7 @@ try {
   </tbody>
 </table>
 
+<?php ur_emit_time_helpers(); /* UR_TZ + window.urFmtLocal (server timezone) */ ?>
 <script type="text/javascript">
 (function () {
   'use strict';
@@ -113,13 +114,11 @@ try {
     return s ? s.charAt(0) + s.slice(1).toLowerCase() : 'Pending';
   }
 
-  function pad(n) { return (n < 10 ? '0' : '') + n; }
-  function fmtLocal(epoch) {
-    if (!epoch) { return '—'; }
-    var d = new Date(epoch * 1000);
-    if (isNaN(d.getTime())) { return '—'; }
-    return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
-  }
+  /* Formats in the SERVER's timezone, not the browser's - see
+   * ur_emit_time_helpers() in _options_form.php. */
+  /* Late-bound: never capture window.urFmtLocal by value, so a page that emits
+   * the helper AFTER its own script still works. */
+  function fmtLocal(e, s) { return window.urFmtLocal(e, s); }
   function isoToEpoch(iso) {
     if (!iso) { return 0; }
     var t = Date.parse(iso);

@@ -16,6 +16,10 @@ declare(strict_types=1);
  *                   one chronological file.
  *   - plugin log:   <runtimeBase>/logs/plugin.log  (a rolling, cross-job log)
  *
+ * Two timestamp conventions, deliberately: run-log FILENAMES are UTC (a sortable,
+ * DST-safe identifier), while the stamps event() writes INSIDE a log are
+ * server-local with an offset, matching the rsync lines they sit beside.
+ *
  * tail() returns text that is ALREADY HTML-escaped, so a caller can drop it into
  * a <pre> safely. This is the defence against the classic log-XSS hole where a
  * filename/path in the log is rendered as raw innerHTML. The UI must NEVER take
@@ -523,10 +527,18 @@ class Logger
      * Append a timestamped line to BOTH the given run log and the rolling
      * plugin log. The plugin log line is prefixed with the job id so the
      * cross-job log is readable.
+     *
+     * The stamp is SERVER-LOCAL with an explicit UTC offset
+     * (2026-08-30T19:40:10+10:00), not UTC: rsync writes its own lines into this
+     * same file in system local time, so a UTC stamp here put two timezones in
+     * one log (issue #135). The offset is kept so the stamp stays unambiguous
+     * ISO-8601. Config.php pins the process timezone to the system zone at load.
+     * NOTE: the run-log FILENAME stays UTC (see newRunLogPath) - it is an
+     * identifier that has to sort lexically and never repeat across a DST fold.
      */
     public static function event(string $runLog, string $jobId, string $message): void
     {
-        $stamp = gmdate('Y-m-d\TH:i:s\Z');
+        $stamp = date('Y-m-d\TH:i:sP');
         $line  = '[' . $stamp . '] ' . $message;
         if ($runLog !== '') {
             self::append($runLog, $line);
