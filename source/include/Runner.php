@@ -873,14 +873,6 @@ class Runner
         // direction is coerced to PUSH (dest = `remote`), so we must not let a
         // hand-edited direction=PULL on a LOCAL job check the wrong side. Only
         // for SSH does PULL flip the destination to the `local` side.
-        // --rsync-path reaches the remote shell, and config.json is user-
-        // writable, so re-check it here the same way the path sides are
-        // re-checked - save-time validation is not the only way in.
-        $remoteRsync = trim((string) ($opts['remoteRsyncPath'] ?? ''));
-        if ($remoteRsync !== '' && !Job::isRemoteProgramPath($remoteRsync)) {
-            $errors[] = 'the remote rsync path must be a bare absolute path.';
-        }
-
         $deleteOn = !empty($opts['delete']) || !empty($opts['deleteExcluded']);
         if ($deleteOn) {
             $destIsRemote = ($transport !== 'SSH') ? true : ($direction !== 'PULL');
@@ -888,6 +880,14 @@ class Runner
             if ($destPath !== '' && !Job::isSpecificSubPath($destPath)) {
                 $errors[] = 'a delete option is enabled, so the destination must be a specific sub-directory, not a root.';
             }
+        }
+
+        // --rsync-path reaches the remote shell, and config.json is user-writable,
+        // so re-check it here the same way both path sides are re-checked above:
+        // save-time validation is not the only way a value gets in.
+        $remoteRsync = trim((string) ($opts['remoteRsyncPath'] ?? ''));
+        if ($remoteRsync !== '' && !Job::isRemoteProgramPath($remoteRsync)) {
+            $errors[] = 'the remote rsync path must be a bare absolute path.';
         }
 
         return $errors;

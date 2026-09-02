@@ -722,10 +722,6 @@ final class JobTest extends TestCase
 
     /**
      * Under LOCAL transport the `remote` field is a second path on THIS box, so
-     * the daemon advisory must not fire - it would be nonsense there.
-     */
-    /**
-     * Under LOCAL transport the `remote` field is a second path on THIS box, so
      * the daemon advisory would be nonsense. `/data` is the reachable case: it
      * is a single segment (so daemonModuleNote WOULD fire) while also failing
      * the /mnt guardrail, so without the transport gate the user would get the

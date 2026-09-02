@@ -627,6 +627,18 @@ function ur_action_save_config(): void
     }
 
     // Jobs (the Jobs tab) - only rebuild the jobs list when it was submitted.
+    // Bad global values must be rejected BEFORE the settings-only early return
+    // below, which saves and answers 200 - collecting them into $allErrors is
+    // not enough, because that array is only inspected further down the
+    // jobs-carrying path.
+    if (!empty($allErrors)) {
+        sendError('Validation failed.', 422, [
+            'errors'   => $allErrors,
+            'warnings' => $allWarnings,
+        ]);
+        return;
+    }
+
     if (!$hasJobs) {
         // Settings-only save: persist the (validated-by-load) config with the
         // updated global section and return.

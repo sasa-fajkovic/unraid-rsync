@@ -1517,11 +1517,12 @@ ur_emit_time_helpers();
             msg += ' (' + res.body.warnings.join('; ') + ')';
           }
           window.urAjax.show(result, true, msg);
-          /* Reload so the summary table reflects the saved state - but not while
-           * a warning is on screen, which the 600ms flash would make unreadable. */
-          if (!(res.body.warnings && res.body.warnings.length)) {
-            setTimeout(function () { window.location.reload(); }, 600);
-          }
+          /* Reload so the summary table reflects the saved state. Hold it longer
+           * when there is a warning to read - suppressing the reload entirely
+           * would leave the table stale on every save of a job whose remote path
+           * legitimately warns (/data, /backup, ...). */
+          var delay = (res.body.warnings && res.body.warnings.length) ? 6000 : 600;
+          setTimeout(function () { window.location.reload(); }, delay);
         } else {
           window.urAjax.show(result, false, window.urAjax.errText(res, 'Save failed.'));
         }

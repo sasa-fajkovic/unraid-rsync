@@ -580,9 +580,11 @@ class Job
     public static function isRemoteProgramPath(string $path): bool
     {
         $p = trim($path);
-        // /D so a trailing newline cannot satisfy PCRE's "$": the accepted
-        // charset holds no shell metacharacter, and that must stay true of the
-        // WHOLE value, because the remote shell re-parses it.
+        // The accepted charset holds no shell metacharacter, and that must stay
+        // true of the WHOLE value, because the remote shell re-parses it. /D is
+        // belt-and-braces: the trim() above already removes the trailing newline
+        // that PCRE's "$" would otherwise tolerate, so this only matters if a
+        // future refactor drops the trim.
         if ($p === '' || strlen($p) > 4096 || !preg_match('#^/[A-Za-z0-9._/+-]+$#D', $p)) {
             return false;
         }
