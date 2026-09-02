@@ -305,11 +305,26 @@ final class RsyncTest extends TestCase
             'tempDir'       => '--temp-dir=5',
             'compressLevel' => '--compress-level=5',
             'modifyWindow'  => '--modify-window=5',
+            'remoteRsyncPath' => '--rsync-path=5',
         ];
         foreach ($expected as $key => $flag) {
             $opts = $this->emptyOpts();
             $opts[$key] = '5';
             $this->assertContains($flag, Rsync::optionTokens($opts), "scalar $key");
+        }
+    }
+
+    public function testRemoteRsyncPathEmitsWhenSetAndIsOmittedWhenBlank(): void
+    {
+        $opts = $this->emptyOpts();
+        $opts['remoteRsyncPath'] = '/usr/local/bin/rsync';
+        $this->assertContains('--rsync-path=/usr/local/bin/rsync', Rsync::optionTokens($opts));
+
+        foreach (Rsync::optionTokens($this->emptyOpts()) as $tok) {
+            $this->assertFalse(
+                str_starts_with($tok, '--rsync-path'),
+                "no token should start with --rsync-path when remoteRsyncPath is empty (got: $tok)"
+            );
         }
     }
 

@@ -77,6 +77,7 @@ class Job
     const SCALAR_OPTION_KEYS = [
         'maxDelete', 'bwlimit', 'timeout', 'contimeout', 'maxSize', 'minSize',
         'chmod', 'tempDir', 'backupDir', 'compressLevel', 'modifyWindow',
+        'remoteRsyncPath',
     ];
 
     /**
@@ -96,6 +97,15 @@ class Job
      */
     const SIZE_SCALAR_KEYS = ['bwlimit', 'maxSize', 'minSize'];
 
+    /**
+     * The one sentence every daemon-module message ends with. Kept as a const so
+     * the error in checkRemotePath() and the advisory in daemonModuleNote()
+     * cannot drift apart.
+     */
+    const DAEMON_MODULE_HINT = 'This plugin transfers over SSH, so use the '
+        . 'absolute filesystem path the module points at on the remote host '
+        . '(for example /volume1/Backup/data).';
+
     /** Scalar key -> rsync flag, for human-readable validation messages. */
     const SCALAR_FLAG_LABELS = [
         'maxDelete'     => '--max-delete',
@@ -106,6 +116,7 @@ class Job
         'bwlimit'       => '--bwlimit',
         'maxSize'       => '--max-size',
         'minSize'       => '--min-size',
+        'remoteRsyncPath' => '--rsync-path',
     ];
 
     /**
@@ -353,6 +364,13 @@ class Job
                     foreach (self::checkRemotePath($remote, $remoteLabel) as $e) {
                         $errors[] = $e;
                     }
+                    // Advisory only, and only for SSH: under LOCAL transport the
+                    // `remote` field is a second path on this box and already had
+                    // to clear the /mnt guardrail above.
+                    $note = self::daemonModuleNote($remote);
+                    if ($note !== '') {
+                        $warnings[] = "$remoteLabel path '$remote' $note";
+                    }
                 }
             }
 
@@ -406,6 +424,18 @@ class Job
             foreach ($checks as $e) {
                 $errors[] = $e;
             }
+        }
+
+        // --rsync-path names a program the REMOTE host is asked to run, so its
+        // value is re-parsed by the remote shell - unlike every other scalar
+        // here, whose value rsync consumes itself. Constrain it to a bare
+        // absolute path so this stays an option and does not become the
+        // free-form remote-command field the closed whitelist exists to avoid.
+        $remoteRsync = trim((string) ($opts['remoteRsyncPath'] ?? ''));
+        if ($remoteRsync !== '' && !self::isRemoteProgramPath($remoteRsync)) {
+            $errors[] = 'The ' . self::SCALAR_FLAG_LABELS['remoteRsyncPath']
+                . ' value must be an absolute path to the rsync binary on the remote host'
+                . ' (for example /usr/local/bin/rsync), with no spaces or shell characters.';
         }
 
         // --delete safety: warn (do not block) when no max-delete cap is set.
@@ -481,7 +511,26 @@ class Job
         $errors = [];
         $norm = self::normalizePath($path);
 
+        // An rsync DAEMON address pasted into a path field. This plugin speaks
+        // rsync-over-SSH, where the remote operand is a literal path, so these
+        // can never work - say why instead of the bare "must be absolute".
+        // No IPv6 guard is needed here (unlike Credentials::rsyncDaemonNote):
+        // this is a PATH field, and a path never legitimately contains "::".
+        $raw = trim($path);
+        if (stripos($raw, 'rsync://') === 0 || strpos($raw, '::') !== false) {
+            $errors[] = "$label '$path' is an rsync daemon address (host::module or rsync://). "
+                . self::DAEMON_MODULE_HINT;
+            return $errors;
+        }
         if ($norm === '' || $norm[0] !== '/') {
+            // A bare single token with no slash at all is far more likely a
+            // daemon MODULE name than a mistyped path - that is exactly how a
+            // NAS "Rsync Server" page labels its backup modules.
+            if ($norm !== '' && strpos($norm, '/') === false) {
+                $errors[] = "$label '$path' looks like an rsync daemon module name, not a path. "
+                    . self::DAEMON_MODULE_HINT;
+                return $errors;
+            }
             $errors[] = "$label must be an absolute path.";
             return $errors;
         }
@@ -489,6 +538,51 @@ class Job
             $errors[] = "$label '$path' must be a specific sub-directory, not the filesystem root.";
         }
         return $errors;
+    }
+
+    /**
+     * An advisory when a remote path COULD be an rsync daemon module name
+     * rather than a filesystem path on the far host, or '' when it looks fine.
+     *
+     * WHY this exists: NAS appliances (Asustor, QNAP, Synology) expose an
+     * "Rsync Server" page whose backup MODULES are addressed as host::module,
+     * and that page shows only the module name - never the folder behind it.
+     * Typed into a job's remote path, a module name becomes `host:/module` over
+     * SSH and rsync fails with an opaque link_stat "..." No such file or
+     * directory, long after save. Reported on the support forum.
+     *
+     * Advisory ONLY, never an error: a single top-level directory such as
+     * /data, /backup or /srv is a perfectly ordinary remote path.
+     */
+    public static function daemonModuleNote(string $path): string
+    {
+        $norm = self::normalizePath($path);
+        if ($norm === '' || $norm[0] !== '/') {
+            return '';
+        }
+        $segments = array_values(array_filter(explode('/', $norm), static fn($s) => $s !== ''));
+        if (count($segments) !== 1) {
+            return '';
+        }
+        return 'is a single top-level directory. If that is an rsync daemon MODULE name, '
+            . self::DAEMON_MODULE_HINT;
+    }
+
+    /**
+     * True when $path is safe to hand to the remote host as a program to run:
+     * one bare absolute path, no whitespace, no shell metacharacters, no ".."
+     * segment, and not a directory. See the --rsync-path check in validate().
+     */
+    public static function isRemoteProgramPath(string $path): bool
+    {
+        $p = trim($path);
+        if ($p === '' || !preg_match('#^/[A-Za-z0-9._/+-]+$#', $p)) {
+            return false;
+        }
+        if (str_ends_with($p, '/')) {
+            return false;
+        }
+        return !in_array('..', explode('/', $p), true);
     }
 
     /**

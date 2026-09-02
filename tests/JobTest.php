@@ -550,6 +550,116 @@ final class JobTest extends TestCase
     }
 
     /** @return array<string,array{0:string,1:string}> */
+    #[DataProvider('remoteProgramPathProvider')]
+    public function testRemoteRsyncPathValueIsConstrainedToABareAbsolutePath(string $value, bool $ok): void
+    {
+        $res = Job::validate($this->validLocalJob(['rsyncOptions' => ['remoteRsyncPath' => $value]]));
+        if ($ok) {
+            $this->assertTrue($res['valid'], 'errors: ' . implode(' | ', $res['errors']));
+            return;
+        }
+        $this->assertFalse($res['valid']);
+        $this->assertNotEmpty(array_filter(
+            $res['errors'],
+            static fn($e) => stripos($e, '--rsync-path') !== false
+        ));
+    }
+
+    public static function remoteProgramPathProvider(): array
+    {
+        return [
+            'blank is optional'    => ['', true],
+            'usr bin'              => ['/usr/bin/rsync', true],
+            'usr local bin'        => ['/usr/local/bin/rsync', true],
+            'opt with dash'        => ['/opt/pkg-tools/bin/rsync', true],
+            'relative'             => ['rsync', false],
+            'sudo prefix'          => ['sudo rsync', false],
+            'command separator'    => ['rsync; rm -rf /', false],
+            'and-and'              => ['/usr/bin/rsync && touch /tmp/x', false],
+            'pipe'                 => ['/usr/bin/rsync | sh', false],
+            'backtick'             => ['/usr/bin/`whoami`', false],
+            'dollar expansion'     => ['/usr/bin/$FOO', false],
+            'traversal'            => ['/usr/../bin/rsync', false],
+            'trailing slash'       => ['/usr/bin/', false],
+            'newline'              => ["/usr/bin/rsync\ntouch /tmp/x", false],
+        ];
+    }
+
+    #[DataProvider('daemonShapedRemotePathProvider')]
+    public function testDaemonShapedRemotePathIsRejectedWithASpecificMessage(string $remote): void
+    {
+        $job = Job::normalize([
+            'name'         => 'nas',
+            'schedule'     => '0 3 * * *',
+            'transport'    => 'SSH',
+            'direction'    => 'PULL',
+            'connectionId' => 'c-nas',
+            'pairs'        => [['local' => '/mnt/user/data/downloads/', 'remote' => $remote]],
+        ]);
+        $res = Job::validate($job);
+        $this->assertFalse($res['valid']);
+        $joined = implode(' | ', $res['errors']);
+        $this->assertStringContainsString('daemon', $joined);
+        // The message must point at the fix, not just name the problem.
+        $this->assertStringContainsString('over SSH', $joined);
+    }
+
+    public static function daemonShapedRemotePathProvider(): array
+    {
+        return [
+            'bare module name'  => ['rsync_bkp'],
+            'double colon'      => ['nas.local::rsync_bkp'],
+            'leading colons'    => ['::rsync_bkp'],
+            'rsync url'         => ['rsync://nas.local/rsync_bkp'],
+        ];
+    }
+
+    /**
+     * The exact shape reported on the forum: a module name with a leading slash
+     * bolted on. It IS a legal absolute path, so it must still save - but the
+     * user has to be told, because rsync will not fail until the first run.
+     */
+    public function testSingleSegmentRemotePathWarnsWithoutBlockingTheSave(): void
+    {
+        $job = Job::normalize([
+            'name'         => 'nas',
+            'schedule'     => '0 3 * * *',
+            'transport'    => 'SSH',
+            'direction'    => 'PULL',
+            'connectionId' => 'c-nas',
+            'pairs'        => [['local' => '/mnt/user/data/downloads/', 'remote' => '/rsync_bkp']],
+        ]);
+        $res = Job::validate($job);
+        $this->assertTrue($res['valid'], 'errors: ' . implode(' | ', $res['errors']));
+        $this->assertNotEmpty(array_filter(
+            $res['warnings'],
+            static fn($w) => stripos($w, 'MODULE') !== false
+        ));
+
+        // A deep remote path is ordinary and must stay silent.
+        $quiet = Job::validate(Job::normalize([
+            'name'         => 'nas',
+            'schedule'     => '0 3 * * *',
+            'transport'    => 'SSH',
+            'direction'    => 'PULL',
+            'connectionId' => 'c-nas',
+            'pairs'        => [['local' => '/mnt/user/data/downloads/', 'remote' => '/volume1/Download/rsync_dir/']],
+        ]));
+        $this->assertSame([], $quiet['warnings']);
+    }
+
+    /**
+     * Under LOCAL transport the `remote` field is a second path on THIS box, so
+     * the daemon advisory must not fire - it would be nonsense there.
+     */
+    public function testLocalTransportNeverGetsTheDaemonModuleAdvisory(): void
+    {
+        $res = Job::validate($this->validLocalJob([
+            'pairs' => [['local' => '/mnt/user/media/', 'remote' => '/mnt/disk1/backup/media/']],
+        ]));
+        $this->assertSame([], $res['warnings']);
+    }
+
     public static function integerScalarProvider(): array
     {
         return [
