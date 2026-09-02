@@ -30,7 +30,11 @@ user-facing highlights.
   single top-level path like `/backup` gets a non-blocking advisory. The
   source/destination pairs row also gained the help text it never had.
 - Validation warnings are no longer discarded when a save fails for some other
-  reason (they were already in the response, just never rendered).
+  reason (they were already in the response, just never rendered), and a save
+  that produced one no longer reloads the page out from under it.
+- Global Settings rsync option values are now validated on save, like a job's
+  own. A job left on "use global config" takes them verbatim, so an invalid
+  global value previously reached rsync unchecked.
 - Dashboard tile "open plugin" link now points at the canonical
   `/Settings/UnraidRsync` (restores the highlighted Settings nav).
 

@@ -108,14 +108,14 @@ class Job
 
     /** Scalar key -> rsync flag, for human-readable validation messages. */
     const SCALAR_FLAG_LABELS = [
-        'maxDelete'     => '--max-delete',
-        'timeout'       => '--timeout',
-        'contimeout'    => '--contimeout',
-        'compressLevel' => '--compress-level',
-        'modifyWindow'  => '--modify-window',
-        'bwlimit'       => '--bwlimit',
-        'maxSize'       => '--max-size',
-        'minSize'       => '--min-size',
+        'maxDelete'       => '--max-delete',
+        'timeout'         => '--timeout',
+        'contimeout'      => '--contimeout',
+        'compressLevel'   => '--compress-level',
+        'modifyWindow'    => '--modify-window',
+        'bwlimit'         => '--bwlimit',
+        'maxSize'         => '--max-size',
+        'minSize'         => '--min-size',
         'remoteRsyncPath' => '--rsync-path',
     ];
 
@@ -426,16 +426,8 @@ class Job
             }
         }
 
-        // --rsync-path names a program the REMOTE host is asked to run, so its
-        // value is re-parsed by the remote shell - unlike every other scalar
-        // here, whose value rsync consumes itself. Constrain it to a bare
-        // absolute path so this stays an option and does not become the
-        // free-form remote-command field the closed whitelist exists to avoid.
-        $remoteRsync = trim((string) ($opts['remoteRsyncPath'] ?? ''));
-        if ($remoteRsync !== '' && !self::isRemoteProgramPath($remoteRsync)) {
-            $errors[] = 'The ' . self::SCALAR_FLAG_LABELS['remoteRsyncPath']
-                . ' value must be an absolute path to the rsync binary on the remote host'
-                . ' (for example /usr/local/bin/rsync), with no spaces or shell characters.';
+        foreach (self::validateRsyncOptions($opts) as $e) {
+            $errors[] = $e;
         }
 
         // --delete safety: warn (do not block) when no max-delete cap is set.
@@ -511,24 +503,36 @@ class Job
         $errors = [];
         $norm = self::normalizePath($path);
 
-        // An rsync DAEMON address pasted into a path field. This plugin speaks
-        // rsync-over-SSH, where the remote operand is a literal path, so these
-        // can never work - say why instead of the bare "must be absolute".
-        // No IPv6 guard is needed here (unlike Credentials::rsyncDaemonNote):
-        // this is a PATH field, and a path never legitimately contains "::".
-        $raw = trim($path);
-        if (stripos($raw, 'rsync://') === 0 || strpos($raw, '::') !== false) {
-            $errors[] = "$label '$path' is an rsync daemon address (host::module or rsync://). "
-                . self::DAEMON_MODULE_HINT;
-            return $errors;
-        }
         if ($norm === '' || $norm[0] !== '/') {
-            // A bare single token with no slash at all is far more likely a
-            // daemon MODULE name than a mistyped path - that is exactly how a
-            // NAS "Rsync Server" page labels its backup modules.
-            if ($norm !== '' && strpos($norm, '/') === false) {
+            // Not a path at all. Name the specific thing the user most likely
+            // pasted instead of the bare "must be an absolute path".
+            //
+            // These tests live INSIDE the non-absolute branch on purpose: a
+            // colon is a legal POSIX filename character, so "::" can appear in
+            // a perfectly good absolute path (/mnt/tank/Fate::Zero). Testing
+            // the raw string would turn such a path into an error, and because
+            // Runner::guardrailErrors shares this method that would fail an
+            // ALREADY-SAVED job at run time. A real daemon address never
+            // starts with "/", so this branch is the only safe place for it.
+            $raw = trim($path);
+            if (stripos($raw, 'rsync://') === 0 || strpos($raw, '::') !== false) {
+                $errors[] = "$label '$path' is an rsync daemon address (host::module or rsync://). "
+                    . self::DAEMON_MODULE_HINT;
+                return $errors;
+            }
+            // A bare token shaped like a name, not a path: exactly how a NAS
+            // "Rsync Server" page labels its backup modules.
+            if (preg_match('/^[A-Za-z0-9._-]+$/D', $raw)) {
                 $errors[] = "$label '$path' looks like an rsync daemon module name, not a path. "
                     . self::DAEMON_MODULE_HINT;
+                return $errors;
+            }
+            // "nas:/vol/data" or "user@nas:/vol/data" - the other thing that
+            // gets copied out of a working command line. The host belongs to
+            // the Connection, so only the path goes in this field.
+            if (preg_match('#^[^/]+:/#', $raw)) {
+                $errors[] = "$label '$path' includes a host. The host comes from the job's "
+                    . 'Connection, so enter only the path on the remote host here.';
                 return $errors;
             }
             $errors[] = "$label must be an absolute path.";
@@ -564,8 +568,8 @@ class Job
         if (count($segments) !== 1) {
             return '';
         }
-        return 'is a single top-level directory. If that is an rsync daemon MODULE name, '
-            . self::DAEMON_MODULE_HINT;
+        return 'is a single top-level directory, which may be an rsync daemon MODULE name '
+            . 'rather than a folder on the remote host. ' . self::DAEMON_MODULE_HINT;
     }
 
     /**
@@ -576,13 +580,52 @@ class Job
     public static function isRemoteProgramPath(string $path): bool
     {
         $p = trim($path);
-        if ($p === '' || !preg_match('#^/[A-Za-z0-9._/+-]+$#', $p)) {
+        // /D so a trailing newline cannot satisfy PCRE's "$": the accepted
+        // charset holds no shell metacharacter, and that must stay true of the
+        // WHOLE value, because the remote shell re-parses it.
+        if ($p === '' || strlen($p) > 4096 || !preg_match('#^/[A-Za-z0-9._/+-]+$#D', $p)) {
             return false;
         }
         if (str_ends_with($p, '/')) {
             return false;
         }
-        return !in_array('..', explode('/', $p), true);
+        foreach (explode('/', $p) as $segment) {
+            if ($segment === '.' || $segment === '..') {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Errors for the rsync OPTION values that need more than normalisation.
+     *
+     * Separate from validate() because the Global Settings tab stores this very
+     * same option object with no job around it (handler.php's global branch),
+     * and a job left on "use global config" - the DEFAULT for a new job - takes
+     * those values verbatim. Validating only inside validate() would therefore
+     * leave the default path unchecked.
+     *
+     * @param  array<string,mixed> $opts a job's (or the global) rsync options
+     * @return array<int,string>
+     */
+    public static function validateRsyncOptions(array $opts): array
+    {
+        $errors = [];
+
+        // --rsync-path names a program the REMOTE host is asked to run, so its
+        // value is re-parsed by the remote shell - unlike every other scalar
+        // here, whose value rsync consumes itself. Constrain it to a bare
+        // absolute path so this stays an option and does not become the
+        // free-form remote-command field the closed whitelist exists to avoid.
+        $remoteRsync = trim((string) ($opts['remoteRsyncPath'] ?? ''));
+        if ($remoteRsync !== '' && !self::isRemoteProgramPath($remoteRsync)) {
+            $errors[] = 'The ' . self::SCALAR_FLAG_LABELS['remoteRsyncPath']
+                . ' value must be an absolute path to the rsync binary on the remote host'
+                . ' (for example /usr/local/bin/rsync), with no spaces or shell characters.';
+        }
+
+        return $errors;
     }
 
     /**

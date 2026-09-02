@@ -568,6 +568,15 @@ function ur_action_save_config(): void
     $allErrors   = [];
     $allWarnings = [];
 
+    // The global defaults are a bare option object with no job around them, but
+    // a job on "use global config" (the default for a new job) takes them
+    // verbatim - so they need the same value checks a job's own options get.
+    if ($hasGlobal) {
+        foreach (Job::validateRsyncOptions($config['global']['defaultRsyncOptions']) as $e) {
+            $allErrors[] = 'Global settings: ' . $e;
+        }
+    }
+
     // logDir (persistent log directory): validate/confine. A non-empty value that
     // fails the rules is rejected (logs stay in RAM) WITH a warning so the user
     // isn't left thinking persistence is on. Only when the field is present, so a
