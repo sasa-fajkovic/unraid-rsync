@@ -882,6 +882,14 @@ class Runner
             }
         }
 
+        // --rsync-path reaches the remote shell, and config.json is user-writable,
+        // so re-check it here the same way both path sides are re-checked above:
+        // save-time validation is not the only way a value gets in.
+        $remoteRsync = trim((string) ($opts['remoteRsyncPath'] ?? ''));
+        if ($remoteRsync !== '' && !Job::isRemoteProgramPath($remoteRsync)) {
+            $errors[] = 'the remote rsync path must be a bare absolute path.';
+        }
+
         return $errors;
     }
 

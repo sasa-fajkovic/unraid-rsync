@@ -94,6 +94,10 @@ class Rsync
         'backupDir'      => '--backup-dir',
         'compressLevel'  => '--compress-level',
         'modifyWindow'   => '--modify-window',
+        // The rsync binary on the REMOTE host. Unlike every other scalar here,
+        // this value is handed to the far side to invoke, so Job::validate
+        // constrains it to a bare absolute path (no spaces/shell characters).
+        'remoteRsyncPath' => '--rsync-path',
     ];
 
     /**

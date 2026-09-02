@@ -17,7 +17,24 @@ user-facing highlights.
   world-readable FAT32 flash. Empty (default) keeps the existing `/boot`
   behaviour. Changing it migrates the file.
 
+- **Remote rsync path** (rsync options): `--rsync-path`, the absolute path to
+  the rsync binary on the remote host. Set it when the remote keeps rsync off
+  its default SSH PATH (common on NAS appliances) and a run fails with
+  "rsync: command not found". Constrained to a bare absolute path.
+
 ### Fixed
+- A job's remote path that is really an **rsync daemon module name** is now
+  called out at save time instead of failing the first run with an opaque
+  `link_stat ... No such file or directory`. `host::module` and `rsync://` are
+  rejected with an explanation, a bare module name is named as such, and a
+  single top-level path like `/backup` gets a non-blocking advisory. The
+  source/destination pairs row also gained the help text it never had.
+- Validation warnings are no longer discarded when a save fails for some other
+  reason (they were already in the response, just never rendered), and a save
+  that produced one no longer reloads the page out from under it.
+- Global Settings rsync option values are now validated on save, like a job's
+  own. A job left on "use global config" takes them verbatim, so an invalid
+  global value previously reached rsync unchecked.
 - Dashboard tile "open plugin" link now points at the canonical
   `/Settings/UnraidRsync` (restores the highlighted Settings nav).
 

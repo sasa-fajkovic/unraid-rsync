@@ -127,6 +127,7 @@ class Config
             'backupDir'       => '',
             'compressLevel'   => '',
             'modifyWindow'    => '',
+            'remoteRsyncPath' => '',
         ];
     }
 

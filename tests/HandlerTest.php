@@ -127,6 +127,39 @@ final class HandlerTest extends TestCase
         $this->assertSame(100, Config::load()['global']['retention']);
     }
 
+    /**
+     * The Global Settings tab posts `global[...]` with no `jobs`, which takes a
+     * settings-only early-return path. An invalid rsync option value there must
+     * still be rejected: a job left on "use global config" - the default for a
+     * new job - takes these values verbatim, so a 200 here would report success
+     * and then fail every such job at run time.
+     */
+    public function testSaveConfigRejectsAnInvalidGlobalRsyncOptionOnAGlobalOnlySave(): void
+    {
+        $_POST = [
+            'action'     => 'saveConfig',
+            'csrf_token' => 'test-token',
+            'global'     => ['defaultRsyncOptions' => ['remoteRsyncPath' => '/usr/bin/rsync; sudo sh']],
+        ];
+        [$body, $code] = $this->runCapture(fn() => ur_action_save_config());
+        $this->assertSame(422, $code, json_encode($body));
+        $this->assertNotEmpty(array_filter(
+            $body['errors'] ?? [],
+            static fn($e) => stripos($e, '--rsync-path') !== false
+        ));
+        // ...and nothing was persisted.
+        $this->assertSame('', Config::load()['global']['defaultRsyncOptions']['remoteRsyncPath'] ?? 'MISSING');
+
+        // A valid value on the same route still saves.
+        $_POST['global']['defaultRsyncOptions']['remoteRsyncPath'] = '/usr/local/bin/rsync';
+        [$ok, $okCode] = $this->runCapture(fn() => ur_action_save_config());
+        $this->assertSame(200, $okCode, json_encode($ok));
+        $this->assertSame(
+            '/usr/local/bin/rsync',
+            Config::load()['global']['defaultRsyncOptions']['remoteRsyncPath']
+        );
+    }
+
     public function testSaveConfigNestedFormRoundTrip(): void
     {
         // Simulate exactly the nested POST the form produces.

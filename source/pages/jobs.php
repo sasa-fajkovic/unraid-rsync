@@ -245,6 +245,19 @@ function ur_render_job_card($job, $index): void
     }
     echo '</div>';
     echo '<div><button type="button" class="ur-pair-add" data-rows="' . ur_h($pairsRowsId) . '">' . ur_h(ur_t('Add pair')) . '</button></div>';
+    // The pairs row was the only major field with no help at all, and its boxes
+    // are local|remote by POSITION - not source|destination, which Direction
+    // decides. Spell that out, plus the rsync-daemon module trap that reaches
+    // the support forum: a module name here becomes host:/module over SSH and
+    // fails with an opaque link_stat error long after save.
+    // display:block because the base stylesheet ships `.inline_help {display:none}`
+    // until the page Help toggle is on - and the module trap below is the one
+    // sentence that has to be readable without hunting for that toggle.
+    echo '<blockquote class="inline_help" style="display:block;margin:6px 0 0"><p>'
+        . ur_h(ur_t('The LEFT box is always a path on this server; the RIGHT box is the path on the other host (SSH transport) or a second path on this server (Local transport). Which one is the source is set by Direction above: Push reads from the left, Pull reads from the right.'))
+        . '</p><p>'
+        . ur_h(ur_t('For an SSH job the right box must be an absolute filesystem path on the remote host - NOT an rsync daemon module name. If your NAS "Rsync Server" page shows only a module such as "backup", use the folder that module points at (for example /volume1/Backup/data).'))
+        . '</p></blockquote>';
     echo '</dd>';
 
     // use global config toggle
@@ -391,7 +404,7 @@ function ur_render_pair_row(string $prefix, $k, string $local, string $remote): 
     echo '<div class="ur-pair-row">';
     echo '<input type="text" name="' . ur_h($base . '[local]') . '" value="' . ur_h($local) . '" placeholder="/mnt/user/share/sub/" required>';
     echo ' &rarr; ';
-    echo '<input type="text" name="' . ur_h($base . '[remote]') . '" value="' . ur_h($remote) . '" placeholder="/mnt/disk/backup/ or remote path" required>';
+    echo '<input type="text" name="' . ur_h($base . '[remote]') . '" value="' . ur_h($remote) . '" placeholder="/mnt/disk/backup/ or /remote/path/on/host/" required>';
     echo ' <button type="button" class="ur-pair-del">&minus;</button>';
     echo '</div>';
 }
@@ -1504,8 +1517,12 @@ ur_emit_time_helpers();
             msg += ' (' + res.body.warnings.join('; ') + ')';
           }
           window.urAjax.show(result, true, msg);
-          /* Reload so the summary table reflects the saved state. */
-          setTimeout(function () { window.location.reload(); }, 600);
+          /* Reload so the summary table reflects the saved state. Hold it longer
+           * when there is a warning to read - suppressing the reload entirely
+           * would leave the table stale on every save of a job whose remote path
+           * legitimately warns (/data, /backup, ...). */
+          var delay = (res.body.warnings && res.body.warnings.length) ? 6000 : 600;
+          setTimeout(function () { window.location.reload(); }, delay);
         } else {
           window.urAjax.show(result, false, window.urAjax.errText(res, 'Save failed.'));
         }

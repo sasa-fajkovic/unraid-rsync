@@ -204,6 +204,7 @@ if (!function_exists('ur_option_help')) {
             'contimeout'     => 'Give up if the connection cannot be established within this many seconds (--contimeout=SECONDS). Leave blank to use the SSH/rsync default.',
             'maxSize'        => 'Skip any file larger than this size (--max-size=SIZE), e.g. 100M or 2G. Leave blank for no maximum (transfer files of any size).',
             'minSize'        => 'Skip any file smaller than this size (--min-size=SIZE), e.g. 10K. Leave blank for no minimum.',
+            'remoteRsyncPath' => 'Absolute path to the rsync binary on the REMOTE host (--rsync-path=PATH). Only used by SSH jobs. Set this when the remote host keeps rsync somewhere that is not on its default SSH PATH - common on NAS appliances - and a run fails with "rsync: command not found". Must be a bare absolute path such as /usr/local/bin/rsync: no arguments, spaces or shell characters. Leave blank to let the remote shell find rsync itself. Set as a GLOBAL default it applies to every job, so if your jobs target hosts that keep rsync in different places, set it per job instead.',
             'chmod'          => 'Force permissions on transferred files and directories (--chmod=CHMOD), e.g. D755,F644 for directories 755 and files 644. Leave blank to keep the existing permissions unchanged.',
             'tempDir'        => 'Place temporary files in this directory during the transfer (--temp-dir=DIR). Leave blank to use the default location (alongside the destination files).',
             'backupDir'      => 'Move changed or deleted files into this directory instead of overwriting them (--backup-dir=DIR); also enables --backup. Leave blank to disable backups (files are overwritten in place).',
@@ -362,6 +363,7 @@ if (!function_exists('ur_render_rsync_options')) {
             'backupDir'     => ['Backup dir (enables --backup)', '--backup-dir='],
             'compressLevel' => ['Compress level', '--compress-level='],
             'modifyWindow'  => ['Modify window (s)', '--modify-window='],
+            'remoteRsyncPath' => ['Remote rsync path (SSH jobs)', '--rsync-path='],
         ];
 
         // Emit the help CSS + JS exactly once per page, even when several option
@@ -1109,11 +1111,15 @@ if (!function_exists('ur_emit_ajax_helpers')) {
     if (res.networkError || res.status === 0) {
       return fallback + ': could not reach the server (network error).';
     }
+    /* A 422 body carries `warnings` alongside `errors`; without this they are
+     * silently dropped whenever a save fails for some OTHER reason. */
+    var warn = (res.body && res.body.warnings && res.body.warnings.length)
+      ? ' (' + res.body.warnings.join('; ') + ')' : '';
     if (res.body && res.body.errors && res.body.errors.length) {
-      return res.body.errors.join('; ') + ' (HTTP ' + res.status + ')';
+      return res.body.errors.join('; ') + warn + ' (HTTP ' + res.status + ')';
     }
     if (res.body && res.body.error) {
-      return res.body.error + ' (HTTP ' + res.status + ')';
+      return res.body.error + warn + ' (HTTP ' + res.status + ')';
     }
     if (res.parseError) {
       return fallback + ': the server returned a non-JSON response (HTTP ' + res.status + ').';

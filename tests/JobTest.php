@@ -549,6 +549,219 @@ final class JobTest extends TestCase
         $this->assertTrue($ok['valid'], 'errors: ' . implode(' | ', $ok['errors']));
     }
 
+    #[DataProvider('remoteProgramPathProvider')]
+    public function testRemoteRsyncPathValueIsConstrainedToABareAbsolutePath(string $value, bool $ok): void
+    {
+        $res = Job::validate($this->validLocalJob(['rsyncOptions' => ['remoteRsyncPath' => $value]]));
+        if ($ok) {
+            $this->assertTrue($res['valid'], 'errors: ' . implode(' | ', $res['errors']));
+            return;
+        }
+        $this->assertFalse($res['valid']);
+        $this->assertNotEmpty(array_filter(
+            $res['errors'],
+            static fn($e) => stripos($e, '--rsync-path') !== false
+        ));
+    }
+
+    /** @return array<string,array{0:string,1:bool}> */
+    public static function remoteProgramPathProvider(): array
+    {
+        return [
+            'blank is optional'    => ['', true],
+            'usr bin'              => ['/usr/bin/rsync', true],
+            'usr local bin'        => ['/usr/local/bin/rsync', true],
+            'opt with dash'        => ['/opt/pkg-tools/bin/rsync', true],
+            'relative'             => ['rsync', false],
+            'sudo prefix'          => ['sudo rsync', false],
+            'command separator'    => ['rsync; rm -rf /', false],
+            'and-and'              => ['/usr/bin/rsync && touch /tmp/x', false],
+            'pipe'                 => ['/usr/bin/rsync | sh', false],
+            'backtick'             => ['/usr/bin/`whoami`', false],
+            'dollar expansion'     => ['/usr/bin/$FOO', false],
+            'traversal'            => ['/usr/../bin/rsync', false],
+            'trailing slash'       => ['/usr/bin/', false],
+            'newline'              => ["/usr/bin/rsync\ntouch /tmp/x", false],
+            'trailing newline'     => ["/usr/bin/rsync\n", true],
+            'dot segment'          => ['/usr/./bin/rsync', false],
+            'bare dot'             => ['/.', false],
+            'over length'          => ['/usr/bin/' . str_repeat('r', 4100), false],
+        ];
+    }
+
+    /**
+     * A colon is a legal POSIX filename character, so "::" appears in perfectly
+     * good absolute paths. Testing the raw string for it would fail an
+     * ALREADY-SAVED job at run time, because Runner::guardrailErrors shares
+     * checkRemotePath. Guards the fix for that regression.
+     */
+    #[DataProvider('colonBearingAbsolutePathProvider')]
+    public function testAbsolutePathContainingColonsIsNotTreatedAsADaemonAddress(string $remote): void
+    {
+        $job = Job::normalize([
+            'name'         => 'nas',
+            'schedule'     => '0 3 * * *',
+            'transport'    => 'SSH',
+            'direction'    => 'PUSH',
+            'connectionId' => 'c-nas',
+            'pairs'        => [['local' => '/mnt/user/media/', 'remote' => $remote]],
+        ]);
+        $res = Job::validate($job);
+        $this->assertTrue($res['valid'], 'errors: ' . implode(' | ', $res['errors']));
+
+        // ...and the run-time guardrail, which is what would break a saved job.
+        $this->assertSame([], Runner::guardrailErrors(
+            ['direction' => 'PUSH'],
+            ['local' => '/mnt/user/media/', 'remote' => $remote],
+            'SSH',
+            []
+        ));
+    }
+
+    /** @return array<string,array{0:string}> */
+    public static function colonBearingAbsolutePathProvider(): array
+    {
+        return [
+            'double colon in dir' => ['/mnt/tank/anime/Fate::Zero'],
+            'snapshot suffix'     => ['/srv/backup::mirror/photos'],
+            'timestamp dir'       => ['/data/2024-01-01::12:00:00/backup'],
+            'single colon'        => ['/mnt/tank/a:b/c'],
+        ];
+    }
+
+    #[DataProvider('daemonShapedRemotePathProvider')]
+    public function testDaemonShapedRemotePathIsRejectedWithASpecificMessage(string $remote): void
+    {
+        $job = Job::normalize([
+            'name'         => 'nas',
+            'schedule'     => '0 3 * * *',
+            'transport'    => 'SSH',
+            'direction'    => 'PULL',
+            'connectionId' => 'c-nas',
+            'pairs'        => [['local' => '/mnt/user/data/downloads/', 'remote' => $remote]],
+        ]);
+        $res = Job::validate($job);
+        $this->assertFalse($res['valid']);
+        $joined = implode(' | ', $res['errors']);
+        $this->assertStringContainsString('daemon', $joined);
+        // The message must point at the fix, not just name the problem.
+        $this->assertStringContainsString('over SSH', $joined);
+    }
+
+    /** @return array<string,array{0:string}> */
+    public static function daemonShapedRemotePathProvider(): array
+    {
+        return [
+            'bare module name'  => ['rsync_bkp'],
+            'double colon'      => ['nas.local::rsync_bkp'],
+            'leading colons'    => ['::rsync_bkp'],
+            'rsync url'         => ['rsync://nas.local/rsync_bkp'],
+        ];
+    }
+
+    /**
+     * A non-absolute value that is plainly not a module name must not be told it
+     * looks like one - it gets the generic message (or, for a pasted host, the
+     * host-specific one).
+     */
+    #[DataProvider('nonModuleInvalidRemoteProvider')]
+    public function testNonModuleShapedInvalidRemotePathIsNotCalledAModuleName(string $remote, string $expect): void
+    {
+        $errors = Job::checkRemotePath($remote, 'remote path');
+        $this->assertNotEmpty($errors);
+        $joined = implode(' | ', $errors);
+        $this->assertStringNotContainsString('module name', $joined);
+        $this->assertStringContainsString($expect, $joined);
+    }
+
+    /** @return array<string,array{0:string,1:string}> */
+    public static function nonModuleInvalidRemoteProvider(): array
+    {
+        return [
+            'relative with dot'  => ['./relative/path', 'must be an absolute path'],
+            'windows drive'      => ['C:\\backup', 'must be an absolute path'],
+            'unc share'          => ['\\\\server\\share', 'must be an absolute path'],
+            'host and path'      => ['nas.local:/volume1/data', 'includes a host'],
+            'user host and path' => ['pandasharp@nas.local:/volume1/data', 'includes a host'],
+        ];
+    }
+
+    /**
+     * The exact shape reported on the forum: a module name with a leading slash
+     * bolted on. It IS a legal absolute path, so it must still save - but the
+     * user has to be told, because rsync will not fail until the first run.
+     */
+    public function testSingleSegmentRemotePathWarnsWithoutBlockingTheSave(): void
+    {
+        $job = Job::normalize([
+            'name'         => 'nas',
+            'schedule'     => '0 3 * * *',
+            'transport'    => 'SSH',
+            'direction'    => 'PULL',
+            'connectionId' => 'c-nas',
+            'pairs'        => [['local' => '/mnt/user/data/downloads/', 'remote' => '/rsync_bkp']],
+        ]);
+        $res = Job::validate($job);
+        $this->assertTrue($res['valid'], 'errors: ' . implode(' | ', $res['errors']));
+        $this->assertNotEmpty(array_filter(
+            $res['warnings'],
+            static fn($w) => stripos($w, 'MODULE') !== false
+        ));
+
+        // A deep remote path is ordinary and must stay silent.
+        $quiet = Job::validate(Job::normalize([
+            'name'         => 'nas',
+            'schedule'     => '0 3 * * *',
+            'transport'    => 'SSH',
+            'direction'    => 'PULL',
+            'connectionId' => 'c-nas',
+            'pairs'        => [['local' => '/mnt/user/data/downloads/', 'remote' => '/volume1/Download/rsync_dir/']],
+        ]));
+        $this->assertSame([], $quiet['warnings']);
+    }
+
+    /**
+     * Under LOCAL transport the `remote` field is a second path on THIS box, so
+     * the daemon advisory would be nonsense. `/data` is the reachable case: it
+     * is a single segment (so daemonModuleNote WOULD fire) while also failing
+     * the /mnt guardrail, so without the transport gate the user would get the
+     * real error plus a confusing rsync-daemon aside.
+     */
+    public function testLocalTransportNeverGetsTheDaemonModuleAdvisory(): void
+    {
+        $res = Job::validate($this->validLocalJob([
+            'pairs' => [['local' => '/mnt/user/media/', 'remote' => '/data']],
+        ]));
+        $this->assertFalse($res['valid']);
+        $this->assertNotSame('', Job::daemonModuleNote('/data'), 'precondition: /data would warn');
+        $this->assertSame([], $res['warnings']);
+    }
+
+    /**
+     * B2: the Global Settings tab stores the same option object with no job
+     * around it, and a job on "use global config" - the default - takes it
+     * verbatim. Validating only inside validate() left that path unchecked.
+     */
+    public function testGlobalRsyncOptionsAreValidatedTheSameAsAJobs(): void
+    {
+        $this->assertNotEmpty(Job::validateRsyncOptions(['remoteRsyncPath' => 'sudo rsync']));
+        $this->assertNotEmpty(Job::validateRsyncOptions(['remoteRsyncPath' => 'rsync; id']));
+        $this->assertSame([], Job::validateRsyncOptions(['remoteRsyncPath' => '/usr/local/bin/rsync']));
+        $this->assertSame([], Job::validateRsyncOptions(['remoteRsyncPath' => '']));
+        $this->assertSame([], Job::validateRsyncOptions([]));
+    }
+
+    /** A hand-edited config.json must not sneak the value past the run path. */
+    public function testRunTimeGuardrailRejectsABadRemoteRsyncPath(): void
+    {
+        $pair = ['local' => '/mnt/user/media/', 'remote' => '/srv/backup/media/'];
+        $bad  = Runner::guardrailErrors(['direction' => 'PUSH'], $pair, 'SSH', ['remoteRsyncPath' => 'sudo rsync']);
+        $this->assertNotEmpty(array_filter($bad, static fn($e) => stripos($e, 'remote rsync path') !== false));
+
+        $ok = Runner::guardrailErrors(['direction' => 'PUSH'], $pair, 'SSH', ['remoteRsyncPath' => '/usr/bin/rsync']);
+        $this->assertSame([], $ok);
+    }
+
     /** @return array<string,array{0:string,1:string}> */
     public static function integerScalarProvider(): array
     {
