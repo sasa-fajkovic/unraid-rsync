@@ -26,6 +26,20 @@ declare(strict_types=1);
  *      connection's pinned remoteHostKey to a per-run known_hosts file.
  *      cleanupRuntime(token) removes that run's files again.
  *
+ * RSYNC DAEMON CONNECTIONS
+ *   A Connection carries a `transport` of SSH or DAEMON. materialize() and
+ *   testConnection() REFUSE a DAEMON connection outright - not for tidiness, but
+ *   because materialize()'s PASSWORD branch is the else FALL-THROUGH, so without
+ *   the refusal a daemon connection would silently get an SSH_ASKPASS passfile
+ *   and an `-e ssh ...` string handed to rsync beside a host::module operand,
+ *   which rsync accepts as daemon-over-remote-shell rather than rejecting.
+ *
+ *   materializeDaemon() is the daemon counterpart, and it lives HERE rather than
+ *   in Rsync.php because the only thing it materialises is a secret, through
+ *   this file's existing 0600 tmpfs machinery (pass/<token> via writePassFile ->
+ *   safeWriteSecret), cleaned up by the same cleanupRuntime($token). It builds no
+ *   ssh command line at all.
+ *
  * AUTH METHODS
  *   KEYFILE:
  *     ssh -i <keyFilePath> -o IdentitiesOnly=yes -o BatchMode=yes
@@ -367,6 +381,21 @@ class Ssh
         }
         $conn = Credentials::mergeConnection($conn);
 
+        // A daemon Connection has no SSH transport to build. Refuse BEFORE
+        // ensureRuntimeDirs()/newRuntimeToken() so no token is minted and no file
+        // is written. One guard covers every caller (Runner::materializeSsh,
+        // Ssh::testConnection). This is a SECURITY control, not tidiness: PASSWORD
+        // is this method's else FALL-THROUGH below, so without it a daemon
+        // connection would get an SSH_ASKPASS passfile and an `ssh` -e string
+        // handed to rsync alongside a host::module operand - which rsync does not
+        // reject, it silently switches to daemon-over-remote-shell (main.c:1435).
+        if ((string) ($conn['transport'] ?? 'SSH') !== 'SSH') {
+            return [
+                'ok'    => false,
+                'error' => 'This Connection uses rsync daemon (rsyncd) transport; an SSH transport cannot be built from it.',
+            ];
+        }
+
         self::ensureRuntimeDirs();
 
         // Unique per-run token: isolates concurrent runs even of the same conn.
@@ -420,6 +449,106 @@ class Ssh
             'keyPath'    => $keyPath,
             'passFile'   => $passFile,
             'knownHosts' => $knownHosts,
+        ];
+    }
+
+    /**
+     * Materialise the run-time pieces for an rsync DAEMON connection.
+     *
+     * This is NOT a fourth secret kind: the module secret goes to the EXISTING
+     * <$runtimeBase>/pass/<token> via the existing writePassFile ->
+     * safeWriteSecret (tempnam O_EXCL, chmod 0600 before and after, atomic
+     * rename that does not follow a planted symlink). So ensureRuntimeDirs()'s
+     * dir list, cleanupRuntime()'s path list, Logger::setRedaction's
+     * ['keys','pass','known_hosts'] subdirs and the Runner's `if ($token !== '')`
+     * cleanup all need ZERO edits.
+     *
+     * rsync's own gate is satisfied: authenticate.c getpassf() exits 1 when the
+     * password file's st_mode & 06 is set (other-read OR other-write) and, for a
+     * root-run rsync, when the file is not root-owned. 0600 written by this root
+     * process passes both.
+     *
+     * ANONYMOUS MODULE: when the stored secret is empty NOTHING is written, no
+     * token is minted and no runtime dir is created - passFile and token are
+     * both ''. An empty password file would make rsync exit 1 with "failed to
+     * read a password from %s" (authenticate.c:215), so omitting
+     * --password-file entirely is the only correct behaviour.
+     *
+     * Every validation happens BEFORE the token is minted, so no failure path
+     * can orphan a secret on disk.
+     *
+     * @param array<string,mixed> $creds  loaded credentials structure
+     * @param string              $connId
+     * @return array{
+     *   ok: bool,
+     *   error?: string,
+     *   token?: string,
+     *   conn?: array<string,mixed>,
+     *   passFile?: string,
+     *   port?: int
+     * }
+     * @throws RuntimeException on a filesystem failure while materialising.
+     */
+    public static function materializeDaemon(array $creds, string $connId): array
+    {
+        $conn = Credentials::findConnection($creds, $connId);
+        if ($conn === null) {
+            return ['ok' => false, 'error' => "Connection not found: $connId"];
+        }
+        $conn = Credentials::mergeConnection($conn);
+
+        if ((string) $conn['transport'] !== 'DAEMON') {
+            return [
+                'ok'    => false,
+                'error' => 'This Connection uses SSH transport; an rsync daemon transport cannot be built from it.',
+            ];
+        }
+
+        // Runner::userHost() returns '' when either half is empty, which would
+        // hand rsync the operand "::module" and fail opaquely mid-run. Fail here
+        // with a reason the user can act on instead.
+        if ($conn['host'] === '' || $conn['username'] === '') {
+            return [
+                'ok'    => false,
+                'error' => 'The Connection is incomplete: an rsync daemon connection needs both a host and a username.',
+            ];
+        }
+
+        // Re-check what validateConnection already enforced at save time:
+        // credentials.json is hand-editable on /boot. rsync's parse_hostspec
+        // breaks the authority at the FIRST ':' or '/', so a host or username
+        // carrying either turns "[user@]host::module" into an SSH target over the
+        // DEFAULT remote shell (no pinned host key) or into a plain LOCAL path.
+        if (!Credentials::isSafeDaemonToken((string) $conn['host'])) {
+            return ['ok' => false, 'error' => 'The Connection host is not valid for an rsync daemon operand.'];
+        }
+        if (!Credentials::isSafeDaemonToken((string) $conn['username'])) {
+            return ['ok' => false, 'error' => 'The Connection username is not valid for an rsync daemon operand.'];
+        }
+
+        $plain = Credentials::deobfuscate((string) $conn['password']);
+        if ($plain !== '' && preg_match('/[\x00\r\n]/', $plain)) {
+            return [
+                'ok'    => false,
+                'error' => 'The module secret must not contain line breaks: rsync reads only the first line '
+                    . 'of the password file, so everything after it would be silently discarded.',
+            ];
+        }
+
+        $token    = '';
+        $passFile = '';
+        if ($plain !== '') {
+            self::ensureRuntimeDirs();
+            $token    = static::newRuntimeToken($connId);
+            $passFile = self::writePassFile($token, $plain);
+        }
+
+        return [
+            'ok'       => true,
+            'token'    => $token,
+            'conn'     => $conn,
+            'passFile' => $passFile,
+            'port'     => (int) $conn['port'],
         ];
     }
 
@@ -537,14 +666,21 @@ class Ssh
         @chmod($tmp, 0600);
         if (@file_put_contents($tmp, $body) === false) {
             @unlink($tmp);
-            throw new RuntimeException("Unable to materialise $label: $path");
+            // No $path in the message, deliberately. Runner::materializeSsh /
+            // ::materializeDaemonConn surface a thrown message straight into the
+            // run log AND plugin.log, and that happens BEFORE Logger::setRedaction
+            // is armed (it is armed only on the success arm) - and redactRunLog
+            // never touches plugin.log. The per-run tmpfs path is gone by the time
+            // anyone reads the log, so it has no diagnostic value; $label already
+            // says which secret failed.
+            throw new RuntimeException("Unable to materialise $label.");
         }
         @chmod($tmp, 0600);
         // rename replaces the name atomically and does NOT follow a symlink that
         // may have been planted at $path.
         if (!@rename($tmp, $path)) {
             @unlink($tmp);
-            throw new RuntimeException("Unable to place $label at: $path");
+            throw new RuntimeException("Unable to place $label.");
         }
     }
 
@@ -623,6 +759,17 @@ class Ssh
             return ['ok' => false, 'reason' => 'config', 'message' => "Connection not found: $connId"];
         }
         $conn = Credentials::mergeConnection($conn);
+
+        // Before the host/username check, deliberately: a daemon connection with
+        // an empty host would otherwise get the wrong message, and - worse - a
+        // complete one would get an `ssh` probe fired at port 873.
+        if ((string) ($conn['transport'] ?? 'SSH') !== 'SSH') {
+            return [
+                'ok'      => false,
+                'reason'  => 'config',
+                'message' => 'This Connection uses rsync daemon (rsyncd) transport; the SSH connection test does not apply to it.',
+            ];
+        }
 
         if ($conn['host'] === '' || $conn['username'] === '') {
             return ['ok' => false, 'reason' => 'config', 'message' => 'Host and username are required to test a connection.'];

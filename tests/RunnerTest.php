@@ -1036,4 +1036,803 @@ final class RunnerTest extends TestCase
 
         Credentials::save(Credentials::defaults());
     }
+
+    // =====================================================================
+    // rsync DAEMON transport (issue #139). Every daemon run below is driven
+    // through the SAME injected seams the SSH/LOCAL runs use - Rsync::$runner
+    // for the spawn and Ssh::$runtimeBase for the tmpfs - so no rsync, ssh or
+    // rsyncd is ever contacted.
+    // =====================================================================
+
+    /** Recursively remove a temp runtime base (same shape as the inline cleanups above). */
+    private function rmTree(string $dir): void
+    {
+        if (!is_dir($dir)) {
+            return;
+        }
+        $it = new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator($dir, FilesystemIterator::SKIP_DOTS),
+            RecursiveIteratorIterator::CHILD_FIRST
+        );
+        foreach ($it as $f) {
+            $f->isDir() ? @rmdir($f->getPathname()) : @unlink($f->getPathname());
+        }
+        @rmdir($dir);
+    }
+
+    /**
+     * Seed a DAEMON connection + a DAEMON job and point Ssh::$runtimeBase at a
+     * fresh temp tmpfs. Returns that base; the caller restores
+     * Ssh::$runtimeBase, resets the keychain and rmTree()s it in a finally.
+     *
+     * @param array<string,mixed> $connOverrides
+     * @param array<string,mixed> $jobOverrides
+     */
+    private function seedDaemonJob(string $jobId, array $connOverrides = [], array $jobOverrides = []): string
+    {
+        $rt = sys_get_temp_dir() . '/ur-runner-daemon-' . getmypid() . '-' . bin2hex(random_bytes(4));
+        Ssh::$runtimeBase = $rt;
+
+        $creds = Credentials::defaults();
+        $creds['connections'][] = Credentials::mergeConnection(array_merge([
+            'id'        => 'c-daemon',
+            'name'      => 'nas',
+            'transport' => 'DAEMON',
+            'host'      => 'nas.local',
+            'username'  => 'moduser',
+            'password'  => Credentials::obfuscate('s3cret'),
+        ], $connOverrides));
+        Credentials::save($creds);
+
+        $config = Config::load();
+        $job = Config::defaultJob();
+        $job['id']           = $jobId;
+        $job['name']         = $jobId;
+        $job['transport']    = 'DAEMON';
+        $job['direction']    = 'PUSH';
+        $job['connectionId'] = 'c-daemon';
+        $job['pairs']        = [['local' => '/mnt/user/src/', 'remote' => 'rsync_bkp/photos']];
+        $config['jobs'][]    = array_merge($job, $jobOverrides);
+        Config::save($config);
+        RunState::clear($jobId);
+        RunState::clearAbort($jobId);
+
+        return $rt;
+    }
+
+    // --- resolvePair --------------------------------------------------------
+
+    /**
+     * resolvePair is a pure operand builder, and the DAEMON case differs from
+     * the SSH one by exactly one character ('::' vs ':'). The matrix pins all
+     * three transports PLUS a junk hand-edited value in ONE place, whole-array,
+     * so a future transport branch cannot quietly change SSH or LOCAL bytes.
+     *
+     * @param array{src:string,dest:string} $expected
+     */
+    #[DataProvider('resolvePairTransportProvider')]
+    public function testResolvePairTransportMatrix(
+        string $transport,
+        string $direction,
+        string $remote,
+        array $expected
+    ): void {
+        $job = Config::defaultJob();
+        $job['transport'] = $transport;
+        $job['direction'] = $direction;
+
+        $this->assertSame(
+            $expected,
+            Runner::resolvePair(
+                $job,
+                ['local' => '/mnt/user/m/', 'remote' => $remote],
+                $transport,
+                'sasa@rpi'
+            )
+        );
+    }
+
+    public static function resolvePairTransportProvider(): array
+    {
+        return [
+            // DAEMON: userHost . '::' . module reference, both directions.
+            'daemon-push' => ['DAEMON', 'PUSH', 'rsync_bkp/photos', [
+                'src' => '/mnt/user/m/', 'dest' => 'sasa@rpi::rsync_bkp/photos',
+            ]],
+            'daemon-pull' => ['DAEMON', 'PULL', 'rsync_bkp/photos', [
+                'src' => 'sasa@rpi::rsync_bkp/photos', 'dest' => '/mnt/user/m/',
+            ]],
+            // A bare module root keeps its shape too (no slash is inserted).
+            'daemon-module-root-push' => ['DAEMON', 'PUSH', 'rsync_bkp', [
+                'src' => '/mnt/user/m/', 'dest' => 'sasa@rpi::rsync_bkp',
+            ]],
+            // A trailing slash is meaningful to rsync and must survive verbatim.
+            'daemon-trailing-slash-pull' => ['DAEMON', 'PULL', 'rsync_bkp/', [
+                'src' => 'sasa@rpi::rsync_bkp/', 'dest' => '/mnt/user/m/',
+            ]],
+            // SSH: single colon, unchanged by the daemon arm inserted above it.
+            'ssh-push' => ['SSH', 'PUSH', '/data/m/', [
+                'src' => '/mnt/user/m/', 'dest' => 'sasa@rpi:/data/m/',
+            ]],
+            'ssh-pull' => ['SSH', 'PULL', '/data/m/', [
+                'src' => 'sasa@rpi:/data/m/', 'dest' => '/mnt/user/m/',
+            ]],
+            // LOCAL: both sides bare, direction ignored, userHost never applied.
+            'local-push' => ['LOCAL', 'PUSH', '/mnt/disk1/m/', [
+                'src' => '/mnt/user/m/', 'dest' => '/mnt/disk1/m/',
+            ]],
+            'local-pull' => ['LOCAL', 'PULL', '/mnt/disk1/m/', [
+                'src' => '/mnt/user/m/', 'dest' => '/mnt/disk1/m/',
+            ]],
+            // An unknown hand-edited transport keeps TODAY's LOCAL-shaped
+            // fallthrough - it must not fall into the new DAEMON arm.
+            'unknown-push' => ['FTP', 'PUSH', '/data/m/', [
+                'src' => '/mnt/user/m/', 'dest' => '/data/m/',
+            ]],
+            'unknown-pull' => ['FTP', 'PULL', '/data/m/', [
+                'src' => '/mnt/user/m/', 'dest' => '/data/m/',
+            ]],
+        ];
+    }
+
+    // --- guardrailErrors <-> Job::validate mirror (D13) ----------------------
+
+    /**
+     * Rewrite Job::validate's per-pair error labels into Runner::guardrailErrors'
+     * labels, so the two lists can be compared BY VALUE and IN ORDER. Anything
+     * that is not a pure label difference therefore shows up as a mismatch.
+     *
+     * @param array<int,string> $jobPairErrors
+     * @return array<int,string>
+     */
+    private function asRunnerLabels(array $jobPairErrors, string $transport, string $direction): array
+    {
+        $destIsRemote = in_array($transport, ['SSH', 'DAEMON'], true) ? ($direction !== 'PULL') : true;
+        $localRole    = $destIsRemote ? 'source' : 'destination';
+        $remoteRole   = $destIsRemote ? 'destination' : 'source';
+        $qualifier    = ($transport === 'LOCAL') ? 'local' : (($transport === 'DAEMON') ? 'module' : 'remote');
+        $remoteLabel  = ($transport === 'LOCAL')
+            ? 'second local path'
+            : (($transport === 'DAEMON') ? 'daemon module path' : 'remote path');
+
+        // strtr() picks the LONGEST match at each position, and the "required"
+        // forms carry "Pair #1: " (with the colon) while the checker labels
+        // carry "Pair #1 " (without), so the two shapes can never collide.
+        $map = [
+            "Pair #1: $localRole (local) path is required."        => 'local path is required.',
+            "Pair #1: $remoteRole ($qualifier) path is required."  => $remoteLabel . ' is required.',
+            "Pair #1 $localRole (local)"                           => 'local path',
+            "Pair #1 $remoteRole ($qualifier)"                     => $remoteLabel,
+            'Pair #1: a delete option'                             => 'a delete option',
+        ];
+
+        return array_values(array_map(
+            static fn(string $e): string => strtr($e, $map),
+            $jobPairErrors
+        ));
+    }
+
+    /**
+     * D13: Job::validate (save time) and Runner::guardrailErrors (run time) are
+     * a MIRROR PAIR - same checker, same predicate, same order, for every
+     * transport including a junk hand-edited one. They may differ ONLY in the
+     * error labels, which asRunnerLabels() normalises away. A daemon branch
+     * added to one side and not the other fails here.
+     */
+    #[DataProvider('guardrailMirrorProvider')]
+    public function testGuardrailErrorsMirrorJobValidateForEveryTransport(
+        string $transport,
+        string $direction,
+        string $local,
+        string $remote,
+        bool $deleteOn
+    ): void {
+        $opts = Config::mergeRsyncOptions($deleteOn ? ['delete' => true] : []);
+
+        $job = Config::defaultJob();
+        $job['name']         = 'mirror';
+        $job['transport']    = $transport;
+        $job['direction']    = $direction;
+        $job['pairs']        = [['local' => $local, 'remote' => $remote]];
+        $job['rsyncOptions'] = $opts;
+
+        $runnerErrors = Runner::guardrailErrors($job, ['local' => $local, 'remote' => $remote], $transport, $opts);
+
+        $jobPairErrors = array_values(array_filter(
+            Job::validate($job)['errors'],
+            static fn(string $e): bool => strpos($e, 'Pair #') === 0
+        ));
+
+        $this->assertSame(
+            $this->asRunnerLabels($jobPairErrors, $transport, $direction),
+            $runnerErrors,
+            "save-time and run-time guardrails disagree for $transport/$direction"
+        );
+    }
+
+    public static function guardrailMirrorProvider(): array
+    {
+        return [
+            // DAEMON: the happy module reference, and every shape checkDaemonModule rejects.
+            'daemon-ok'                  => ['DAEMON', 'PUSH', '/mnt/user/src/', 'rsync_bkp/photos', false],
+            'daemon-module-root-delete'  => ['DAEMON', 'PUSH', '/mnt/user/src/', 'rsync_bkp', true],
+            'daemon-absolute-module'     => ['DAEMON', 'PUSH', '/mnt/user/src/', '/data', true],
+            'daemon-host-in-module'      => ['DAEMON', 'PUSH', '/mnt/user/src/', 'nas::mod', false],
+            'daemon-dotdot-segment'      => ['DAEMON', 'PUSH', '/mnt/user/src/', 'rsync_bkp/../etc', false],
+            'daemon-empty-remote'        => ['DAEMON', 'PUSH', '/mnt/user/src/', '', true],
+            'daemon-pull-bad-local'      => ['DAEMON', 'PULL', '/mnt/user', 'rsync_bkp/photos', true],
+            'daemon-pull-delete-ok'      => ['DAEMON', 'PULL', '/mnt/user/dst/', 'rsync_bkp', true],
+            // SSH and LOCAL: unchanged behaviour on both sides.
+            'ssh-push-root-delete'       => ['SSH', 'PUSH', '/mnt/user/src/', '/', true],
+            'ssh-pull-root-delete'       => ['SSH', 'PULL', '/mnt/user/src/sub/', '/', true],
+            'ssh-push-module-shaped'     => ['SSH', 'PUSH', '/mnt/user/src/', 'tmp', false],
+            'local-pull-root-delete'     => ['LOCAL', 'PULL', '/mnt/user/src/', '/', true],
+            'local-push-ok'              => ['LOCAL', 'PUSH', '/mnt/user/src/', '/mnt/disk1/dst/', true],
+            // A junk hand-edited transport: both sides must agree about it too.
+            'unknown-pull-root-delete'   => ['FTP', 'PULL', '/mnt/user/src/sub/', '/', true],
+            'unknown-push-module-shaped' => ['FTP', 'PUSH', '/mnt/user/src/', 'tmp', false],
+            'both-sides-empty'           => ['SSH', 'PUSH', '', '', true],
+        ];
+    }
+
+    /**
+     * The --delete destination side, pinned WHOLE-ARRAY per transport.
+     *
+     * The discriminating case is 'FTP' + PULL, NOT 'LOCAL' + PULL: LOCAL is
+     * forced to PUSH by normalize(), so it yields destIsRemote=true under both
+     * the old (`$transport !== 'SSH' ? true : ...`) and the new
+     * (`in_array(..., ['SSH','DAEMON']) ? ... : true`) expression and would
+     * catch nothing. An unknown transport under PULL is the only input where a
+     * plausible mis-write of the new expression flips the checked side.
+     */
+    public function testGuardrailDeleteDestinationSideIsIdenticalForSshLocalAndAnUnknownTransport(): void
+    {
+        $opts = Config::mergeRsyncOptions(['delete' => true]);
+        $pair = ['local' => '/mnt/user/src/sub/', 'remote' => '/'];
+        $job  = Config::defaultJob();
+        $job['direction'] = 'PULL';
+
+        $rootIsNotSubdir = "remote path '/' must be a specific sub-directory, not the filesystem root.";
+        $deleteError     = 'a delete option is enabled, so the destination must be a specific sub-directory, not a root.';
+
+        // SSH + PULL: the destination is the LOCAL side, which IS specific, so
+        // only the remote-path root complaint fires.
+        $job['transport'] = 'SSH';
+        $this->assertSame([$rootIsNotSubdir], Runner::guardrailErrors($job, $pair, 'SSH', $opts));
+
+        // Unknown transport + PULL: the destination is the REMOTE side (matching
+        // resolvePair's LOCAL-shaped fallthrough), so the delete guard fires.
+        $job['transport'] = 'FTP';
+        $this->assertSame([$rootIsNotSubdir, $deleteError], Runner::guardrailErrors($job, $pair, 'FTP', $opts));
+
+        // LOCAL + PULL: destination is the remote side too (direction is
+        // spurious for LOCAL), checked with the LOCAL checker.
+        $job['transport'] = 'LOCAL';
+        $this->assertSame(
+            [
+                "second local path '/' is a protected system or array root and cannot be used.",
+                $deleteError,
+            ],
+            Runner::guardrailErrors($job, $pair, 'LOCAL', $opts)
+        );
+
+        // DAEMON + PULL: destination is the LOCAL side, exactly as for SSH.
+        $job['transport'] = 'DAEMON';
+        $this->assertSame(
+            [
+                "daemon module path '/' must not begin with \"/\". An rsync daemon path is relative to the "
+                    . 'module, so enter the module reference (for example rsync_bkp or rsync_bkp/photos), '
+                    . 'not an absolute filesystem path.',
+            ],
+            Runner::guardrailErrors($job, $pair, 'DAEMON', $opts)
+        );
+    }
+
+    // --- a full daemon run --------------------------------------------------
+
+    public function testDaemonRunOnANonDefaultPortEmitsThatPortNotEightSevenThree(): void
+    {
+        // buildArgv is proven to honour a port and materializeDaemon is proven to
+        // return one, but the JOIN between them - Runner reading $mat['port'] into
+        // the pieces bag - is only exercised here. A NAS rsyncd behind a port map
+        // is the common case, and hard-coding 873 in the Runner would pass every
+        // other daemon test.
+        $seenArgv = null;
+        $origBase = Ssh::$runtimeBase;
+        $rt       = $this->seedDaemonJob('j-daemon-port', ['port' => 8730]);
+
+        Rsync::$runner = function (array $argv, $onOutput, ?array $env = null) use (&$seenArgv): int {
+            $seenArgv = $argv;
+            return 0;
+        };
+
+        try {
+            $res = Runner::run('j-daemon-port', false);
+        } finally {
+            Ssh::$runtimeBase = $origBase;
+            Credentials::save(Credentials::defaults());
+            $this->rmTree($rt);
+        }
+
+        $this->assertSame(Rsync::STATE_SUCCESS, $res['state']);
+        $this->assertIsArray($seenArgv);
+        $this->assertContains('--port=8730', $seenArgv);
+        $this->assertNotContains('--port=873', $seenArgv, 'the connection port must reach the argv, not a default');
+    }
+
+    public function testSshRunUnlinksItsRuntimeSecretsInTheFinally(): void
+    {
+        // The daemon arm asserts its pass file is gone after the run; its SSH
+        // sibling never did, so dropping the token on the SSH arm would leave the
+        // run's known_hosts / pass files behind (and per-token redaction unarmed)
+        // with the suite still green.
+        $khDuringRun   = null;
+        $passDuringRun = null;
+
+        $origBase = Ssh::$runtimeBase;
+        $rt = sys_get_temp_dir() . '/ur-runner-sshclean-' . getmypid() . '-' . bin2hex(random_bytes(4));
+        Ssh::$runtimeBase = $rt;
+
+        // PASSWORD auth + a pinned host key, so BOTH pass/ and known_hosts/ are
+        // materialised for the run.
+        $creds = Credentials::defaults();
+        $creds['connections'][] = Credentials::mergeConnection([
+            'id' => 'c-pw', 'name' => 'cpw', 'host' => 'h.example', 'username' => 'root',
+            'authMethod' => 'PASSWORD', 'password' => Credentials::obfuscate('pw'),
+            'remoteHostKey' => 'h.example ssh-ed25519 AAAAhostkey',
+        ]);
+        Credentials::save($creds);
+
+        Rsync::$runner = function (array $argv, $onOutput) use (&$khDuringRun, &$passDuringRun, $rt): int {
+            $kh   = glob($rt . '/known_hosts/*');
+            $pass = glob($rt . '/pass/*');
+            $khDuringRun   = (is_array($kh) && $kh !== []) ? $kh[0] : null;
+            $passDuringRun = (is_array($pass) && $pass !== []) ? $pass[0] : null;
+            return 0;
+        };
+
+        $config = Config::load();
+        $job = Config::defaultJob();
+        $job['id']           = 'j-sshclean';
+        $job['name']         = 'j-sshclean';
+        $job['transport']    = 'SSH';
+        $job['direction']    = 'PUSH';
+        $job['connectionId'] = 'c-pw';
+        $job['pairs']        = [['local' => '/mnt/user/src/', 'remote' => '/data/dst/']];
+        $config['jobs'][]    = $job;
+        Config::save($config);
+        RunState::clear('j-sshclean');
+        RunState::clearAbort('j-sshclean');
+
+        try {
+            $res = Runner::run('j-sshclean', false);
+            // Sampled INSIDE the try: the finally below rmTree()s the whole base,
+            // which would make every "is it gone?" assertion pass vacuously.
+            $khAfterRun   = ($khDuringRun !== null) ? is_file($khDuringRun) : null;
+            $passAfterRun = ($passDuringRun !== null) ? is_file($passDuringRun) : null;
+            $leftOver     = array_merge(glob($rt . '/pass/*') ?: [], glob($rt . '/known_hosts/*') ?: []);
+        } finally {
+            Ssh::$runtimeBase = $origBase;
+            Credentials::save(Credentials::defaults());
+            $this->rmTree($rt);
+        }
+
+        $this->assertSame(Rsync::STATE_SUCCESS, $res['state']);
+        $this->assertNotNull($khDuringRun, 'a known_hosts file exists while the SSH rsync runs');
+        $this->assertNotNull($passDuringRun, 'a pass file exists while the SSH rsync runs');
+        $this->assertFalse($khAfterRun, 'known_hosts is unlinked by the run finally');
+        $this->assertFalse($passAfterRun, 'the pass file is unlinked by the run finally');
+        $this->assertSame([], $leftOver, 'no per-run secret survives the run');
+    }
+
+    public function testDaemonRunEmitsTheFullDaemonArgvAndMapsTheExitCode(): void
+    {
+        $seenArgv       = null;
+        $seenEnv        = 'not-called';
+        $passDuringRun  = null;
+        $permDuringRun  = null;
+        $passAfterRun   = null;
+
+        $origBase = Ssh::$runtimeBase;
+        // contimeout is emitted ONLY for daemon transport (rsync main.c:1558
+        // makes it a hard failure everywhere else), so a daemon run is the one
+        // place the whole chain job -> effectiveOptions -> buildArgv can be
+        // asserted end to end.
+        $rt = $this->seedDaemonJob('j-daemon', [], [
+            'rsyncOptions' => Config::mergeRsyncOptions(['contimeout' => '45']),
+        ]);
+
+        Rsync::$runner = function (array $argv, $onOutput, ?array $env = null) use (&$seenArgv, &$seenEnv, &$passDuringRun, &$permDuringRun, $rt): int {
+            $seenArgv = $argv;
+            $seenEnv  = $env;
+            // The materialised secret, found independently of the argv.
+            $files = glob($rt . '/pass/*');
+            if (is_array($files) && count($files) === 1) {
+                $passDuringRun = $files[0];
+                clearstatcache(true, $passDuringRun);
+                $permDuringRun = fileperms($passDuringRun) & 0777;
+                // FIRST captured byte names the passfile, exactly as rsync's own
+                // getpassf() errors do: redaction must already be armed.
+                $onOutput('opening password file ' . $passDuringRun . "\n");
+            }
+            return 24; // vanished files -> WARNING
+        };
+
+        try {
+            $res          = Runner::run('j-daemon', false);
+            $passAfterRun = ($passDuringRun !== null) ? is_file($passDuringRun) : null;
+            $log          = (string) @file_get_contents($res['runLog']);
+        } finally {
+            Ssh::$runtimeBase = $origBase;
+            Credentials::save(Credentials::defaults());
+            $this->rmTree($rt);
+        }
+
+        // Exit-code mapping is the same machinery every other transport uses.
+        $this->assertSame(Rsync::STATE_WARNING, $res['state']);
+        $this->assertSame(24, $res['exitCode']);
+        $this->assertSame(Rsync::STATE_WARNING, Runner::readSummary('j-daemon')['state']);
+
+        // The 0600 tmpfs passfile existed while rsync ran, and is gone after.
+        $this->assertNotNull($passDuringRun, 'exactly one pass file exists while the daemon rsync runs');
+        $this->assertStringStartsWith($rt . '/pass/', (string) $passDuringRun);
+        $this->assertSame(0600, $permDuringRun, 'rsync getpassf() refuses a file with st_mode & 06 set');
+        $this->assertFalse($passAfterRun, 'the pass file is unlinked by the run finally');
+
+        // The WHOLE argv, in order: --port ALWAYS, --password-file only because
+        // a secret exists, --log-file still emitted, no -e, tail always
+        // ['--', src, dest], and the operand is userHost . '::' . module.
+        $this->assertSame([
+            Rsync::rsyncPath(),
+            '-r',
+            '-h',
+            '-t',
+            '--partial',
+            '--mkpath',
+            '--contimeout=45',
+            '-v',
+            '--info=stats2,progress2',
+            '--log-file=' . $res['runLog'],
+            '--port=873',
+            '--password-file=' . $passDuringRun,
+            '--',
+            '/mnt/user/src/',
+            'moduser@nas.local::rsync_bkp/photos',
+        ], $seenArgv);
+
+        // F9 / D10: the pieces bag always carries sshEnv => [], and
+        // Ssh::childEnv([]) is null - the child inherits, carrying no secret.
+        $this->assertNull($seenEnv, 'a daemon run passes no child environment');
+
+        // Redaction was armed BEFORE the first captured byte.
+        $this->assertStringNotContainsString((string) $passDuringRun, $log);
+        $this->assertStringContainsString(
+            'opening password file ' . Logger::REDACT_PLACEHOLDER,
+            $log
+        );
+        // ...and disarmed afterwards, so nothing leaks into a later run.
+        $this->assertSame((string) $passDuringRun, Logger::redact((string) $passDuringRun));
+    }
+
+    public function testAnonymousDaemonModuleRunEmitsNoPasswordFileAndWritesNoSecret(): void
+    {
+        // A module with no `auth users` needs no secret. An EMPTY password file
+        // would make rsync exit 1 ("failed to read a password from %s",
+        // authenticate.c:215), so nothing must be written and --password-file
+        // must be absent - which also proves buildArgv gates on the explicit
+        // `daemon` key rather than on "is there a password file".
+        $seenArgv    = null;
+        $passDirMade = null;
+
+        $origBase = Ssh::$runtimeBase;
+        $rt = $this->seedDaemonJob('j-daemon-anon', ['password' => '']);
+
+        Rsync::$runner = function (array $argv, $onOutput) use (&$seenArgv, &$passDirMade, $rt): int {
+            $seenArgv    = $argv;
+            $passDirMade = is_dir($rt . '/pass');
+            return 0;
+        };
+
+        try {
+            $res = Runner::run('j-daemon-anon', false);
+        } finally {
+            Ssh::$runtimeBase = $origBase;
+            Credentials::save(Credentials::defaults());
+            $this->rmTree($rt);
+        }
+
+        $this->assertSame(Rsync::STATE_SUCCESS, $res['state']);
+        $this->assertFalse($passDirMade, 'an anonymous module mints no token and creates no pass dir');
+        $this->assertSame([
+            Rsync::rsyncPath(),
+            '-r',
+            '-h',
+            '-t',
+            '--partial',
+            '--mkpath',
+            '-v',
+            '--info=stats2,progress2',
+            '--log-file=' . $res['runLog'],
+            '--port=873',
+            '--',
+            '/mnt/user/src/',
+            'moduser@nas.local::rsync_bkp/photos',
+        ], $seenArgv);
+    }
+
+    public function testDaemonRunRedactsThePassFilePathRsyncWritesThroughItsOwnLogFile(): void
+    {
+        // D9. rsync writes the run log ITSELF through --log-file, on its own fd:
+        // those bytes never pass through Logger::sink, and Logger::setRedaction
+        // only hooks the sink. authenticate.c:188 and :215 name the password
+        // file VERBATIM in two of rsync's own errors, so the fake runner appends
+        // straight to the run-log FILE here. A sink-only test is green while the
+        // real thing leaks, which is exactly why this one bypasses the sink.
+        $passFromArgv = null;
+
+        $origBase = Ssh::$runtimeBase;
+        $rt = $this->seedDaemonJob('j-daemon-logfile');
+
+        Rsync::$runner = function (array $argv, $onOutput) use (&$passFromArgv): int {
+            $logFile = '';
+            foreach ($argv as $tok) {
+                if (strpos($tok, '--log-file=') === 0) {
+                    $logFile = substr($tok, strlen('--log-file='));
+                }
+                if (strpos($tok, '--password-file=') === 0) {
+                    $passFromArgv = substr($tok, strlen('--password-file='));
+                }
+            }
+            // Written DIRECTLY to the file, never through $onOutput.
+            file_put_contents(
+                $logFile,
+                "2026/09/03 10:00:00 [999] could not open password file $passFromArgv\n"
+                    . "2026/09/03 10:00:00 [999] ERROR: failed to read a password from $passFromArgv\n",
+                FILE_APPEND
+            );
+            return 1;
+        };
+
+        try {
+            $res = Runner::run('j-daemon-logfile', false);
+            $log = (string) @file_get_contents($res['runLog']);
+        } finally {
+            Ssh::$runtimeBase = $origBase;
+            Credentials::save(Credentials::defaults());
+            $this->rmTree($rt);
+        }
+
+        $this->assertSame(Rsync::STATE_FAILED, $res['state']);
+        $this->assertNotNull($passFromArgv, 'the daemon argv carried a --password-file path');
+        $this->assertStringStartsWith($rt . '/pass/', (string) $passFromArgv);
+
+        // The path rsync wrote itself is scrubbed from the browser-visible log,
+        // and the surrounding rsync text still reads correctly.
+        $this->assertStringNotContainsString((string) $passFromArgv, $log);
+        $this->assertStringContainsString(
+            'could not open password file ' . Logger::REDACT_PLACEHOLDER,
+            $log
+        );
+        $this->assertStringContainsString(
+            'ERROR: failed to read a password from ' . Logger::REDACT_PLACEHOLDER,
+            $log
+        );
+        // Disarmed in the finally, after the last redaction pass.
+        $this->assertSame((string) $passFromArgv, Logger::redact((string) $passFromArgv));
+    }
+
+    // --- transport mismatch: job vs. connection ------------------------------
+
+    public function testSshJobPointingAtADaemonConnectionFailsWithNoRsyncSpawn(): void
+    {
+        $rsyncCalls = 0;
+        Rsync::$runner = function (array $argv, $onOutput) use (&$rsyncCalls): int {
+            $rsyncCalls++;
+            return 0;
+        };
+
+        $origBase = Ssh::$runtimeBase;
+        $rt = $this->seedDaemonJob('j-ssh-at-daemon', [], ['transport' => 'SSH', 'postHook' => 'POST']);
+
+        try {
+            $res      = Runner::run('j-ssh-at-daemon', false);
+            $log      = (string) @file_get_contents($res['runLog']);
+            $rtDirs   = [is_dir($rt . '/keys'), is_dir($rt . '/pass'), is_dir($rt . '/known_hosts')];
+        } finally {
+            Ssh::$runtimeBase = $origBase;
+            Credentials::save(Credentials::defaults());
+            $this->rmTree($rt);
+        }
+
+        $this->assertSame(Rsync::STATE_FAILED, $res['state']);
+        $this->assertSame('ssh-config', $res['reason'] ?? '');
+        $this->assertSame(0, $rsyncCalls, 'no rsync is spawned for a transport mismatch');
+        $this->assertStringContainsString(
+            'SSH transport could not be prepared: This Connection uses rsync daemon (rsyncd) transport; '
+                . 'an SSH transport cannot be built from it.',
+            $log
+        );
+        // The refusal precedes ensureRuntimeDirs()/newRuntimeToken(): nothing at
+        // all was created under the runtime base.
+        $this->assertSame([false, false, false], $rtDirs, 'a refused materialise creates no runtime dirs');
+        // The failure path is still a normal unwind: the postHook ran.
+        $this->assertContains('hook:POST:FAILED', $this->trace);
+    }
+
+    public function testDaemonJobPointingAtAnSshConnectionFailsWithNoRsyncSpawn(): void
+    {
+        $rsyncCalls = 0;
+        Rsync::$runner = function (array $argv, $onOutput) use (&$rsyncCalls): int {
+            $rsyncCalls++;
+            return 0;
+        };
+
+        $origBase = Ssh::$runtimeBase;
+        $rt = $this->seedDaemonJob(
+            'j-daemon-at-ssh',
+            ['transport' => 'SSH', 'authMethod' => 'PASSWORD', 'password' => Credentials::obfuscate('pw')],
+            ['postHook' => 'POST']
+        );
+
+        try {
+            $res    = Runner::run('j-daemon-at-ssh', false);
+            $log    = (string) @file_get_contents($res['runLog']);
+            $rtDirs = [is_dir($rt . '/keys'), is_dir($rt . '/pass'), is_dir($rt . '/known_hosts')];
+        } finally {
+            Ssh::$runtimeBase = $origBase;
+            Credentials::save(Credentials::defaults());
+            $this->rmTree($rt);
+        }
+
+        $this->assertSame(Rsync::STATE_FAILED, $res['state']);
+        $this->assertSame('daemon-config', $res['reason'] ?? '');
+        $this->assertSame(0, $rsyncCalls, 'no rsync is spawned for a transport mismatch');
+        $this->assertStringContainsString(
+            'rsync daemon transport could not be prepared: The selected Connection uses SSH transport, '
+                . 'but this job uses rsync daemon transport.',
+            $log
+        );
+        // The Runner rejects on the MERGED connection before Ssh::materializeDaemon
+        // is reached, so no SSH passfile is materialised for the daemon job either.
+        $this->assertSame([false, false, false], $rtDirs, 'a refused daemon materialise creates no runtime dirs');
+        $this->assertContains('hook:POST:FAILED', $this->trace);
+    }
+
+    // --- an incomplete connection fails fast ---------------------------------
+
+    public function testDaemonJobWithAnEmptyHostFailsFastInsteadOfBuildingADoubleColonOperand(): void
+    {
+        $rsyncCalls = 0;
+        Rsync::$runner = function (array $argv, $onOutput) use (&$rsyncCalls): int {
+            $rsyncCalls++;
+            return 0;
+        };
+
+        $origBase = Ssh::$runtimeBase;
+        $rt = $this->seedDaemonJob('j-daemon-nohost', ['host' => '']);
+
+        try {
+            $res = Runner::run('j-daemon-nohost', false);
+            $log = (string) @file_get_contents($res['runLog']);
+        } finally {
+            Ssh::$runtimeBase = $origBase;
+            Credentials::save(Credentials::defaults());
+            $this->rmTree($rt);
+        }
+
+        $this->assertSame(Rsync::STATE_FAILED, $res['state']);
+        $this->assertSame('connection-incomplete', $res['reason'] ?? '');
+        $this->assertSame(0, $rsyncCalls, 'rsync must not run with an unresolvable operand');
+        $this->assertStringContainsString(
+            'rsync daemon transport could not be prepared: The selected Connection is incomplete: '
+                . 'an rsync daemon job needs both a host and a username.',
+            $log
+        );
+        // The whole point: the run never reaches the "::module" operand.
+        $this->assertStringNotContainsString('::rsync_bkp', $log);
+    }
+
+    public function testSshJobWithAnEmptyUsernameFailsFastInsteadOfBuildingAColonOperand(): void
+    {
+        // Ssh::materialize never reads host or username, so before the fail-fast
+        // guard this job returned ok:true and handed rsync the operand
+        // ":/data/dst/", failing opaquely mid-run. It could never have succeeded.
+        $rsyncCalls = 0;
+        Rsync::$runner = function (array $argv, $onOutput) use (&$rsyncCalls): int {
+            $rsyncCalls++;
+            return 0;
+        };
+
+        $origBase = Ssh::$runtimeBase;
+        $rt = sys_get_temp_dir() . '/ur-runner-nouser-' . getmypid() . '-' . bin2hex(random_bytes(4));
+        Ssh::$runtimeBase = $rt;
+
+        $creds = Credentials::defaults();
+        $creds['connections'][] = Credentials::mergeConnection([
+            'id'         => 'c-nouser',
+            'name'       => 'nouser',
+            'host'       => 'h.example',
+            'username'   => '',
+            'authMethod' => 'PASSWORD',
+            'password'   => Credentials::obfuscate('pw'),
+        ]);
+        Credentials::save($creds);
+
+        $config = Config::load();
+        $job = Config::defaultJob();
+        $job['id']           = 'j-ssh-nouser';
+        $job['name']         = 'j-ssh-nouser';
+        $job['transport']    = 'SSH';
+        $job['direction']    = 'PUSH';
+        $job['connectionId'] = 'c-nouser';
+        $job['pairs']        = [['local' => '/mnt/user/src/', 'remote' => '/data/dst/']];
+        $config['jobs'][]    = $job;
+        Config::save($config);
+        RunState::clear('j-ssh-nouser');
+        RunState::clearAbort('j-ssh-nouser');
+
+        try {
+            $res       = Runner::run('j-ssh-nouser', false);
+            $log       = (string) @file_get_contents($res['runLog']);
+            $leftovers = array_merge(
+                (array) glob($rt . '/pass/*'),
+                (array) glob($rt . '/keys/*'),
+                (array) glob($rt . '/known_hosts/*')
+            );
+        } finally {
+            Ssh::$runtimeBase = $origBase;
+            Credentials::save(Credentials::defaults());
+            $this->rmTree($rt);
+        }
+
+        $this->assertSame(Rsync::STATE_FAILED, $res['state']);
+        $this->assertSame('connection-incomplete', $res['reason'] ?? '');
+        $this->assertSame(0, $rsyncCalls, 'rsync must not run with an unresolvable operand');
+        $this->assertStringContainsString(
+            'SSH transport could not be prepared: The selected Connection is incomplete: '
+                . 'it needs both a host and a username.',
+            $log
+        );
+        // The operand the old code would have built never appears...
+        $this->assertStringNotContainsString(':/data/dst/', $log);
+        // ...and the secrets materialise() had already written are cleaned up
+        // before the guard returns, so nothing is orphaned in tmpfs.
+        $this->assertSame([], $leftovers, 'the fail-fast guard cleans up first');
+    }
+
+    public function testContimeoutIsDroppedOnANonDaemonRunThroughTheFullRunner(): void
+    {
+        // rsync main.c:1558 makes --contimeout a HARD failure (exit 1,
+        // RERR_SYNTAX) on every remote-shell AND local transfer - only the
+        // daemon socket path returns earlier, at main.c:1550. A stored value
+        // must therefore be dropped rather than emitted: before this, every
+        // LOCAL/SSH job that set it exited 1 before transferring anything. The
+        // daemon run above asserts the same option IS emitted there.
+        $seenArgv = null;
+        Rsync::$runner = function (array $argv, $onOutput) use (&$seenArgv): int {
+            $seenArgv = $argv;
+            return 0;
+        };
+
+        $id  = $this->saveLocalJob('j-local', [
+            'rsyncOptions' => Config::mergeRsyncOptions(['contimeout' => '45']),
+        ]);
+        $res = Runner::run($id, false);
+
+        $this->assertSame(Rsync::STATE_SUCCESS, $res['state']);
+        $this->assertSame([
+            Rsync::rsyncPath(),
+            '-r',
+            '-h',
+            '-t',
+            '--partial',
+            '--mkpath',
+            '-v',
+            '--info=stats2,progress2',
+            '--log-file=' . $res['runLog'],
+            '--',
+            '/mnt/user/src/',
+            '/mnt/disk1/dst/',
+        ], $seenArgv);
+    }
 }

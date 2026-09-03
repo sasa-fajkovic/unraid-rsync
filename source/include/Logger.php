@@ -524,6 +524,89 @@ class Logger
     }
 
     /**
+     * Redact the currently-armed per-run secret paths out of an existing run-log
+     * FILE, in place. Returns true when the file was rewritten.
+     *
+     * WHY the file and not just the stream: sink() only ever sees the output WE
+     * capture. rsync writes the SAME log itself through `--log-file=<runLog>` on
+     * its own fd, and it names the daemon password file VERBATIM in two of its
+     * own errors - authenticate.c:188 "could not open password file %s" and :215
+     * "ERROR: failed to read a password from %s". Those lines never pass through
+     * the sink, so the file is the only place left to scrub them. The same pass
+     * closes the pre-existing SSH hole where rsync at `debug` echoes the
+     * remote-shell command with the tmpfs key path in it.
+     *
+     * MUST be called only AFTER the pair's rsync has exited and closed its
+     * --log-file fd - which is exactly where enforceRunLogCap() is already
+     * called. No-op when nothing is armed, when $path is not a run log, or when
+     * the file does not exist. Best-effort, like every other write here.
+     *
+     * ponytail: reads the whole file (bounded by maxRunLogBytes, 16 MiB) rather
+     * than streaming. Chunk it if the per-pair cost ever shows up.
+     */
+    public static function redactRunLog(string $path): bool
+    {
+        if (self::$redactStrings === [] && self::$redactDirs === []) {
+            return false;
+        }
+        if (!self::isRunLogPath($path) || !is_file($path)) {
+            return false;
+        }
+        $body = @file_get_contents($path);
+        if ($body === false || $body === '') {
+            return false;
+        }
+        $red = self::redact($body);
+        if ($red === $body) {
+            return false;
+        }
+        // r+b, not w: the run may still be live, and truncating the file open
+        // would race the next append. Rewrite in place under the same LOCK_EX
+        // the appenders use, then cut the tail (redaction only ever shortens).
+        $fh = @fopen($path, 'r+b');
+        if ($fh === false) {
+            return false;
+        }
+        if (@flock($fh, LOCK_EX)) {
+            @rewind($fh);
+            @fwrite($fh, $red);
+            @ftruncate($fh, strlen($red));
+            @flock($fh, LOCK_UN);
+        }
+        @fclose($fh);
+        return true;
+    }
+
+    /**
+     * Scrub anything that LOOKS like a per-run tmpfs secret path out of $text,
+     * with nothing armed and no per-run state: every path under the runtime
+     * base's keys/ , pass/ or known_hosts/ subtree becomes REDACT_PLACEHOLDER.
+     * PURE.
+     *
+     * redactRunLog() only runs in the RUNNER process, after a pair's rsync has
+     * exited. Between those passes the live Status/Overview poller is tailing the
+     * same file from php-fpm, where nothing is armed and nothing can be - so the
+     * password-file path rsync names in its own errors (authenticate.c:188/:215),
+     * and the `-e "ssh -i <tmpfs-keypath>"` line at --debug=all, were readable in
+     * the browser for the length of a pair, and stayed readable for good if the
+     * runner was SIGKILLed mid-pair. This is a SHAPE match rather than an exact
+     * one precisely because the reader knows no token. Only a path to a
+     * root-owned 0600 file is ever at stake here, never a secret's bytes.
+     */
+    public static function scrubSecretPaths(string $text): string
+    {
+        $base = self::base();
+        if ($text === '' || $base === '' || strpos($text, $base) === false) {
+            return $text;
+        }
+        return preg_replace(
+            '#' . preg_quote($base, '#') . '/(?:keys|pass|known_hosts)(?:/[^\s"\']*)?#',
+            self::REDACT_PLACEHOLDER,
+            $text
+        ) ?? $text;
+    }
+
+    /**
      * Append a timestamped line to BOTH the given run log and the rolling
      * plugin log. The plugin log line is prefixed with the job id so the
      * cross-job log is readable.
@@ -592,6 +675,13 @@ class Logger
             }
             $data = "[... earlier output truncated ...]\n" . $data;
         }
+
+        // SCRUB before escaping: this is the ONLY redaction a reader process
+        // gets. redactRunLog() runs in the runner, after each pair; a tail taken
+        // mid-pair (or after a SIGKILLed run) would otherwise show the per-run
+        // tmpfs secret PATHS rsync writes into the log through its own
+        // --log-file fd. Cheap: a single strpos guard when nothing matches.
+        $data = self::scrubSecretPaths($data);
 
         // ESCAPE before returning - the caller renders this verbatim. Log files
         // hold arbitrary bytes (rsync output, non-UTF-8 filenames); ENT_SUBSTITUTE

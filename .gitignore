@@ -19,3 +19,4 @@ sftp-config.json
 /vendor/
 /.phpunit.cache/
 .phpunit.result.cache
+.php-cs-fixer.cache

@@ -82,6 +82,47 @@ final class ProcIOTest extends TestCase
         proc_close($proc);
     }
 
+    public function testAnAbsoluteDeadlineBoundsAChildThatNeverWritesAndNeverExits(): void
+    {
+        // The third parameter is what stops Rsync::listDaemonModules wedging a
+        // php-fpm worker on a daemon that accepts the TCP connection and then
+        // says nothing: with no output there is no EOF to end the loop, so only
+        // the deadline can. Checked at the TOP of each iteration, hence the
+        // allowance for one 1s select tick past it.
+        $descriptors = [0 => ['file', '/dev/null', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
+        $pipes = [];
+        $proc  = proc_open(['bash', '-c', 'sleep 30'], $descriptors, $pipes);
+        $this->assertIsResource($proc);
+
+        $started = microtime(true);
+        ProcIO::drainPipes(
+            [1 => $pipes[1], 2 => $pipes[2]],
+            static function (int $fd, string $chunk): void {
+            },
+            $started + 0.2
+        );
+        $elapsed = microtime(true) - $started;
+
+        proc_terminate($proc, 9);
+        proc_close($proc);
+
+        $this->assertLessThan(
+            5.0,
+            $elapsed,
+            'drainPipes must return on its deadline, not wait for the child'
+        );
+    }
+
+    public function testANullDeadlineIsTodaysUnboundedBehaviour(): void
+    {
+        // All three pre-existing callers pass two arguments; the default must not
+        // cut a slow-but-healthy child short.
+        $started = microtime(true);
+        [$out] = $this->capture(['bash', '-c', 'sleep 0.4; printf done']);
+        $this->assertSame('done', $out);
+        $this->assertGreaterThanOrEqual(0.3, microtime(true) - $started);
+    }
+
     public function testSkipsNonResourceEntriesGracefully(): void
     {
         // Defensive: non-resource pipe entries are ignored, callback never fires.

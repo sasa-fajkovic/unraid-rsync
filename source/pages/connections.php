@@ -2,13 +2,23 @@
 /**
  * connections.php - the Connections tab body.
  *
- * The reusable connection list + add/edit/delete cards. Each card has
- * host/port/user, an auth-method select (KEYFILE -> existing on-system key file;
- * KEY -> a managed key from the Credentials tab; PASSWORD -> a write-only
- * password field with a clear recoverable-secret warning), a strict-host-key
- * select, a "Discover host key" button (ssh-keyscan), a connect timeout, and a
- * "Test connection" button. A stored password is shown only as "set / not set";
- * the field is write-only.
+ * The reusable connection list + add/edit/delete cards. Each card has a
+ * TRANSPORT select (SSH -> rsync over an ssh command line; DAEMON -> the rsyncd
+ * wire protocol straight to a TCP port), host/port/user, an auth-method select
+ * (KEYFILE -> existing on-system key file; KEY -> a managed key from the
+ * Credentials tab; PASSWORD -> a write-only password field with a clear
+ * recoverable-secret warning), a strict-host-key select, a "Discover host key"
+ * button (ssh-keyscan), a connect timeout, and a "Test connection" button. A
+ * stored password is shown only as "set / not set"; the field is write-only.
+ *
+ * Everything that only makes sense over SSH (auth method, key file, managed key,
+ * strict host key, pinned host key) carries the class ur-ssh-only and is hidden
+ * on a daemon card by syncConnTransport(); the daemon-specific help carries
+ * ur-daemon-only. There is exactly ONE password input per card - the same one,
+ * relabelled "Module secret" for a daemon - because a second input with the same
+ * name would also be submitted (display:none does not suppress submission), PHP
+ * would keep the last one, and the blank-preserves-the-stored-value rule would
+ * then make an SSH password unchangeable.
  *
  * The managed-key keychain (generate/import SSH keys) lives on the SEPARATE
  * Credentials tab (pages/credentials.php); a connection references one of those
@@ -81,6 +91,15 @@ function ur_render_connection_card($conn, $index, array $keys): void
     $timeout     = (string) $conn['connectTimeout'];
     $hostKey     = (string) $conn['remoteHostKey'];
     $hasPass     = ((string) $conn['password']) !== '';
+    $transport   = (string) $conn['transport'];
+    $isDaemon    = ($transport === 'DAEMON');
+    // Inline display styles, seeded server-side so the card is already correct
+    // before any JS runs; syncConnTransport() keeps them in step afterwards.
+    // An EMPTY string (no style attribute) is deliberate for the shown case: it
+    // leaves a blockquote.inline_help behind the page's own Help toggle, exactly
+    // as every other help box on this page is.
+    $sshOnlyStyle    = $isDaemon ? ' style="display:none"' : '';
+    $daemonOnlyStyle = $isDaemon ? '' : ' style="display:none"';
     // A KEYFILE connection always has SOME keyFilePath after merge; offer the
     // conventional default when it's somehow empty so the field is never blank.
     if ($keyFilePath === '') {
@@ -91,6 +110,30 @@ function ur_render_connection_card($conn, $index, array $keys): void
     echo '<input type="hidden" name="' . ur_h($p . '[id]') . '" value="' . ur_h($id) . '">';
     echo '<dl>';
 
+    // transport. FIRST field on the card because it decides which of the fields
+    // below even apply: SSH builds an `ssh` command line, DAEMON speaks the
+    // rsyncd wire protocol directly on a TCP port, so auth method, keys and
+    // host-key pinning have no meaning there at all. The handler clears the
+    // stale keyId / keyFilePath / remoteHostKey when a card is saved as DAEMON.
+    echo '<dt><label for="' . ur_h($idb . '_transport') . '">' . ur_h(ur_t('Transport')) . '</label>:</dt>';
+    echo '<dd><select id="' . ur_h($idb . '_transport') . '" class="ur-conn-transport" name="' . ur_h($p . '[transport]') . '" data-idb="' . ur_h($idb) . '">';
+    foreach ([
+        'SSH'    => 'SSH (rsync over SSH)',
+        'DAEMON' => 'rsync daemon (rsyncd, port 873)',
+    ] as $val => $lbl) {
+        $sel = ($transport === $val) ? ' selected' : '';
+        echo '<option value="' . ur_h($val) . '"' . $sel . '>' . ur_h(ur_t($lbl)) . '</option>';
+    }
+    echo '</select>';
+    // display:block, NOT the usual empty style: the base stylesheet ships
+    // `.inline_help {display:none}` until the page Help toggle is on, and "this
+    // protocol is not encrypted" must never be behind that toggle.
+    echo '<blockquote class="inline_help ur-daemon-warn" style="display:' . ($isDaemon ? 'block' : 'none') . '"><p><strong>' . ur_h(ur_t('Warning:')) . '</strong> '
+        . ur_h(ur_t('the rsync daemon protocol is NOT encrypted. Only a challenge/response (MD4 with old peers) protects the module secret, '
+            . 'and file names and file contents travel in clear over the network. Use SSH transport on any untrusted network.'))
+        . '</p></blockquote>';
+    echo '</dd>';
+
     // name (required)
     echo '<dt><label for="' . ur_h($idb . '_name') . '">' . ur_h(ur_t('Name')) . '</label>' . ur_required_mark() . ':</dt>';
     echo '<dd><input type="text" id="' . ur_h($idb . '_name') . '" name="' . ur_h($p . '[name]') . '" value="' . ur_h($name) . '" required></dd>';
@@ -99,22 +142,27 @@ function ur_render_connection_card($conn, $index, array $keys): void
     echo '<dt><label for="' . ur_h($idb . '_host') . '">' . ur_h(ur_t('Host')) . '</label>' . ur_required_mark() . ':</dt>';
     echo '<dd><input type="text" id="' . ur_h($idb . '_host') . '" name="' . ur_h($p . '[host]') . '" value="' . ur_h($host) . '" placeholder="host.example or 10.0.0.5" required></dd>';
 
-    // port (required - has a sensible default of 22, but must not be blank)
+    // port (required - defaults to 22 for SSH and 873 for a daemon, but must
+    // not be blank; the JS rewrites the value on a transport switch only while
+    // it still holds the OTHER transport's default)
     echo '<dt><label for="' . ur_h($idb . '_port') . '">' . ur_h(ur_t('Port')) . '</label>' . ur_required_mark() . ':</dt>';
-    echo '<dd><input type="number" min="1" max="65535" id="' . ur_h($idb . '_port') . '" name="' . ur_h($p . '[port]') . '" value="' . ur_h($port) . '" placeholder="22" required>';
-    echo '<blockquote class="inline_help"><p>' . ur_h(ur_t('The remote host\'s SSH port (usually 22). This is NOT the "Rsync Server" / rsyncd port 873 that NAS appliances expose — that is a different protocol which this plugin does not speak.')) . '</p></blockquote>';
+    echo '<dd><input type="number" min="1" max="65535" id="' . ur_h($idb . '_port') . '" name="' . ur_h($p . '[port]') . '" value="' . ur_h($port) . '" placeholder="' . ($isDaemon ? '873' : '22') . '" required>';
+    echo '<blockquote class="inline_help ur-ssh-only"' . $sshOnlyStyle . '><p>' . ur_h(ur_t('The remote host\'s SSH port (usually 22). This is NOT the "Rsync Server" / rsyncd port 873 that NAS appliances expose - to talk to that, set Transport to "rsync daemon (rsyncd)" instead.')) . '</p></blockquote>';
+    echo '<blockquote class="inline_help ur-daemon-only"' . $daemonOnlyStyle . '><p>' . ur_h(ur_t('The rsync daemon (rsyncd) port - 873 unless the NAS was configured otherwise. This is NOT an SSH port.')) . '</p></blockquote>';
     echo '</dd>';
 
     // username (required)
     echo '<dt><label for="' . ur_h($idb . '_user') . '">' . ur_h(ur_t('Username')) . '</label>' . ur_required_mark() . ':</dt>';
-    echo '<dd><input type="text" id="' . ur_h($idb . '_user') . '" name="' . ur_h($p . '[username]') . '" value="' . ur_h($username) . '" required></dd>';
+    echo '<dd><input type="text" id="' . ur_h($idb . '_user') . '" name="' . ur_h($p . '[username]') . '" value="' . ur_h($username) . '" required>';
+    echo '<blockquote class="inline_help ur-daemon-only"' . $daemonOnlyStyle . '><p>' . ur_h(ur_t('The rsyncd module user, from the daemon\'s "auth users" setting or the NAS "Rsync Server" page - not an SSH account. If the module has no auth users, any value works and no secret is needed.')) . '</p></blockquote>';
+    echo '</dd>';
 
     // auth method. KEYFILE is FIRST (the default + common Unraid case): point at
     // an existing key file already on this server. KEY = a managed keychain key
     // created/imported on the Credentials tab. PASSWORD = obfuscated stored
     // password.
-    echo '<dt><label for="' . ur_h($idb . '_auth') . '">' . ur_h(ur_t('Auth method')) . '</label>:</dt>';
-    echo '<dd><select id="' . ur_h($idb . '_auth') . '" class="ur-conn-auth" name="' . ur_h($p . '[authMethod]') . '" data-idb="' . ur_h($idb) . '">';
+    echo '<dt class="ur-ssh-only"' . $sshOnlyStyle . '><label for="' . ur_h($idb . '_auth') . '">' . ur_h(ur_t('Auth method')) . '</label>:</dt>';
+    echo '<dd class="ur-ssh-only"' . $sshOnlyStyle . '><select id="' . ur_h($idb . '_auth') . '" class="ur-conn-auth" name="' . ur_h($p . '[authMethod]') . '" data-idb="' . ur_h($idb) . '">';
     foreach ([
         'KEYFILE'  => 'Existing key file on this server',
         'KEY'      => 'Managed key (from the Credentials tab)',
@@ -128,10 +176,13 @@ function ur_render_connection_card($conn, $index, array $keys): void
     // KEYFILE: path to an existing private key file on this server (shown +
     // required only when auth=KEYFILE). Nothing is uploaded/read/stored by the
     // plugin - OpenSSH reads the file in place via `ssh -i`.
-    $isKeyFile        = ($auth === 'KEYFILE');
+    // A hidden field must never be `required` - the browser refuses to submit
+    // "an invalid form control that is not focusable" - so the daemon case drops
+    // it here as well as hiding the row.
+    $isKeyFile        = ($auth === 'KEYFILE') && !$isDaemon;
     $keyFileRowStyle  = $isKeyFile ? '' : ' style="display:none"';
-    echo '<dt class="ur-auth-keyfile" id="' . ur_h($idb . '_keyfilerow_dt') . '"' . $keyFileRowStyle . '><label for="' . ur_h($idb . '_keyfile') . '">' . ur_h(ur_t('Key file path')) . '</label>' . ur_required_mark() . ':</dt>';
-    echo '<dd class="ur-auth-keyfile" id="' . ur_h($idb . '_keyfilerow_dd') . '"' . $keyFileRowStyle . '>';
+    echo '<dt class="ur-auth-keyfile ur-ssh-only" id="' . ur_h($idb . '_keyfilerow_dt') . '"' . $keyFileRowStyle . '><label for="' . ur_h($idb . '_keyfile') . '">' . ur_h(ur_t('Key file path')) . '</label>' . ur_required_mark() . ':</dt>';
+    echo '<dd class="ur-auth-keyfile ur-ssh-only" id="' . ur_h($idb . '_keyfilerow_dd') . '"' . $keyFileRowStyle . '>';
     echo '<input type="text" id="' . ur_h($idb . '_keyfile') . '" name="' . ur_h($p . '[keyFilePath]') . '" value="' . ur_h($keyFilePath) . '"' . ($isKeyFile ? ' required' : '') . ' placeholder="' . ur_h(Credentials::DEFAULT_KEY_FILE_PATH) . '">';
     echo '<blockquote class="inline_help"><p>'
         . ur_h(ur_t('Recommended if you already have an SSH key on this server. Your private key stays in ~/.ssh — '
@@ -142,10 +193,10 @@ function ur_render_connection_card($conn, $index, array $keys): void
     echo '</dd>';
 
     // KEY: managed-key picker (shown + required only when auth=KEY)
-    $isKey       = ($auth === 'KEY');
+    $isKey       = ($auth === 'KEY') && !$isDaemon;
     $keyRowStyle = $isKey ? '' : ' style="display:none"';
-    echo '<dt class="ur-auth-key" id="' . ur_h($idb . '_keyrow_dt') . '"' . $keyRowStyle . '><label for="' . ur_h($idb . '_key') . '">' . ur_h(ur_t('SSH key')) . '</label>' . ur_required_mark() . ':</dt>';
-    echo '<dd class="ur-auth-key" id="' . ur_h($idb . '_keyrow_dd') . '"' . $keyRowStyle . '>';
+    echo '<dt class="ur-auth-key ur-ssh-only" id="' . ur_h($idb . '_keyrow_dt') . '"' . $keyRowStyle . '><label for="' . ur_h($idb . '_key') . '">' . ur_h(ur_t('SSH key')) . '</label>' . ur_required_mark() . ':</dt>';
+    echo '<dd class="ur-auth-key ur-ssh-only" id="' . ur_h($idb . '_keyrow_dd') . '"' . $keyRowStyle . '>';
     echo '<select id="' . ur_h($idb . '_key') . '" name="' . ur_h($p . '[keyId]') . '"' . ($isKey ? ' required' : '') . '>';
     echo '<option value="">' . ur_h(ur_t('(select a key)')) . '</option>';
     $found = false;
@@ -174,36 +225,53 @@ function ur_render_connection_card($conn, $index, array $keys): void
     // legitimate "edit other fields, keep password" save). The JS toggle mirrors
     // this exact rule, and the server (Credentials::validateConnection) is the
     // source of truth: a PASSWORD connection with no password is rejected.
+    // A daemon card always shows this row (its authMethod is irrelevant) and
+    // never requires it: an rsyncd module with no `auth users` needs no secret at
+    // all, so forcing one would make an anonymous module impossible to save.
     $isPass        = ($auth === 'PASSWORD');
-    $passRequired  = $isPass && !$hasPass;
-    $passRowStyle  = $isPass ? '' : ' style="display:none"';
-    echo '<dt class="ur-auth-pass" id="' . ur_h($idb . '_passrow_dt') . '"' . $passRowStyle . '><label for="' . ur_h($idb . '_pass') . '">' . ur_h(ur_t('Password')) . '</label>'
+    $passRequired  = $isPass && !$hasPass && !$isDaemon;
+    $passRowStyle  = ($isPass || $isDaemon) ? '' : ' style="display:none"';
+    echo '<dt class="ur-auth-pass" id="' . ur_h($idb . '_passrow_dt') . '"' . $passRowStyle . '><label for="' . ur_h($idb . '_pass') . '">'
+        . '<span class="ur-pass-label-ssh ur-ssh-only"' . $sshOnlyStyle . '>' . ur_h(ur_t('Password')) . '</span>'
+        . '<span class="ur-pass-label-daemon ur-daemon-only"' . $daemonOnlyStyle . '>' . ur_h(ur_t('Module secret')) . '</span>'
+        . '</label>'
         . '<abbr class="ur-required ur-pass-required" title="' . ur_h(ur_t('Required')) . '"' . ($passRequired ? '' : ' style="display:none"') . '>*</abbr>:</dt>';
     echo '<dd class="ur-auth-pass" id="' . ur_h($idb . '_passrow_dd') . '"' . $passRowStyle . '>';
     echo '<input type="password" id="' . ur_h($idb . '_pass') . '" data-haspass="' . ($hasPass ? '1' : '0') . '" name="' . ur_h($p . '[password]') . '" value="" autocomplete="new-password"' . ($passRequired ? ' required' : '') . ' placeholder="' . ur_h($hasPass ? ur_t('(unchanged - leave blank to keep)') : ur_t('(not set)')) . '">';
     echo ' <span class="ur-pass-state">' . ur_h($hasPass ? ur_t('Password is set') : ur_t('No password set')) . '</span>';
-    echo '<blockquote class="inline_help"><p><strong>' . ur_h(ur_t('Warning:')) . '</strong> '
+    // Same at-rest fact either way; only the ADVICE differs, because rsyncd has
+    // no key auth to prefer - telling a daemon user to use one is unactionable.
+    echo '<blockquote class="inline_help ur-ssh-only"' . $sshOnlyStyle . '><p><strong>' . ur_h(ur_t('Warning:')) . '</strong> '
         . ur_h(ur_t('Passwords are stored OBFUSCATED (reversible), not encrypted, on the world-readable USB flash. '
             . 'Anyone with flash access can recover them. Prefer key auth, and use a dedicated low-privilege remote account.'))
+        . '</p></blockquote>';
+    echo '<blockquote class="inline_help ur-daemon-only"' . $daemonOnlyStyle . '><p><strong>' . ur_h(ur_t('Warning:')) . '</strong> '
+        . ur_h(ur_t('Module secrets are stored OBFUSCATED (reversible), not encrypted, on the world-readable USB flash. '
+            . 'Anyone with flash access can recover them. rsyncd has no key auth, so use a secret unique to this module '
+            . 'and give the module itself the narrowest export path and the lowest privileges it can do the job with.'))
         . '</p></blockquote>';
     echo '</dd>';
 
     // strict host key
-    echo '<dt><label for="' . ur_h($idb . '_strict') . '">' . ur_h(ur_t('Strict host key checking')) . '</label>:</dt>';
-    echo '<dd><select id="' . ur_h($idb . '_strict') . '" name="' . ur_h($p . '[strictHostKey]') . '">';
+    echo '<dt class="ur-ssh-only"' . $sshOnlyStyle . '><label for="' . ur_h($idb . '_strict') . '">' . ur_h(ur_t('Strict host key checking')) . '</label>:</dt>';
+    echo '<dd class="ur-ssh-only"' . $sshOnlyStyle . '><select id="' . ur_h($idb . '_strict') . '" name="' . ur_h($p . '[strictHostKey]') . '">';
     foreach (['accept-new' => 'accept-new (accept an unknown host key on connect)', 'yes' => 'yes (require a pinned host key)', 'no' => 'no (do not verify - insecure)'] as $val => $lbl) {
         $sel = ($strict === $val) ? ' selected' : '';
         echo '<option value="' . ur_h($val) . '"' . $sel . '>' . ur_h(ur_t($lbl)) . '</option>';
     }
     echo '</select></dd>';
 
-    // connect timeout
-    echo '<dt><label for="' . ur_h($idb . '_timeout') . '">' . ur_h(ur_t('Connect timeout (s)')) . '</label>:</dt>';
-    echo '<dd><input type="text" id="' . ur_h($idb . '_timeout') . '" name="' . ur_h($p . '[connectTimeout]') . '" value="' . ur_h($timeout) . '" placeholder="10"></dd>';
+    // connect timeout. SSH-ONLY: connectTimeout is read at exactly one site,
+    // Ssh::buildSshArgv's `-o ConnectTimeout=N`, so on a daemon card it
+    // configures nothing and showing it promises a bound that does not exist.
+    // The daemon equivalent is the --contimeout rsync option, whose own help
+    // already says it applies to daemon transport only.
+    echo '<dt class="ur-ssh-only"' . $sshOnlyStyle . '><label for="' . ur_h($idb . '_timeout') . '">' . ur_h(ur_t('Connect timeout (s)')) . '</label>:</dt>';
+    echo '<dd class="ur-ssh-only"' . $sshOnlyStyle . '><input type="text" id="' . ur_h($idb . '_timeout') . '" name="' . ur_h($p . '[connectTimeout]') . '" value="' . ur_h($timeout) . '" placeholder="10"></dd>';
 
     // host key (discover) - textarea holds the pinned key; button fills it
-    echo '<dt><label for="' . ur_h($idb . '_hostkey') . '">' . ur_h(ur_t('Pinned host key')) . '</label>:</dt>';
-    echo '<dd>';
+    echo '<dt class="ur-ssh-only"' . $sshOnlyStyle . '><label for="' . ur_h($idb . '_hostkey') . '">' . ur_h(ur_t('Pinned host key')) . '</label>:</dt>';
+    echo '<dd class="ur-ssh-only"' . $sshOnlyStyle . '>';
     echo '<textarea id="' . ur_h($idb . '_hostkey') . '" name="' . ur_h($p . '[remoteHostKey]') . '" rows="2" placeholder="' . ur_h(ur_t('Use "Discover host key" to fetch this from the host')) . '">' . ur_h($hostKey) . '</textarea>';
     echo '<div><button type="button" class="ur-discover-hostkey" data-idb="' . ur_h($idb) . '">' . ur_h(ur_t('Discover host key')) . '</button></div>';
     echo '</dd>';
@@ -267,7 +335,7 @@ function ur_render_connection_card($conn, $index, array $keys): void
 <?php endif; ?>
 
 <p>
-  <?=_('Reusable SSH connections. Jobs reference a connection by its id (shown here by name); define a connection once and point any number of jobs at it. To authenticate with a plugin-managed key, generate or import it first on the Credentials tab')?>.
+  <?=_('Reusable connections, either over SSH or straight to an rsync daemon (rsyncd). Jobs reference a connection by its id (shown here by name); define a connection once and point any number of jobs at it. To authenticate with a plugin-managed key, generate or import it first on the Credentials tab')?>.
 </p>
 
 <blockquote class="inline_help">
@@ -290,6 +358,7 @@ function ur_render_connection_card($conn, $index, array $keys): void
   <thead>
     <tr>
       <th><?=_('Name')?></th>
+      <th><?=_('Transport')?></th>
       <th><?=_('Host')?></th>
       <th><?=_('User')?></th>
       <th><?=_('Auth')?></th>
@@ -297,15 +366,19 @@ function ur_render_connection_card($conn, $index, array $keys): void
   </thead>
   <tbody>
     <?php if (empty($connections)): ?>
-      <tr><td colspan="4"><?=_('No connections yet')?>.</td></tr>
+      <tr><td colspan="5"><?=_('No connections yet')?>.</td></tr>
     <?php else: foreach ($connections as $c):
         $cc = Credentials::mergeConnection($c);
     ?>
       <tr>
         <td><?=htmlspecialchars((string)$cc['name'], ENT_QUOTES, 'UTF-8')?></td>
+        <td><?=htmlspecialchars((string)$cc['transport'], ENT_QUOTES, 'UTF-8')?></td>
         <td><?=htmlspecialchars((string)$cc['host'] . ':' . (string)$cc['port'], ENT_QUOTES, 'UTF-8')?></td>
         <td><?=htmlspecialchars((string)$cc['username'], ENT_QUOTES, 'UTF-8')?></td>
-        <td><?=htmlspecialchars((string)$cc['authMethod'], ENT_QUOTES, 'UTF-8')?></td>
+        <?php /* A daemon connection has no SSH auth method; its stored authMethod
+                 is whatever the hidden select happened to post, so showing it
+                 would be a lie. */ ?>
+        <td><?=htmlspecialchars((string)$cc['transport'] === 'DAEMON' ? 'rsyncd' : (string)$cc['authMethod'], ENT_QUOTES, 'UTF-8')?></td>
       </tr>
     <?php endforeach; endif; ?>
   </tbody>
@@ -578,10 +651,83 @@ ur_emit_form_enable_assets();
     }
   }
 
+  /* ---- transport conditional fields ----
+   * SSH builds an `ssh` command line; DAEMON speaks the rsyncd wire protocol
+   * straight to a TCP port, so auth method, key file, managed key, strict host
+   * key and pinned host key have no meaning there. Three classes, toggled by
+   * setting style.display directly (there is deliberately NO CSS rule for any of
+   * them - a rule would fight the page's own Help toggle on the .inline_help
+   * boxes that carry ur-ssh-only / ur-daemon-only):
+   *   .ur-ssh-only     shown on SSH, hidden on DAEMON;
+   *   .ur-daemon-only  the reverse;
+   *   .ur-daemon-warn  forced to display:block on DAEMON, because the base
+   *                    stylesheet ships `.inline_help {display:none}` until the
+   *                    page Help toggle is on and the unencrypted-protocol
+   *                    warning must not be behind that toggle.
+   * This runs BEFORE syncAuthRequired (it calls it on the SSH branch), so an SSH
+   * card's auth-specific hiding is applied last and wins. */
+  function syncConnTransport(sel) {
+    if (!sel || !sel.getAttribute) { return; }
+    var idb = sel.getAttribute('data-idb'); if (!idb) { return; }
+    var card = sel.closest ? sel.closest('.ur-conn-card') : null; if (!card) { return; }
+    var isDaemon = (sel.value === 'DAEMON');
+
+    Array.prototype.forEach.call(card.querySelectorAll('.ur-ssh-only'),    function (el) { el.style.display = isDaemon ? 'none'  : '';      });
+    Array.prototype.forEach.call(card.querySelectorAll('.ur-daemon-only'), function (el) { el.style.display = isDaemon ? ''      : 'none';  });
+    Array.prototype.forEach.call(card.querySelectorAll('.ur-daemon-warn'), function (el) { el.style.display = isDaemon ? 'block' : 'none';  });
+
+    if (isDaemon) {
+      /* A hidden `required` field is "not focusable" and would block Apply. */
+      ['_keyfile', '_key'].forEach(function (s) {
+        var el = document.getElementById(idb + s); if (el) { el.required = false; }
+      });
+      /* One password input per card - the SAME one, relabelled. Always visible on
+         a daemon card (its authMethod is irrelevant) and never required (an
+         anonymous module needs no secret). */
+      ['_passrow_dt', '_passrow_dd'].forEach(function (s) {
+        var el = document.getElementById(idb + s); if (el) { el.style.display = ''; }
+      });
+      var passInput = document.getElementById(idb + '_pass');
+      if (passInput) { passInput.required = false; }
+      var passDt   = document.getElementById(idb + '_passrow_dt');
+      var passMark = passDt ? passDt.querySelector('.ur-pass-required') : null;
+      if (passMark) { passMark.style.display = 'none'; }
+    } else {
+      var authSel = document.getElementById(idb + '_auth');
+      if (authSel) { syncAuthRequired(authSel); }   /* re-apply the auth-specific hiding */
+    }
+    syncConnPortDefault(sel, idb);
+  }
+
+  function syncConnPortDefault(sel, idb) {
+    var port = document.getElementById(idb + '_port'); if (!port) { return; }
+    var v = (port.value || '').trim();
+    var isDaemon = (sel.value === 'DAEMON');
+    port.placeholder = isDaemon ? '873' : '22';
+    /* Rewrite the VALUE only when the transport actually changed under the user's
+       hands, and then only while the field still holds the OTHER transport's
+       default - so a port someone deliberately chose is never clobbered. The
+       seeding pass on page load must touch NO stored port: an SSH connection left
+       on 873 is exactly the misconfiguration the plugin warns about, and silently
+       rewriting it to 22 on mere page view (so the next Apply persists a value
+       nobody typed) is worse than the warning. */
+    var prev = sel._urLastTransport;
+    sel._urLastTransport = sel.value;
+    if (prev === undefined || prev === sel.value) { return; }
+    if (isDaemon) { if (v === '' || v === '22')  { port.value = '873'; } }
+    else          { if (v === '' || v === '873') { port.value = '22';  } }
+  }
+
+  function syncAllConnTransport() {
+    Array.prototype.forEach.call(document.querySelectorAll('.ur-conn-transport'), syncConnTransport);
+  }
+
   document.addEventListener('change', function (ev) {
     var t = ev.target;
     if (t && t.classList && t.classList.contains('ur-conn-auth')) {
       syncAuthRequired(t);
+    } else if (t && t.classList && t.classList.contains('ur-conn-transport')) {
+      syncConnTransport(t);
     }
   });
 
@@ -778,9 +924,11 @@ ur_emit_form_enable_assets();
       wrap.innerHTML = html.trim();
       var card = wrap.firstElementChild;
       document.getElementById('ur-conns-container').appendChild(card);
-      /* A new card defaults to KEYFILE auth (the template default); seed its
-       * required state to match. */
+      /* A new card defaults to SSH transport + KEYFILE auth (the template
+       * defaults); seed its required/visibility state to match. Transport LAST:
+       * it re-applies the auth-specific hiding on its SSH branch. */
       syncAllAuthRequired();
+      syncAllConnTransport();
     });
   }
 
@@ -828,7 +976,9 @@ ur_emit_form_enable_assets();
   }
   wireForm('ur-conns-form', 'ur-conns-result');
 
-  /* Seed the conditional-required state for all initially-rendered cards. */
+  /* Seed the conditional-required state for all initially-rendered cards.
+   * Transport LAST: it re-applies the auth-specific hiding on its SSH branch. */
   syncAllAuthRequired();
+  syncAllConnTransport();
 })();
 </script>

@@ -575,6 +575,20 @@ function ur_action_save_config(): void
         foreach (Job::validateRsyncOptions($config['global']['defaultRsyncOptions']) as $e) {
             $allErrors[] = 'Global settings: ' . $e;
         }
+
+        // Job::validate's --contimeout warning reads the JOB's own options, so a
+        // job on "use global config" - whose own contimeout is always '' - never
+        // triggers it, and Job::validateRsyncOptions has no transport to reason
+        // about. That leaves the one place a connect timeout is naturally set
+        // ONCE with no signal at all, while Rsync::buildArgv silently drops the
+        // value for every SSH and Local job that inherits it (rsync main.c:1558
+        // exits 1 for --contimeout on any non-daemon transfer). Warn here, at the
+        // field, rather than on every job that happens to use the defaults.
+        if (trim((string) ($config['global']['defaultRsyncOptions']['contimeout'] ?? '')) !== '') {
+            $allWarnings[] = 'Global settings: the --contimeout option only applies to rsync daemon '
+                . '(rsyncd) transport; rsync rejects it outright on SSH and Local transfers, so it is '
+                . 'not sent for jobs on those transports.';
+        }
     }
 
     // logDir (persistent log directory): validate/confine. A non-empty value that
@@ -787,7 +801,11 @@ function ur_normalize_key_for_save(array $raw, array $existing): array
  * special: an empty submitted password PRESERVES the existing stored
  * (obfuscated) password rather than clearing it (so editing other fields
  * doesn't wipe a set password); a non-empty submitted password is obfuscated
- * and replaces it. Switching auth away from PASSWORD clears the stored password.
+ * and replaces it. Switching auth away from PASSWORD clears the stored password
+ * - except on a DAEMON connection, where the same field holds the rsyncd module
+ * secret and the (hidden) auth method has nothing to say about it. Changing the
+ * TRANSPORT also clears it: a secret typed for one protocol is never carried
+ * over to the other.
  *
  * @param array<string,mixed> $raw      one raw connection row
  * @param array<string,mixed> $existing loaded credentials structure
@@ -795,11 +813,28 @@ function ur_normalize_key_for_save(array $raw, array $existing): array
  */
 function ur_normalize_connection_for_save(array $raw, array $existing): array
 {
+    // Resolve the PREVIOUSLY STORED record BEFORE the merge: the transport
+    // default has to come from it, not from a bare 'SSH'. A Connections tab
+    // left open across the upgrade has no Transport control, so its POST omits
+    // the field entirely - and defaulting an absent field to SSH would not just
+    // reset the port, it would flip the password predicate below and DESTROY
+    // the stored module secret. An absent field means "unchanged", never "SSH".
+    $id            = trim((string) ($raw['id'] ?? ''));
+    $prev          = ($id !== '') ? Credentials::findConnection($existing, $id) : null;
+    $submittedPass = isset($raw['password']) ? (string) $raw['password'] : '';
+
     $conn = Credentials::mergeConnection([
         'id'             => isset($raw['id'])             ? (string) $raw['id']             : '',
         'name'           => isset($raw['name'])           ? (string) $raw['name']           : '',
+        'transport'      => isset($raw['transport'])      ? (string) $raw['transport']      : (string) ($prev['transport'] ?? 'SSH'),
         'host'           => isset($raw['host'])           ? (string) $raw['host']           : '',
-        'port'           => isset($raw['port'])           ? (string) $raw['port']           : 22,
+        // '' rather than a literal 22: mergeConnection derives the port default
+        // from the RESOLVED transport (22 for SSH, 873 for DAEMON) and treats an
+        // out-of-range value as "use the default", which '' is. A hard-coded 22
+        // here would silently pin every new daemon connection to the SSH port.
+        // An ABSENT field is restored from $prev just below the merge, where the
+        // resolved transport is known.
+        'port'           => isset($raw['port'])           ? (string) $raw['port']           : '',
         'username'       => isset($raw['username'])       ? (string) $raw['username']       : '',
         // New connections default to KEYFILE (the common Unraid case); an
         // explicit submitted value always wins.
@@ -812,18 +847,39 @@ function ur_normalize_connection_for_save(array $raw, array $existing): array
         // password handled below
     ]);
 
-    $id            = $conn['id'];
-    $submittedPass = isset($raw['password']) ? (string) $raw['password'] : '';
-    $prev          = ($id !== '') ? Credentials::findConnection($existing, $id) : null;
+    // An ABSENT port means "unchanged", exactly like transport above - but only
+    // while the transport is unchanged too: a stored 22 belonged to the SSH
+    // connection this card used to be, so on a flip the merged, transport-correct
+    // default (873) is the right answer. Without the first half a stale-tab POST
+    // would silently reset a deliberate custom daemon port (say 8730) to 873.
+    if (!isset($raw['port']) && $prev !== null
+        && strtoupper(trim((string) ($prev['transport'] ?? 'SSH'))) === $conn['transport']) {
+        $prevPort = (int) ($prev['port'] ?? 0);
+        if ($prevPort >= 1 && $prevPort <= 65535) {
+            $conn['port'] = $prevPort;
+        }
+    }
 
-    if ($conn['authMethod'] !== 'PASSWORD') {
-        // KEY auth: never carry a password.
+    if ($conn['transport'] !== 'DAEMON' && $conn['authMethod'] !== 'PASSWORD') {
+        // KEY auth: never carry a password. A DAEMON connection is exempt: its
+        // auth-method select is hidden on the card and still POSTs whatever it
+        // last held (display:none does not suppress submission), so gating the
+        // module secret on it would throw away the secret of every daemon
+        // connection whose card was first created as KEYFILE.
         $conn['password'] = '';
     } elseif ($submittedPass !== '') {
         // New/changed password -> obfuscate and store.
         $conn['password'] = Credentials::obfuscate($submittedPass);
-    } elseif ($prev !== null) {
-        // Empty submission -> preserve the existing stored (obfuscated) value.
+    } elseif ($prev !== null && strtoupper(trim((string) ($prev['transport'] ?? 'SSH'))) === $conn['transport']) {
+        // Empty submission -> preserve the existing stored (obfuscated) value,
+        // but ONLY while the transport is unchanged. A secret is scoped to the
+        // protocol it was typed for: the auth <select> is hidden (not disabled)
+        // on a daemon card, so it keeps posting PASSWORD, and without this arm a
+        // DAEMON -> SSH flip would carry the rsyncd MODULE SECRET over as the
+        // SSH account password and offer it to sshd on the next run - and an SSH
+        // -> DAEMON flip would send the account password to the daemon. Falls
+        // through to '' below, which is also the only way to blank a stored
+        // module secret through the UI (flip away, apply, flip back).
         $conn['password'] = (string) ($prev['password'] ?? '');
     } else {
         $conn['password'] = '';
@@ -841,6 +897,15 @@ function ur_normalize_connection_for_save(array $raw, array $existing): array
         // non-KEYFILE connection we store it empty so the on-disk record reflects
         // that no key file is in use.
         $conn['keyFilePath'] = '';
+    }
+    if ($conn['transport'] === 'DAEMON') {
+        // Same display:none-still-submits problem as the password above: a card
+        // switched to DAEMON still posts whatever the hidden SSH controls held.
+        // remoteHostKey in particular is cleared by nothing else, ever, so a
+        // stale pinned SSH host key would sit on a daemon record forever.
+        $conn['keyId']         = '';
+        $conn['keyFilePath']   = '';
+        $conn['remoteHostKey'] = '';
     }
 
     return $conn;
@@ -951,6 +1016,18 @@ function ur_action_save_credentials(): void
         $creds['keys'] = $resultKeys;
     }
 
+    // Snapshot the PRE-SAVE connections before the block below overwrites
+    // $creds['connections']: the post-save warning loop needs the old transport
+    // of each connection to spot a transport change, and after the overwrite it
+    // is unrecoverable.
+    $prevConns = (isset($creds['connections']) && is_array($creds['connections'])) ? $creds['connections'] : [];
+
+    // Ids of the connections THIS request actually submitted (edited or added).
+    // The post-save warning loop is scoped to them: a keys-only save, or a
+    // connections save that omitted a card, must not lecture the user about a
+    // record it never touched.
+    $touchedIds = [];
+
     // --- connections (update existing by id; preserve omitted; append new) ---
     if ($hasConns) {
         $rawConns = $connsSubmitted ? array_values($_POST['connections']) : [];
@@ -970,6 +1047,7 @@ function ur_action_save_credentials(): void
                 // surfaces the problem - we never silently drop a row that
                 // carries an id (that path is deleteConnection's job).
                 $submittedById[$conn['id']] = $conn;
+                $touchedIds[$conn['id']]    = true;
             } elseif ($hasContent) {
                 $appended[] = $conn;                    // a brand-new connection
             }
@@ -993,7 +1071,8 @@ function ur_action_save_credentials(): void
                 'c-',
                 array_column($resultConns, 'id')
             );
-            $resultConns[] = $conn;
+            $touchedIds[$conn['id']] = true;
+            $resultConns[]           = $conn;
         }
 
         // Validate the whole resulting set (KEY connections' keyId is checked
@@ -1021,19 +1100,81 @@ function ur_action_save_credentials(): void
         return;
     }
 
-    // Warn (without failing the save) about a connection pointed at the rsync
-    // DAEMON rather than SSH - the single most confusing way to misconfigure
-    // this plugin, since the daemon accepts the TCP connection and then closes
-    // it, which surfaces much later as an opaque "not running SSH" error.
+    // Warn (without failing the save) about an SSH connection pointed at the
+    // rsync DAEMON - the single most confusing way to misconfigure this plugin,
+    // since the daemon accepts the TCP connection and then closes it, which
+    // surfaces much later as an opaque "not running SSH" error - and, now that
+    // DAEMON is a real transport, about the reverse mistake too.
     $warnings = [];
+
+    // Needed only to NAME the jobs that reference a connection whose transport
+    // just changed. An unreadable config must never fail a save that has already
+    // been written, so it degrades to "no dependents named".
+    $cfgForDeps = null;
+    try {
+        $cfgForDeps = Config::load();
+    } catch (Throwable $e) {
+        $cfgForDeps = null;
+    }
+
     foreach ($creds['connections'] as $c) {
+        // Only warn about what this request submitted. Without this a keys-only
+        // save (renaming an SSH key, no connections in the POST at all) would
+        // emit the unencrypted-protocol warning for every stored daemon
+        // connection, none of which the user was looking at.
+        if (!isset($touchedIds[(string) ($c['id'] ?? '')])) {
+            continue;
+        }
+
+        $label         = trim((string) ($c['name'] ?? '')) !== '' ? (string) $c['name'] : (string) ($c['host'] ?? '');
+        $connTransport = (string) ($c['transport'] ?? 'SSH');
+
         $note = Credentials::rsyncDaemonNote(
             (int) ($c['port'] ?? 0),
-            (string) ($c['host'] ?? '')
+            (string) ($c['host'] ?? ''),
+            $connTransport
         );
         if ($note !== '') {
-            $label = trim((string) ($c['name'] ?? '')) !== '' ? (string) $c['name'] : (string) ($c['host'] ?? '');
             $warnings[] = ($label !== '' ? $label . ': ' : '') . $note;
+        }
+
+        if ($connTransport === 'DAEMON') {
+            // The digest is NEGOTIATED, not fixed: authenticate.c:76/:90 hash with
+            // valid_auth_checksums.negotiated_nni after negotiate_daemon_auth()
+            // (:242/:355), so MD4 is the floor for an old peer, not the ceiling.
+            // Saying "weak MD4" flatly would be a false claim about rsync; the
+            // load-bearing half is that the payload is in clear either way.
+            $warnings[] = ($label !== '' ? $label . ': ' : '')
+                . 'The rsync daemon protocol is not encrypted. Only a challenge/response (MD4 with old peers) '
+                . 'protects the module secret, and file names and file contents travel in clear. Use SSH '
+                . 'transport on any untrusted network.';
+        }
+
+        // A connection's transport is a referential constraint on the jobs that
+        // reference it (Job::validate cross-checks the pair), but saveCredentials
+        // never re-validates jobs - unlike deleteConnection, which disables
+        // dependents. Warn, never 422: the save already succeeded and the user
+        // may be mid-migration.
+        $prev = Credentials::findConnection(['connections' => $prevConns], (string) ($c['id'] ?? ''));
+        if ($prev !== null && strtoupper(trim((string) ($prev['transport'] ?? 'SSH'))) !== $connTransport) {
+            // ur_normalize_connection_for_save refuses to carry a stored secret
+            // across a transport change. Say so, or the drop is silent.
+            if ((string) ($prev['password'] ?? '') !== '' && (string) ($c['password'] ?? '') === '') {
+                $warnings[] = ($label !== '' ? $label . ': ' : '')
+                    . 'The transport changed, so the previously stored password / module secret was cleared: '
+                    . 'a secret typed for one protocol is never reused for the other. Type a new one if this '
+                    . 'Connection needs it.';
+            }
+            $deps  = Credentials::usedBy($creds, 'connection', (string) ($c['id'] ?? ''), $cfgForDeps);
+            $names = array_map(static fn($j) => (string) $j['name'], $deps['jobs'] ?? []);
+            if ($names !== []) {
+                $warnings[] = ($label !== '' ? $label . ': ' : '') . sprintf(
+                    'Transport changed to %s. These jobs still reference this Connection and will fail until '
+                    . 'their own Transport matches: %s.',
+                    $connTransport,
+                    implode(', ', $names)
+                );
+            }
         }
     }
 
@@ -1379,6 +1520,11 @@ function ur_action_discover_host_key(): void
 /**
  * POST testConnection: probe a saved connection by id and classify the result.
  * Never returns secrets.
+ *
+ * Transport-dispatched: an SSH connection gets the ssh probe; a DAEMON
+ * connection has no ssh to probe, so it gets an rsync module listing instead.
+ * Both branches answer with the SAME shape - ok / reason / message / modules -
+ * so the client has one renderer; `modules` is always empty on the SSH branch.
  */
 function ur_action_test_connection(): void
 {
@@ -1394,8 +1540,29 @@ function ur_action_test_connection(): void
         sendError('A connection id is required.', 422);
         return;
     }
-    if (Credentials::findConnection($creds, $id) === null) {
+    $found = Credentials::findConnection($creds, $id);
+    if ($found === null) {
         sendError('Connection not found.', 404);
+        return;
+    }
+
+    $conn = Credentials::mergeConnection($found);
+    if ((string) $conn['transport'] === 'DAEMON') {
+        // Mirrors ur_action_discover_host_key above: cap the PHP execution time
+        // of THIS request above the probe's own hard deadline, so a wedged
+        // request can never live forever and hold a php-fpm worker. Skipped in
+        // tests (no live request to bound); set_time_limit also RESETS the
+        // timer, so time already spent doesn't count against it.
+        if (!defined('UR_HANDLER_TESTING') && function_exists('set_time_limit')) {
+            @set_time_limit(Rsync::DAEMON_PROBE_TIMEOUT + 10);
+        }
+        $res = Rsync::listDaemonModules($conn);
+        sendResponse([
+            'ok'      => (bool) $res['ok'],
+            'reason'  => (string) $res['reason'],
+            'message' => (string) $res['message'],
+            'modules' => array_values($res['modules']),
+        ], 200);
         return;
     }
 
@@ -1407,6 +1574,9 @@ function ur_action_test_connection(): void
         'ok'      => (bool) $res['ok'],
         'reason'  => (string) $res['reason'],
         'message' => (string) $res['message'],
+        // Always present so the client has one response shape to render; an ssh
+        // probe never lists modules.
+        'modules' => [],
     ], 200);
 }
 
@@ -2167,7 +2337,14 @@ function ur_action_preview_options(): void
         ? $_POST['rsyncOptions']
         : [];
 
-    $tokens = Rsync::optionTokens(Job::normalizeRsyncOptions($optsIn));
+    // The job's transport, when the caller knows it (the Global Settings block
+    // has none). It changes the answer: --contimeout is emitted only on rsync
+    // daemon transport, because rsync refuses it outright anywhere else, so a
+    // transport-blind preview would promise a flag the run drops. Unvalidated on
+    // purpose - optionTokens treats every non-DAEMON value the same way.
+    $transport = isset($_POST['transport']) && is_string($_POST['transport']) ? $_POST['transport'] : null;
+
+    $tokens = Rsync::optionTokens(Job::normalizeRsyncOptions($optsIn), $transport);
 
     sendResponse(['ok' => true, 'tokens' => array_values($tokens)], 200);
 }
