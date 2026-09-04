@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -588,6 +589,812 @@ final class RsyncTest extends TestCase
         } finally {
             Rsync::$rsyncPathOverride = null;
         }
+    }
+
+    // --- rsync DAEMON transport (issue #139) --------------------------------
+
+    /**
+     * A deliberately busy, fully explicit option set shared by the golden argv
+     * regressions and the daemon argv assertions, so both sides compare like
+     * with like: -a with two implied options left ON (they emit no negation)
+     * and the rest negated, three scalars, and three filters in an order that
+     * only survives if nothing sorts, groups or dedupes them.
+     */
+    private function busyOpts(): array
+    {
+        $opts = $this->emptyOpts();
+        $opts['archive']         = true;
+        $opts['perms']           = true;   // implied by -a and ticked -> no --no-perms
+        $opts['times']           = true;   // ditto
+        $opts['compress']        = true;
+        $opts['delete']          = true;
+        $opts['bwlimit']         = '2000';
+        $opts['tempDir']         = '/mnt/user/tmp';
+        $opts['remoteRsyncPath'] = '/usr/local/bin/rsync';
+        $opts['filters']         = [
+            ['type' => 'include', 'pattern' => '*/'],
+            ['type' => 'include', 'pattern' => 'A*'],
+            ['type' => 'exclude', 'pattern' => '*'],
+        ];
+        return $opts;
+    }
+
+    /** The transport-pieces bag Runner hands buildArgv for a DAEMON job. */
+    private function daemonPieces(array $over = []): array
+    {
+        return $over + [
+            'daemon'       => true,
+            'daemonPort'   => 873,
+            'passwordFile' => '/rt/pass/tok',
+            // Runner ALWAYS sets this (it is fed to Ssh::childEnv unguarded).
+            'sshEnv'       => [],
+        ];
+    }
+
+    /** A merged DAEMON connection, as Credentials::mergeConnection returns it. */
+    private function daemonConn(array $over = []): array
+    {
+        return $over + [
+            'transport' => 'DAEMON',
+            'host'      => 'nas.local',
+            'username'  => 'moduser',
+            'port'      => 873,
+        ];
+    }
+
+    /**
+     * GOLDEN REGRESSION. The SSH argv is frozen byte-for-byte at a3ed950's
+     * output: adding DAEMON transport must not move, add or drop a single
+     * token on the SSH path. Verified against a checkout of a3ed950, not
+     * against the current implementation.
+     */
+    public function testGoldenSshArgvIsByteIdenticalToTheReleasedBuild(): void
+    {
+        $argv = Rsync::buildArgv(
+            $this->busyOpts(),
+            'verbose',
+            '/rt/logs/j1/run.log',
+            '/mnt/user/src/',
+            'bob@nas:/data/',
+            ['dashE' => "'ssh' '-i' '/tmp/k'", 'sshEnv' => []],
+            false
+        );
+        $this->assertSame([
+            '/usr/bin/rsync',
+            '-a',
+            '--no-recursive',
+            '--no-links',
+            '--no-owner',
+            '--no-group',
+            '--no-D',
+            '-z',
+            '-t',
+            '-p',
+            '--delete',
+            '--bwlimit=2000',
+            '--temp-dir=/mnt/user/tmp',
+            '--rsync-path=/usr/local/bin/rsync',
+            '--include=*/',
+            '--include=A*',
+            '--exclude=*',
+            '-vv',
+            '--info=progress2,stats2',
+            '--itemize-changes',
+            '--log-file=/rt/logs/j1/run.log',
+            '-e',
+            "'ssh' '-i' '/tmp/k'",
+            '--',
+            '/mnt/user/src/',
+            'bob@nas:/data/',
+        ], $argv);
+    }
+
+    /** GOLDEN REGRESSION. Same contract for a LOCAL job: no -e, no daemon flag. */
+    public function testGoldenLocalArgvIsByteIdenticalToTheReleasedBuild(): void
+    {
+        $argv = Rsync::buildArgv(
+            $this->busyOpts(),
+            'normal',
+            '/rt/logs/j2/run.log',
+            '/mnt/user/a/',
+            '/mnt/disk1/b/',
+            null,
+            false
+        );
+        $this->assertSame([
+            '/usr/bin/rsync',
+            '-a',
+            '--no-recursive',
+            '--no-links',
+            '--no-owner',
+            '--no-group',
+            '--no-D',
+            '-z',
+            '-t',
+            '-p',
+            '--delete',
+            '--bwlimit=2000',
+            '--temp-dir=/mnt/user/tmp',
+            '--rsync-path=/usr/local/bin/rsync',
+            '--include=*/',
+            '--include=A*',
+            '--exclude=*',
+            '-v',
+            '--info=stats2,progress2',
+            '--log-file=/rt/logs/j2/run.log',
+            '--',
+            '/mnt/user/a/',
+            '/mnt/disk1/b/',
+        ], $argv);
+    }
+
+    /**
+     * The whole DAEMON argv, asserted as one array rather than by substring:
+     * the filters keep their stored order, the -a negations still sit
+     * immediately after the -a they negate, --log-file is still emitted (D18),
+     * --contimeout IS emitted here (daemon is the only transport rsync accepts
+     * it on), and --port then --password-file occupy exactly the slot -e used
+     * to - between --dry-run and the -- terminator.
+     */
+    public function testBuildArgvDaemonEmitsPortAndPasswordFileInTheDashESlot(): void
+    {
+        $opts = $this->busyOpts();
+        $opts['contimeout'] = '15';
+        $argv = Rsync::buildArgv(
+            $opts,
+            'verbose',
+            '/rt/logs/j3/run.log',
+            'bob@nas::rsync_bkp/photos/',
+            '/mnt/user/dst/',
+            $this->daemonPieces(),
+            false
+        );
+        $this->assertSame([
+            '/usr/bin/rsync',
+            '-a',
+            '--no-recursive',
+            '--no-links',
+            '--no-owner',
+            '--no-group',
+            '--no-D',
+            '-z',
+            '-t',
+            '-p',
+            '--delete',
+            '--bwlimit=2000',
+            '--contimeout=15',
+            '--temp-dir=/mnt/user/tmp',
+            '--rsync-path=/usr/local/bin/rsync',
+            '--include=*/',
+            '--include=A*',
+            '--exclude=*',
+            '-vv',
+            '--info=progress2,stats2',
+            '--itemize-changes',
+            '--log-file=/rt/logs/j3/run.log',
+            '--port=873',
+            '--password-file=/rt/pass/tok',
+            '--',
+            'bob@nas::rsync_bkp/photos/',
+            '/mnt/user/dst/',
+        ], $argv);
+    }
+
+    /**
+     * An ANONYMOUS module (no stored secret) emits --port but NO
+     * --password-file: an empty password file makes rsync exit 1 with "failed
+     * to read a password from %s" (authenticate.c:215), so omitting the flag is
+     * the only correct behaviour.
+     */
+    public function testBuildArgvDaemonAnonymousModuleOmitsThePasswordFile(): void
+    {
+        $argv = Rsync::buildArgv(
+            $this->busyOpts(),
+            'normal',
+            '/rt/logs/j4/run.log',
+            'bob@nas::pub',
+            '/mnt/user/dst/',
+            $this->daemonPieces(['daemonPort' => 8730, 'passwordFile' => '']),
+            true
+        );
+        $this->assertSame([
+            '/usr/bin/rsync',
+            '-a',
+            '--no-recursive',
+            '--no-links',
+            '--no-owner',
+            '--no-group',
+            '--no-D',
+            '-z',
+            '-t',
+            '-p',
+            '--delete',
+            '--bwlimit=2000',
+            '--temp-dir=/mnt/user/tmp',
+            '--rsync-path=/usr/local/bin/rsync',
+            '--include=*/',
+            '--include=A*',
+            '--exclude=*',
+            '-v',
+            '--info=stats2,progress2',
+            '--log-file=/rt/logs/j4/run.log',
+            '--dry-run',
+            '--port=8730',
+            '--',
+            'bob@nas::pub',
+            '/mnt/user/dst/',
+        ], $argv);
+        foreach ($argv as $tok) {
+            $this->assertFalse(
+                str_starts_with($tok, '--password-file'),
+                "an anonymous module must emit no --password-file (got: $tok)"
+            );
+        }
+    }
+
+    /**
+     * STRUCTURAL mutual exclusion. rsync does NOT reject `-e` beside a
+     * "host::module" operand - it silently switches to daemon-over-remote-shell
+     * (main.c:1435), which would hand the module secret to whatever the default
+     * remote shell reaches. So a bag carrying BOTH keys must still emit no -e.
+     */
+    public function testBuildArgvDaemonNeverEmitsDashEEvenWhenTheBagCarriesOne(): void
+    {
+        $argv = Rsync::buildArgv(
+            $this->emptyOpts(),
+            'quiet',
+            '/rt/r.log',
+            'bob@nas::mod',
+            '/mnt/user/dst/',
+            $this->daemonPieces(['dashE' => "'ssh' '-i' '/rt/keys/tok'"])
+        );
+        $this->assertSame([
+            '/usr/bin/rsync',
+            '-q',
+            '--log-file=/rt/r.log',
+            '--port=873',
+            '--password-file=/rt/pass/tok',
+            '--',
+            'bob@nas::mod',
+            '/mnt/user/dst/',
+        ], $argv);
+        $this->assertNotContains('-e', $argv, 'daemon transport must never emit -e, at any index');
+        $this->assertNotContains("'ssh' '-i' '/rt/keys/tok'", $argv, 'the -e payload must not leak either');
+    }
+
+    /**
+     * The exclusion is gated on the explicit `daemon` key, NOT on "is there a
+     * password file" - an anonymous daemon connection carries neither a passfile
+     * nor a port-specific hint, and any emptiness-based gate would let -e back
+     * in for exactly that connection. This is the case an emptiness test misses.
+     */
+    public function testBuildArgvDaemonWithoutAPassFileStillNeverEmitsDashE(): void
+    {
+        $argv = Rsync::buildArgv(
+            $this->emptyOpts(),
+            'quiet',
+            '/rt/r.log',
+            'bob@nas::mod',
+            '/mnt/user/dst/',
+            $this->daemonPieces(['passwordFile' => '', 'dashE' => "'ssh' '-o' 'BatchMode=yes'"])
+        );
+        $this->assertSame([
+            '/usr/bin/rsync',
+            '-q',
+            '--log-file=/rt/r.log',
+            '--port=873',
+            '--',
+            'bob@nas::mod',
+            '/mnt/user/dst/',
+        ], $argv);
+        $this->assertNotContains('-e', $argv);
+    }
+
+    /**
+     * --port is emitted UNCONDITIONALLY for a daemon run, with no "only if it
+     * differs from 873" branch, so a wrong port is visible in the run log; a
+     * bag that omits it falls back to the rsyncd default rather than to 22.
+     */
+    public function testBuildArgvDaemonAlwaysEmitsAPortAndDefaultsToRsyncd(): void
+    {
+        $bag = ['daemon' => true, 'sshEnv' => []];   // no daemonPort, no passwordFile
+        $argv = Rsync::buildArgv($this->emptyOpts(), 'quiet', '/rt/r.log', 'bob@nas::m', '/d/', $bag);
+        $this->assertSame([
+            '/usr/bin/rsync',
+            '-q',
+            '--log-file=/rt/r.log',
+            '--port=' . Credentials::RSYNCD_PORT,
+            '--',
+            'bob@nas::m',
+            '/d/',
+        ], $argv);
+        $this->assertSame(873, Credentials::RSYNCD_PORT);
+    }
+
+    /**
+     * D18: --log-file and --rsync-path are NOT suppressed on daemon transport.
+     * server_options() never transmits either to the far side, so a daemon's
+     * "refuse options" cannot reach them: --log-file stays correct (it is a
+     * client-side local log) and --rsync-path is simply inert.
+     */
+    public function testBuildArgvDaemonKeepsLogFileAndRsyncPath(): void
+    {
+        $opts = $this->emptyOpts();
+        $opts['remoteRsyncPath'] = '/usr/local/bin/rsync';
+        $argv = Rsync::buildArgv($opts, 'normal', '/rt/logs/j/run.log', 'b@n::m', '/d/', $this->daemonPieces());
+        $this->assertContains('--log-file=/rt/logs/j/run.log', $argv);
+        $this->assertContains('--rsync-path=/usr/local/bin/rsync', $argv);
+    }
+
+    /**
+     * D7. --contimeout is a HARD failure (exit 1, RERR_SYNTAX) on every SSH and
+     * LOCAL transfer: main.c:1558 is reached for remote-shell AND local runs,
+     * because only the daemon socket path returns earlier at main.c:1550. So it
+     * is emitted for DAEMON and dropped everywhere else - and dropping it must
+     * change NOTHING else about the argv.
+     */
+    public function testContimeoutIsEmittedForDaemonTransportOnly(): void
+    {
+        $plain = $this->busyOpts();
+        $withCt = $plain;
+        $withCt['contimeout'] = '15';
+
+        $sshBag = ['dashE' => "'ssh'", 'sshEnv' => []];
+        // SSH and LOCAL: the argv is identical with and without the stored value.
+        $this->assertSame(
+            Rsync::buildArgv($plain, 'quiet', '/rt/r.log', '/a/', 'u@h:/b/', $sshBag),
+            Rsync::buildArgv($withCt, 'quiet', '/rt/r.log', '/a/', 'u@h:/b/', $sshBag),
+            'a stored contimeout must not change the SSH argv at all'
+        );
+        $this->assertSame(
+            Rsync::buildArgv($plain, 'quiet', '/rt/r.log', '/a/', '/b/', null),
+            Rsync::buildArgv($withCt, 'quiet', '/rt/r.log', '/a/', '/b/', null),
+            'a stored contimeout must not change the LOCAL argv at all'
+        );
+        foreach (Rsync::buildArgv($withCt, 'quiet', '/rt/r.log', '/a/', 'u@h:/b/', $sshBag) as $tok) {
+            $this->assertFalse(str_starts_with($tok, '--contimeout'), "SSH must not emit $tok");
+        }
+        foreach (Rsync::buildArgv($withCt, 'quiet', '/rt/r.log', '/a/', '/b/', null) as $tok) {
+            $this->assertFalse(str_starts_with($tok, '--contimeout'), "LOCAL must not emit $tok");
+        }
+        // DAEMON keeps it, in its SCALAR_FLAGS map position (after --bwlimit,
+        // before --temp-dir).
+        $daemon = Rsync::buildArgv($withCt, 'quiet', '/rt/r.log', 'u@h::m', '/b/', $this->daemonPieces());
+        $this->assertContains('--contimeout=15', $daemon);
+        $this->assertSame(
+            array_search('--bwlimit=2000', $daemon, true) + 1,
+            array_search('--contimeout=15', $daemon, true)
+        );
+    }
+
+    /** Dropping contimeout must not mutate the caller's options array. */
+    public function testBuildArgvDoesNotMutateTheCallersOptions(): void
+    {
+        $opts = $this->emptyOpts();
+        $opts['contimeout'] = '15';
+        Rsync::buildArgv($opts, 'quiet', '/rt/r.log', '/a/', '/b/', null);
+        $this->assertSame('15', $opts['contimeout']);
+    }
+
+    /**
+     * The live "rsync options preview" renders straight from optionTokens(), and
+     * its whole reason to exist is that it shows what will really run. So the
+     * contimeout gate lives HERE, not in buildArgv: told the transport, the
+     * mapper drops exactly what buildArgv would have dropped, and the preview
+     * can no longer promise a flag the run throws away.
+     */
+    public function testOptionTokensDropsContimeoutForEveryNonDaemonTransport(): void
+    {
+        $opts = $this->emptyOpts();
+        $opts['contimeout'] = '30';
+
+        $this->assertSame(['--contimeout=30'], Rsync::optionTokens($opts, 'DAEMON'));
+        $this->assertSame([], Rsync::optionTokens($opts, 'SSH'));
+        $this->assertSame([], Rsync::optionTokens($opts, 'LOCAL'));
+        // A hand-edited/unknown transport behaves like the non-daemon ones -
+        // the same way buildArgv treats anything without a `daemon` piece.
+        $this->assertSame([], Rsync::optionTokens($opts, 'FTP'));
+        // Resolved the way every other transport comparison in the tree is.
+        $this->assertSame(['--contimeout=30'], Rsync::optionTokens($opts, ' daemon '));
+
+        // No transport = no context (the Global Settings block, shared by jobs of
+        // every transport): today's behaviour, unchanged, which is what keeps the
+        // whitelist tests and every one-argument caller green.
+        $this->assertSame(['--contimeout=30'], Rsync::optionTokens($opts));
+        $this->assertSame(['--contimeout=30'], Rsync::optionTokens($opts, null));
+    }
+
+    /** The gate touches --contimeout and nothing else, in either direction. */
+    public function testOptionTokensTransportGateTouchesOnlyContimeout(): void
+    {
+        $opts = $this->busyOpts();
+        unset($opts['contimeout']);
+
+        foreach ([null, 'SSH', 'LOCAL', 'DAEMON', 'FTP'] as $transport) {
+            $this->assertSame(
+                Rsync::optionTokens($opts),
+                Rsync::optionTokens($opts, $transport),
+                'a job with no contimeout must produce byte-identical tokens on every transport'
+            );
+        }
+
+        $withCt = $opts;
+        $withCt['contimeout'] = '30';
+        $this->assertSame(Rsync::optionTokens($opts), Rsync::optionTokens($withCt, 'SSH'));
+        $this->assertSame(
+            array_merge(Rsync::optionTokens($opts), []),
+            Rsync::optionTokens($withCt, 'SSH'),
+            'dropping the key must not disturb the order of anything else'
+        );
+    }
+
+    /** ...and the mapper must not mutate the caller's array when it drops it. */
+    public function testOptionTokensDoesNotMutateTheCallersOptions(): void
+    {
+        $opts = $this->emptyOpts();
+        $opts['contimeout'] = '15';
+        Rsync::optionTokens($opts, 'SSH');
+        $this->assertSame('15', $opts['contimeout']);
+    }
+
+    // --- listDaemonModules: the pre-auth module-listing probe ----------------
+
+    /**
+     * The probe argv, asserted whole. It ends with `--` then the operand, like
+     * every other spawn in this codebase; it carries NO --password-file (a
+     * listing is answered BEFORE auth_server(), clientserver.c:1420-1424, so the
+     * flag would never be read) and no -e and no whitelist option.
+     */
+    public function testListDaemonModulesArgvIsMinimalAndCarriesNoPasswordFile(): void
+    {
+        $seen = null;
+        Rsync::$daemonProbeRunner = function (array $argv) use (&$seen): array {
+            $seen = $argv;
+            return [0, "@RSYNCD: EXIT\n"];
+        };
+        try {
+            Rsync::listDaemonModules($this->daemonConn(['port' => 1873]));
+        } finally {
+            Rsync::$daemonProbeRunner = null;
+        }
+        $this->assertSame([
+            '/usr/bin/rsync',
+            '--contimeout=20',
+            '--timeout=20',
+            '--port=1873',
+            '--',
+            'moduser@nas.local::',
+        ], $seen);
+        $this->assertSame(20, Rsync::DAEMON_PROBE_TIMEOUT);
+        $this->assertSame('--', $seen[count($seen) - 2], 'the operand must follow a -- terminator');
+        foreach ($seen as $tok) {
+            $this->assertFalse(str_starts_with($tok, '--password-file'), 'a listing never reads a password file');
+        }
+        $this->assertNotContains('-e', $seen);
+    }
+
+    /**
+     * send_listing() emits one "%-15s\t%s\n" line per listed module, wrapped in
+     * the daemon's MOTD and @RSYNCD framing. Only the names are kept.
+     */
+    public function testListDaemonModulesParsesARealisticListing(): void
+    {
+        $listing = "Welcome to the NAS\n"
+            . "@RSYNCD: 31.0\n"
+            . "rsync_bkp      \tBackup share\n"
+            . "photos         \tPhotos, read only\n"
+            . "media.2        \t\n"
+            . "\n"
+            . "bad name       \tspaces are not a module name\n"
+            . "@RSYNCD: EXIT\n";
+        Rsync::$daemonProbeRunner = fn(array $argv): array => [0, $listing];
+        try {
+            $res = Rsync::listDaemonModules($this->daemonConn());
+        } finally {
+            Rsync::$daemonProbeRunner = null;
+        }
+        $this->assertSame(
+            [
+                'ok'      => true,
+                'reason'  => 'ok',
+                'message' => 'Connected to the rsync daemon and listed 3 module(s): rsync_bkp, photos, media.2.'
+                    . ' NOTE: a module listing is answered BEFORE authentication, so this does NOT verify'
+                    . ' the username or the module secret. Run a dry-run to test those.',
+                'modules' => ['rsync_bkp', 'photos', 'media.2'],
+            ],
+            $res
+        );
+    }
+
+    /** A daemon whose every module is `list = no` still answers, with nothing. */
+    public function testListDaemonModulesReportsAnEmptyListing(): void
+    {
+        Rsync::$daemonProbeRunner = fn(array $argv): array => [0, "@RSYNCD: 31.0\n@RSYNCD: EXIT\n"];
+        try {
+            $res = Rsync::listDaemonModules($this->daemonConn());
+        } finally {
+            Rsync::$daemonProbeRunner = null;
+        }
+        $this->assertSame(
+            [
+                'ok'      => true,
+                'reason'  => 'ok',
+                'message' => 'Connected to the rsync daemon, but it listed no public modules'
+                    . ' (a module can be hidden with "list = no").'
+                    . ' NOTE: a module listing is answered BEFORE authentication, so this does NOT verify'
+                    . ' the username or the module secret. Run a dry-run to test those.',
+                'modules' => [],
+            ],
+            $res
+        );
+    }
+
+    /** A listing is pre-auth, so anyone who can reach the port writes it: cap it. */
+    public function testListDaemonModulesCapsTheListingAtTwoHundredNames(): void
+    {
+        $listing = '';
+        for ($i = 0; $i < 500; $i++) {
+            $listing .= 'mod' . $i . "\tcomment\n";
+        }
+        Rsync::$daemonProbeRunner = fn(array $argv): array => [0, $listing];
+        try {
+            $res = Rsync::listDaemonModules($this->daemonConn());
+        } finally {
+            Rsync::$daemonProbeRunner = null;
+        }
+        $this->assertCount(200, $res['modules']);
+        $this->assertSame('mod0', $res['modules'][0]);
+        $this->assertSame('mod199', $res['modules'][199]);
+    }
+
+    #[DataProvider('daemonProbeExitProvider')]
+    public function testListDaemonModulesClassifiesEveryExitCode(int $exit, string $reason, string $message): void
+    {
+        Rsync::$daemonProbeRunner = fn(array $argv): array => [$exit, "some output\n"];
+        try {
+            $res = Rsync::listDaemonModules($this->daemonConn());
+        } finally {
+            Rsync::$daemonProbeRunner = null;
+        }
+        $this->assertSame(
+            ['ok' => false, 'reason' => $reason, 'message' => $message, 'modules' => []],
+            $res
+        );
+    }
+
+    public static function daemonProbeExitProvider(): array
+    {
+        $unreachable = 'Could not reach the rsync daemon. Check the host, the port and the network.';
+        $timeout     = 'The rsync daemon did not answer within 20 seconds.';
+        $refused     = static fn(int $n): string => 'The rsync daemon answered but refused the request (rsync exit '
+            . $n . '). Check that the daemon is really rsyncd and not an SSH server.';
+        return [
+            'RERR_STARTCLIENT 5'  => [5, 'unreachable', $unreachable],
+            'RERR_SOCKETIO 10'    => [10, 'unreachable', $unreachable],
+            'RERR_TIMEOUT 30'     => [30, 'timeout', $timeout],
+            'RERR_CONTIMEOUT 35'  => [35, 'timeout', $timeout],
+            'SIGTERM 143'         => [143, 'timeout', $timeout],
+            'RERR_SYNTAX 1'       => [1, 'refused', $refused(1)],
+            'RERR_PROTOCOL 2'     => [2, 'refused', $refused(2)],
+            'RERR_UNSUPPORTED 4'  => [4, 'refused', $refused(4)],
+            'unmapped 12'         => [12, 'error', 'The rsync daemon probe failed (rsync exit 12).'],
+            'exec failure 127'    => [127, 'error', 'The rsync daemon probe failed (rsync exit 127).'],
+        ];
+    }
+
+    /**
+     * Every pre-flight refusal happens BEFORE the spawn seam is consulted, so a
+     * connection that could produce a dangerous operand never reaches rsync at
+     * all: a ':' or '/' in the host or username makes parse_hostspec
+     * (options.c:3073-3120) reinterpret "u@nas::mod" as an SSH target or as a
+     * local path.
+     */
+    #[DataProvider('unusableDaemonConnProvider')]
+    public function testListDaemonModulesRefusesAnUnusableConnectionWithoutSpawning(array $conn, string $cause): void
+    {
+        $spawned = false;
+        Rsync::$daemonProbeRunner = function (array $argv) use (&$spawned): array {
+            $spawned = true;
+            return [0, ''];
+        };
+        try {
+            $res = Rsync::listDaemonModules($conn);
+        } finally {
+            Rsync::$daemonProbeRunner = null;
+        }
+        $this->assertFalse($spawned, 'a rejected connection must never reach the probe runner');
+        $this->assertSame(
+            [
+                'ok'      => false,
+                'reason'  => 'config',
+                'message' => 'This Connection is not usable for an rsync daemon probe: ' . $cause,
+                'modules' => [],
+            ],
+            $res
+        );
+    }
+
+    public static function unusableDaemonConnProvider(): array
+    {
+        $base = ['transport' => 'DAEMON', 'host' => 'nas.local', 'username' => 'moduser', 'port' => 873];
+        return [
+            'ssh transport' => [
+                ['transport' => 'SSH'] + $base,
+                'it does not use rsync daemon (rsyncd) transport.',
+            ],
+            'legacy record with no transport key' => [
+                ['host' => 'nas.local', 'username' => 'moduser', 'port' => 873],
+                'it does not use rsync daemon (rsyncd) transport.',
+            ],
+            'empty host' => [
+                ['host' => ''] + $base,
+                'it needs both a host and a username.',
+            ],
+            'empty username' => [
+                ['username' => ''] + $base,
+                'it needs both a host and a username.',
+            ],
+            'host smuggling an ssh hostspec' => [
+                ['host' => 'a:b@evil.example'] + $base,
+                'the host is not valid for an rsync daemon operand.',
+            ],
+            'host with a slash' => [
+                ['host' => 'nas.local/evil'] + $base,
+                'the host is not valid for an rsync daemon operand.',
+            ],
+            'username with a colon' => [
+                ['username' => 'a:b'] + $base,
+                'the username is not valid for an rsync daemon operand.',
+            ],
+        ];
+    }
+
+    // --- listDaemonModules: the live proc_open path --------------------------
+    // These two spawn a FAKE rsync (a tiny PHP stub), never a real one: the byte
+    // cap and the wall-clock deadline live in the spawn arm, below the
+    // $daemonProbeRunner seam, so the seam cannot exercise them.
+
+    /** @var array<int,string> fake rsync stubs to unlink */
+    private array $fakeBins = [];
+
+    protected function tearDown(): void
+    {
+        Rsync::$daemonProbeRunner = null;
+        Rsync::$rsyncPathOverride = null;
+        foreach ($this->fakeBins as $path) {
+            @unlink($path);
+        }
+        $this->fakeBins = [];
+    }
+
+    /** Write an executable stub that stands in for the rsync binary. */
+    private function fakeRsync(string $phpBody): string
+    {
+        $dir = UR_RUNTIME_BASE . '/rsync-probe-stub';
+        if (!is_dir($dir)) {
+            mkdir($dir, 0777, true);
+        }
+        $path = $dir . '/fake-rsync-' . bin2hex(random_bytes(4));
+        file_put_contents($path, '#!' . PHP_BINARY . "\n<?php\n" . $phpBody . "\n");
+        chmod($path, 0755);
+        $this->fakeBins[] = $path;
+        return $path;
+    }
+
+    /**
+     * The output cap is applied INSIDE the drain callback, not by trimming the
+     * buffer afterwards - a hostile daemon can stream an unbounded MOTD at a
+     * php-fpm worker. The stub emits exactly DAEMON_PROBE_MAX_BYTES of listing
+     * (one real module + 4095 * 16 bytes of noise) and then one more module
+     * line, which must therefore never be captured at all.
+     */
+    public function testListDaemonModulesCapsCapturedOutputInsideTheChunkCallback(): void
+    {
+        $this->assertSame(65536, Rsync::DAEMON_PROBE_MAX_BYTES);
+        $this->assertSame(16 + (4095 * 16), Rsync::DAEMON_PROBE_MAX_BYTES);
+
+        Rsync::$rsyncPathOverride = $this->fakeRsync(<<<'PHPSTUB'
+fwrite(STDOUT, "keepmod\tcomment\n");                    // 16 bytes
+fwrite(STDOUT, str_repeat("noise line here\n", 4095));   // 65520 bytes -> 65536
+fwrite(STDOUT, "toolate\tz\n");                          // entirely past the cap
+exit(0);
+PHPSTUB);
+        $res = Rsync::listDaemonModules($this->daemonConn());
+
+        $this->assertTrue($res['ok'], 'the stub exits 0, so the probe succeeded');
+        $this->assertSame(['keepmod'], $res['modules'], 'nothing past the byte cap may be captured');
+    }
+
+    /**
+     * A daemon that accepts the TCP connection and then says nothing must not
+     * hold the php-fpm worker: the probe's HARD wall-clock deadline
+     * (DAEMON_PROBE_TIMEOUT, a fixed constant - never the connection's stored
+     * connectTimeout, which clamps to 600) breaks the drain loop and kills the
+     * child. Costs ~20s of wall clock; it is the only end-to-end proof that the
+     * deadline is plumbed through to ProcIO::drainPipes.
+     */
+    public function testListDaemonModulesHonoursItsHardWallClockDeadline(): void
+    {
+        // Sleeps well past the deadline and would exit 0 (reason 'ok') if the
+        // deadline were dropped, so this fails on both the clock and the reason.
+        Rsync::$rsyncPathOverride = $this->fakeRsync('sleep(45); exit(0);');
+
+        $started = microtime(true);
+        $res     = Rsync::listDaemonModules($this->daemonConn());
+        $elapsed = microtime(true) - $started;
+
+        $this->assertSame(
+            [
+                'ok'      => false,
+                'reason'  => 'timeout',
+                'message' => 'The rsync daemon did not answer within 20 seconds.',
+                'modules' => [],
+            ],
+            $res
+        );
+        $this->assertGreaterThanOrEqual(15.0, $elapsed, 'it must actually wait for the deadline');
+        $this->assertLessThan(30.0, $elapsed, 'it must not wait for the child to exit on its own');
+    }
+
+    /**
+     * The deadline must bound the CALL, not just the drain loop. drainPipes
+     * returns the instant both pipes hit EOF - which is NOT the same as the
+     * child having exited. A child that closes stdout and stderr and then
+     * lingers ends the drain immediately, leaving proc_close() to block until it
+     * finally goes away: in a php-fpm worker that is exactly the wedge
+     * DAEMON_PROBE_TIMEOUT exists to prevent, and the previous
+     * deadline-gated kill never fired for it because the deadline had not
+     * passed. The stub above keeps its pipes open and so passes either way; this
+     * one does not.
+     */
+    public function testListDaemonModulesKillsAChildThatClosesItsPipesAndLingers(): void
+    {
+        Rsync::$rsyncPathOverride = $this->fakeRsync(<<<'PHPSTUB'
+fwrite(STDOUT, "keepmod	comment
+");
+fclose(STDOUT);
+fclose(STDERR);
+sleep(45);
+exit(0);
+PHPSTUB);
+
+        $started = microtime(true);
+        $res     = Rsync::listDaemonModules($this->daemonConn());
+        $elapsed = microtime(true) - $started;
+
+        // Un-bounded, this returns reason 'ok' after ~45s (the stub exits 0).
+        $this->assertSame(
+            [
+                'ok'      => false,
+                'reason'  => 'timeout',
+                'message' => 'The rsync daemon did not answer within 20 seconds.',
+                'modules' => [],
+            ],
+            $res
+        );
+        $this->assertGreaterThanOrEqual(15.0, $elapsed, 'it must wait for its own deadline, not EOF');
+        $this->assertLessThan(30.0, $elapsed, 'proc_close() must never wait out a lingering child');
+    }
+
+    /**
+     * ...and the bounded wait must not slow down the ordinary case: a child that
+     * closes its pipes and exits promptly is reaped promptly.
+     */
+    public function testListDaemonModulesReturnsAsSoonAsAWellBehavedChildExits(): void
+    {
+        Rsync::$rsyncPathOverride = $this->fakeRsync(<<<'PHPSTUB'
+fwrite(STDOUT, "keepmod	comment
+");
+exit(0);
+PHPSTUB);
+
+        $started = microtime(true);
+        $res     = Rsync::listDaemonModules($this->daemonConn());
+        $elapsed = microtime(true) - $started;
+
+        $this->assertTrue($res['ok'], json_encode($res));
+        $this->assertSame(['keepmod'], $res['modules']);
+        $this->assertLessThan(5.0, $elapsed, 'the poll must not add measurable latency');
     }
 }
 

@@ -414,6 +414,92 @@ final class LoggerTest extends TestCase
         }
     }
 
+    // --- redactRunLog: rsync's own --log-file writes bypass sink() -----------
+
+    public function testRedactRunLogScrubsWhatRsyncWroteThroughItsOwnLogFileFd(): void
+    {
+        // rsync opens --log-file itself (Rsync.php) and names the daemon password
+        // file VERBATIM in two of its own errors (authenticate.c:188 / :215).
+        // Those lines never pass through Logger::sink, so appending them directly
+        // is exactly the scenario: only a pass over the FILE can scrub them.
+        $passFile = $this->rtBase . '/pass/c-nas-1234-deadbeefcafe';
+        $path     = Logger::openRun('j-daemon', 1750000000);
+        Logger::setRedaction([$passFile], $this->rtBase, 'c-nas-1234-deadbeefcafe');
+
+        file_put_contents(
+            $path,
+            "rsync: ERROR: failed to read a password from $passFile\n",
+            FILE_APPEND
+        );
+
+        $this->assertTrue(Logger::redactRunLog($path));
+        $body = (string) file_get_contents($path);
+        $this->assertStringNotContainsString($passFile, $body);
+        $this->assertStringContainsString('failed to read a password from [redacted]', $body);
+    }
+
+    public function testRedactRunLogIsANoOpWhenNothingIsArmedOrThePathIsNotARunLog(): void
+    {
+        $passFile = $this->rtBase . '/pass/tok';
+        $path     = Logger::openRun('j-daemon', 1750000000);
+        file_put_contents($path, "saw $passFile\n", FILE_APPEND);
+
+        // Nothing armed.
+        $this->assertFalse(Logger::redactRunLog($path));
+        $this->assertStringContainsString($passFile, (string) file_get_contents($path));
+
+        // Armed, but plugin.log is not a run log - and redaction there would
+        // rewrite a rolling cross-job file under another run's lock.
+        Logger::setRedaction([$passFile], $this->rtBase, 'tok');
+        Logger::append(Logger::pluginLogPath(), "saw $passFile");
+        $this->assertFalse(Logger::redactRunLog(Logger::pluginLogPath()));
+
+        // Armed and a real run log -> rewritten.
+        $this->assertTrue(Logger::redactRunLog($path));
+    }
+
+    // --- tail(): the ONLY redaction a reader process gets --------------------
+
+    public function testTailScrubsPerRunSecretPathsWithNothingArmed(): void
+    {
+        // The live Status/Overview poller tails this file from php-fpm MID-RUN,
+        // where setRedaction has never been called and cannot be (different
+        // process, no token). Before this, the passfile path rsync writes through
+        // its own --log-file fd was browser-visible for the length of a pair, and
+        // stayed visible for good if the runner was SIGKILLed mid-pair.
+        $path = Logger::openRun('j-daemon', 1750000000);
+        file_put_contents($path, implode("\n", [
+            'rsync: ERROR: failed to read a password from ' . $this->rtBase . '/pass/c-nas-9-abc',
+            'opening connection using: ssh -i ' . $this->rtBase . '/keys/c-nas-9-abc/id -o UserKnownHostsFile='
+                . $this->rtBase . '/known_hosts/c-nas-9-abc nas.local rsync --server',
+            'sent 100 bytes',
+        ]) . "\n", FILE_APPEND);
+
+        Logger::clearRedaction();
+        $out = Logger::tail($path);
+
+        $this->assertStringNotContainsString($this->rtBase . '/pass/', $out);
+        $this->assertStringNotContainsString($this->rtBase . '/keys/', $out);
+        $this->assertStringNotContainsString($this->rtBase . '/known_hosts/', $out);
+        $this->assertStringContainsString('failed to read a password from [redacted]', $out);
+        // Ordinary log content is untouched.
+        $this->assertStringContainsString('sent 100 bytes', $out);
+        $this->assertStringContainsString('nas.local rsync --server', $out);
+    }
+
+    public function testTailStillEscapesAfterScrubbing(): void
+    {
+        // The scrub runs BEFORE htmlspecialchars; it must not open a hole in the
+        // log-XSS guard.
+        $path = Logger::openRun('j-xss', 1750000000);
+        file_put_contents($path, '<script>alert(1)</script> ' . $this->rtBase . "/pass/tok\n", FILE_APPEND);
+
+        $out = Logger::tail($path);
+        $this->assertStringNotContainsString('<script>', $out);
+        $this->assertStringContainsString('&lt;script&gt;', $out);
+        $this->assertStringContainsString('[redacted]', $out);
+    }
+
     public function testPluginLogIsNotSizeCapped(): void
     {
         // The cap applies only to per-run logs; plugin.log is the rolling

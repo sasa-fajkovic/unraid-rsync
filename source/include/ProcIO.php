@@ -29,8 +29,15 @@ class ProcIO
      *
      * @param array<int,resource>       $pipes   fd => stream (typically [1=>stdout, 2=>stderr])
      * @param callable(int,string):void $onChunk invoked with (fd, chunk) per read
+     * @param float|null $deadlineAt ABSOLUTE microtime(true) deadline. When non-null
+     *        the loop breaks as soon as the deadline has passed, checked at the TOP
+     *        of each iteration - so a child that produces NO output at all is still
+     *        bounded (to at most one 1s select tick past the deadline). The caller
+     *        still owns reaping/killing the child. Default null = the original
+     *        behaviour, byte-identical for the three two-argument callers
+     *        (Rsync::defaultRun, Runner::defaultHookRun, KeyTools::runArgv).
      */
-    public static function drainPipes(array $pipes, callable $onChunk): void
+    public static function drainPipes(array $pipes, callable $onChunk, ?float $deadlineAt = null): void
     {
         $open = [];
         foreach ($pipes as $fd => $stream) {
@@ -41,6 +48,9 @@ class ProcIO
         }
 
         while (!empty($open)) {
+            if ($deadlineAt !== null && microtime(true) >= $deadlineAt) {
+                break;
+            }
             $read   = array_values($open);
             $write  = null;
             $except = null;

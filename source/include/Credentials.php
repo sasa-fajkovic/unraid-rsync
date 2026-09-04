@@ -28,8 +28,11 @@ declare(strict_types=1);
  *       documented in the UI/README. Empty passphrase only (unattended cron).
  *
  *   Connections
- *     { id, name, host, port, username, authMethod, keyId, keyFilePath,
- *       password, remoteHostKey, strictHostKey, connectTimeout }
+ *     { id, name, transport, host, port, username, authMethod, keyId,
+ *       keyFilePath, password, remoteHostKey, strictHostKey, connectTimeout }
+ *     - transport SSH (the default) builds an `ssh` command line; DAEMON speaks
+ *       the rsync daemon (rsyncd) wire protocol straight to a TCP port (873) and
+ *       ignores every SSH-only field below - see CONN_TRANSPORTS.
  *     - authMethod KEYFILE points at an EXISTING private key file already on
  *       this Unraid system (keyFilePath, e.g. /root/.ssh/id_ed25519). The plugin
  *       NEVER reads, copies, uploads or stores the key material - OpenSSH reads
@@ -61,6 +64,19 @@ class Credentials
 {
     /** Current schema version this code writes. */
     const SCHEMA_VERSION = 1;
+
+    /**
+     * Allowed connection transports. SSH is the default and the only one that
+     * builds an ssh command line. DAEMON speaks the rsync daemon (rsyncd) wire
+     * protocol directly on a TCP port (873 by default).
+     *
+     * This is deliberately NOT a fourth AUTH_METHODS value: Ssh::materialize's
+     * PASSWORD arm is the else FALL-THROUGH, so a fourth auth method would
+     * silently materialise an SSH_ASKPASS passfile and an `ssh` -e string for a
+     * daemon connection - and rsync does not reject an `-e` beside a
+     * host::module operand, it quietly switches to daemon-over-remote-shell.
+     */
+    const CONN_TRANSPORTS = ['SSH', 'DAEMON'];
 
     /**
      * Allowed connection auth methods.
@@ -159,6 +175,13 @@ class Credentials
         return [
             'id'             => '',
             'name'           => '',
+            // SSH for new connections AND for every pre-existing one:
+            // mergeConnection() backfills a missing/unknown value from here,
+            // which is what makes this field additive WITHIN schema v1 - no
+            // version bump, no migration, exactly like keyFilePath (see
+            // migrate()). Bumping the schema would make an OLDER plugin's
+            // migrate() throw and take every existing connection down with it.
+            'transport'      => 'SSH',
             'host'           => '',
             'port'           => 22,
             'username'       => '',
@@ -398,8 +421,19 @@ class Credentials
         $out['password'] = isset($conn['password']) ? (string) $conn['password'] : $defaults['password'];
         $out['remoteHostKey'] = isset($conn['remoteHostKey']) ? (string) $conn['remoteHostKey'] : $defaults['remoteHostKey'];
 
-        $port = isset($conn['port']) ? (int) $conn['port'] : $defaults['port'];
-        $out['port'] = ($port >= 1 && $port <= 65535) ? $port : $defaults['port'];
+        // Clamp the transport FIRST: the port default below reads the RESOLVED
+        // value, so this ordering is load-bearing. Reversed, a daemon connection
+        // would silently default to 22 and rsync would speak the rsyncd protocol
+        // at sshd. An unknown/absent value backfills to SSH.
+        $transport = strtoupper(trim((string) ($conn['transport'] ?? $defaults['transport'])));
+        $out['transport'] = in_array($transport, self::CONN_TRANSPORTS, true) ? $transport : $defaults['transport'];
+
+        // The port default follows the transport (873 for rsyncd, 22 for SSH),
+        // so a card whose port was never touched lands on the right one when the
+        // transport is switched. An explicitly stored port always wins.
+        $defaultPort = ($out['transport'] === 'DAEMON') ? self::RSYNCD_PORT : $defaults['port'];
+        $port = isset($conn['port']) ? (int) $conn['port'] : $defaultPort;
+        $out['port'] = ($port >= 1 && $port <= 65535) ? $port : $defaultPort;
 
         $auth = strtoupper(trim((string) ($conn['authMethod'] ?? $defaults['authMethod'])));
         $out['authMethod'] = in_array($auth, self::AUTH_METHODS, true) ? $auth : $defaults['authMethod'];
@@ -452,42 +486,69 @@ class Credentials
         return ['valid' => count($errors) === 0, 'errors' => $errors];
     }
 
+    /**
+     * Longest usable rsync daemon module secret, in bytes. rsync's getpassf()
+     * reads the password file with `read(fd, buffer, sizeof buffer - 1)` into a
+     * `char buffer[512]` (authenticate.c:204), so byte 512 onwards is discarded
+     * without a word - the run just fails to authenticate.
+     */
+    const DAEMON_SECRET_MAX_BYTES = 511;
+
     /** The TCP port the rsync DAEMON (rsyncd) listens on. Not an SSH port. */
     public const RSYNCD_PORT = 873;
 
     /**
-     * A warning when a connection looks like it is aimed at an rsync DAEMON
-     * rather than at SSH, or '' when it looks fine.
+     * A warning when a connection's host/port look inconsistent with its
+     * TRANSPORT, or '' when they look fine.
      *
      * WHY this exists: NAS appliances ship an "Rsync Server" toggle (QNAP HBS 3,
-     * Synology) that enables rsyncd on 873 - a DIFFERENT protocol from the
-     * rsync-over-SSH this plugin speaks. Port 873 passes the 1-65535 check and
-     * silently becomes `ssh -p 873`, so the daemon accepts the TCP connection,
-     * fails to speak SSH and drops it. The user then sees an opaque "not running
-     * SSH / connection closed" much later, at Discover-host-key or first run,
-     * with nothing linking it back to the port they typed. Reported on the
-     * support forum; this is advisory only, because running sshd on 873 is
-     * unusual but perfectly legal.
+     * Synology) that enables rsyncd on 873 - a DIFFERENT protocol from
+     * rsync-over-SSH. Port 873 passes the 1-65535 check and silently becomes
+     * `ssh -p 873`, so the daemon accepts the TCP connection, fails to speak SSH
+     * and drops it. The user then sees an opaque "not running SSH / connection
+     * closed" much later, at Discover-host-key or first run, with nothing linking
+     * it back to the port they typed. Reported on the support forum; this is
+     * advisory only, because running sshd on 873 is unusual but perfectly legal.
+     *
+     * For DAEMON transport the port test is INVERTED rather than dropped: a
+     * daemon connection still sitting on 22 (the SSH default it was created with)
+     * is now the likeliest misconfiguration. $transport defaults to 'SSH' so
+     * every pre-daemon call site keeps its exact behaviour, and any unknown
+     * value takes the SSH arm.
      */
-    public static function rsyncDaemonNote(int $port, string $host = ''): string
+    public static function rsyncDaemonNote(int $port, string $host = '', string $transport = 'SSH'): string
     {
         $h = strtolower(trim($host));
-        // An IPv6 literal is FULL of colons ("fe80::1", "::1", "[2001:db8::1]")
-        // and is a perfectly good SSH host, so it must be excluded before the
-        // double-colon test below - otherwise every IPv6 user gets this warning.
-        $bare    = trim($h, '[]');
-        $isIpv6  = filter_var($bare, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) !== false;
         // "rsync://host/module" or the daemon's "host::module" double-colon form
-        // pasted into the Host field - neither is an SSH target.
-        if (strpos($h, 'rsync://') === 0 || (!$isIpv6 && strpos($h, '::') !== false)) {
+        // pasted into the Host field - wrong on BOTH transports, because the
+        // module belongs on the job's pair, not here. An IPv6 literal is FULL of
+        // colons ("fe80::1", "::1", "[2001:db8::1]") and is a perfectly good SSH
+        // host, so it must be excluded before the double-colon test - otherwise
+        // every IPv6 user gets this warning.
+        $daemonShaped = strpos($h, 'rsync://') === 0
+            || (!self::isIpv6Literal($h) && strpos($h, '::') !== false);
+
+        if (strtoupper(trim($transport)) === 'DAEMON') {
+            if ($daemonShaped) {
+                return 'This looks like a full rsync daemon address (rsync:// or host::module). '
+                    . 'Enter just the hostname or IP here; the module goes in the job\'s pair.';
+            }
+            if ($port !== self::RSYNCD_PORT) {
+                return 'Port ' . $port . ' is unusual for an rsync daemon; rsyncd normally listens on 873.';
+            }
+            return '';
+        }
+
+        if ($daemonShaped) {
             return 'This looks like an rsync daemon address (rsync:// or host::module). '
-                . 'This plugin transfers over SSH, so enter just the hostname or IP here '
-                . 'and put the remote path on the job\'s pair.';
+                . 'This Connection uses SSH transport, so enter just the hostname or IP here '
+                . 'and put the remote path on the job\'s pair. To use an rsync daemon instead, '
+                . 'set this Connection\'s Transport to "rsync daemon (rsyncd)".';
         }
         if ($port === self::RSYNCD_PORT) {
             return 'Port 873 is the rsync daemon (rsyncd) port, which is a different protocol '
-                . 'from the rsync-over-SSH this plugin uses. Enable SSH on the remote host and '
-                . 'use its SSH port (usually 22).';
+                . 'from rsync-over-SSH. Either enable SSH on the remote host and use its SSH port '
+                . '(usually 22), or set this Connection\'s Transport to "rsync daemon (rsyncd)".';
         }
         return '';
     }
@@ -505,6 +566,11 @@ class Credentials
     {
         $errors = [];
 
+        // findConnection() hands back the RAW on-disk record and a pre-daemon
+        // credentials.json has no transport key at all, so the ?? 'SSH' backfill
+        // is mandatory here even though a merged connection always carries one.
+        $transport = strtoupper(trim((string) ($conn['transport'] ?? 'SSH')));
+
         if (trim((string) ($conn['name'] ?? '')) === '') {
             $errors[] = 'Connection name is required.';
         }
@@ -514,17 +580,44 @@ class Credentials
         // (or carrying whitespace / shell metacharacters) could be parsed by
         // OpenSSH itself as an OPTION (e.g. -oProxyCommand=...) - an
         // option-injection vector. Reject unsafe values here (defence in depth
-        // on top of the run-time argv construction).
+        // on top of the run-time argv construction). A DAEMON connection builds
+        // "user@host::module" instead, which rsync itself re-parses - hence the
+        // STRICTER charset; see isSafeDaemonToken for why ':' and '/' are fatal.
         $host = trim((string) ($conn['host'] ?? ''));
         if ($host === '') {
             $errors[] = 'Host is required.';
+        } elseif ($transport === 'DAEMON') {
+            if (self::isIpv6Literal($host)) {
+                // A bare IPv6 literal cannot be concatenated into "host::module"
+                // (its own colons collide with the module separator) and the
+                // bracketed form is rejected by isSafeDaemonToken. Say so plainly
+                // instead of emitting the generic charset message.
+                $errors[] = 'IPv6 daemon hosts are not supported yet. Use the host name or an IPv4 '
+                    . 'address for an rsync daemon Connection.';
+            } elseif (!self::isSafeDaemonToken($host)) {
+                $errors[] = 'Host is not valid for an rsync daemon Connection: it must not contain '
+                    . '":", "/", "?", "#", "[" or "]", must not begin with "-", and must not contain '
+                    . 'whitespace or shell characters. rsync would silently reinterpret such a value '
+                    . 'as an SSH target or as a local path.';
+            }
         } elseif (!self::isSafeSshToken($host)) {
             $errors[] = 'Host contains unsafe characters or begins with "-".';
         }
 
+        // A username stays REQUIRED for DAEMON: rsyncd's auth_server() returns
+        // immediately for a module with no `auth users`, so a supplied username
+        // is simply unused there - requiring it costs nothing and keeps the
+        // operand builder free of an empty-"@"-prefix edge case.
         $username = trim((string) ($conn['username'] ?? ''));
         if ($username === '') {
             $errors[] = 'Username is required.';
+        } elseif ($transport === 'DAEMON') {
+            if (!self::isSafeDaemonToken($username)) {
+                $errors[] = 'Username is not valid for an rsync daemon Connection: it must not contain '
+                    . '":", "/", "?", "#", "[" or "]", must not begin with "-", and must not contain '
+                    . 'whitespace or shell characters. rsync would silently reinterpret such a value '
+                    . 'as an SSH target or as a local path.';
+            }
         } elseif (!self::isSafeSshToken($username)) {
             $errors[] = 'Username contains unsafe characters or begins with "-".';
         }
@@ -532,6 +625,48 @@ class Credentials
         $port = (int) ($conn['port'] ?? 0);
         if ($port < 1 || $port > 65535) {
             $errors[] = 'Port must be between 1 and 65535.';
+        }
+
+        if ($transport === 'DAEMON') {
+            // No authMethod, strictHostKey or key rules here: those fields are
+            // SSH-only and the daemon card hides them, but a hidden <select>
+            // still POSTs its value - rejecting a daemon connection for, say, a
+            // missing key file would make every one of them unsaveable.
+            //
+            // The module secret is OPTIONAL: anonymous modules (no `auth users`)
+            // are legal, and Ssh::materializeDaemon writes no password file at
+            // all for an empty secret. Both rules below test the DEOBFUSCATED
+            // value, because that is the byte string that reaches the password
+            // file. They cover every value the UI writes, which is what they are
+            // for. They do NOT also catch a hand-edited credentials.json, despite
+            // what an earlier comment here claimed: a hand-editor writes
+            // PLAINTEXT, which deobfuscate() XOR-decodes into unrelated bytes
+            // that sail past both rules. Ssh::materializeDaemon re-checks the
+            // line-break rule at run time; that is the hand-edit guard.
+            $stored = (string) ($conn['password'] ?? '');
+            $secret = $stored !== '' ? self::deobfuscate($stored) : '';
+
+            // rsync's getpassf() strtok()s the password file at the first \n or
+            // \r (authenticate.c:212), so everything after one is silently
+            // discarded and the user gets an auth failure with no clue why.
+            if (preg_match('/[\x00\r\n]/', $secret)) {
+                $errors[] = 'The module secret must not contain line breaks: rsync reads only the first '
+                    . 'line of the password file, so everything after it would be silently discarded. '
+                    . 'Type a new secret into this Connection to replace the stored one - leaving the '
+                    . 'field blank keeps it.';
+            } elseif (strlen($secret) > self::DAEMON_SECRET_MAX_BYTES) {
+                // getpassf() reads into `char buffer[512]` with
+                // `read(fd, buffer, sizeof buffer - 1)` (authenticate.c:204), so
+                // byte 512 onwards never exists as far as rsync is concerned. A
+                // longer secret authenticates with a silent prefix and the run
+                // dies with an unexplained "auth failed on module".
+                $errors[] = 'The module secret must be ' . self::DAEMON_SECRET_MAX_BYTES . ' bytes or shorter: '
+                    . 'rsync reads at most that much of the password file, so a longer secret is silently '
+                    . 'truncated and authentication fails with no explanation. Type a shorter secret into '
+                    . 'this Connection to replace the stored one - leaving the field blank keeps it.';
+            }
+
+            return ['valid' => count($errors) === 0, 'errors' => $errors];
         }
 
         $auth = (string) ($conn['authMethod'] ?? '');
@@ -596,6 +731,32 @@ class Credentials
         // No whitespace or shell metacharacters (defence in depth - we build
         // argv arrays, but ssh itself parses leading-dash tokens as options).
         return !preg_match('/[\s;&|`$()<>"\'\\\\]/', $value);
+    }
+
+    /**
+     * True when a host/username string is safe as the "[user@]host" part of an
+     * rsync DAEMON operand "[user@]host::module". STRICTER than isSafeSshToken().
+     *
+     * rsync's own parse_hostspec() breaks the authority at the FIRST ':' or '/'.
+     * A username "a:b" makes "a:b@nas::mod" resolve to an SSH connection to host
+     * "a" over the DEFAULT remote shell - no pinned host key, no key, no port. A
+     * '/' makes parse_hostspec return NULL and rsync treats the whole operand as
+     * a LOCAL path, so a "backup" would quietly copy into a directory on this
+     * box. '?', '#', '[' and ']' are rejected too so a URL-ish or
+     * IPv6-bracketed paste can never reach the operand. PURE.
+     */
+    public static function isSafeDaemonToken(string $value): bool
+    {
+        if (!self::isSafeSshToken($value)) {
+            return false;
+        }
+        return !preg_match('/[:\/?#\[\]]/', trim($value));
+    }
+
+    /** True when $host is an IPv6 literal, bracketed or bare. PURE. */
+    private static function isIpv6Literal(string $host): bool
+    {
+        return filter_var(trim(strtolower(trim($host)), '[]'), FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) !== false;
     }
 
     /**

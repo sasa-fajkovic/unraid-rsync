@@ -845,4 +845,723 @@ final class JobTest extends TestCase
         $this->assertFalse($res2['valid']);
         $this->assertNotEmpty(array_filter($res2['errors'], fn($e) => stripos($e, '--temp-dir') !== false));
     }
+
+    // --- issue #139: rsync DAEMON transport --------------------------------
+
+    /**
+     * A credentials structure carrying one DAEMON connection, one explicit SSH
+     * connection, and one LEGACY connection with NO `transport` key at all -
+     * exactly what an upgraded credentials.json holds, and what
+     * Credentials::findConnection hands back RAW (it does not merge).
+     */
+    private function daemonCreds(): array
+    {
+        $creds = Credentials::defaults();
+        $creds['connections'][] = ['id' => 'c-nas',    'name' => 'nas',    'transport' => 'DAEMON'];
+        $creds['connections'][] = ['id' => 'c-rpi',    'name' => 'rpi',    'transport' => 'SSH'];
+        $creds['connections'][] = ['id' => 'c-legacy', 'name' => 'legacy'];
+        return $creds;
+    }
+
+    /** A minimal valid DAEMON job: PULL a module into a local sub-directory. */
+    private function validDaemonJob(array $overrides = []): array
+    {
+        return Job::normalize(array_merge([
+            'name'         => 'nas-pull',
+            'schedule'     => '0 3 * * *',
+            'transport'    => 'DAEMON',
+            'direction'    => 'PULL',
+            'connectionId' => 'c-nas',
+            'pairs'        => [['local' => '/mnt/user/backup/nas/', 'remote' => 'rsync_bkp/photos']],
+        ], $overrides));
+    }
+
+    // --- the enum ----------------------------------------------------------
+
+    public function testTransportsGainsDaemonAndUnknownStillCoercesToSsh(): void
+    {
+        // Whole array, order included: Rsync/Runner branch on membership and the
+        // jobs.php select is built from the same three values.
+        $this->assertSame(['SSH', 'LOCAL', 'DAEMON'], Job::TRANSPORTS);
+
+        // A submitted value is upper-cased and trimmed before the whitelist test.
+        $this->assertSame('DAEMON', Job::normalize(['name' => 'x', 'transport' => 'daemon'])['transport']);
+        $this->assertSame('DAEMON', Job::normalize(['name' => 'x', 'transport' => ' DaEmOn '])['transport']);
+        // ...and an unknown value still falls back to SSH (see also
+        // testInvalidEnumsCoercedToDefaults, which pins 'FTP').
+        $this->assertSame('SSH', Job::normalize(['name' => 'x', 'transport' => 'RSYNCD'])['transport']);
+        $this->assertSame('SSH', Job::normalize(['name' => 'x'])['transport']);
+    }
+
+    public function testDaemonJobKeepsPullWhileLocalIsStillCoercedToPush(): void
+    {
+        // Pulling from a NAS module is the primary reported use case, so DAEMON
+        // must NOT be swept into the LOCAL direction coercion.
+        $this->assertSame('PULL', Job::normalize([
+            'name' => 'd', 'transport' => 'DAEMON', 'direction' => 'PULL',
+        ])['direction']);
+        $this->assertSame('PULL', Job::normalize([
+            'name' => 's', 'transport' => 'SSH', 'direction' => 'PULL',
+        ])['direction']);
+        // LOCAL is unchanged: both sides are on this box, so PULL is meaningless.
+        $this->assertSame('PUSH', Job::normalize([
+            'name' => 'l', 'transport' => 'LOCAL', 'direction' => 'PULL',
+        ])['direction']);
+    }
+
+    /**
+     * D13/D14 mirror-pair rule, at the point where the two sides could most
+     * easily drift: config.json is hand-editable on /boot, so it can hold
+     * `"transport": "daemon"`. Runner::run and Runner::guardrailErrors resolve
+     * that with strtoupper()+trim() and build a real daemon operand, so
+     * Job::validate must classify the SAME BYTES the same way. If it treated the
+     * value as an unknown transport it would pick the wrong role labels, skip
+     * the Connection requirement and the cross-check, and run the SSH path
+     * checker over a module reference - all while the run does the opposite.
+     */
+    #[DataProvider('lowerCaseTransportProvider')]
+    public function testValidateResolvesTheTransportExactlyAsTheRunnerDoes(string $stored): void
+    {
+        $job = $this->validDaemonJob();
+        $job['transport'] = $stored;            // hand-edited: normalize() never writes this
+
+        // Same bytes, same classification as Runner::run (Runner.php:248).
+        $this->assertSame('DAEMON', strtoupper(trim($stored)));
+
+        // 1. The Connection is REQUIRED, with the daemon wording.
+        $noConn = $job;
+        $noConn['connectionId'] = '';
+        $this->assertContains(
+            'An rsync daemon job must select a Connection.',
+            Job::validate($noConn, $this->daemonCreds())['errors']
+        );
+
+        // 2. The transport cross-check runs (an SSH connection is refused).
+        $wrongConn = $job;
+        $wrongConn['connectionId'] = 'c-rpi';
+        $this->assertContains(
+            'This job uses rsync daemon transport, but the selected Connection uses SSH '
+            . 'transport. Pick a Connection whose Transport is "rsync daemon (rsyncd)".',
+            Job::validate($wrongConn, $this->daemonCreds())['errors']
+        );
+
+        // 3. The DAEMON path checker is used, not checkRemotePath: an absolute
+        //    path is wrong for a module reference and must say so in module terms.
+        $absolute = $job;
+        $absolute['pairs'] = [['local' => '/mnt/user/backup/nas/', 'remote' => '/volume1/Backup']];
+        $errors = implode(' | ', Job::validate($absolute, $this->daemonCreds())['errors']);
+        $this->assertStringContainsString('(module)', $errors, 'the role label must be the module one');
+        $this->assertStringContainsString(
+            'An rsync daemon path is relative to the module',
+            $errors,
+            'checkDaemonModule must be the checker, not checkRemotePath'
+        );
+
+        // 4. And the contimeout warning stays SILENT, exactly as it does for the
+        //    upper-cased spelling - buildArgv will really emit the flag.
+        $withTimeout = $job;
+        $withTimeout['rsyncOptions']['contimeout'] = '30';
+        $this->assertSame([], Job::validate($withTimeout, $this->daemonCreds())['warnings']);
+
+        // The enum check still reports the raw value as invalid; that is a
+        // separate, correct signal and must not change which rules were applied.
+        $this->assertContains(
+            'Transport must be SSH, LOCAL or DAEMON.',
+            Job::validate($job, $this->daemonCreds())['errors']
+        );
+    }
+
+    /** @return array<string,array{0:string}> */
+    public static function lowerCaseTransportProvider(): array
+    {
+        return [
+            'lower case'        => ['daemon'],
+            'mixed case'        => ['Daemon'],
+            'surrounding space' => [' DAEMON '],
+        ];
+    }
+
+    /**
+     * The absent-key case has to agree too: Runner defaults a missing transport
+     * to 'SSH', so validate must apply the SSH rules to it, not the
+     * unknown-transport ones.
+     */
+    public function testValidateTreatsAnAbsentTransportAsSshLikeTheRunnerDoes(): void
+    {
+        $job = $this->validDaemonJob(['transport' => 'SSH', 'connectionId' => 'c-nas']);
+        unset($job['transport']);
+
+        $this->assertContains(
+            'This job uses SSH transport, but the selected Connection uses rsync daemon '
+            . '(rsyncd) transport. Pick a Connection whose Transport is "SSH".',
+            Job::validate($job, $this->daemonCreds())['errors'],
+            'an absent transport must take the SSH arm, exactly as Runner.php:248 does'
+        );
+    }
+
+    public function testTransportEnumMessageNamesAllThreeTransports(): void
+    {
+        // A hand-edited config.json can hold a transport normalize() would have
+        // rejected; the message must list every legal value.
+        $job = $this->validLocalJob();
+        $job['transport'] = 'FTP';
+        $res = Job::validate($job);
+        $this->assertFalse($res['valid']);
+        $this->assertContains('Transport must be SSH, LOCAL or DAEMON.', $res['errors']);
+    }
+
+    // --- checkDaemonModule -------------------------------------------------
+
+    #[DataProvider('legalDaemonModuleProvider')]
+    public function testLegalDaemonModuleReferenceAccepted(string $ref): void
+    {
+        $this->assertSame([], Job::checkDaemonModule($ref, 'Module'));
+    }
+
+    /** @return array<string,array{0:string}> */
+    public static function legalDaemonModuleProvider(): array
+    {
+        return [
+            'bare module'          => ['rsync_bkp'],
+            // A trailing slash is MEANINGFUL to rsync (contents, not the dir),
+            // so it must survive - rule 9 may only strip it to read segments.
+            'trailing slash'       => ['rsync_bkp/'],
+            'one sub-path'         => ['rsync_bkp/photos'],
+            'deep sub-path'        => ['rsync_bkp/photos/2026'],
+            'dots dashes scores'   => ['my-mod.1_2'],
+            'capitalised'          => ['Backup/a/b'],
+            'leading digit'        => ['9lives'],
+            'single character'     => ['a'],
+            'at the 4096 limit'    => [str_repeat('a', 4096)],
+            // rsyncd.conf.5 forbids only '/' and ']' in a [module] name, so a
+            // leading '_' or '.' is a perfectly ordinary module and must not be
+            // rejected. "_backup" is a common NAS default.
+            'underscore lead'      => ['_backup'],
+            'dot lead'             => ['.hidden'],
+            'dot lead sub-path'    => ['.hidden/photos'],
+        ];
+    }
+
+    /**
+     * Every rejected shape, with the EXACT message. Order matters: the rules are
+     * "first match wins", so e.g. "-nas::mod" must report the leading dash, not
+     * the daemon address.
+     */
+    #[DataProvider('rejectedDaemonModuleProvider')]
+    public function testRejectedDaemonModuleReferenceGivesTheExactMessage(string $ref, string $expected): void
+    {
+        $this->assertSame([$expected], Job::checkDaemonModule($ref, 'Module'));
+    }
+
+    /** @return array<string,array{0:string,1:string}> */
+    public static function rejectedDaemonModuleProvider(): array
+    {
+        $required = 'Module must be an rsync daemon module reference '
+            . '(for example rsync_bkp or rsync_bkp/photos).';
+        $host = static fn(string $p): string => "Module '$p' includes the daemon host. "
+            . "The host, port and username come from the job's Connection, so enter only the "
+            . 'module reference here (for example rsync_bkp or rsync_bkp/photos).';
+        $absolute = static fn(string $p): string => "Module '$p' must not begin with \"/\". "
+            . 'An rsync daemon path is relative to the module, so enter the module reference '
+            . '(for example rsync_bkp or rsync_bkp/photos), not an absolute filesystem path.';
+        $hostPort = static fn(string $p): string => "Module '$p' includes a host or port. "
+            . "The host, port and username come from the job's Connection, so enter only the "
+            . 'module reference here.';
+        $segments = static fn(string $p): string
+            => "Module '$p' must not contain \".\", \"..\" or empty path segments.";
+        $shape = static fn(string $p): string => "Module '$p' is not a valid rsync daemon module "
+            . 'reference. The first segment is the module name (letters, digits, dot, dash or '
+            . 'underscore), optionally followed by a path inside it, for example rsync_bkp/photos.';
+
+        return [
+            'empty'              => ['', $required],
+            'whitespace only'    => ['   ', $required],
+            'over length'        => [str_repeat('a', 4097), 'Module is too long.'],
+            'interior space'     => ['my mod', "Module 'my mod' contains whitespace or control characters."],
+            'interior tab'       => ["a\tb", "Module 'a\tb' contains whitespace or control characters."],
+            'interior newline'   => ["a\nb", "Module 'a\nb' contains whitespace or control characters."],
+            'nul byte'           => ["a\0b", "Module 'a\0b' contains whitespace or control characters."],
+            'delete byte'        => ["a\x7fb", "Module 'a\x7fb' contains whitespace or control characters."],
+            'leading dash'       => ['-mod', 'Module \'-mod\' must not begin with "-".'],
+            'dash beats address' => ['-nas::mod', 'Module \'-nas::mod\' must not begin with "-".'],
+            'rsync url'          => ['rsync://nas.local/mod', $host('rsync://nas.local/mod')],
+            'rsync url cased'    => ['RSYNC://nas.local/mod', $host('RSYNC://nas.local/mod')],
+            'host and module'    => ['nas.local::rsync_bkp', $host('nas.local::rsync_bkp')],
+            'leading colons'     => ['::rsync_bkp', $host('::rsync_bkp')],
+            'user host module'   => ['bkp@nas::mod', $host('bkp@nas::mod')],
+            'absolute path'      => ['/volume1/Backup', $absolute('/volume1/Backup')],
+            'root'               => ['/', $absolute('/')],
+            // Rule 5 (daemon address) runs BEFORE rule 6 (leading '/'), and this
+            // is the only input that matches both - swap the two blocks and this
+            // is the case that notices.
+            'address beats absolute' => ['/volume1::rsync_bkp', $host('/volume1::rsync_bkp')],
+            'single colon host'  => ['nas:mod', $hostPort('nas:mod')],
+            'colon port'         => ['nas:873', $hostPort('nas:873')],
+            'semicolon'          => ['mod;rm', "Module 'mod;rm' contains unsafe characters."],
+            // Rule 3 runs BEFORE the metacharacter rule, so a shell payload
+            // carrying a space is reported as whitespace, not as unsafe.
+            'space beats meta'   => ['mod; rm -rf /', "Module 'mod; rm -rf /' contains whitespace or control characters."],
+            'space in sub-path'  => ['mod/a b', "Module 'mod/a b' contains whitespace or control characters."],
+            'ampersand'          => ['mod&x', "Module 'mod&x' contains unsafe characters."],
+            'pipe'               => ['mod|sh', "Module 'mod|sh' contains unsafe characters."],
+            'backtick'           => ['mod`id`', "Module 'mod`id`' contains unsafe characters."],
+            'dollar expansion'   => ['mod$(id)', "Module 'mod\$(id)' contains unsafe characters."],
+            'redirect'           => ['mod>out', "Module 'mod>out' contains unsafe characters."],
+            'quote'              => ["mod'x", "Module 'mod'x' contains unsafe characters."],
+            'backslash'          => ['mod\\x', "Module 'mod\\x' contains unsafe characters."],
+            'dot segment'        => ['./mod', $segments('./mod')],
+            'dotdot segment'     => ['../etc', $segments('../etc')],
+            'interior dotdot'    => ['mod/../../etc', $segments('mod/../../etc')],
+            'interior dot'       => ['mod/./sub', $segments('mod/./sub')],
+            'empty segment'      => ['mod//sub', $segments('mod//sub')],
+            'dash-lead segment'  => ['-', 'Module \'-\' must not begin with "-".'],
+            'plus in module'     => ['mod+x', $shape('mod+x')],
+            'percent in module'  => ['mod%2e', $shape('mod%2e')],
+        ];
+    }
+
+    // --- daemon pairs vs. the PR#138 SSH advisory ---------------------------
+
+    public function testDaemonPairAcceptsAModuleReferenceAndRaisesNoDaemonAdvisory(): void
+    {
+        // The PR#138 warning exists to catch a module name typed into an SSH job.
+        // On a DAEMON job a module name is exactly right, so it must be silent.
+        $res = Job::validate($this->validDaemonJob([
+            'pairs' => [['local' => '/mnt/user/backup/nas/', 'remote' => 'rsync_bkp']],
+        ]), $this->daemonCreds());
+        $this->assertTrue($res['valid'], 'errors: ' . implode(' | ', $res['errors']));
+        $this->assertSame([], $res['errors']);
+        $this->assertSame([], $res['warnings']);
+    }
+
+    public function testTheSameModuleReferenceIsStillRejectedUnderSshTransport(): void
+    {
+        // Regression on PR#138: DAEMON must not have relaxed the SSH rule.
+        $ssh = Job::validate(Job::normalize([
+            'name'         => 'nas',
+            'schedule'     => '0 3 * * *',
+            'transport'    => 'SSH',
+            'direction'    => 'PULL',
+            'connectionId' => 'c-rpi',
+            'pairs'        => [['local' => '/mnt/user/backup/nas/', 'remote' => 'rsync_bkp']],
+        ]), $this->daemonCreds());
+        $this->assertFalse($ssh['valid']);
+        $this->assertSame([
+            "Pair #1 source (remote) 'rsync_bkp' looks like an rsync daemon module name, not a path. "
+                . Job::DAEMON_MODULE_HINT,
+        ], $ssh['errors']);
+
+        // ...and the single-segment ADVISORY still fires on an SSH pair.
+        $warned = Job::validate(Job::normalize([
+            'name'         => 'nas',
+            'schedule'     => '0 3 * * *',
+            'transport'    => 'SSH',
+            'direction'    => 'PULL',
+            'connectionId' => 'c-rpi',
+            'pairs'        => [['local' => '/mnt/user/backup/nas/', 'remote' => '/rsync_bkp']],
+        ]), $this->daemonCreds());
+        $this->assertTrue($warned['valid'], 'errors: ' . implode(' | ', $warned['errors']));
+        $this->assertSame([
+            "Pair #1 source (remote) path '/rsync_bkp' " . Job::daemonModuleNote('/rsync_bkp'),
+        ], $warned['warnings']);
+    }
+
+    public function testDaemonPairRejectsAnAbsoluteFilesystemPath(): void
+    {
+        $res = Job::validate($this->validDaemonJob([
+            'pairs' => [['local' => '/mnt/user/backup/nas/', 'remote' => '/volume1/Backup/data']],
+        ]), $this->daemonCreds());
+        $this->assertFalse($res['valid']);
+        $this->assertSame([
+            "Pair #1 source (module) '/volume1/Backup/data' must not begin with \"/\". "
+                . 'An rsync daemon path is relative to the module, so enter the module reference '
+                . '(for example rsync_bkp or rsync_bkp/photos), not an absolute filesystem path.',
+        ], $res['errors']);
+    }
+
+    public function testDaemonPairLabelsSayModuleNotRemote(): void
+    {
+        // $remoteQualifier is 'module' for DAEMON, 'local' for LOCAL, 'remote'
+        // for SSH and for any unknown hand-edited value.
+        $res = Job::validate($this->validDaemonJob([
+            'direction' => 'PUSH',
+            'pairs'     => [['local' => '/mnt/user/backup/nas/', 'remote' => '']],
+        ]), $this->daemonCreds());
+        $this->assertSame(['Pair #1: destination (module) path is required.'], $res['errors']);
+
+        $junk = $this->validDaemonJob(['pairs' => [['local' => '/mnt/user/a/b/', 'remote' => '']]]);
+        $junk['transport'] = 'FTP';
+        $this->assertContains('Pair #1: destination (remote) path is required.', Job::validate($junk)['errors']);
+    }
+
+    // --- isSpecificDaemonTarget + the --delete guard (D12) ------------------
+
+    #[DataProvider('specificDaemonTargetProvider')]
+    public function testIsSpecificDaemonTarget(string $ref, bool $expected): void
+    {
+        $this->assertSame($expected, Job::isSpecificDaemonTarget($ref));
+    }
+
+    /** @return array<string,array{0:string,1:bool}> */
+    public static function specificDaemonTargetProvider(): array
+    {
+        return [
+            'module root'      => ['rsync_bkp', true],
+            'trailing slash'   => ['rsync_bkp/', true],
+            'sub-path'         => ['rsync_bkp/photos', true],
+            'padded'           => ['  rsync_bkp  ', true],
+            'empty'            => ['', false],
+            'whitespace only'  => ['   ', false],
+            'absolute'         => ['/data', false],
+            'root'             => ['/', false],
+            'dot'              => ['.', false],
+            'dotdot'           => ['..', false],
+            'dot slash'        => ['./', false],
+            'slashes only'     => ['///', false],
+        ];
+    }
+
+    public function testDaemonTargetHasExactParityWithTheSshSubPathRule(): void
+    {
+        // D12: a module ROOT is allowed as a --delete destination for exactly the
+        // reason '/data' is allowed over SSH - one segment is enough. The two
+        // predicates must agree segment-for-segment, which is why the guard is
+        // BRANCHED rather than skipped for daemon.
+        foreach (['data' => '/data', 'a/b' => '/a/b', 'a/b/c/' => '/a/b/c/'] as $module => $ssh) {
+            $this->assertSame(
+                Job::isSpecificSubPath($ssh),
+                Job::isSpecificDaemonTarget($module),
+                "'$module' must match '$ssh'"
+            );
+        }
+    }
+
+    public function testDaemonDeleteToAModuleRootIsAllowedAndTheRunnerAgrees(): void
+    {
+        // Precondition: the SSH predicate rejects every module reference (it
+        // demands a leading '/'), so without the transport branch this job would
+        // be unsaveable with --delete on.
+        $this->assertFalse(Job::isSpecificSubPath('rsync_bkp'));
+
+        $pair = ['local' => '/mnt/user/media/', 'remote' => 'rsync_bkp'];
+        $res  = Job::validate($this->validDaemonJob([
+            'direction'    => 'PUSH',
+            'pairs'        => [$pair],
+            'rsyncOptions' => ['delete' => true, 'maxDelete' => '100'],
+        ]), $this->daemonCreds());
+        $this->assertSame([], $res['errors']);
+
+        // D13 mirror: the run-time guard must reach the same verdict.
+        $this->assertSame([], Runner::guardrailErrors(
+            ['direction' => 'PUSH'],
+            $pair,
+            'DAEMON',
+            ['delete' => true]
+        ));
+    }
+
+    public function testDaemonPullDeleteChecksTheLOCALDestinationAndTheRunnerAgrees(): void
+    {
+        // PULL flips the destination to the local side, so the SSH predicate -
+        // not isSpecificDaemonTarget - must be used there. 'restore' is the
+        // discriminating value: isSpecificDaemonTarget('restore') is TRUE, so if
+        // the daemon predicate leaked onto the local side the delete error would
+        // silently vanish.
+        $this->assertTrue(Job::isSpecificDaemonTarget('restore'));
+        $this->assertFalse(Job::isSpecificSubPath('restore'));
+
+        $pair = ['local' => 'restore', 'remote' => 'rsync_bkp'];
+        $res  = Job::validate($this->validDaemonJob([
+            'pairs'        => [$pair],
+            'rsyncOptions' => ['delete' => true, 'maxDelete' => '10'],
+        ]), $this->daemonCreds());
+        $this->assertSame([
+            'Pair #1 destination (local) must be an absolute path.',
+            'Pair #1: a delete option is enabled, so the destination must be a specific sub-directory, not a root.',
+        ], $res['errors']);
+
+        $this->assertSame([
+            'local path must be an absolute path.',
+            'a delete option is enabled, so the destination must be a specific sub-directory, not a root.',
+        ], Runner::guardrailErrors(['direction' => 'PULL'], $pair, 'DAEMON', ['delete' => true]));
+    }
+
+    /**
+     * D14 row 2/10: for an unknown hand-edited transport the destination is the
+     * `remote` side unconditionally, because that is what Runner::resolvePair
+     * does with it. 'LOCAL' would pass under BOTH the old and the new form here,
+     * so the junk value is the only case that catches a divergence.
+     */
+    public function testUnknownTransportTreatsRemoteAsTheDeleteDestinationOnBothSides(): void
+    {
+        $pair = ['local' => '/mnt/user/a/b/', 'remote' => '/'];
+        $job  = $this->validLocalJob([
+            'direction'    => 'PULL',
+            'pairs'        => [$pair],
+            'rsyncOptions' => ['delete' => true, 'maxDelete' => '10'],
+        ]);
+        $job['transport'] = 'FTP';
+        $job['direction'] = 'PULL';
+
+        $errors = Job::validate($job)['errors'];
+        $this->assertSame([
+            'Transport must be SSH, LOCAL or DAEMON.',
+            "Pair #1 destination (remote) '/' must be a specific sub-directory, not the filesystem root.",
+            'Pair #1: a delete option is enabled, so the destination must be a specific sub-directory, not a root.',
+        ], $errors);
+
+        $this->assertSame([
+            "remote path '/' must be a specific sub-directory, not the filesystem root.",
+            'a delete option is enabled, so the destination must be a specific sub-directory, not a root.',
+        ], Runner::guardrailErrors(['direction' => 'PULL'], $pair, 'FTP', ['delete' => true]));
+    }
+
+    // --- tempDir / backupDir ------------------------------------------------
+
+    public function testDaemonReceiverTempDirAndBackupDirUseTheModuleCheck(): void
+    {
+        // rsync resolves both flags relative to the MODULE root on a daemon
+        // receiver, so a relative reference is right and an absolute one is not.
+        $ok = Job::validate($this->validDaemonJob([
+            'direction'    => 'PUSH',
+            'pairs'        => [['local' => '/mnt/user/media/', 'remote' => 'rsync_bkp']],
+            'rsyncOptions' => ['tempDir' => 'tmp', 'backupDir' => 'old/2026'],
+        ]), $this->daemonCreds());
+        $this->assertSame([], $ok['errors']);
+
+        $bad = Job::validate($this->validDaemonJob([
+            'direction'    => 'PUSH',
+            'pairs'        => [['local' => '/mnt/user/media/', 'remote' => 'rsync_bkp']],
+            'rsyncOptions' => ['tempDir' => '/volume1/tmp', 'backupDir' => 'nas::old'],
+        ]), $this->daemonCreds());
+        $this->assertSame([
+            "Option --temp-dir '/volume1/tmp' must not begin with \"/\". An rsync daemon path is "
+                . 'relative to the module, so enter the module reference (for example rsync_bkp or '
+                . 'rsync_bkp/photos), not an absolute filesystem path.',
+            "Option --backup-dir 'nas::old' includes the daemon host. The host, port and username "
+                . "come from the job's Connection, so enter only the module reference here "
+                . '(for example rsync_bkp or rsync_bkp/photos).',
+        ], $bad['errors']);
+    }
+
+    public function testDaemonPullReceiverTempDirStillClearsTheMntGuardrail(): void
+    {
+        // On a PULL the receiver is THIS box, so the local guardrail applies even
+        // under daemon transport - staging onto the boot flash stays impossible.
+        $res = Job::validate($this->validDaemonJob([
+            'rsyncOptions' => ['tempDir' => '/boot/staging'],
+        ]), $this->daemonCreds());
+        $this->assertSame([
+            "Option --temp-dir '/boot/staging' must be a sub-directory of /mnt "
+                . '(for example /mnt/user/share/...).',
+        ], $res['errors']);
+    }
+
+    /**
+     * D20 / fact 13: --temp-dir and --backup-dir are never module names, so the
+     * daemon-shaped discriminators inside checkRemotePath must not fire on them.
+     * Before this, an SSH PUSH with tempDir "tmp" was told it "looks like an
+     * rsync daemon module name, not a path".
+     */
+    public function testSshPushTempDirNoLongerGetsTheDaemonModuleWording(): void
+    {
+        $this->assertSame(
+            ['Option --temp-dir must be an absolute path.'],
+            Job::checkRemotePath('tmp', 'Option --temp-dir', false)
+        );
+        $this->assertSame(
+            ['Option --backup-dir must be an absolute path.'],
+            Job::checkRemotePath('nas::old', 'Option --backup-dir', false)
+        );
+        // The host-shaped error and the absolute-path sub-path rule still fire.
+        $this->assertSame(
+            ["Option --temp-dir 'nas:/vol/tmp' includes a host. The host comes from the job's "
+                . 'Connection, so enter only the path on the remote host here.'],
+            Job::checkRemotePath('nas:/vol/tmp', 'Option --temp-dir', false)
+        );
+        $this->assertSame(
+            ["Option --temp-dir '/' must be a specific sub-directory, not the filesystem root."],
+            Job::checkRemotePath('/', 'Option --temp-dir', false)
+        );
+
+        // End to end through validate().
+        $res = Job::validate(Job::normalize([
+            'name'         => 'remote-temp',
+            'schedule'     => '0 3 * * *',
+            'transport'    => 'SSH',
+            'direction'    => 'PUSH',
+            'connectionId' => 'c-rpi',
+            'pairs'        => [['local' => '/mnt/user/docs/', 'remote' => '/srv/backup/docs/']],
+            'rsyncOptions' => ['tempDir' => 'tmp'],
+        ]), $this->daemonCreds());
+        $this->assertSame(['Option --temp-dir must be an absolute path.'], $res['errors']);
+    }
+
+    public function testPairPathDefaultKeepsTheDaemonDiscriminatorsForPairPaths(): void
+    {
+        // The new third parameter defaults to true, so every existing two-argument
+        // call site - including Runner::guardrailErrors - is unchanged.
+        $this->assertSame(
+            ["remote path 'tmp' looks like an rsync daemon module name, not a path. "
+                . Job::DAEMON_MODULE_HINT],
+            Job::checkRemotePath('tmp', 'remote path')
+        );
+        $this->assertSame(
+            ["remote path 'nas::old' is an rsync daemon address (host::module or rsync://). "
+                . Job::DAEMON_MODULE_HINT],
+            Job::checkRemotePath('nas::old', 'remote path')
+        );
+        $this->assertSame(
+            Job::checkRemotePath('tmp', 'remote path'),
+            Job::checkRemotePath('tmp', 'remote path', true)
+        );
+    }
+
+    // --- job transport <-> connection transport cross-check -----------------
+
+    #[DataProvider('transportCrossCheckProvider')]
+    public function testJobTransportIsCrossCheckedAgainstTheConnection(
+        string $jobTransport,
+        string $connectionId,
+        array $expectedErrors
+    ): void {
+        $pairs = $jobTransport === 'DAEMON'
+            ? [['local' => '/mnt/user/backup/nas/', 'remote' => 'rsync_bkp/photos']]
+            : [['local' => '/mnt/user/backup/nas/', 'remote' => '/srv/backup/docs/']];
+
+        $res = Job::validate(Job::normalize([
+            'name'         => 'x',
+            'schedule'     => '0 3 * * *',
+            'transport'    => $jobTransport,
+            'direction'    => 'PUSH',
+            'connectionId' => $connectionId,
+            'pairs'        => $pairs,
+        ]), $this->daemonCreds());
+
+        $this->assertSame($expectedErrors, $res['errors']);
+        $this->assertSame($expectedErrors === [], $res['valid']);
+    }
+
+    /** @return array<string,array{0:string,1:string,2:array<int,string>}> */
+    public static function transportCrossCheckProvider(): array
+    {
+        $daemonWantsDaemon = 'This job uses rsync daemon transport, but the selected Connection uses '
+            . 'SSH transport. Pick a Connection whose Transport is "rsync daemon (rsyncd)".';
+        $sshWantsSsh = 'This job uses SSH transport, but the selected Connection uses rsync daemon '
+            . '(rsyncd) transport. Pick a Connection whose Transport is "SSH".';
+
+        return [
+            'daemon job + daemon conn'  => ['DAEMON', 'c-nas', []],
+            'ssh job + ssh conn'        => ['SSH', 'c-rpi', []],
+            // fact 14: findConnection returns the RAW record. A pre-daemon
+            // credentials.json has no `transport` key at all, and EVERY existing
+            // SSH job would report a mismatch without the ?? 'SSH' backfill.
+            'ssh job + legacy conn'     => ['SSH', 'c-legacy', []],
+            'daemon job + ssh conn'     => ['DAEMON', 'c-rpi', [$daemonWantsDaemon]],
+            'daemon job + legacy conn'  => ['DAEMON', 'c-legacy', [$daemonWantsDaemon]],
+            'ssh job + daemon conn'     => ['SSH', 'c-nas', [$sshWantsSsh]],
+            'daemon job + no conn'      => ['DAEMON', '', ['An rsync daemon job must select a Connection.']],
+            'ssh job + no conn'         => ['SSH', '', ['An SSH job must select a Connection.']],
+            'daemon job + ghost conn'   => ['DAEMON', 'c-ghost', ['The selected Connection does not exist.']],
+            'ssh job + ghost conn'      => ['SSH', 'c-ghost', ['The selected Connection does not exist.']],
+        ];
+    }
+
+    public function testConnectionTransportIsComparedCaseInsensitively(): void
+    {
+        // A hand-edited credentials.json may hold "daemon"; mergeConnection would
+        // upper-case it on read, so validate() must too or the save-time and
+        // run-time checks disagree about the same file.
+        $creds = Credentials::defaults();
+        $creds['connections'][] = ['id' => 'c-nas', 'name' => 'nas', 'transport' => ' daemon '];
+
+        $res = Job::validate($this->validDaemonJob(), $creds);
+        $this->assertSame([], $res['errors']);
+    }
+
+    public function testCrossCheckIsSkippedWhenNoCredentialsAreSupplied(): void
+    {
+        // The handler validates without creds in some paths; a daemon job must
+        // still save there, exactly as an SSH job does.
+        $res = Job::validate($this->validDaemonJob());
+        $this->assertTrue($res['valid'], 'errors: ' . implode(' | ', $res['errors']));
+    }
+
+    public function testLocalJobIsNeverCrossCheckedAgainstAConnection(): void
+    {
+        // LOCAL transport ignores connectionId entirely - even a stale reference
+        // to a daemon connection must not produce an error.
+        $job = $this->validLocalJob();
+        $job['connectionId'] = 'c-nas';
+        $res = Job::validate($job, $this->daemonCreds());
+        $this->assertTrue($res['valid'], 'errors: ' . implode(' | ', $res['errors']));
+    }
+
+    // --- D7: the --contimeout warning ---------------------------------------
+
+    #[DataProvider('contimeoutWarningProvider')]
+    public function testContimeoutWarnsOffDaemonTransportOnly(string $transport, bool $expectWarning): void
+    {
+        $warning = 'The --contimeout option only applies to rsync daemon (rsyncd) transport; '
+            . 'rsync rejects it outright on SSH and Local transfers, so it is not sent for this job.';
+
+        $job = match ($transport) {
+            'DAEMON' => $this->validDaemonJob(['rsyncOptions' => ['contimeout' => '30']]),
+            'LOCAL'  => $this->validLocalJob(['rsyncOptions' => ['contimeout' => '30']]),
+            default  => Job::normalize([
+                'name'         => 's',
+                'schedule'     => '0 3 * * *',
+                'transport'    => 'SSH',
+                'direction'    => 'PUSH',
+                'connectionId' => 'c-rpi',
+                'pairs'        => [['local' => '/mnt/user/a/b/', 'remote' => '/srv/x/']],
+                'rsyncOptions' => ['contimeout' => '30'],
+            ]),
+        };
+
+        $res = Job::validate($job, $this->daemonCreds());
+        // NEVER an error: rejecting it would break a save that has carried the
+        // value for months.
+        $this->assertSame([], $res['errors']);
+        $this->assertTrue($res['valid']);
+        $this->assertSame($expectWarning ? [$warning] : [], $res['warnings']);
+    }
+
+    /** @return array<string,array{0:string,1:bool}> */
+    public static function contimeoutWarningProvider(): array
+    {
+        return [
+            'ssh warns'          => ['SSH', true],
+            'local warns'        => ['LOCAL', true],
+            'daemon stays quiet' => ['DAEMON', false],
+        ];
+    }
+
+    public function testBlankContimeoutNeverWarns(): void
+    {
+        foreach (['', '   '] as $value) {
+            $res = Job::validate($this->validLocalJob(['rsyncOptions' => ['contimeout' => $value]]));
+            $this->assertSame([], $res['warnings'], "contimeout " . var_export($value, true) . " must be silent");
+        }
+    }
+
+    // --- D19: the reworded hint ---------------------------------------------
+
+    public function testDaemonModuleHintNamesTheJobNotThePluginAndOffersTheWayOut(): void
+    {
+        $this->assertSame(
+            'This job transfers over SSH, so use the absolute filesystem path the module points at '
+                . 'on the remote host (for example /volume1/Backup/data). To address the module by '
+                . 'name instead, set the job Transport to "rsync daemon (rsyncd)".',
+            Job::DAEMON_MODULE_HINT
+        );
+        // The old lead became false the moment DAEMON transport existed.
+        $this->assertStringStartsNotWith('This plugin transfers over SSH', Job::DAEMON_MODULE_HINT);
+        // ...but 'over SSH' must survive: the PR#138 assertion pins it.
+        $this->assertStringContainsString('over SSH', Job::DAEMON_MODULE_HINT);
+
+        // Both messages that embed it stay in lockstep.
+        $this->assertStringEndsWith(Job::DAEMON_MODULE_HINT, Job::daemonModuleNote('/rsync_bkp'));
+        $this->assertStringEndsWith(Job::DAEMON_MODULE_HINT, Job::checkRemotePath('rsync_bkp', 'x')[0]);
+    }
 }

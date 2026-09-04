@@ -635,4 +635,641 @@ final class CredentialsTest extends TestCase
         // ...but an IPv6 host on the daemon PORT still warns, on the port.
         $this->assertStringContainsString('873', Credentials::rsyncDaemonNote(873, '2001:db8::1'));
     }
+
+    // --- connection TRANSPORT field (rsync daemon vs. SSH) ------------------
+
+    /**
+     * The frozen key order of a merged connection. Whole-array assertions below
+     * depend on it, and it is load-bearing in one specific place: `transport`
+     * must be resolved BEFORE `port`, because the port default reads it.
+     */
+    private const MERGED_KEY_ORDER = [
+        'id', 'name', 'host', 'username', 'keyId', 'keyFilePath', 'password',
+        'remoteHostKey', 'transport', 'port', 'authMethod', 'strictHostKey',
+        'connectTimeout',
+    ];
+
+    private const DAEMON_HOST_ERROR = 'Host is not valid for an rsync daemon Connection: it must not contain '
+        . '":", "/", "?", "#", "[" or "]", must not begin with "-", and must not contain '
+        . 'whitespace or shell characters. rsync would silently reinterpret such a value '
+        . 'as an SSH target or as a local path.';
+
+    private const DAEMON_USER_ERROR = 'Username is not valid for an rsync daemon Connection: it must not contain '
+        . '":", "/", "?", "#", "[" or "]", must not begin with "-", and must not contain '
+        . 'whitespace or shell characters. rsync would silently reinterpret such a value '
+        . 'as an SSH target or as a local path.';
+
+    private const DAEMON_IPV6_ERROR = 'IPv6 daemon hosts are not supported yet. Use the host name or an IPv4 '
+        . 'address for an rsync daemon Connection.';
+
+    private const DAEMON_SECRET_ERROR = 'The module secret must not contain line breaks: rsync reads only the first '
+        . 'line of the password file, so everything after it would be silently discarded. '
+        . 'Type a new secret into this Connection to replace the stored one - leaving the '
+        . 'field blank keeps it.';
+
+    private const DAEMON_SECRET_LENGTH_ERROR = 'The module secret must be 511 bytes or shorter: '
+        . 'rsync reads at most that much of the password file, so a longer secret is silently '
+        . 'truncated and authentication fails with no explanation. Type a shorter secret into '
+        . 'this Connection to replace the stored one - leaving the field blank keeps it.';
+
+    public function testDefaultConnectionCarriesSshTransport(): void
+    {
+        $c = Credentials::defaultConnection();
+        // The field is ADDITIVE within credentials.json schema v1: exactly one
+        // new key, defaulting to SSH, and positioned right after 'name'.
+        $this->assertSame([
+            'id', 'name', 'transport', 'host', 'port', 'username', 'authMethod',
+            'keyId', 'keyFilePath', 'password', 'remoteHostKey', 'strictHostKey',
+            'connectTimeout',
+        ], array_keys($c));
+        $this->assertSame('SSH', $c['transport']);
+        $this->assertSame(22, $c['port']);
+        $this->assertSame(1, Credentials::SCHEMA_VERSION, 'the transport field must NOT bump the schema');
+    }
+
+    public function testConnTransportsEnum(): void
+    {
+        // LOCAL is a JOB transport, never a CONNECTION transport.
+        $this->assertSame(['SSH', 'DAEMON'], Credentials::CONN_TRANSPORTS);
+        $this->assertSame(873, Credentials::RSYNCD_PORT);
+    }
+
+    public function testMergeConnectionKeyOrderIsFrozenAndPutsTransportBeforePort(): void
+    {
+        $keys = array_keys(Credentials::mergeConnection([]));
+        $this->assertSame(self::MERGED_KEY_ORDER, $keys);
+        // Structural proof of the ordering constraint: the port default reads the
+        // RESOLVED transport, so transport must be written first.
+        $this->assertLessThan(
+            array_search('port', $keys, true),
+            array_search('transport', $keys, true),
+            'transport must be resolved before the port default'
+        );
+    }
+
+    #[DataProvider('connectionTransportClampProvider')]
+    public function testMergeConnectionClampsTransport(mixed $stored, string $expected): void
+    {
+        $c = Credentials::mergeConnection(['id' => 'c', 'name' => 'n', 'host' => 'h', 'username' => 'u', 'transport' => $stored]);
+        $this->assertSame($expected, $c['transport']);
+    }
+
+    public static function connectionTransportClampProvider(): array
+    {
+        return [
+            'exact SSH'         => ['SSH', 'SSH'],
+            'exact DAEMON'      => ['DAEMON', 'DAEMON'],
+            'lowercase daemon'  => ['daemon', 'DAEMON'],
+            'mixed + padded'    => ["  DaEmOn \n", 'DAEMON'],
+            'lowercase ssh'     => ['ssh', 'SSH'],
+            'junk FTP'          => ['FTP', 'SSH'],
+            'job-only LOCAL'    => ['LOCAL', 'SSH'],
+            'empty string'      => ['', 'SSH'],
+            'null'              => [null, 'SSH'],
+            'int'               => [0, 'SSH'],
+        ];
+    }
+
+    public function testMergeConnectionBackfillsALegacyRecordToSshAndChangesNothingElse(): void
+    {
+        // A record exactly as a pre-daemon plugin wrote it: no transport key at
+        // all. The whole merged array is asserted (order included) so any other
+        // drift in the merge is caught, not just the new key.
+        $legacy = [
+            'id' => 'c-nas', 'name' => 'NAS', 'host' => 'nas.example', 'port' => 22,
+            'username' => 'backup', 'authMethod' => 'KEYFILE', 'keyId' => '',
+            'keyFilePath' => '/root/.ssh/id_ed25519', 'password' => '',
+            'remoteHostKey' => 'nas.example ssh-ed25519 AAAA',
+            'strictHostKey' => 'accept-new', 'connectTimeout' => 10,
+        ];
+        $this->assertSame([
+            'id'             => 'c-nas',
+            'name'           => 'NAS',
+            'host'           => 'nas.example',
+            'username'       => 'backup',
+            'keyId'          => '',
+            'keyFilePath'    => '/root/.ssh/id_ed25519',
+            'password'       => '',
+            'remoteHostKey'  => 'nas.example ssh-ed25519 AAAA',
+            'transport'      => 'SSH',
+            'port'           => 22,
+            'authMethod'     => 'KEYFILE',
+            'strictHostKey'  => 'accept-new',
+            'connectTimeout' => 10,
+        ], Credentials::mergeConnection($legacy));
+    }
+
+    public function testLegacyCredentialsFileOnDiskLoadsAsSshTransport(): void
+    {
+        // The on-disk no-breaking-change path: an existing credentials.json with
+        // no transport key anywhere still loads, keeps schemaVersion 1, and every
+        // connection comes back as SSH on its stored port.
+        file_put_contents(Credentials::path(), json_encode([
+            'schemaVersion' => 1,
+            'keys'          => [],
+            'connections'   => [
+                ['id' => 'c-1', 'name' => 'a', 'host' => 'h1', 'username' => 'u1', 'port' => 22],
+                ['id' => 'c-2', 'name' => 'b', 'host' => 'h2', 'username' => 'u2', 'port' => 2222],
+            ],
+        ]));
+        $loaded = Credentials::load();
+        $this->assertSame(1, $loaded['schemaVersion']);
+        $this->assertSame(['SSH', 'SSH'], array_column($loaded['connections'], 'transport'));
+        $this->assertSame([22, 2222], array_column($loaded['connections'], 'port'));
+    }
+
+    #[DataProvider('transportAwarePortProvider')]
+    public function testMergeConnectionPortDefaultFollowsTheResolvedTransport(array $in, int $expected): void
+    {
+        $this->assertSame($expected, Credentials::mergeConnection($in)['port']);
+    }
+
+    public static function transportAwarePortProvider(): array
+    {
+        return [
+            // DAEMON with no stored port lands on 873. This is ALSO the ordering
+            // proof: if the port default ran before the transport clamp it would
+            // read an unresolved transport and give 22.
+            'daemon, no port'         => [['transport' => 'DAEMON'], 873],
+            'daemon lowercase, no port' => [['transport' => 'daemon'], 873],
+            'daemon, out-of-range'    => [['transport' => 'DAEMON', 'port' => 99999], 873],
+            'daemon, zero'            => [['transport' => 'DAEMON', 'port' => 0], 873],
+            // An explicitly stored port always wins, even the SSH default on a
+            // connection that was switched to DAEMON (that is what rsyncDaemonNote
+            // warns about, rather than silently rewriting the user's value).
+            'daemon, stored 22'       => [['transport' => 'DAEMON', 'port' => 22], 22],
+            'daemon, stored 8730'     => [['transport' => 'DAEMON', 'port' => 8730], 8730],
+            // SSH and unknown transports keep the pre-daemon behaviour exactly.
+            'ssh, no port'            => [['transport' => 'SSH'], 22],
+            'ssh, out-of-range'       => [['transport' => 'SSH', 'port' => 99999], 22],
+            'ssh, stored 2222'        => [['transport' => 'SSH', 'port' => 2222], 2222],
+            'legacy, no transport'    => [['host' => 'h'], 22],
+            'legacy, stored 22'       => [['host' => 'h', 'port' => 22], 22],
+            'junk transport, no port' => [['transport' => 'FTP'], 22],
+            'junk transport, bad port' => [['transport' => 'FTP', 'port' => -1], 22],
+        ];
+    }
+
+    // --- daemon token safety (rsync parse_hostspec reinterpretation) --------
+
+    #[DataProvider('unsafeDaemonTokenProvider')]
+    public function testIsSafeDaemonTokenRejectsHostspecBreakCharacters(string $value): void
+    {
+        $this->assertFalse(Credentials::isSafeDaemonToken($value));
+    }
+
+    /**
+     * Every one of these is accepted by isSafeSshToken today, so the daemon rule
+     * is demonstrably the thing that catches them - and isSafeSshToken itself is
+     * unchanged, which is what keeps every existing SSH connection saveable.
+     */
+    #[DataProvider('unsafeDaemonTokenProvider')]
+    public function testIsSafeSshTokenIsUnchangedByTheDaemonRule(string $value): void
+    {
+        $this->assertTrue(Credentials::isSafeSshToken($value));
+    }
+
+    public static function unsafeDaemonTokenProvider(): array
+    {
+        return [
+            // ':' - rsync's parse_hostspec breaks the authority at the first ':',
+            // so a username "a:b" makes "a:b@nas::mod" an SSH connection to host
+            // "a" over the DEFAULT remote shell: no pinned host key, no key, no port.
+            'colon'            => ['a:b'],
+            'leading colon'    => [':nas'],
+            'trailing colon'   => ['nas:'],
+            'double colon'     => ['nas::mod'],
+            // '/' - parse_hostspec returns NULL and rsync treats the WHOLE operand
+            // as a local path, so a "backup" quietly writes into this box.
+            'slash'            => ['nas/evil'],
+            'leading slash'    => ['/nas'],
+            // URL-ish and IPv6-bracketed pastes.
+            'question mark'    => ['nas?x'],
+            'hash'             => ['nas#x'],
+            'open bracket'     => ['[nas'],
+            'close bracket'    => ['nas]'],
+            'bracketed ipv6'   => ['[2001:db8::1]'],
+            'bare ipv6'        => ['2001:db8::1'],
+            'padded colon'     => ['  a:b  '],
+        ];
+    }
+
+    public function testIsSafeDaemonTokenAcceptsOrdinaryHostsAndUsernames(): void
+    {
+        foreach (['nas.local', 'my-nas.sub.example.net', '10.0.0.5', 'moduser', 'backup_user', 'a'] as $v) {
+            $this->assertTrue(Credentials::isSafeDaemonToken($v), "'$v' must be accepted");
+        }
+        // ...and everything isSafeSshToken already rejects stays rejected.
+        foreach (['', '   ', '-oProxyCommand=evil', 'user@evil', 'a b', 'h;id', 'h`id`', 'h|nc', 'h$(id)'] as $v) {
+            $this->assertFalse(Credentials::isSafeDaemonToken($v), "'$v' must be rejected");
+        }
+    }
+
+    // --- validateConnection: DAEMON arm -------------------------------------
+
+    public function testValidateConnectionAcceptsADaemonConnectionWithNoSshAuthFields(): void
+    {
+        // A daemon card hides the auth controls but a hidden <select> still POSTs
+        // its value, so the SSH-only rules must not fire: no authMethod enum, no
+        // strictHostKey enum, no key-file / managed-key / password requirement.
+        // The module secret is OPTIONAL (an anonymous rsyncd module is legal).
+        $conn = [
+            'transport' => 'DAEMON', 'name' => 'NAS module', 'host' => 'nas.local',
+            'username' => 'moduser', 'port' => 873,
+            'authMethod' => 'telnet', 'strictHostKey' => 'maybe',
+            'keyId' => '', 'keyFilePath' => '', 'password' => '',
+        ];
+        $res = Credentials::validateConnection($conn, Credentials::defaults());
+        $this->assertSame(['valid' => true, 'errors' => []], $res);
+
+        // The SAME record on SSH transport still gets both enum errors - proof the
+        // daemon arm is a real branch and not a blanket relaxation.
+        $res = Credentials::validateConnection(['transport' => 'SSH'] + $conn, Credentials::defaults());
+        $this->assertSame([
+            'Auth method must be KEYFILE, KEY or PASSWORD.',
+            'Strict host key checking must be accept-new, yes or no.',
+        ], $res['errors']);
+    }
+
+    public function testValidateConnectionDaemonStillRequiresNameHostUsernameAndPort(): void
+    {
+        // The shared rules (and their exact order) are the same on both arms.
+        $res = Credentials::validateConnection(
+            ['transport' => 'DAEMON', 'name' => '', 'host' => '', 'username' => '', 'port' => 0],
+            Credentials::defaults()
+        );
+        $this->assertSame([
+            'Connection name is required.',
+            'Host is required.',
+            'Username is required.',
+            'Port must be between 1 and 65535.',
+        ], $res['errors']);
+    }
+
+    #[DataProvider('unsafeDaemonTokenProvider')]
+    public function testValidateConnectionRejectsUnsafeDaemonHost(string $host): void
+    {
+        $res = Credentials::validateConnection([
+            'transport' => 'DAEMON', 'name' => 'n', 'host' => $host,
+            'username' => 'moduser', 'port' => 873,
+        ], Credentials::defaults());
+        // An IPv6 literal gets its own, more specific message; everything else
+        // gets the charset message. Either way, exactly ONE error.
+        $expected = in_array($host, ['2001:db8::1', '[2001:db8::1]'], true)
+            ? self::DAEMON_IPV6_ERROR
+            : self::DAEMON_HOST_ERROR;
+        $this->assertSame([$expected], $res['errors'], "host '$host'");
+    }
+
+    #[DataProvider('unsafeDaemonTokenProvider')]
+    public function testValidateConnectionRejectsUnsafeDaemonUsername(string $user): void
+    {
+        $res = Credentials::validateConnection([
+            'transport' => 'DAEMON', 'name' => 'n', 'host' => 'nas.local',
+            'username' => $user, 'port' => 873,
+        ], Credentials::defaults());
+        // The IPv6 exemption is host-only: a username is always the charset rule.
+        $this->assertSame([self::DAEMON_USER_ERROR], $res['errors'], "username '$user'");
+    }
+
+    #[DataProvider('ipv6DaemonHostProvider')]
+    public function testValidateConnectionRejectsIpv6DaemonHostsWithASpecificMessage(string $host): void
+    {
+        $res = Credentials::validateConnection([
+            'transport' => 'DAEMON', 'name' => 'n', 'host' => $host,
+            'username' => 'moduser', 'port' => 873,
+        ], Credentials::defaults());
+        $this->assertSame([self::DAEMON_IPV6_ERROR], $res['errors'], "host '$host'");
+    }
+
+    public static function ipv6DaemonHostProvider(): array
+    {
+        return [
+            'link local'  => ['fe80::1'],
+            'doc prefix'  => ['2001:db8::1'],
+            'loopback'    => ['::1'],
+            'bracketed'   => ['[2001:db8::1]'],
+            'uppercase'   => ['2001:DB8::1'],
+        ];
+    }
+
+    /**
+     * The concrete rsync-side reinterpretations the daemon charset rule exists to
+     * stop. Each pair is (host, username) as stored on the Connection; the third
+     * column is the operand rsync would have been handed.
+     */
+    #[DataProvider('hostspecReinterpretationProvider')]
+    public function testDaemonConnectionRejectsParseHostspecReinterpretations(
+        string $host,
+        string $username,
+        array $expectedErrors
+    ): void {
+        $res = Credentials::validateConnection([
+            'transport' => 'DAEMON', 'name' => 'n', 'host' => $host,
+            'username' => $username, 'port' => 873,
+        ], Credentials::defaults());
+        $this->assertSame($expectedErrors, $res['errors']);
+        $this->assertFalse($res['valid']);
+    }
+
+    public static function hostspecReinterpretationProvider(): array
+    {
+        return [
+            // "a:b@nas::mod" -> parse_hostspec breaks at the first ':' and rsync
+            // opens an SSH connection to host "a" over the DEFAULT remote shell.
+            'username with colon' => ['nas.local', 'a:b', [self::DAEMON_USER_ERROR]],
+            // "u@nas/evil::mod" -> parse_hostspec returns NULL and rsync treats
+            // the whole operand as a LOCAL path.
+            'host with slash'     => ['nas/evil', 'moduser', [self::DAEMON_HOST_ERROR]],
+            'username with slash' => ['nas.local', 'u/x', [self::DAEMON_USER_ERROR]],
+            // A pasted daemon address in the Host field.
+            'host with ::'        => ['nas::rsync_bkp', 'moduser', [self::DAEMON_HOST_ERROR]],
+            // Both sides bad -> both errors, host first (shared rule order).
+            'both'                => ['nas/evil', 'a:b', [self::DAEMON_HOST_ERROR, self::DAEMON_USER_ERROR]],
+        ];
+    }
+
+    #[DataProvider('daemonSecretProvider')]
+    public function testValidateConnectionDaemonSecretLineBreakRule(string $plain, array $expectedErrors): void
+    {
+        $res = Credentials::validateConnection([
+            'transport' => 'DAEMON', 'name' => 'n', 'host' => 'nas.local',
+            'username' => 'moduser', 'port' => 873,
+            'password' => Credentials::obfuscate($plain),
+        ], Credentials::defaults());
+        $this->assertSame($expectedErrors, $res['errors']);
+    }
+
+    public static function daemonSecretProvider(): array
+    {
+        return [
+            // rsync's getpassf() strtok()s the password file at the first \n or
+            // \r, so anything after one is silently discarded.
+            'newline'        => ["first\nsecond", [self::DAEMON_SECRET_ERROR]],
+            'carriage ret'   => ["first\rsecond", [self::DAEMON_SECRET_ERROR]],
+            'trailing nl'    => ["hunter2\n", [self::DAEMON_SECRET_ERROR]],
+            'nul byte'       => ["hun\x00ter2", [self::DAEMON_SECRET_ERROR]],
+            'ordinary'       => ['hunter2', []],
+            'spaces + utf8'  => ['  pässwörd with spaces  ', []],
+            'anonymous'      => ['', []],
+            // rsync's getpassf() reads with `read(fd, buffer, sizeof buffer - 1)`
+            // into a char buffer[512] (authenticate.c:204): byte 512 onwards is
+            // discarded in silence, so a longer secret authenticates with a
+            // PREFIX of itself and the run dies with an unexplained
+            // "auth failed on module". Reject it at save time instead.
+            'exactly 511'    => [str_repeat('a', 511), []],
+            '512 bytes'      => [str_repeat('a', 512), [self::DAEMON_SECRET_LENGTH_ERROR]],
+            '4 KiB'          => [str_repeat('x', 4096), [self::DAEMON_SECRET_LENGTH_ERROR]],
+            // Bytes, not characters: a 300-character UTF-8 secret whose bytes
+            // exceed 511 is truncated by rsync just the same.
+            'multibyte over' => [str_repeat('ä', 300), [self::DAEMON_SECRET_LENGTH_ERROR]],
+            // One error at a time: a value that breaks both rules reports the
+            // line break, which is the one the user can see.
+            'both rules'     => [str_repeat('a', 600) . "\nmore", [self::DAEMON_SECRET_ERROR]],
+        ];
+    }
+
+    /**
+     * The constant is the rsync-imposed limit, not a taste: getpassf() reads
+     * `sizeof buffer - 1` of a `char buffer[512]`.
+     */
+    public function testDaemonSecretMaxBytesMatchesRsyncsPasswordFileRead(): void
+    {
+        $this->assertSame(511, Credentials::DAEMON_SECRET_MAX_BYTES);
+    }
+
+    /**
+     * A stored secret that fails a content rule cannot be cleared by submitting
+     * the card blank - blank PRESERVES the stored value - so the message has to
+     * say how to get out of the 422 it causes.
+     */
+    public function testDaemonSecretErrorsSayHowToReplaceTheStoredValue(): void
+    {
+        foreach (["a\nb", str_repeat('a', 512)] as $plain) {
+            $res = Credentials::validateConnection([
+                'transport' => 'DAEMON', 'name' => 'n', 'host' => 'nas.local',
+                'username' => 'moduser', 'port' => 873,
+                'password' => Credentials::obfuscate($plain),
+            ], Credentials::defaults());
+            $this->assertCount(1, $res['errors']);
+            $this->assertStringContainsString(
+                'Type a ',
+                $res['errors'][0],
+                'the message must tell the user to type a fresh secret into the card'
+            );
+            $this->assertStringContainsString('leaving the field blank keeps it', $res['errors'][0]);
+        }
+    }
+
+    // --- validateConnection: the SSH arm is byte-identical to today ---------
+
+    /**
+     * The SSH rules, asserted as WHOLE error arrays with their order, so a stray
+     * daemon branch leaking into the SSH arm (or a reordered shared rule) fails
+     * here rather than silently changing what an existing save reports.
+     */
+    #[DataProvider('sshValidationProvider')]
+    public function testValidateConnectionSshArmIsUnchanged(array $conn, array $expectedErrors): void
+    {
+        $creds = Credentials::defaults();
+        $creds['keys'][] = ['id' => 'k-1', 'name' => 'kk', 'publicKey' => 'ssh-ed25519 AAAA'];
+        $res = Credentials::validateConnection($conn, $creds);
+        $this->assertSame($expectedErrors, $res['errors']);
+        $this->assertSame($expectedErrors === [], $res['valid']);
+    }
+
+    public static function sshValidationProvider(): array
+    {
+        $ok = ['name' => 'n', 'host' => 'nas.local', 'username' => 'u', 'port' => 22, 'strictHostKey' => 'accept-new'];
+        return [
+            'everything missing' => [
+                ['name' => '', 'host' => '', 'username' => '', 'port' => 0, 'authMethod' => 'telnet', 'strictHostKey' => 'maybe'],
+                [
+                    'Connection name is required.',
+                    'Host is required.',
+                    'Username is required.',
+                    'Port must be between 1 and 65535.',
+                    'Auth method must be KEYFILE, KEY or PASSWORD.',
+                    'Strict host key checking must be accept-new, yes or no.',
+                ],
+            ],
+            'unsafe host and username' => [
+                ['name' => 'n', 'host' => '-oProxyCommand=evil', 'username' => 'a b', 'port' => 22,
+                 'authMethod' => 'PASSWORD', 'password' => 'x', 'strictHostKey' => 'accept-new'],
+                [
+                    'Host contains unsafe characters or begins with "-".',
+                    'Username contains unsafe characters or begins with "-".',
+                ],
+            ],
+            'keyfile without a path' => [
+                $ok + ['authMethod' => 'KEYFILE', 'keyFilePath' => '   '],
+                ['Existing-key-file connections require a key file path.'],
+            ],
+            'keyfile relative path' => [
+                $ok + ['authMethod' => 'KEYFILE', 'keyFilePath' => 'relative/id_ed25519'],
+                ['The key file path must be an absolute path (starting with "/") and must not contain unsafe characters.'],
+            ],
+            'key auth without a key' => [
+                $ok + ['authMethod' => 'KEY', 'keyId' => ''],
+                ['Key-based connections must select an SSH key.'],
+            ],
+            'key auth, missing key' => [
+                $ok + ['authMethod' => 'KEY', 'keyId' => 'k-nope'],
+                ['The selected SSH key does not exist.'],
+            ],
+            'key auth, present key' => [
+                $ok + ['authMethod' => 'KEY', 'keyId' => 'k-1'],
+                [],
+            ],
+            'password auth, empty' => [
+                $ok + ['authMethod' => 'PASSWORD', 'password' => ''],
+                ['Password-based connections require a password.'],
+            ],
+            'password auth, set' => [
+                $ok + ['authMethod' => 'PASSWORD', 'password' => 'hunter2'],
+                [],
+            ],
+            // A legacy record has no transport key at all: it must take the SSH
+            // arm, not trip the daemon charset rule.
+            'legacy record, no transport key' => [
+                $ok + ['authMethod' => 'KEYFILE', 'keyFilePath' => '/root/.ssh/id_ed25519'],
+                [],
+            ],
+            // An unknown hand-edited transport also takes the SSH arm, matching
+            // mergeConnection's clamp.
+            'junk transport takes the SSH arm' => [
+                ['transport' => 'FTP'] + $ok + ['authMethod' => 'telnet'],
+                ['Auth method must be KEYFILE, KEY or PASSWORD.'],
+            ],
+        ];
+    }
+
+    /**
+     * ':' and '/' remain LEGAL in an SSH host/username - they are only fatal for
+     * the daemon operand. Tightening the SSH rule would break existing saves.
+     */
+    public function testSshHostAndUsernameStillAcceptColonAndSlash(): void
+    {
+        $creds = Credentials::defaults();
+        foreach ([['a:b', 'u'], ['nas/evil', 'u'], ['nas.local', 'a:b'], ['nas.local', 'u/x']] as [$host, $user]) {
+            $res = Credentials::validateConnection([
+                'name' => 'n', 'host' => $host, 'username' => $user, 'port' => 22,
+                'authMethod' => 'KEYFILE', 'keyFilePath' => '/root/.ssh/id_ed25519',
+                'strictHostKey' => 'accept-new',
+            ], $creds);
+            $this->assertSame([], $res['errors'], "SSH '$user@$host' must still validate");
+        }
+    }
+
+    /**
+     * The transport is read case-insensitively and with surrounding whitespace
+     * stripped, exactly as mergeConnection clamps it - so a hand-edited
+     * credentials.json cannot slip past the daemon rules by lowercasing.
+     */
+    public function testValidateConnectionTransportMatchIsCaseInsensitive(): void
+    {
+        foreach (['daemon', 'DaEmOn', "  DAEMON \n"] as $t) {
+            $res = Credentials::validateConnection([
+                'transport' => $t, 'name' => 'n', 'host' => 'a:b',
+                'username' => 'moduser', 'port' => 873,
+            ], Credentials::defaults());
+            $this->assertSame([self::DAEMON_HOST_ERROR], $res['errors'], "transport '$t'");
+        }
+    }
+
+    // --- rsyncDaemonNote: the new third parameter ---------------------------
+
+    /**
+     * The two-argument form (every pre-daemon call site) must behave exactly as
+     * it does today, and must be indistinguishable from an explicit 'SSH'.
+     */
+    #[DataProvider('sshDaemonNoteProvider')]
+    public function testRsyncDaemonNoteDefaultsToTodaysSshBehaviour(int $port, string $host, string $expected): void
+    {
+        $this->assertSame($expected, Credentials::rsyncDaemonNote($port, $host));
+        $this->assertSame($expected, Credentials::rsyncDaemonNote($port, $host, 'SSH'));
+        // Any unknown/hand-edited value takes the SSH arm too.
+        $this->assertSame($expected, Credentials::rsyncDaemonNote($port, $host, 'FTP'));
+        $this->assertSame($expected, Credentials::rsyncDaemonNote($port, $host, ''));
+    }
+
+    public static function sshDaemonNoteProvider(): array
+    {
+        $daemonShaped = 'This looks like an rsync daemon address (rsync:// or host::module). '
+            . 'This Connection uses SSH transport, so enter just the hostname or IP here '
+            . 'and put the remote path on the job\'s pair. To use an rsync daemon instead, '
+            . 'set this Connection\'s Transport to "rsync daemon (rsyncd)".';
+        $port873 = 'Port 873 is the rsync daemon (rsyncd) port, which is a different protocol '
+            . 'from rsync-over-SSH. Either enable SSH on the remote host and use its SSH port '
+            . '(usually 22), or set this Connection\'s Transport to "rsync daemon (rsyncd)".';
+        return [
+            'plain host, 22'        => [22, 'nas.local', ''],
+            'plain host, 2222'      => [2222, 'nas.local', ''],
+            'plain host, 873'       => [873, 'nas.local', $port873],
+            'ipv6 host, 22'         => [22, '2001:db8::1', ''],
+            'ipv6 host, 873'        => [873, '2001:db8::1', $port873],
+            'rsync url'             => [22, 'rsync://nas/module', $daemonShaped],
+            'double colon'          => [22, 'nas::module', $daemonShaped],
+            // The host shape wins over the port, as it does today.
+            'double colon on 873'   => [873, 'nas::module', $daemonShaped],
+            'no host given'         => [22, '', ''],
+        ];
+    }
+
+    /**
+     * On DAEMON transport the PORT test is inverted rather than dropped: 873 is
+     * now correct and anything else is the likely misconfiguration (typically a
+     * connection left on the SSH default 22).
+     */
+    #[DataProvider('daemonNoteProvider')]
+    public function testRsyncDaemonNoteInvertsForDaemonTransport(int $port, string $host, string $expected): void
+    {
+        $this->assertSame($expected, Credentials::rsyncDaemonNote($port, $host, 'DAEMON'));
+        // Case/whitespace insensitive, matching mergeConnection's clamp.
+        $this->assertSame($expected, Credentials::rsyncDaemonNote($port, $host, '  daemon '));
+    }
+
+    public static function daemonNoteProvider(): array
+    {
+        $daemonShaped = 'This looks like a full rsync daemon address (rsync:// or host::module). '
+            . 'Enter just the hostname or IP here; the module goes in the job\'s pair.';
+        return [
+            'correct port'      => [873, 'nas.local', ''],
+            'left on SSH 22'    => [22, 'nas.local', 'Port 22 is unusual for an rsync daemon; rsyncd normally listens on 873.'],
+            'odd port'          => [2222, 'nas.local', 'Port 2222 is unusual for an rsync daemon; rsyncd normally listens on 873.'],
+            // The host shape still wins over the port.
+            'rsync url on 873'  => [873, 'rsync://nas/module', $daemonShaped],
+            'double colon on 22' => [22, 'nas::module', $daemonShaped],
+        ];
+    }
+
+    // --- usedBy is unaffected by the transport field ------------------------
+
+    public function testUsedByConnectionListsJobsRegardlessOfTransport(): void
+    {
+        $creds = Credentials::defaults();
+        $creds['connections'][] = Credentials::mergeConnection([
+            'id' => 'c-d', 'name' => 'nas-rsyncd', 'transport' => 'DAEMON',
+            'host' => 'nas.local', 'username' => 'moduser',
+        ]);
+        $config = Config::defaults();
+        $config['jobs'][] = ['id' => 'j-1', 'name' => 'photos', 'connectionId' => 'c-d', 'enabled' => true];
+        $config['jobs'][] = ['id' => 'j-2', 'name' => 'music', 'connectionId' => 'c-other', 'enabled' => true];
+
+        $used = Credentials::usedBy($creds, 'connection', 'c-d', $config);
+        $this->assertSame([['id' => 'j-1', 'name' => 'photos']], $used['jobs']);
+    }
+
+    public function testUsedByKeyIgnoresADaemonConnectionThatIsNotKeyAuth(): void
+    {
+        // A daemon connection carries the default KEYFILE authMethod, so it must
+        // not hold a managed key hostage.
+        $creds = Credentials::defaults();
+        $creds['keys'][] = ['id' => 'k-1', 'name' => 'kk', 'publicKey' => 'p'];
+        $creds['connections'][] = Credentials::mergeConnection([
+            'id' => 'c-d', 'name' => 'nas-rsyncd', 'transport' => 'DAEMON',
+            'host' => 'nas.local', 'username' => 'moduser', 'keyId' => 'k-1',
+        ]);
+        $this->assertSame([], Credentials::usedBy($creds, 'key', 'k-1')['connections']);
+    }
 }

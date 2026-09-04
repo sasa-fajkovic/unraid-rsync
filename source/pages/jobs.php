@@ -144,7 +144,7 @@ function ur_render_job_card($job, $index): void
     // transport (drives whether Connection is required - see the JS toggle)
     echo '<dt><label for="' . ur_h($idb . '_transport') . '">' . ur_h(ur_t('Transport')) . '</label>:</dt>';
     echo '<dd><select id="' . ur_h($idb . '_transport') . '" class="ur-transport-select" data-conn="' . ur_h($idb . '_conn') . '" name="' . ur_h($p . '[transport]') . '">';
-    foreach (['SSH' => 'SSH (remote host)', 'LOCAL' => 'Local (this server)'] as $val => $lbl) {
+    foreach (['SSH' => 'SSH (remote host)', 'LOCAL' => 'Local (this server)', 'DAEMON' => 'rsync daemon (host::module)'] as $val => $lbl) {
         $sel = ($transport === $val) ? ' selected' : '';
         echo '<option value="' . ur_h($val) . '"' . $sel . '>' . ur_h(ur_t($lbl)) . '</option>';
     }
@@ -158,16 +158,19 @@ function ur_render_job_card($job, $index): void
         echo '<option value="' . ur_h($val) . '"' . $sel . '>' . ur_h(ur_t($lbl)) . '</option>';
     }
     echo '</select>';
-    echo '<blockquote class="inline_help"><p>' . ur_h(ur_t('Direction only applies to SSH transport.')) . '</p></blockquote>';
+    echo '<blockquote class="inline_help"><p>' . ur_h(ur_t('Direction applies to SSH and rsync daemon transports; a Local job always copies left to right.')) . '</p></blockquote>';
     echo '</dd>';
 
     // connection (populated from the saved Credentials connections). REQUIRED
-    // only for SSH transport (LOCAL jobs use no connection), so the `required`
-    // attribute and the visual marker are toggled by JS off the transport select
-    // (and seeded server-side here for the initial transport).
+    // for every transport EXCEPT Local (which uses no connection at all), so the
+    // `required` attribute and the visual marker are toggled by JS off the
+    // transport select (and seeded server-side here for the initial transport).
+    // Expressed as "not LOCAL" rather than a list of remote transports so an
+    // unknown hand-edited value still gets the marker - the safe side, and it
+    // matches Job::validate, which requires a Connection for SSH and DAEMON.
     global $urConnections;
     $conns = is_array($urConnections) ? $urConnections : [];
-    $connRequired = ($transport === 'SSH');
+    $connRequired = ($transport !== 'LOCAL');
     echo '<dt><label for="' . ur_h($idb . '_conn') . '">' . ur_h(ur_t('Connection')) . '</label>'
         . '<abbr class="ur-required ur-conn-required" title="' . ur_h(ur_t('Required')) . '"'
         . ($connRequired ? '' : ' style="display:none"') . '>*</abbr>:</dt>';
@@ -187,7 +190,14 @@ function ur_render_job_card($job, $index): void
         if ($cId === $connId) {
             $connFound = true;
         }
-        echo '<option value="' . ur_h($cId) . '"' . $sel . '>' . ur_h($cName) . '</option>';
+        // $urConnections is the RAW credentials array - it never went through
+        // Credentials::mergeConnection - so a pre-daemon record has no transport
+        // key at all and `?? 'SSH'` is mandatory. The transport is used ONLY to
+        // append a label suffix here: never to filter or group the options. A
+        // bare branch that dropped a connection from this select would let the
+        // next save silently clear the job's connectionId.
+        $cSuffix = (strtoupper(trim((string) ($conn['transport'] ?? 'SSH'))) === 'DAEMON') ? ' [rsyncd]' : '';
+        echo '<option value="' . ur_h($cId) . '"' . $sel . '>' . ur_h($cName . $cSuffix) . '</option>';
     }
     // Preserve an existing connectionId that no longer matches a saved
     // connection (e.g. the connection was deleted) so editing doesn't silently
@@ -199,7 +209,7 @@ function ur_render_job_card($job, $index): void
     if (empty($conns)) {
         echo '<blockquote class="inline_help"><p>' . ur_h(ur_t('Add connections in the Connections tab.')) . '</p></blockquote>';
     } else {
-        echo '<blockquote class="inline_help"><p>' . ur_h(ur_t('Used for SSH transport. Manage connections in the Connections tab.')) . '</p></blockquote>';
+        echo '<blockquote class="inline_help"><p>' . ur_h(ur_t('Used for SSH and rsync daemon transports. Manage connections in the Connections tab.')) . '</p></blockquote>';
     }
     echo '</dd>';
 
@@ -257,6 +267,8 @@ function ur_render_job_card($job, $index): void
         . ur_h(ur_t('The LEFT box is always a path on this server; the RIGHT box is the path on the other host (SSH transport) or a second path on this server (Local transport). Which one is the source is set by Direction above: Push reads from the left, Pull reads from the right.'))
         . '</p><p>'
         . ur_h(ur_t('For an SSH job the right box must be an absolute filesystem path on the remote host - NOT an rsync daemon module name. If your NAS "Rsync Server" page shows only a module such as "backup", use the folder that module points at (for example /volume1/Backup/data).'))
+        . '</p><p>'
+        . ur_h(ur_t('For an rsync daemon job the right box is a MODULE reference on the daemon - just "rsync_bkp", or "rsync_bkp/photos" for a folder inside it. No host and no leading slash: the host, port, username and module secret all come from the Connection.'))
         . '</p></blockquote>';
     echo '</dd>';
 
@@ -328,7 +340,7 @@ function ur_render_job_card($job, $index): void
 
     // rsync options block (whitelist), gated visually by the use-global toggle
     echo '<div class="ur-job-opts" id="' . ur_h($idb . '_opts') . '"' . ($useGlobal ? ' style="display:none"' : '') . '>';
-    ur_render_rsync_options($opts, $p . '[rsyncOptions]', $idb . '_opts_fields');
+    ur_render_rsync_options($opts, $p . '[rsyncOptions]', $idb . '_opts_fields', $transport);
     echo '</div>';
 
     // Run / Dry-run / Abort actions. These are only meaningful for a saved job
@@ -1260,20 +1272,22 @@ ur_emit_time_helpers();
   });
 
   /* Toggle the Connection select's `required` attribute + its visual marker to
-   * match the chosen transport: SSH needs a connection, LOCAL does not. Keeping
-   * the client `required` in lockstep with the server rule (Job::validate) means
-   * a LOCAL job is never blocked and an SSH job without a connection is caught
-   * client-side too. Driven off the transport select (which carries data-conn). */
+   * match the chosen transport: SSH and rsync-daemon jobs need a connection,
+   * LOCAL does not. Expressed as "not LOCAL" (rather than a list of the remote
+   * transports) so this stays in lockstep with the server rule in Job::validate
+   * and with $connRequired above - a LOCAL job is never blocked and a remote job
+   * without a connection is caught client-side too. Driven off the transport
+   * select (which carries data-conn). */
   function syncConnRequired(transportSel) {
     if (!transportSel) { return; }
     var conn = document.getElementById(transportSel.getAttribute('data-conn'));
     if (!conn) { return; }
-    var isSsh = (transportSel.value === 'SSH');
-    conn.required = isSsh;
+    var needsConn = (transportSel.value !== 'LOCAL');
+    conn.required = needsConn;
     /* The marker lives in the same card; find it relative to the connection. */
     var card = conn.closest ? conn.closest('.ur-job-card') : null;
     var mark = card ? card.querySelector('.ur-conn-required') : null;
-    if (mark) { mark.style.display = isSsh ? '' : 'none'; }
+    if (mark) { mark.style.display = needsConn ? '' : 'none'; }
   }
 
   /* Toggle a job's options block when "use global defaults" changes, and keep

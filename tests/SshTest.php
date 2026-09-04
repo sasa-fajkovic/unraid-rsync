@@ -19,12 +19,33 @@ final class FakeSsh extends Ssh
     public static $lastProbeArgv = null;
     /** @var array<string,string>|null the env runProbe was last called with */
     public static $lastProbeEnv = null;
+    /** @var int how many per-run tokens were minted (guard-ORDERING probe) */
+    public static $tokenMints = 0;
 
     protected static function runProbe(array $argv, ?array $env = null): array
     {
         self::$lastProbeArgv = $argv;
         self::$lastProbeEnv  = $env;
         return self::$nextProbe;
+    }
+
+    // materialize()/materializeDaemon() call this through static::, so counting
+    // it here proves WHERE a refusal happens, not just what it returns.
+    public static function newRuntimeToken(string $connId): string
+    {
+        self::$tokenMints++;
+        return parent::newRuntimeToken($connId);
+    }
+}
+
+/** Ssh with a DETERMINISTIC per-run token, so a test can pre-plant its path. */
+final class FixedTokenSsh extends Ssh
+{
+    const TOKEN = 'fixed-token';
+
+    public static function newRuntimeToken(string $connId): string
+    {
+        return self::TOKEN;
     }
 }
 
@@ -49,6 +70,7 @@ final class SshTest extends TestCase
         FakeSsh::$nextProbe = [0, ''];
         FakeSsh::$lastProbeArgv = null;
         FakeSsh::$lastProbeEnv = null;
+        FakeSsh::$tokenMints = 0;
     }
 
     protected function tearDown(): void
@@ -684,5 +706,548 @@ final class SshTest extends TestCase
         $res = Ssh::testConnection(Credentials::defaults(), 'nope');
         $this->assertFalse($res['ok']);
         $this->assertSame('config', $res['reason']);
+    }
+
+    // --- DAEMON transport: Ssh refuses it, and materialises only a passfile ---
+
+    /**
+     * A merged DAEMON connection. mergeConnection() resolves the port from the
+     * transport, so an untouched card lands on 873 (Credentials::RSYNCD_PORT).
+     *
+     * @param array<string,mixed> $over
+     * @return array<string,mixed>
+     */
+    private function daemonConn(array $over = []): array
+    {
+        return Credentials::mergeConnection(array_merge([
+            'id' => 'c-daemon', 'name' => 'd', 'host' => 'nas.local',
+            'username' => 'moduser', 'transport' => 'DAEMON',
+        ], $over));
+    }
+
+    /**
+     * The expected MERGED connection, in mergeConnection's pinned key order -
+     * spelled out so a reordering or a dropped key fails loudly rather than
+     * being absorbed by a call to the very function under test.
+     *
+     * @param array<string,mixed> $over
+     * @return array<string,mixed>
+     */
+    private function mergedConn(array $over = []): array
+    {
+        return array_merge([
+            'id'             => '',
+            'name'           => '',
+            'host'           => 'h.example',
+            'username'       => 'sasa',
+            'keyId'          => '',
+            'keyFilePath'    => Credentials::DEFAULT_KEY_FILE_PATH,
+            'password'       => '',
+            'remoteHostKey'  => '',
+            'transport'      => 'SSH',
+            'port'           => 22,
+            'authMethod'     => 'KEYFILE',
+            'strictHostKey'  => 'accept-new',
+            'connectTimeout' => 10,
+        ], $over);
+    }
+
+    /** Sorted directory entries (no dots), or [] when the dir does not exist. */
+    private function dirEntries(string $dir): array
+    {
+        if (!is_dir($dir)) {
+            return [];
+        }
+        $entries = array_values(array_diff(scandir($dir) ?: [], ['.', '..']));
+        sort($entries);
+        return $entries;
+    }
+
+    public function testMaterializeRefusesADaemonConnectionAndCreatesNothing(): void
+    {
+        $creds = Credentials::defaults();
+        $creds['connections'][] = $this->daemonConn(['password' => Credentials::obfuscate('s3cret')]);
+
+        $mat = FakeSsh::materialize($creds, 'c-daemon');
+
+        $this->assertSame([
+            'ok'    => false,
+            'error' => 'This Connection uses rsync daemon (rsyncd) transport; an SSH transport cannot be built from it.',
+        ], $mat);
+
+        // The guard sits BEFORE newRuntimeToken() and ensureRuntimeDirs(): no
+        // token was minted and the tmpfs runtime base was never created. A guard
+        // one line later would still return this exact message, so asserting the
+        // message alone would prove nothing.
+        $this->assertSame(0, FakeSsh::$tokenMints);
+        $this->assertDirectoryDoesNotExist($this->rtBase);
+
+        // Control: the same call for an SSH connection DOES mint a token and
+        // create all three secret dirs - so the two assertions above can fail.
+        $creds['connections'][] = $this->passConn(['password' => Credentials::obfuscate('x')]);
+        $ok = FakeSsh::materialize($creds, 'c-pw');
+        $this->assertTrue($ok['ok'], $ok['error'] ?? '');
+        $this->assertSame(1, FakeSsh::$tokenMints);
+        foreach (['keys', 'pass', 'known_hosts'] as $sub) {
+            $this->assertDirectoryExists($this->rtBase . '/' . $sub);
+        }
+        FakeSsh::cleanupRuntime((string) $ok['token']);
+    }
+
+    /**
+     * PASSWORD is materialize()'s else FALL-THROUGH, so the refusal must not
+     * depend on authMethod: a daemon card still POSTs whatever the (hidden) auth
+     * select held, and without the guard a PASSWORD one would get an SSH_ASKPASS
+     * passfile plus an `ssh` -e string handed to rsync beside a host::module
+     * operand (which rsync silently accepts as daemon-over-remote-shell).
+     */
+    #[DataProvider('daemonAuthMethodProvider')]
+    public function testMaterializeRefusesADaemonConnectionWhateverItsAuthMethod(string $authMethod): void
+    {
+        $creds = Credentials::defaults();
+        $creds['keys'][] = [
+            'id' => 'k-1', 'name' => 'k', 'privateKey' => "KEY\n",
+            'publicKey' => 'ssh-ed25519 AAAA', 'fingerprint' => 'SHA256:x',
+        ];
+        $creds['connections'][] = $this->daemonConn([
+            'authMethod' => $authMethod,
+            'keyId'      => 'k-1',
+            'password'   => Credentials::obfuscate('s3cret'),
+        ]);
+
+        $mat = FakeSsh::materialize($creds, 'c-daemon');
+
+        $this->assertSame([
+            'ok'    => false,
+            'error' => 'This Connection uses rsync daemon (rsyncd) transport; an SSH transport cannot be built from it.',
+        ], $mat);
+        $this->assertSame(0, FakeSsh::$tokenMints);
+        $this->assertDirectoryDoesNotExist($this->rtBase);
+    }
+
+    /** @return array<string,array{0:string}> */
+    public static function daemonAuthMethodProvider(): array
+    {
+        return ['keyfile' => ['KEYFILE'], 'key' => ['KEY'], 'password' => ['PASSWORD']];
+    }
+
+    public function testTestConnectionRefusesADaemonConnectionWithoutSpawningAnything(): void
+    {
+        $creds = Credentials::defaults();
+        $creds['connections'][] = $this->daemonConn(['password' => Credentials::obfuscate('s3cret')]);
+
+        $res = FakeSsh::testConnection($creds, 'c-daemon');
+
+        $this->assertSame([
+            'ok'      => false,
+            'reason'  => 'config',
+            'message' => 'This Connection uses rsync daemon (rsyncd) transport; the SSH connection test does not apply to it.',
+        ], $res);
+        // Nothing was spawned and nothing was materialised for it.
+        $this->assertNull(FakeSsh::$lastProbeArgv);
+        $this->assertNull(FakeSsh::$lastProbeEnv);
+        $this->assertSame(0, FakeSsh::$tokenMints);
+        $this->assertDirectoryDoesNotExist($this->rtBase);
+    }
+
+    /**
+     * The transport guard precedes the host/username check. Reversed, a daemon
+     * connection with an empty host would get "Host and username are required"
+     * - and a COMPLETE one would get an ssh probe fired at port 873.
+     */
+    public function testTestConnectionDaemonGuardPrecedesTheHostAndUsernameCheck(): void
+    {
+        $creds = Credentials::defaults();
+        $creds['connections'][] = $this->daemonConn(['host' => '', 'username' => '']);
+
+        $res = FakeSsh::testConnection($creds, 'c-daemon');
+
+        $this->assertSame([
+            'ok'      => false,
+            'reason'  => 'config',
+            'message' => 'This Connection uses rsync daemon (rsyncd) transport; the SSH connection test does not apply to it.',
+        ], $res);
+        $this->assertNull(FakeSsh::$lastProbeArgv);
+    }
+
+    public function testMaterializeDaemonWritesOnePassFileAt0600AndNothingElse(): void
+    {
+        $creds = Credentials::defaults();
+        // A secret with an inner space and no trailing newline: rsync's getpassf()
+        // strtok()s the first line only, so the bytes must land verbatim.
+        $creds['connections'][] = $this->daemonConn(['password' => Credentials::obfuscate('s3cr et')]);
+
+        $mat = FakeSsh::materializeDaemon($creds, 'c-daemon');
+
+        $this->assertTrue($mat['ok'], $mat['error'] ?? '');
+        $token = (string) $mat['token'];
+        $this->assertNotSame('', $token);
+        $this->assertSame(1, FakeSsh::$tokenMints);
+
+        $this->assertSame([
+            'ok'       => true,
+            'token'    => $token,
+            'conn'     => $this->mergedConn([
+                'id'        => 'c-daemon',
+                'name'      => 'd',
+                'host'      => 'nas.local',
+                'username'  => 'moduser',
+                'password'  => Credentials::obfuscate('s3cr et'),
+                'transport' => 'DAEMON',
+                'port'      => 873,
+            ]),
+            'passFile' => $this->rtBase . '/pass/' . $token,
+            'port'     => 873,
+        ], $mat);
+
+        // No sshEnv/sshArgv/dashE/keyPath/knownHosts here: SPEC 2.B pins the
+        // daemon bag to five keys, and the `sshEnv => []` that Runner.php:374
+        // needs belongs to the Runner's own pieces bag (SPEC 2.D6).
+        foreach (['sshEnv', 'sshArgv', 'dashE', 'keyPath', 'knownHosts'] as $absent) {
+            $this->assertArrayNotHasKey($absent, $mat);
+        }
+
+        // EXACTLY one secret file exists, and it is the passfile.
+        $this->assertSame([$token], $this->dirEntries($this->rtBase . '/pass'));
+        $this->assertSame([], $this->dirEntries($this->rtBase . '/keys'));
+        $this->assertSame([], $this->dirEntries($this->rtBase . '/known_hosts'));
+        $this->assertSame('s3cr et', file_get_contents($mat['passFile']));
+        // getpassf() (authenticate.c:175-217) exits 1 when st_mode & 06 is set.
+        if (DIRECTORY_SEPARATOR === '/') {
+            $this->assertSame('0600', substr(sprintf('%o', fileperms($mat['passFile'])), -4));
+        }
+
+        FakeSsh::cleanupRuntime($token);
+        $this->assertFileDoesNotExist($mat['passFile']);
+        $this->assertSame([], $this->dirEntries($this->rtBase . '/pass'));
+    }
+
+    public function testMaterializeDaemonAnonymousModuleWritesNothingAndMintsNoToken(): void
+    {
+        $creds = Credentials::defaults();
+        // No stored secret: an anonymous (no `auth users`) module.
+        $creds['connections'][] = $this->daemonConn(['port' => 8730]);
+
+        $mat = FakeSsh::materializeDaemon($creds, 'c-daemon');
+
+        $this->assertSame([
+            'ok'       => true,
+            'token'    => '',
+            'conn'     => $this->mergedConn([
+                'id'        => 'c-daemon',
+                'name'      => 'd',
+                'host'      => 'nas.local',
+                'username'  => 'moduser',
+                'transport' => 'DAEMON',
+                'port'      => 8730,
+            ]),
+            'passFile' => '',
+            'port'     => 8730,
+        ], $mat);
+
+        // An EMPTY password file would make rsync exit 1 ("failed to read a
+        // password from %s", authenticate.c:215), so nothing at all is written -
+        // not even the runtime dirs - and no token is minted for the Runner to
+        // clean up.
+        $this->assertSame(0, FakeSsh::$tokenMints);
+        $this->assertDirectoryDoesNotExist($this->rtBase);
+    }
+
+    /**
+     * Every materializeDaemon guard runs BEFORE the token is minted, so no
+     * failure path can orphan a secret on disk.
+     *
+     * @param array<string,mixed> $over
+     */
+    #[DataProvider('daemonMaterializeGuardProvider')]
+    public function testMaterializeDaemonGuardsRefuseBeforeAnythingIsWritten(array $over, string $expected): void
+    {
+        $creds = Credentials::defaults();
+        $creds['connections'][] = $this->daemonConn($over);
+
+        $mat = FakeSsh::materializeDaemon($creds, 'c-daemon');
+
+        $this->assertSame(['ok' => false, 'error' => $expected], $mat);
+        $this->assertSame(0, FakeSsh::$tokenMints);
+        $this->assertDirectoryDoesNotExist($this->rtBase);
+    }
+
+    /** @return array<string,array{0:array<string,mixed>,1:string}> */
+    public static function daemonMaterializeGuardProvider(): array
+    {
+        $wrongTransport = 'This Connection uses SSH transport; an rsync daemon transport cannot be built from it.';
+        $incomplete     = 'The Connection is incomplete: an rsync daemon connection needs both a host and a username.';
+        $badHost        = 'The Connection host is not valid for an rsync daemon operand.';
+        $badUser        = 'The Connection username is not valid for an rsync daemon operand.';
+        $newline        = 'The module secret must not contain line breaks: rsync reads only the first line '
+            . 'of the password file, so everything after it would be silently discarded.';
+
+        return [
+            'ssh transport'      => [['transport' => 'SSH'], $wrongTransport],
+            'unknown transport'  => [['transport' => 'FTP'], $wrongTransport],
+            'empty host'         => [['host' => ''], $incomplete],
+            'empty username'     => [['username' => ''], $incomplete],
+            // parse_hostspec breaks the authority at the FIRST ':' or '/', so
+            // either character turns the operand into an SSH target over the
+            // default remote shell, or into a plain local path.
+            'host with a colon'  => [['host' => 'nas:2222'], $badHost],
+            'host with a slash'  => [['host' => 'nas/evil'], $badHost],
+            'host with a bracket' => [['host' => '[fe80::1]'], $badHost],
+            'user with a colon'  => [['username' => 'a:b'], $badUser],
+            'user with a slash'  => [['username' => 'a/b'], $badUser],
+            'secret with LF'     => [['password' => Credentials::obfuscate("first\nsecond")], $newline],
+            'secret with CR'     => [['password' => Credentials::obfuscate("first\rsecond")], $newline],
+            'secret with NUL'    => [['password' => Credentials::obfuscate("first\0second")], $newline],
+        ];
+    }
+
+    /**
+     * The daemon path goes through the SAME hardened ensureRuntimeDirs(): a
+     * symlink planted at pass/ (the /tmp symlink attack) is refused rather than
+     * followed, the attacker's target is never written into, and the throw
+     * happens BEFORE the token is minted.
+     *
+     * The only failure path AFTER minting is a write failure inside
+     * writePassFile -> safeWriteSecret, which is not reachable portably (its
+     * own chmod 0700 in ensureRuntimeDirs re-grants write to the owner); that
+     * writer unlinks its tempnam() on every error branch before throwing, so it
+     * cannot orphan a secret either.
+     */
+    public function testMaterializeDaemonRefusesASymlinkedPassDirAndWritesNothing(): void
+    {
+        if (DIRECTORY_SEPARATOR !== '/') {
+            $this->markTestSkipped('POSIX-only symlink test');
+        }
+        mkdir($this->rtBase, 0700, true);
+        $target = $this->rtBase . '/evil-target';
+        mkdir($target, 0700, true);
+        symlink($target, $this->rtBase . '/pass');
+
+        $creds = Credentials::defaults();
+        $creds['connections'][] = $this->daemonConn(['password' => Credentials::obfuscate('s3cret')]);
+
+        $threw = false;
+        try {
+            FakeSsh::materializeDaemon($creds, 'c-daemon');
+        } catch (RuntimeException $e) {
+            $threw = true;
+            $this->assertStringContainsString('symlink', strtolower($e->getMessage()));
+        }
+        $this->assertTrue($threw, 'materializeDaemon must refuse a symlinked runtime dir');
+        $this->assertSame([], $this->dirEntries($target));
+        $this->assertSame(0, FakeSsh::$tokenMints);
+    }
+
+    /**
+     * A secret-write failure must not name the per-run tmpfs path. The Runner
+     * turns a thrown message straight into a run-log AND plugin.log line, and it
+     * does so on the FAILURE arm - where Logger::setRedaction has not been armed
+     * (it is armed only on success) and where redactRunLog never reaches
+     * plugin.log at all. $label already says which secret failed, and the path is
+     * a tmpfs name that is gone by the time anyone reads the log.
+     */
+    public function testASecretWriteFailureNeverNamesThePerRunSecretPath(): void
+    {
+        if (DIRECTORY_SEPARATOR !== '/') {
+            $this->markTestSkipped('POSIX-only rename-onto-a-directory test');
+        }
+        // A DIRECTORY where the pass file should land: safeWriteSecret's atomic
+        // rename() then fails (EISDIR) after the tempnam write succeeded.
+        $passPath = $this->rtBase . '/pass/' . FixedTokenSsh::TOKEN;
+        mkdir($passPath, 0700, true);
+
+        $creds = Credentials::defaults();
+        $creds['connections'][] = $this->daemonConn(['password' => Credentials::obfuscate('s3cret')]);
+
+        $threw = null;
+        try {
+            FixedTokenSsh::materializeDaemon($creds, 'c-daemon');
+        } catch (RuntimeException $e) {
+            $threw = $e;
+        }
+        $this->assertNotNull($threw, 'the failed rename must throw');
+        $this->assertSame('Unable to place password file.', $threw->getMessage());
+        $this->assertStringNotContainsString($this->rtBase, $threw->getMessage());
+        $this->assertStringNotContainsString(FixedTokenSsh::TOKEN, $threw->getMessage());
+        // ...and the tempnam scratch file is unlinked, so nothing is orphaned.
+        $this->assertSame(
+            [],
+            array_values(array_filter(
+                (array) scandir($this->rtBase . '/pass'),
+                static fn(string $e): bool => strpos($e, '.ur-secret.') === 0
+            ))
+        );
+    }
+
+    public function testNoSecretWriteExceptionInterpolatesAPath(): void
+    {
+        // The sibling throw (a failed file_put_contents into the tempnam file) is
+        // not reachable portably, and the same reasoning applies to it and to any
+        // throw added later, so pin the rule at the source.
+        $src = file_get_contents(__DIR__ . '/../source/include/Ssh.php');
+        $this->assertIsString($src);
+        $this->assertSame(
+            0,
+            preg_match_all('/throw new RuntimeException\([^;]*\$path/', $src),
+            'a secret path must never reach an exception message - it is logged before redaction is armed'
+        );
+    }
+
+    public function testMaterializeDaemonUnknownConnectionIdFailsAndWritesNothing(): void
+    {
+        $mat = FakeSsh::materializeDaemon(Credentials::defaults(), 'nope');
+
+        $this->assertSame(['ok' => false, 'error' => 'Connection not found: nope'], $mat);
+        $this->assertSame(0, FakeSsh::$tokenMints);
+        $this->assertDirectoryDoesNotExist($this->rtBase);
+    }
+
+    // --- the three SSH auth methods are byte-identical to the pre-daemon code -
+
+    // The three bags below were captured by materialising the SAME connections
+    // against a checkout of a3ed950 (the commit before the daemon transport) and
+    // diffing: the ONLY difference is the new additive `transport => 'SSH'` key
+    // inside the merged `conn` (SPEC section 8, no-breaking-change ledger).
+    // sshArgv, dashE, sshEnv, keyPath, passFile and knownHosts are unchanged.
+
+    public function testKeyAuthMaterialisesTheSameBagAsBeforeTheDaemonTransport(): void
+    {
+        $creds = Credentials::defaults();
+        $creds['keys'][] = [
+            'id' => 'k-1', 'name' => 'k',
+            'privateKey' => "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----",
+            'publicKey' => 'ssh-ed25519 AAAA', 'fingerprint' => 'SHA256:x',
+        ];
+        $creds['connections'][] = $this->keyConn(['remoteHostKey' => 'h.example ssh-ed25519 AAAAhostkey']);
+
+        $mat = Ssh::materialize($creds, 'c-key');
+        $this->assertTrue($mat['ok'], $mat['error'] ?? '');
+        $token = (string) $mat['token'];
+        $kp    = $this->rtBase . '/keys/' . $token;
+        $kh    = $this->rtBase . '/known_hosts/' . $token;
+
+        $this->assertSame([
+            'ok'      => true,
+            'token'   => $token,
+            'conn'    => $this->mergedConn([
+                'id' => 'c-key', 'name' => 'k', 'keyId' => 'k-1', 'authMethod' => 'KEY',
+                'remoteHostKey' => 'h.example ssh-ed25519 AAAAhostkey',
+            ]),
+            'sshArgv' => [
+                'ssh',
+                '-i', $kp,
+                '-o', 'IdentitiesOnly=yes',
+                '-o', 'BatchMode=yes',
+                '-o', 'StrictHostKeyChecking=accept-new',
+                '-o', 'UserKnownHostsFile=' . $kh,
+                '-o', 'GlobalKnownHostsFile=/dev/null',
+                '-o', 'ConnectTimeout=10',
+                '-p', '22',
+            ],
+            'sshEnv'     => [],
+            'dashE'      => "'ssh' '-i' '$kp' '-o' 'IdentitiesOnly=yes' '-o' 'BatchMode=yes'"
+                . " '-o' 'StrictHostKeyChecking=accept-new' '-o' 'UserKnownHostsFile=$kh'"
+                . " '-o' 'GlobalKnownHostsFile=/dev/null' '-o' 'ConnectTimeout=10' '-p' '22'",
+            'keyPath'    => $kp,
+            'passFile'   => '',
+            'knownHosts' => $kh,
+        ], $mat);
+
+        Ssh::cleanupRuntime($token);
+    }
+
+    public function testKeyfileAuthMaterialisesTheSameBagAsBeforeTheDaemonTransport(): void
+    {
+        $keyFile = $this->makeKeyFile();
+        $creds = Credentials::defaults();
+        $creds['connections'][] = $this->keyfileConn([
+            'keyFilePath' => $keyFile, 'remoteHostKey' => 'h.example ssh-ed25519 AAAAhostkey',
+        ]);
+
+        $mat = Ssh::materialize($creds, 'c-kf');
+        $this->assertTrue($mat['ok'], $mat['error'] ?? '');
+        $token = (string) $mat['token'];
+        $kh    = $this->rtBase . '/known_hosts/' . $token;
+
+        $this->assertSame([
+            'ok'      => true,
+            'token'   => $token,
+            'conn'    => $this->mergedConn([
+                'id' => 'c-kf', 'name' => 'kf', 'keyFilePath' => $keyFile,
+                'remoteHostKey' => 'h.example ssh-ed25519 AAAAhostkey',
+            ]),
+            'sshArgv' => [
+                'ssh',
+                '-i', $keyFile,
+                '-o', 'IdentitiesOnly=yes',
+                '-o', 'BatchMode=yes',
+                '-o', 'StrictHostKeyChecking=accept-new',
+                '-o', 'UserKnownHostsFile=' . $kh,
+                '-o', 'GlobalKnownHostsFile=/dev/null',
+                '-o', 'ConnectTimeout=10',
+                '-p', '22',
+            ],
+            'sshEnv'     => [],
+            'dashE'      => "'ssh' '-i' '$keyFile' '-o' 'IdentitiesOnly=yes' '-o' 'BatchMode=yes'"
+                . " '-o' 'StrictHostKeyChecking=accept-new' '-o' 'UserKnownHostsFile=$kh'"
+                . " '-o' 'GlobalKnownHostsFile=/dev/null' '-o' 'ConnectTimeout=10' '-p' '22'",
+            'keyPath'    => $keyFile,
+            'passFile'   => '',
+            'knownHosts' => $kh,
+        ], $mat);
+
+        Ssh::cleanupRuntime($token);
+    }
+
+    public function testPasswordAuthMaterialisesTheSameBagAsBeforeTheDaemonTransport(): void
+    {
+        Ssh::$askpassPathOverride = '/opt/askpass.sh';
+        $creds = Credentials::defaults();
+        $creds['connections'][] = $this->passConn([
+            'password' => Credentials::obfuscate('hunter2'),
+            'remoteHostKey' => 'h.example ssh-ed25519 AAAAhostkey',
+        ]);
+
+        $mat = Ssh::materialize($creds, 'c-pw');
+        $this->assertTrue($mat['ok'], $mat['error'] ?? '');
+        $token = (string) $mat['token'];
+        $kh    = $this->rtBase . '/known_hosts/' . $token;
+        $pf    = $this->rtBase . '/pass/' . $token;
+
+        $this->assertSame([
+            'ok'      => true,
+            'token'   => $token,
+            'conn'    => $this->mergedConn([
+                'id' => 'c-pw', 'name' => 'p', 'authMethod' => 'PASSWORD',
+                'password' => Credentials::obfuscate('hunter2'),
+                'remoteHostKey' => 'h.example ssh-ed25519 AAAAhostkey',
+            ]),
+            'sshArgv' => [
+                'ssh',
+                '-o', 'PubkeyAuthentication=no',
+                '-o', 'PreferredAuthentications=password',
+                '-o', 'NumberOfPasswordPrompts=1',
+                '-o', 'StrictHostKeyChecking=accept-new',
+                '-o', 'UserKnownHostsFile=' . $kh,
+                '-o', 'GlobalKnownHostsFile=/dev/null',
+                '-o', 'ConnectTimeout=10',
+                '-p', '22',
+            ],
+            'sshEnv' => [
+                'SSH_ASKPASS'         => '/opt/askpass.sh',
+                'SSH_ASKPASS_REQUIRE' => 'force',
+                'DISPLAY'             => ':0',
+                'UR_ASKPASS_FILE'     => $pf,
+            ],
+            'dashE'      => "'ssh' '-o' 'PubkeyAuthentication=no' '-o' 'PreferredAuthentications=password'"
+                . " '-o' 'NumberOfPasswordPrompts=1' '-o' 'StrictHostKeyChecking=accept-new'"
+                . " '-o' 'UserKnownHostsFile=$kh' '-o' 'GlobalKnownHostsFile=/dev/null'"
+                . " '-o' 'ConnectTimeout=10' '-p' '22'",
+            'keyPath'    => '',
+            'passFile'   => $pf,
+            'knownHosts' => $kh,
+        ], $mat);
+
+        Ssh::cleanupRuntime($token);
     }
 }

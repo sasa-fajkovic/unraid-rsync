@@ -30,6 +30,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/Config.php';
 require_once __DIR__ . '/Job.php';
 require_once __DIR__ . '/Ssh.php';
+require_once __DIR__ . '/Credentials.php';
 require_once __DIR__ . '/ProcIO.php';
 
 class Rsync
@@ -297,10 +298,24 @@ class Rsync
      * once and rsync does not care where it lands.
      *
      * @param array<string,mixed> $opts a canonical whitelist options object
+     * @param string|null $transport the transport these options will run under,
+     *        when the caller knows it. null = unknown (the Global Settings
+     *        preview, whose block is shared by jobs of every transport), which
+     *        emits every whitelisted option exactly as before. Exactly ONE
+     *        option depends on it: --contimeout, which rsync refuses outright on
+     *        anything but a daemon connection (main.c:1558, exit 1 RERR_SYNTAX),
+     *        so it is dropped for any non-DAEMON value. The gate lives HERE and
+     *        not in buildArgv so the live options preview - which calls this
+     *        mapper directly, and whose whole point is to show what will really
+     *        run - cannot disagree with the argv that really runs.
      * @return array<int,string>
      */
-    public static function optionTokens(array $opts): array
+    public static function optionTokens(array $opts, ?string $transport = null): array
     {
+        if ($transport !== null && strtoupper(trim($transport)) !== 'DAEMON') {
+            unset($opts['contimeout']);
+        }
+
         $tokens = [];
 
         foreach (self::BOOL_FLAGS as $key => $flag) {
@@ -377,6 +392,8 @@ class Rsync
      *   <log-level verbosity flags>
      *   --log-file=<runLog>
      *   [--dry-run]                                (when $dryRun)
+     *   --port=N [--password-file=<path>]          (DAEMON transport only)
+     *     - or -
      *   -e <dashE>                                 (SSH transport only)
      *   --
      *   <src> <dest>
@@ -385,15 +402,26 @@ class Rsync
      * can never be read as a flag (option-injection guard on top of Job.php's
      * path guardrails). PASSWORD auth adds NOTHING to this argv: it is carried
      * entirely by the child ENVIRONMENT (Ssh::buildAuthEnv), so there is no
-     * wrapper program to prepend (see Ssh.php).
+     * wrapper program to prepend (see Ssh.php). A DAEMON module secret is the
+     * one exception, and even there only the PATH of a 0600 tmpfs file reaches
+     * the argv - never the secret itself.
      *
      * @param array<string,mixed> $opts    canonical whitelist options
      * @param string              $logLevel one of Job::LOG_LEVELS
      * @param string              $runLog   absolute path of the per-run log file
      * @param string              $src      source operand (already direction-resolved)
      * @param string              $dest     destination operand
-     * @param array{dashE?:string,sshEnv?:array<string,string>}|null $ssh
-     *        SSH transport pieces from Ssh::materialize(); null/[] for LOCAL.
+     * @param array{
+     *   dashE?: string,
+     *   sshEnv?: array<string,string>,
+     *   daemon?: bool,
+     *   daemonPort?: int,
+     *   passwordFile?: string
+     * }|null $ssh
+     *        Transport pieces. null/[] for LOCAL transport. SSH sets dashE +
+     *        sshEnv (Ssh::materialize). DAEMON sets daemon=true, daemonPort,
+     *        passwordFile ('' for an anonymous module) and sshEnv=[]. `daemon`
+     *        and `dashE` are MUTUALLY EXCLUSIVE by construction below.
      * @param bool                $dryRun
      * @return array<int,string>
      */
@@ -410,6 +438,19 @@ class Rsync
         if (is_array($ssh) && isset($ssh['dashE']) && is_string($ssh['dashE'])) {
             $dashE = $ssh['dashE'];
         }
+        $daemon = is_array($ssh) && !empty($ssh['daemon']);
+
+        // --contimeout is a HARD FAILURE on every non-daemon transfer: rsync
+        // main.c:1558 prints "The --contimeout option may only be used when
+        // connecting to an rsync daemon." and exit_cleanup(RERR_SYNTAX). It is
+        // reached for remote-shell AND local transfers - only the daemon socket
+        // path returns earlier, at main.c:1550. optionTokens() owns that gate
+        // (see its $transport parameter) so the live preview and this argv are
+        // produced by one rule instead of two. buildArgv only ever knows
+        // daemon-or-not; every non-DAEMON label drops the option identically,
+        // so 'SSH' stands in for LOCAL too. The option stays in the whitelist,
+        // so no stored value is lost, and Job::validate warns at save time.
+        $optionTransport = $daemon ? 'DAEMON' : 'SSH';
 
         $argv = [];
 
@@ -422,20 +463,47 @@ class Rsync
         // without a shell, so this absolute path is exec'd directly.
         $argv[] = self::rsyncPath();
 
-        foreach (self::optionTokens($opts) as $tok) {
+        foreach (self::optionTokens($opts, $optionTransport) as $tok) {
             $argv[] = $tok;
         }
         foreach (self::logLevelFlags($logLevel) as $tok) {
             $argv[] = $tok;
         }
 
+        // Kept for DAEMON transport too, deliberately. rsyncd.conf.5 says a
+        // daemon forcibly refuses log-file*, but server_options() (options.c,
+        // 415 lines) never emits --log-file, so it is never transmitted to the
+        // far side and the refusal is unreachable. Client-side --log-file is
+        // local-only (-M/--remote-option is the forwarding path). Do NOT add a
+        // transport gate here - it would change SSH and LOCAL argv bytes for no
+        // reason. The same proof covers --rsync-path, which is simply inert on
+        // daemon transport rather than an error.
         $argv[] = '--log-file=' . $runLog;
 
         if ($dryRun) {
             $argv[] = '--dry-run';
         }
 
-        if ($dashE !== '') {
+        if ($daemon) {
+            // ALWAYS emit --port, with no "only if != 873" branch: one less
+            // branch, and a port-22 mistake becomes visible in the run log
+            // instead of silent. A "host::module" operand cannot carry an
+            // inline port (parse_hostspec is called with a NULL port_ptr for
+            // the bare hostspec form), so this flag is the only way to say it.
+            $argv[] = '--port=' . (int) ($ssh['daemonPort'] ?? Credentials::RSYNCD_PORT);
+            $passwordFile = (string) ($ssh['passwordFile'] ?? '');
+            if ($passwordFile !== '') {
+                // Only the PATH reaches the argv; the secret itself never does.
+                // RSYNC_PASSWORD is deliberately not used - rsync.1 warns that
+                // environment variables can be world-visible.
+                $argv[] = '--password-file=' . $passwordFile;
+            }
+        } elseif ($dashE !== '') {
+            // elseif, not a second if: this is what makes daemon-over-remote-
+            // shell structurally unreachable. rsync does not reject `-e` beside
+            // a "host::module" operand - it silently switches transport
+            // (main.c:1435), which would send the module secret to whatever the
+            // default remote shell reaches.
             $argv[] = '-e';
             $argv[] = $dashE;
         }
@@ -594,11 +662,23 @@ class Rsync
             }
         );
 
-        // Capture the final status BEFORE proc_close. proc_close only returns
-        // the exit CODE and gives -1 once the child has already been reaped, so
-        // a process killed by a signal (our SIGTERM abort) would otherwise be
-        // lost. proc_get_status reports `signaled` + `termsig`, which we encode
-        // as 128+signal (the shell convention) so SIGTERM(15) -> 143 -> ABORTED.
+        return self::reapExitCode($proc);
+    }
+
+    /**
+     * Close a proc_open handle and return its exit code, encoding a signalled
+     * child as 128+signal (the shell convention) so SIGTERM(15) -> 143.
+     *
+     * Capture the final status BEFORE proc_close: proc_close only returns the
+     * exit CODE and gives -1 once the child has already been reaped, so a
+     * process killed by a signal (our SIGTERM abort, or the daemon probe's
+     * deadline kill) would otherwise be lost. proc_get_status reports
+     * `signaled` + `termsig`.
+     *
+     * @param resource $proc
+     */
+    private static function reapExitCode($proc): int
+    {
         $status = @proc_get_status($proc);
         $code   = proc_close($proc);
 
@@ -616,5 +696,231 @@ class Rsync
         // Fallback to proc_close's value; a negative (already-reaped) result has
         // no usable code, so treat it as a generic failure.
         return $code < 0 ? 1 : $code;
+    }
+
+    /**
+     * Wall-clock budget for the daemon module-listing probe, in seconds. A FIXED
+     * constant, deliberately NOT the connection's stored connectTimeout (which
+     * mergeConnection clamps to 1-600 and would wedge a php-fpm worker for ten
+     * minutes on a black-holed host). Mirrors KeyTools::DISCOVER_TIMEOUT_MAX.
+     */
+    const DAEMON_PROBE_TIMEOUT = 20;
+
+    /** Hard cap on bytes captured from a probe (a hostile or huge daemon MOTD). */
+    const DAEMON_PROBE_MAX_BYTES = 65536;
+
+    /**
+     * Injectable probe runner, mirroring self::$runner. When set, called as
+     * fn(array $argv): array{0:int,1:string} returning [exitCode, combined
+     * output] instead of spawning. Tests set this; production leaves it null.
+     *
+     * @var callable|null
+     */
+    public static $daemonProbeRunner = null;
+
+    /**
+     * List an rsync daemon's public modules: `rsync --port=N -- [user@]host::`.
+     *
+     * PRE-AUTH, and that is not a limitation we can remove: start_daemon()
+     * answers a bare module-list request with send_listing() and returns
+     * (clientserver.c:1420-1424) BEFORE rsync_module() (:1445) ever reaches
+     * auth_server() and its @RSYNCD: AUTHREQD. So a listing NEVER verifies the
+     * username or the module secret, and a --password-file here would never be
+     * read - it is therefore deliberately absent from the argv below, and the
+     * success message says so in as many words.
+     *
+     * @param array<string,mixed> $conn a MERGED connection (Credentials::mergeConnection)
+     * @return array{ok:bool,reason:string,message:string,modules:array<int,string>}
+     *         reason: 'ok'|'config'|'unreachable'|'refused'|'timeout'|'error'
+     */
+    public static function listDaemonModules(array $conn): array
+    {
+        $host     = trim((string) ($conn['host'] ?? ''));
+        $username = trim((string) ($conn['username'] ?? ''));
+
+        $cause = '';
+        if ((string) ($conn['transport'] ?? 'SSH') !== 'DAEMON') {
+            $cause = 'it does not use rsync daemon (rsyncd) transport.';
+        } elseif ($host === '' || $username === '') {
+            $cause = 'it needs both a host and a username.';
+        } elseif (!Credentials::isSafeDaemonToken($host)) {
+            $cause = 'the host is not valid for an rsync daemon operand.';
+        } elseif (!Credentials::isSafeDaemonToken($username)) {
+            $cause = 'the username is not valid for an rsync daemon operand.';
+        }
+        if ($cause !== '') {
+            return [
+                'ok'      => false,
+                'reason'  => 'config',
+                'message' => 'This Connection is not usable for an rsync daemon probe: ' . $cause,
+                'modules' => [],
+            ];
+        }
+
+        // The `--` ends rsync option parsing so an operand can never be read as
+        // a flag, exactly as buildArgv does. No option from the whitelist and no
+        // -e: this probe is deliberately the smallest daemon conversation there
+        // is. --timeout guards a daemon that accepts the TCP connection and then
+        // says nothing; --contimeout guards one that never accepts it.
+        $argv = [
+            self::rsyncPath(),
+            '--contimeout=' . self::DAEMON_PROBE_TIMEOUT,
+            '--timeout=' . self::DAEMON_PROBE_TIMEOUT,
+            '--port=' . (int) ($conn['port'] ?? Credentials::RSYNCD_PORT),
+            '--',
+            $username . '@' . $host . '::',
+        ];
+
+        $timedOut = false;
+        if (static::$daemonProbeRunner !== null) {
+            $probe = (static::$daemonProbeRunner)($argv);
+            $exit  = (int) ($probe[0] ?? 1);
+            $out   = (string) ($probe[1] ?? '');
+        } else {
+            $descriptors = [
+                0 => ['file', '/dev/null', 'r'],
+                1 => ['pipe', 'w'],
+                2 => ['pipe', 'w'],
+            ];
+            $pipes = [];
+            $proc  = @proc_open($argv, $descriptors, $pipes, null, null);
+            if (!is_resource($proc)) {
+                return [
+                    'ok'      => false,
+                    'reason'  => 'error',
+                    'message' => 'Could not start rsync to probe the daemon.',
+                    'modules' => [],
+                ];
+            }
+
+            $out      = '';
+            $captured = 0;
+            $deadline = microtime(true) + self::DAEMON_PROBE_TIMEOUT;
+            ProcIO::drainPipes(
+                [1 => $pipes[1], 2 => $pipes[2]],
+                static function (int $fd, string $chunk) use (&$out, &$captured): void {
+                    // Cap INSIDE the callback, never by trimming afterwards: a
+                    // hostile daemon can stream an unbounded MOTD, and this runs
+                    // in a php-fpm worker.
+                    $room = self::DAEMON_PROBE_MAX_BYTES - $captured;
+                    if ($room <= 0) {
+                        return;
+                    }
+                    $take      = substr($chunk, 0, $room);
+                    $out      .= $take;
+                    $captured += strlen($take);
+                },
+                $deadline
+            );
+
+            // drainPipes honours the deadline but deliberately never touches the
+            // process handle, so bounding the CALL is ours to do - and EOF on
+            // both pipes is NOT proof the child has exited. A child that closes
+            // stdout and stderr and then lingers ends the drain immediately,
+            // leaving proc_close() inside reapExitCode() to block for as long as
+            // it feels like: exactly the php-fpm wedge DAEMON_PROBE_TIMEOUT
+            // exists to prevent. So poll unconditionally until it is gone or the
+            // deadline passes, then two signals - TERM so rsync can clean up,
+            // then KILL for a wedged one.
+            while (true) {
+                $running = @proc_get_status($proc);
+                if (empty($running['running'])) {
+                    break;
+                }
+                if (microtime(true) >= $deadline) {
+                    @proc_terminate($proc);
+                    @proc_terminate($proc, 9);
+                    $timedOut = true;
+                    break;
+                }
+                usleep(20000);
+            }
+
+            $exit = self::reapExitCode($proc);
+        }
+
+        if ($timedOut) {
+            // Our own wall-clock kill wins over whatever code the reap reported
+            // (137 from the SIGKILL, most likely) - we know why it died.
+            $exit = 35;
+        }
+
+        switch ($exit) {
+            case 0:
+                $reason = 'ok';
+                break;
+            case 30:  // RERR_TIMEOUT
+            case 35:  // RERR_CONTIMEOUT
+            case 143: // 128 + SIGTERM
+                $reason = 'timeout';
+                break;
+            case 5:   // RERR_STARTCLIENT
+            case 10:  // RERR_SOCKETIO
+                $reason = 'unreachable';
+                break;
+            case 1:   // RERR_SYNTAX
+            case 2:   // RERR_PROTOCOL - e.g. an sshd answering on this port
+            case 4:   // RERR_UNSUPPORTED
+                $reason = 'refused';
+                break;
+            default:
+                $reason = 'error';
+                break;
+        }
+
+        if ($reason !== 'ok') {
+            $messages = [
+                'unreachable' => 'Could not reach the rsync daemon. Check the host, the port and the network.',
+                'timeout'     => 'The rsync daemon did not answer within ' . self::DAEMON_PROBE_TIMEOUT . ' seconds.',
+                'refused'     => 'The rsync daemon answered but refused the request (rsync exit ' . $exit . ').'
+                    . ' Check that the daemon is really rsyncd and not an SSH server.',
+                'error'       => 'The rsync daemon probe failed (rsync exit ' . $exit . ').',
+            ];
+            return ['ok' => false, 'reason' => $reason, 'message' => $messages[$reason], 'modules' => []];
+        }
+
+        $modules = self::parseModuleListing($out);
+        $note    = ' NOTE: a module listing is answered BEFORE authentication, so this does NOT verify'
+            . ' the username or the module secret. Run a dry-run to test those.';
+        $message = ($modules === [])
+            ? 'Connected to the rsync daemon, but it listed no public modules'
+                . ' (a module can be hidden with "list = no").' . $note
+            : 'Connected to the rsync daemon and listed ' . count($modules) . ' module(s): '
+                . implode(', ', $modules) . '.' . $note;
+
+        return ['ok' => true, 'reason' => 'ok', 'message' => $message, 'modules' => $modules];
+    }
+
+    /**
+     * Pull the module names out of a daemon listing. send_listing() emits one
+     * "%-15s\t%s\n" line per listed module (clientserver.c:1261-1272), so the
+     * name is everything before the first tab; anything else on the stream (the
+     * daemon's MOTD, an @RSYNCD line, rsync's own diagnostics) is noise the name
+     * regex below drops rather than trust - no separate '@' test, that branch
+     * was unreachable, since '@' already fails the regex's first character. PURE.
+     *
+     * @return array<int,string>
+     */
+    private static function parseModuleListing(string $out): array
+    {
+        $modules = [];
+        foreach (explode("\n", $out) as $line) {
+            // A listing is answered before auth, so anyone who can reach the
+            // port can put text here: cap the list rather than mirror whatever
+            // arrives into the UI.
+            if (count($modules) >= 200) {
+                break;
+            }
+            $line = trim($line);
+            if ($line === '') {
+                continue;
+            }
+            $tab  = strpos($line, "\t");
+            $name = trim($tab === false ? $line : substr($line, 0, $tab));
+            if (preg_match('/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/D', $name)) {
+                $modules[] = $name;
+            }
+        }
+        return $modules;
     }
 }

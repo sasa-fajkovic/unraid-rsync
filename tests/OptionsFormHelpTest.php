@@ -601,6 +601,843 @@ final class OptionsFormHelpTest extends TestCase
         );
     }
 
+    // --- issue #139: the rsync DAEMON transport ----------------------------
+
+    /**
+     * D7 / F1: rsync's main.c:1558 rejects --contimeout outright (exit 1,
+     * RERR_SYNTAX) on EVERY non-daemon transfer - remote-shell AND local - so
+     * Rsync::buildArgv now drops the key off-daemon. The help must say so
+     * instead of the old, actively wrong "Leave blank to use the SSH/rsync
+     * default", which implied the flag worked on an SSH job.
+     *
+     * The reword must keep the "(--contimeout=SECONDS)" parenthetical, because
+     * testEveryDescriptionNamesTheRsyncFlag matches every description against
+     * the flag regex - asserted here directly so a future reword that drops it
+     * fails with a message that says WHY.
+     */
+    public function testContimeoutHelpSaysItIsRsyncDaemonOnly(): void
+    {
+        $text = ur_option_help()['contimeout'];
+
+        $this->assertSame(
+            'Give up if the connection cannot be established within this many seconds '
+            . '(--contimeout=SECONDS). rsync accepts this ONLY when connecting to an rsync '
+            . 'daemon (rsyncd) - it rejects it outright on SSH and Local transfers, so it is '
+            . 'dropped for those. Leave blank for no connect timeout.',
+            $text
+        );
+        $this->assertStringContainsString('(--contimeout=SECONDS)', $text);
+        $this->assertMatchesRegularExpression(
+            '/\((?:-{1,2}[A-Za-z][\w-]*(?:=[A-Z]+)?)\)/',
+            $text,
+            'The contimeout reword must keep a flag parenthetical or '
+            . 'testEveryDescriptionNamesTheRsyncFlag breaks.'
+        );
+        // The old copy claimed a fallback that does not exist: rsync EXITS on
+        // this flag off-daemon, it does not fall back to an SSH default.
+        $this->assertStringNotContainsString('Leave blank to use the SSH/rsync default', $text);
+    }
+
+    /**
+     * --port and --password-file are carried in the transport-pieces bag that
+     * Rsync::buildArgv receives, NEVER in the closed option whitelist: a
+     * user-editable --password-file would be an arbitrary-file-read primitive
+     * aimed at a remote daemon, and a whitelisted --port would split the source
+     * of truth with the Connection's own port. Guard both the help map and the
+     * rendered form so neither can grow a control for them.
+     */
+    public function testDaemonTransportFlagsNeverBecomeWhitelistOptions(): void
+    {
+        $helpKeys = array_keys(ur_option_help());
+        foreach (['port', 'daemonPort', 'passwordFile', 'password'] as $forbidden) {
+            $this->assertNotContains($forbidden, $helpKeys);
+        }
+        // The whitelist itself is unchanged, so the help map is unchanged.
+        // (Canonicalizing, like testHelpMapKeysMatchWhitelistExactly: the help
+        // map is grouped for reading, not stored in whitelist order.)
+        $this->assertEqualsCanonicalizing(array_keys(Config::defaultRsyncOptions()), $helpKeys);
+        $this->assertCount(40, $helpKeys);
+
+        $html = $this->renderOptions(Config::defaultRsyncOptions(), 'global[defaultRsyncOptions]', 'ur_t139');
+        foreach (['[port]', '[daemonPort]', '[passwordFile]', '--password-file', '--port='] as $needle) {
+            $this->assertStringNotContainsString(
+                $needle,
+                $html,
+                "The options form must never render a control for '$needle'."
+            );
+        }
+    }
+
+    /**
+     * The Connections tab must render the per-card Transport select, seed it
+     * from the stored value, and show the "rsyncd is not encrypted" warning on
+     * a daemon card without the page Help toggle (display:block, not the usual
+     * blockquote.inline_help default of hidden).
+     *
+     * Also covers the two things a legacy install depends on: a stored record
+     * with NO transport key at all backfills to SSH on port 22, and a daemon
+     * record defaults to port 873 - which is mergeConnection's clamp-transport-
+     * BEFORE-port ordering, visible here end to end.
+     */
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testConnectionsPageRendersTransportSelectAndDaemonWarning(): void
+    {
+        $this->seedConnections();
+        $html = $this->renderPageBody(__DIR__ . '/../source/pages/connections.php');
+
+        // One transport select per card, plus one in the clone template.
+        $this->assertSame(
+            3,
+            preg_match_all('/class="ur-conn-transport"/', $html),
+            'Every connection card AND the #ur-conn-template must carry a Transport select.'
+        );
+        $this->assertStringContainsString(
+            '<select id="ur_conn_0_transport" class="ur-conn-transport" '
+            . 'name="connections[0][transport]" data-idb="ur_conn_0">',
+            $html
+        );
+        $this->assertStringContainsString(
+            '<select id="ur_conn___CIDX___transport" class="ur-conn-transport" '
+            . 'name="connections[__CIDX__][transport]" data-idb="ur_conn___CIDX__">',
+            $html
+        );
+
+        // Both options exist, and each card's stored transport is pre-selected:
+        // card 0 (legacy, no transport key) SSH, card 1 DAEMON.
+        $this->assertSame(
+            [
+                ['SSH', ' selected'], ['DAEMON', ''],       // card 0 - legacy
+                ['SSH', ''], ['DAEMON', ' selected'],       // card 1 - daemon
+                ['SSH', ' selected'], ['DAEMON', ''],       // the clone template
+            ],
+            $this->transportOptions($html)
+        );
+
+        // The unencrypted warning: present on every card, forced visible only on
+        // the daemon one. It must NOT be behind the page Help toggle.
+        $this->assertSame(
+            ['display:none', 'display:block', 'display:none'],
+            $this->attrList($html, '/<blockquote class="inline_help ur-daemon-warn" style="([^"]*)"/')
+        );
+        $this->assertStringContainsString(
+            'the rsync daemon protocol is NOT encrypted. Only a challenge/response (MD4 with '
+            . 'old peers) protects the module secret, and file names and file contents travel in '
+            . 'clear over the network. Use SSH transport on any untrusted network.',
+            $html
+        );
+
+        // mergeConnection clamps the transport BEFORE choosing the port default,
+        // so a legacy record lands on 22 and a daemon record on 873.
+        $this->assertStringContainsString(
+            'id="ur_conn_0_port" name="connections[0][port]" value="22" placeholder="22"',
+            $html
+        );
+        $this->assertStringContainsString(
+            'id="ur_conn_1_port" name="connections[1][port]" value="873" placeholder="873"',
+            $html
+        );
+
+        // The summary table gains a Transport column, and a daemon row's Auth
+        // cell reads the literal "rsyncd" rather than a meaningless authMethod.
+        $tbody = $this->collapse($this->between($html, '<tbody>', '</tbody>'));
+        $this->assertStringContainsString(
+            '<tr> <td>Legacy NAS</td> <td>SSH</td> <td>nas.local:22</td> <td>root</td> <td>KEYFILE</td> </tr>',
+            $tbody
+        );
+        $this->assertStringContainsString(
+            '<tr> <td>Daemon NAS</td> <td>DAEMON</td> <td>nas2.local:873</td> <td>moduser</td> <td>rsyncd</td> </tr>',
+            $tbody
+        );
+        $this->assertStringContainsString(
+            '<th>Name</th> <th>Transport</th> <th>Host</th> <th>User</th> <th>Auth</th>',
+            $this->collapse($this->between($html, '<thead>', '</thead>'))
+        );
+    }
+
+    /**
+     * Every SSH-only control on a DAEMON card must be seeded hidden SERVER-side
+     * (before any JS runs) and every daemon-only control shown - and the exact
+     * reverse on an SSH card. Asserted as an invariant over the whole card
+     * rather than a list of ids, so a row added later is covered too.
+     *
+     * The one shared control is the password row: it is the SAME single input
+     * on both transports (a second input with the same name would also submit,
+     * PHP would keep the last, and the blank-preserves-the-stored-value rule
+     * would make an SSH password unchangeable), so it must be visible on the
+     * daemon card and must NOT carry ur-ssh-only.
+     */
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testConnectionsPageHidesSshOnlyControlsOnADaemonCard(): void
+    {
+        $this->seedConnections();
+        $html = $this->renderPageBody(__DIR__ . '/../source/pages/connections.php');
+
+        $daemonCard = $this->between($html, 'data-conn-id="c-daemon"', '<script type="text/html"');
+        $this->assertNotSame('', $daemonCard, 'daemon card not found in connections.php output.');
+
+        $sshOnly = $this->tagsWithClass($daemonCard, 'ur-ssh-only');
+        $this->assertGreaterThanOrEqual(10, count($sshOnly), 'expected the SSH-only rows on the card.');
+        foreach ($sshOnly as $tag) {
+            $this->assertStringContainsString(
+                'style="display:none"',
+                $tag,
+                "A .ur-ssh-only element must be seeded hidden on a DAEMON card: $tag"
+            );
+        }
+        foreach ($this->tagsWithClass($daemonCard, 'ur-daemon-only') as $tag) {
+            $this->assertStringNotContainsString(
+                'display:none',
+                $tag,
+                "A .ur-daemon-only element must be visible on a DAEMON card: $tag"
+            );
+        }
+        // The single shared password row: visible, relabelled, not SSH-only.
+        $this->assertStringContainsString('<dt class="ur-auth-pass" id="ur_conn_1_passrow_dt">', $daemonCard);
+        $this->assertStringContainsString('<dd class="ur-auth-pass" id="ur_conn_1_passrow_dd">', $daemonCard);
+        $this->assertSame(
+            1,
+            preg_match_all('/name="connections\[1\]\[password\]"/', $daemonCard),
+            'There must be exactly ONE password input per card, relabelled - never a second one.'
+        );
+        $this->assertStringContainsString('>Module secret</span>', $daemonCard);
+
+        // ...and the mirror image on the SSH card: daemon-only help hidden, the
+        // transport-driven SSH rows visible. (The ur-auth-* rows carry their own
+        // auth-method hiding, which is a different toggle, so they are excluded.)
+        $sshCard = $this->between($html, 'data-conn-id="c-legacy"', 'data-conn-id="c-daemon"');
+        $this->assertNotSame('', $sshCard, 'legacy SSH card not found in connections.php output.');
+        foreach ($this->tagsWithClass($sshCard, 'ur-daemon-only') as $tag) {
+            $this->assertStringContainsString(
+                'style="display:none"',
+                $tag,
+                "A .ur-daemon-only element must be seeded hidden on an SSH card: $tag"
+            );
+        }
+        foreach ($this->tagsWithClass($sshCard, 'ur-ssh-only') as $tag) {
+            if (strpos($tag, 'ur-auth-') !== false) {
+                continue; // hidden by the auth-method toggle, not the transport one
+            }
+            $this->assertStringNotContainsString(
+                'display:none',
+                $tag,
+                "A .ur-ssh-only element must be visible on an SSH card: $tag"
+            );
+        }
+    }
+
+    /**
+     * The at-rest warning under the password field is transport-specific ADVICE
+     * wrapped around a shared fact. The fact (obfuscated, not encrypted, on a
+     * world-readable flash) is true for a module secret and must stay; the advice
+     * "Prefer key auth" is unactionable on rsyncd, which has no key auth at all,
+     * so the blockquote is class-toggled like every other transport-specific box
+     * on the card rather than left saying the wrong thing.
+     */
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testPasswordAdviceIsTransportSpecific(): void
+    {
+        $this->seedConnections();
+        $html = $this->renderPageBody(__DIR__ . '/../source/pages/connections.php');
+
+        $daemonCard = $this->between($html, 'data-conn-id="c-daemon"', '<script type="text/html"');
+        $this->assertNotSame('', $daemonCard, 'daemon card not found in connections.php output.');
+        $sshCard = $this->between($html, 'data-conn-id="c-legacy"', 'data-conn-id="c-daemon"');
+        $this->assertNotSame('', $sshCard, 'legacy SSH card not found in connections.php output.');
+
+        // Both variants are rendered on both cards (the toggle is display-only),
+        // so look inside the password row and pick the one that is SHOWN there.
+        $shownAdvice = static function (string $card): string {
+            // NB the needle stops at the quote, not '">': on an SSH card whose
+            // auth is not PASSWORD the same <dd> also carries style="display:none".
+            $row = (string) strstr((string) strstr($card, '_passrow_dd"'), '</dd>', true);
+            $m   = [];
+            preg_match_all(
+                '/<blockquote class="inline_help (ur-(?:ssh|daemon)-only)"(?: style="([^"]*)")?><p>(.*?)<\/p>/s',
+                $row,
+                $m,
+                PREG_SET_ORDER
+            );
+            foreach ($m as $bq) {
+                if (($bq[2] ?? '') !== 'display:none') {
+                    return $bq[3];
+                }
+            }
+            return '';
+        };
+
+        $daemonAdvice = $shownAdvice($daemonCard);
+        $this->assertStringContainsString('Module secrets are stored OBFUSCATED', $daemonAdvice);
+        $this->assertStringContainsString('world-readable USB flash', $daemonAdvice, 'the at-rest fact must stay');
+        $this->assertStringContainsString('rsyncd has no key auth', $daemonAdvice);
+        $this->assertStringNotContainsString(
+            'Prefer key auth',
+            $daemonAdvice,
+            'rsyncd has no key auth, so that advice must not be the visible one'
+        );
+
+        // The SSH variant is still rendered on the daemon card, just seeded hidden.
+        $this->assertStringContainsString(
+            '<blockquote class="inline_help ur-ssh-only" style="display:none"><p><strong>Warning:</strong> '
+            . 'Passwords are stored OBFUSCATED',
+            $daemonCard
+        );
+
+        // ...and the exact mirror on the SSH card.
+        $sshAdvice = $shownAdvice($sshCard);
+        $this->assertStringContainsString('Passwords are stored OBFUSCATED', $sshAdvice);
+        $this->assertStringContainsString('Prefer key auth', $sshAdvice);
+        $this->assertStringContainsString(
+            '<blockquote class="inline_help ur-daemon-only" style="display:none"><p><strong>Warning:</strong> '
+            . 'Module secrets are stored OBFUSCATED',
+            $sshCard
+        );
+    }
+
+    /**
+     * The transport toggle is entirely CLIENT-side: nothing in the rendered HTML
+     * proves that switching a card's select actually re-hides anything. The
+     * server-seeded state is asserted above; this pins the JS that keeps it in
+     * step, against the SOURCE TEXT, exactly as testPagesWireTheJobTransportIntoThePreview
+     * pins _options_form.php's listener. Deleting any one of these lines leaves a
+     * card that looks right on load and lies the moment the user touches it -
+     * and the `el.required = false` line is what stops a HIDDEN required field
+     * blocking Apply with an unfocusable-control error.
+     */
+    public function testConnectionsPageJsTogglesEveryTransportClassAndClearsHiddenRequired(): void
+    {
+        $js = file_get_contents(__DIR__ . '/../source/pages/connections.php');
+        $this->assertIsString($js);
+
+        foreach ([
+            ".ur-ssh-only'),    function (el) { el.style.display = isDaemon ? 'none'  : '';      }",
+            ".ur-daemon-only'), function (el) { el.style.display = isDaemon ? ''      : 'none';  }",
+            ".ur-daemon-warn'), function (el) { el.style.display = isDaemon ? 'block' : 'none';  }",
+        ] as $needle) {
+            $this->assertStringContainsString($needle, $js, 'syncConnTransport must toggle every class, in the right direction');
+        }
+        $this->assertStringContainsString(
+            "var el = document.getElementById(idb + s); if (el) { el.required = false; }",
+            $js,
+            'a hidden `required` control must be de-required or the browser refuses to submit'
+        );
+        $this->assertStringContainsString(
+            "if (passInput) { passInput.required = false; }",
+            $js,
+            'an anonymous module needs no secret, so the shared password input must not stay required'
+        );
+        $this->assertStringContainsString(
+            "if (authSel) { syncAuthRequired(authSel); }",
+            $js,
+            'switching back to SSH must re-apply the auth-specific hiding'
+        );
+    }
+
+    public function testConnectionsPageOnlyRewritesAPortStillHoldingTheOtherTransportsDefault(): void
+    {
+        $js = file_get_contents(__DIR__ . '/../source/pages/connections.php');
+        $this->assertIsString($js);
+
+        // Both assignments exist and BOTH are guarded on the field still holding
+        // the other transport's default, so a user-chosen 8730 survives a toggle.
+        $this->assertStringContainsString(
+            "if (isDaemon) { if (v === '' || v === '22')  { port.value = '873'; } }",
+            $js
+        );
+        $this->assertStringContainsString(
+            "else          { if (v === '' || v === '873') { port.value = '22';  } }",
+            $js
+        );
+        // ...and the whole rewrite is skipped unless the transport CHANGED under
+        // the user's hands: the on-load seeder runs this for every card, and an
+        // SSH connection stored on 873 is exactly the misconfiguration the plugin
+        // warns about - silently rewriting it to 22 on mere page view would
+        // persist a value nobody typed on the next Apply.
+        $this->assertStringContainsString(
+            "if (prev === undefined || prev === sel.value) { return; }",
+            $js,
+            'the seeding pass must touch no stored port'
+        );
+        $this->assertSame(
+            2,
+            preg_match_all('/port\\.value = \'(?:873|22)\';/', $js),
+            'there must be no unguarded port assignment'
+        );
+    }
+
+    public function testConnectionsPageSeedsTransportAfterAuthAndListensForTransportChanges(): void
+    {
+        $js = file_get_contents(__DIR__ . '/../source/pages/connections.php');
+        $this->assertIsString($js);
+
+        // Ordering constraint: syncConnTransport re-invokes syncAuthRequired on
+        // its SSH branch, so it must run LAST or an SSH card's auth-specific
+        // hiding is immediately overwritten. Both seeders, both call sites.
+        $pairs = [];
+        $m     = [];
+        preg_match_all('/syncAll(AuthRequired|ConnTransport)\(\);/', $js, $m, PREG_OFFSET_CAPTURE);
+        foreach ($m[1] as $hit) {
+            $pairs[] = $hit[0];
+        }
+        $this->assertSame(
+            ['AuthRequired', 'ConnTransport', 'AuthRequired', 'ConnTransport'],
+            $pairs,
+            'both seeders must call syncAllAuthRequired() BEFORE syncAllConnTransport()'
+        );
+
+        // And the delegated change listener must actually route the select.
+        $this->assertStringContainsString(
+            "} else if (t && t.classList && t.classList.contains('ur-conn-transport')) {",
+            $js
+        );
+        $this->assertStringContainsString('syncConnTransport(t);', $js);
+    }
+
+    public function testTestConnectionResultIsWrittenWithTextContentNeverInnerHtml(): void
+    {
+        // A daemon module listing is answered PRE-AUTH (clientserver.c:1420-1424),
+        // so anyone who can reach port 873 controls the text in b.message. It is
+        // filtered and capped server-side, but the DOM write is the last line of
+        // defence and nothing else pins it.
+        $js = file_get_contents(__DIR__ . '/../source/pages/connections.php');
+        $this->assertIsString($js);
+
+        $this->assertSame(0, preg_match_all('/resultEl\.innerHTML/', $js));
+        $this->assertStringContainsString("resultEl.textContent = b.message || 'OK';", $js);
+        $this->assertStringContainsString(
+            "resultEl.textContent = b.message + (b.reason ? ' [' + b.reason + ']' : '');",
+            $js
+        );
+        $this->assertStringContainsString("resultEl.textContent = errText(res, 'Connection test failed.');", $js);
+
+        // Nothing anywhere on the page may put a RESPONSE value into innerHTML.
+        // The three innerHTML sites that exist are page-authored markup (the
+        // discover progress bar) and the clone template - all static, none
+        // server-fed. A fourth needs a look, so the count is pinned.
+        $m = [];
+        preg_match_all('/^.*\.innerHTML\b.*$/m', $js, $m);
+        $this->assertCount(3, $m[0], 'a new innerHTML site needs a look: ' . implode(' | ', $m[0]));
+        foreach ($m[0] as $line) {
+            foreach (['b.message', 'b.reason', 'res.', 'body'] as $fromServer) {
+                $this->assertStringNotContainsString(
+                    $fromServer,
+                    $line,
+                    "daemon output is untrusted and must never reach innerHTML: $line"
+                );
+            }
+        }
+    }
+
+    /**
+     * The daemon-only help bodies and the reworded SSH ones are asserted to EXIST
+     * and be visible elsewhere; this pins their CONTENT, so a blank <p> in the
+     * right place cannot pass. Same treatment the password advice already gets.
+     */
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testDaemonOnlyHelpCopyIsPresentVerbatim(): void
+    {
+        $this->seedConnections();
+        $html = $this->renderPageBody(__DIR__ . '/../source/pages/connections.php');
+
+        $this->assertStringContainsString(
+            'The remote host&#039;s SSH port (usually 22). This is NOT the &quot;Rsync Server&quot; / '
+            . 'rsyncd port 873 that NAS appliances expose - to talk to that, set Transport to '
+            . '&quot;rsync daemon (rsyncd)&quot; instead.',
+            $html
+        );
+        $this->assertStringContainsString(
+            'The rsync daemon (rsyncd) port - 873 unless the NAS was configured otherwise. '
+            . 'This is NOT an SSH port.',
+            $html
+        );
+        $this->assertStringContainsString(
+            'The rsyncd module user, from the daemon&#039;s &quot;auth users&quot; setting or the NAS '
+            . '&quot;Rsync Server&quot; page - not an SSH account. If the module has no auth users, '
+            . 'any value works and no secret is needed.',
+            $html
+        );
+        // The pre-daemon wording claimed the plugin cannot speak rsyncd at all.
+        $this->assertStringNotContainsString('a different protocol which this plugin does not speak', $html);
+    }
+
+    /**
+     * Connect timeout drives exactly one thing - `ssh -o ConnectTimeout=N` in
+     * Ssh::buildSshArgv - so on a daemon card it configures nothing and must be
+     * hidden with the rest of the SSH-only rows. Showing it promises a bound the
+     * daemon transport does not have (that is the --contimeout rsync option).
+     */
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testConnectTimeoutIsAnSshOnlyRow(): void
+    {
+        $this->seedConnections();
+        $html = $this->renderPageBody(__DIR__ . '/../source/pages/connections.php');
+
+        $daemonCard = $this->between($html, 'data-conn-id="c-daemon"', '<script type="text/html"');
+        $this->assertNotSame('', $daemonCard);
+        $this->assertStringContainsString(
+            '<dt class="ur-ssh-only" style="display:none"><label for="ur_conn_1_timeout">',
+            $daemonCard
+        );
+        $this->assertStringContainsString(
+            '<dd class="ur-ssh-only" style="display:none"><input type="text" id="ur_conn_1_timeout"',
+            $daemonCard
+        );
+
+        $sshCard = $this->between($html, 'data-conn-id="c-legacy"', 'data-conn-id="c-daemon"');
+        $this->assertStringContainsString(
+            '<dt class="ur-ssh-only"><label for="ur_conn_0_timeout">',
+            $sshCard
+        );
+    }
+
+    /**
+     * The live options preview renders from Rsync::optionTokens(), and its own
+     * note says these flags are what runs - so it must be told the transport.
+     * --contimeout is emitted only on rsync daemon transport, so an SSH job that
+     * sets it previewed a flag the run then dropped.
+     */
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testOptionsPreviewIsRenderedForTheJobsOwnTransport(): void
+    {
+        $opts = Config::mergeRsyncOptions(['contimeout' => '30']);
+
+        $preview = static function (?string $transport) use ($opts): string {
+            ob_start();
+            ur_render_rsync_options($opts, 'jobs[0][rsyncOptions]', 'ur_j0', $transport);
+            $html = (string) ob_get_clean();
+            $m = [];
+            preg_match('/<code class="ur-preview-out" aria-live="polite">(.*?)<\/code>/s', $html, $m);
+            return $m[1] ?? '';
+        };
+
+        $this->assertStringContainsString('--contimeout=30', $preview('DAEMON'));
+        $this->assertStringNotContainsString('--contimeout', $preview('SSH'));
+        $this->assertStringNotContainsString('--contimeout', $preview('LOCAL'));
+        // The Global Settings block passes no transport: shared by jobs of every
+        // transport, so it shows the flag (and the global save warns about it).
+        $this->assertStringContainsString('--contimeout=30', $preview(null));
+    }
+
+    public function testPreviewNoteNamesTheTransportFlagsGenerically(): void
+    {
+        // The note is the preview's own claim about what else the run adds. It
+        // used to say "the SSH transport", which is wrong now: a daemon job's
+        // added pieces are --port and --password-file, not -e.
+        ob_start();
+        ur_render_rsync_options(Config::defaultRsyncOptions(), 'jobs[0][rsyncOptions]', 'ur_j0');
+        $html = (string) ob_get_clean();
+
+        $note = $this->between($html, '<div class="ur-preview-note">', '</div>');
+        $this->assertStringContainsString(
+            'These option flags only. The log-level flags, --log-file, the transport flags and the '
+            . 'source/destination paths are added when the job runs.',
+            $note
+        );
+        $this->assertStringNotContainsString('the SSH transport', $html);
+    }
+
+    public function testSettingsSecretsHelpNamesTheModuleSecretAsAStoredSecret(): void
+    {
+        // credentials.json now holds a fourth kind of secret; the secretsDir help
+        // is where a user reads what is at rest on the world-readable flash.
+        $settings = file_get_contents(__DIR__ . '/../source/pages/settings.php');
+        $this->assertIsString($settings);
+        $this->assertStringContainsString(
+            'your SSH keys, obfuscated passwords and rsync daemon module secrets, and saved host keys',
+            $settings
+        );
+    }
+
+    /**
+     * The two halves of that: the job card must hand its transport to the
+     * renderer, and the client must send it when it re-previews after an edit -
+     * including when the transport select itself changes, which happens OUTSIDE
+     * the options block the other listeners are delegated on.
+     */
+    public function testPagesWireTheJobTransportIntoThePreview(): void
+    {
+        $jobs = file_get_contents(__DIR__ . '/../source/pages/jobs.php');
+        $this->assertIsString($jobs);
+        $this->assertStringContainsString(
+            "ur_render_rsync_options(\$opts, \$p . '[rsyncOptions]', \$idb . '_opts_fields', \$transport);",
+            $jobs,
+            'the job card must pass its own transport to the options renderer'
+        );
+
+        $form = file_get_contents(__DIR__ . '/../source/pages/_options_form.php');
+        $this->assertIsString($form);
+        $this->assertStringContainsString("params.append('transport', transport);", $form);
+        $this->assertStringContainsString("card.querySelector('.ur-transport-select')", $form);
+        $this->assertStringContainsString(
+            "if (!t || !t.classList || !t.classList.contains('ur-transport-select')) { return; }",
+            $form,
+            'changing the transport must re-run the preview'
+        );
+
+        // The Global Settings block genuinely has no transport to pass.
+        $settings = file_get_contents(__DIR__ . '/../source/pages/settings.php');
+        $this->assertIsString($settings);
+        $this->assertStringContainsString(
+            "ur_render_rsync_options(\$defaultOpts, 'global[defaultRsyncOptions]', 'ur_global');",
+            $settings
+        );
+    }
+
+    /**
+     * With no saved connections the empty-state row must span the table's new
+     * width (the Transport column took it from 4 columns to 5), and the clone
+     * template must still seed a fresh card as SSH on port 22.
+     */
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testConnectionsPageEmptyStateSpansTheTransportColumn(): void
+    {
+        $html = $this->renderPageBody(__DIR__ . '/../source/pages/connections.php');
+
+        $this->assertStringContainsString('<td colspan="5">No connections yet', $html);
+        $this->assertStringNotContainsString('colspan="4"', $html);
+        // Only the clone template renders; a new card defaults to SSH on 22.
+        $this->assertSame(
+            1,
+            preg_match_all('/class="ur-conn-transport"/', $html),
+            'With no connections only #ur-conn-template should render a Transport select.'
+        );
+        $this->assertSame([['SSH', ' selected'], ['DAEMON', '']], $this->transportOptions($html));
+        $this->assertStringContainsString(
+            'id="ur_conn___CIDX___port" name="connections[__CIDX__][port]" value="22" placeholder="22"',
+            $html
+        );
+    }
+
+    /**
+     * The Jobs tab must offer DAEMON as a third transport, require a Connection
+     * for it, and explain that a daemon pair's right-hand box is a MODULE
+     * reference.
+     *
+     * The Connection <select> is fed from the RAW (unmerged) credentials array,
+     * so a pre-daemon record has no 'transport' key at all: the label suffix
+     * must be read with ?? 'SSH' and must NEVER filter or group the options - a
+     * dropped option would let the next save silently clear the job's
+     * connectionId. Both branches are asserted.
+     */
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testJobsPageOffersDaemonTransportAndModuleGuidance(): void
+    {
+        $this->seedConnections();
+        $cfg = Config::defaults();
+        $cfg['jobs'][] = Job::normalize([
+            'id'           => 'j-daemon',
+            'name'         => 'Daemon Job',
+            'transport'    => 'DAEMON',
+            'connectionId' => 'c-daemon',
+            'direction'    => 'PULL',
+            'pairs'        => [['local' => '/mnt/user/photos/', 'remote' => 'rsync_bkp/photos']],
+        ]);
+        Config::save($cfg);
+
+        $html = $this->renderPageBody(__DIR__ . '/../source/pages/jobs.php');
+
+        // All three transports, with the stored DAEMON pre-selected on the card.
+        $card = $this->between($html, 'id="ur_job_0_transport"', '</select>');
+        $this->assertSame(
+            '<option value="SSH">SSH (remote host)</option>'
+            . '<option value="LOCAL">Local (this server)</option>'
+            . '<option value="DAEMON" selected>rsync daemon (host::module)</option>',
+            trim($this->between($card, '>', '')),
+            'The job Transport select must offer SSH, LOCAL and DAEMON in that order.'
+        );
+
+        // A daemon job needs a Connection: both the `required` attribute and the
+        // visual marker are seeded server-side ($connRequired = transport !== LOCAL).
+        $this->assertStringContainsString(
+            'id="ur_job_0_conn" class="ur-conn-select" data-transport="ur_job_0_transport" '
+            . 'name="jobs[0][connectionId]" required>',
+            $html
+        );
+        $this->assertStringNotContainsString(
+            '<abbr class="ur-required ur-conn-required" title="Required" style="display:none">',
+            $html,
+            'The Connection required marker must be shown for a DAEMON job.'
+        );
+        // ...and the client rule matches the server rule (not LOCAL), so a
+        // daemon job is never silently un-required in the browser.
+        $this->assertStringContainsString("var needsConn = (transportSel.value !== 'LOCAL');", $html);
+
+        // Pair guidance + the reworded direction/connection help.
+        $this->assertStringContainsString(
+            'For an rsync daemon job the right box is a MODULE reference on the daemon - just '
+            . '&quot;rsync_bkp&quot;, or &quot;rsync_bkp/photos&quot; for a folder inside it. No host '
+            . 'and no leading slash: the host, port, username and module secret all come from the Connection.',
+            $html
+        );
+        $this->assertStringContainsString(
+            'Direction applies to SSH and rsync daemon transports; a Local job always copies left to right.',
+            $html
+        );
+        // The old SSH-only direction copy is gone.
+        $this->assertStringNotContainsString('Direction only applies to SSH transport.', $html);
+    }
+
+    /**
+     * The per-job Connection <select> must LIST every saved connection, daemon
+     * ones included, and use the transport only to append a " [rsyncd]" label
+     * suffix - never to filter or to group into <optgroup>s. A connection
+     * dropped from this select would let the next save silently clear the job's
+     * connectionId, and the suffix must be read with ?? 'SSH' so a record that
+     * predates the transport field still renders.
+     *
+     * Driven through ur_render_job_card() directly rather than the whole page:
+     * the card renderer reads `global $urConnections`, and renderPageBody()
+     * include()s the body inside a METHOD, so the page's own top-level
+     * assignment lands in a function-local instead of the global. (On a real
+     * webGui page the body is included at global scope, so this is a harness
+     * artifact only - the page's own load path is covered by
+     * testJobsPagePushesConfiguredSecretsDirOverride.) Feeding the global
+     * directly also lets us hand the renderer a record with NO transport key at
+     * all, which Credentials::save() would otherwise backfill.
+     */
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testJobsPageListsDaemonConnectionsWithALabelSuffixAndNoFiltering(): void
+    {
+        // Defines ur_render_job_card() (function declarations are global no
+        // matter where the file is included from).
+        $this->renderPageBody(__DIR__ . '/../source/pages/jobs.php');
+
+        $GLOBALS['urConnections'] = [
+            ['id' => 'c-legacy', 'name' => 'Legacy NAS'],                            // no transport key at all
+            ['id' => 'c-ssh',    'name' => 'SSH NAS',    'transport' => 'SSH'],
+            ['id' => 'c-daemon', 'name' => 'Daemon NAS', 'transport' => 'DAEMON'],
+            ['id' => 'c-lower',  'name' => 'Lower NAS',  'transport' => 'daemon'],   // hand-edited casing
+        ];
+
+        ob_start();
+        ur_render_job_card(
+            Job::normalize([
+                'id'           => 'j-daemon',
+                'name'         => 'Daemon Job',
+                'transport'    => 'DAEMON',
+                'connectionId' => 'c-daemon',
+                'pairs'        => [['local' => '/mnt/user/photos/', 'remote' => 'rsync_bkp/photos']],
+            ]),
+            0
+        );
+        $card = (string) ob_get_clean();
+
+        $select = $this->between($card, 'name="jobs[0][connectionId]"', '</select>');
+        $this->assertNotSame('', $select, 'the Connection select did not render.');
+        preg_match_all('/<option value="[^"]*"(?: selected)?>[^<]*<\/option>/', $select, $m);
+        $this->assertSame([
+            '<option value="">(none)</option>',
+            '<option value="c-legacy">Legacy NAS</option>',
+            '<option value="c-ssh">SSH NAS</option>',
+            '<option value="c-daemon" selected>Daemon NAS [rsyncd]</option>',
+            '<option value="c-lower">Lower NAS [rsyncd]</option>',
+        ], $m[0]);
+        // No grouping, and nothing filtered out.
+        $this->assertStringNotContainsString('<optgroup', $select);
+
+        // The help under the select names both remote transports now (this
+        // branch only renders when connections exist, which is why it lives
+        // here rather than in the whole-page test).
+        $this->assertStringContainsString(
+            'Used for SSH and rsync daemon transports. Manage connections in the Connections tab.',
+            $card
+        );
+        $this->assertStringNotContainsString('Used for SSH transport.', $card);
+    }
+
+    /**
+     * Seed one PRE-DAEMON connection record (no 'transport' key at all, exactly
+     * as an existing install has it on disk) and one daemon record.
+     */
+    private function seedConnections(): void
+    {
+        $creds = Credentials::defaults();
+        $creds['connections'][] = [
+            'id'          => 'c-legacy',
+            'name'        => 'Legacy NAS',
+            'host'        => 'nas.local',
+            'username'    => 'root',
+            'authMethod'  => 'KEYFILE',
+            'keyFilePath' => '/root/.ssh/id_ed25519',
+        ];
+        $creds['connections'][] = [
+            'id'        => 'c-daemon',
+            'name'      => 'Daemon NAS',
+            'host'      => 'nas2.local',
+            'username'  => 'moduser',
+            'transport' => 'DAEMON',
+        ];
+        Credentials::save($creds);
+    }
+
+    /**
+     * Every rendered transport <option> as [value, selectedAttr] pairs, in
+     * document order.
+     *
+     * @return array<int,array{0:string,1:string}>
+     */
+    private function transportOptions(string $html): array
+    {
+        preg_match_all(
+            '/<option value="(SSH|DAEMON)"( selected)?>(?:SSH \(rsync over SSH\)|rsync daemon \(rsyncd, port 873\))<\/option>/',
+            $html,
+            $m,
+            PREG_SET_ORDER
+        );
+        return array_map(static fn(array $x): array => [$x[1], $x[2] ?? ''], $m);
+    }
+
+    /**
+     * Capture group 1 of every match of $pattern, in document order.
+     *
+     * @return array<int,string>
+     */
+    private function attrList(string $html, string $pattern): array
+    {
+        preg_match_all($pattern, $html, $m);
+        return $m[1];
+    }
+
+    /**
+     * Every opening tag in $html whose class attribute contains $class.
+     *
+     * @return array<int,string>
+     */
+    private function tagsWithClass(string $html, string $class): array
+    {
+        preg_match_all('/<[a-z]+[^>]*\b' . preg_quote($class, '/') . '\b[^>]*>/', $html, $m);
+        return $m[0];
+    }
+
+    /** The slice of $html strictly between $start and $end ('' when not found). */
+    private function between(string $html, string $start, string $end): string
+    {
+        $i = strpos($html, $start);
+        if ($i === false) {
+            return '';
+        }
+        $i += strlen($start);
+        if ($end === '') {
+            return substr($html, $i);
+        }
+        $j = strpos($html, $end, $i);
+        return $j === false ? '' : substr($html, $i, $j - $i);
+    }
+
+    /** Collapse every run of whitespace to a single space, trimmed. */
+    private function collapse(string $html): string
+    {
+        return trim((string) preg_replace('/\s+/', ' ', $html));
+    }
+
     /**
      * Render the shared options partial to a string.
      *

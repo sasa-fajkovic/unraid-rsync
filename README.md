@@ -4,9 +4,10 @@
 [![GitHub release](https://img.shields.io/github/v/release/sasa-fajkovic/unraid-rsync)](https://github.com/sasa-fajkovic/unraid-rsync/releases/latest)
 
 A native Unraid webGui plugin for scheduling and monitoring **rsync backup
-jobs** — either **over SSH** to/from a remote host or **locally** between two
-paths on the server — a multi-job scheduler rather than the usual
-single-schedule rsync plugins.
+jobs** — **over SSH** to/from a remote host, straight to an **rsync daemon**
+(`rsyncd`, the "Rsync Server" a NAS exposes), or **locally** between two paths on
+the server — a multi-job scheduler rather than the usual single-schedule rsync
+plugins.
 
 > **Validate with dry-runs first.** rsync moves (and can delete) real data, so
 > exercise a new job with a **Dry-run** and inspect the per-run log before you
@@ -17,8 +18,9 @@ single-schedule rsync plugins.
 
 Run multiple **independent** rsync jobs, each with:
 
-- a **transport**: **SSH** (push to or pull from a remote host) or **Local**
-  (both sides are paths on this server, confined under `/mnt`);
+- a **transport**: **SSH** (push to or pull from a remote host), **rsync
+  daemon** (an `rsyncd` module on a NAS or another server), or **Local** (both
+  sides are paths on this server, confined under `/mnt`);
 - its own cron schedule (per-job, not one global schedule), with a live
   **Next run** column;
 - a curated, **whitelisted** set of rsync flags exposed as checkboxes and value
@@ -29,10 +31,44 @@ Run multiple **independent** rsync jobs, each with:
 - live **state badges**, a **per-run log viewer**, and last-run reporting;
 - optional **notifications** through Unraid's native notification system.
 
-**SSH** jobs additionally reference a connection from the reusable
-**Connections** tab, shown by name in the UI, supporting **existing key file**,
-**managed key**, and **password** auth. Managed keys live in their own
-**Credentials** keychain tab. **Local** jobs use no connection or credentials.
+### Transports
+
+A job picks one of three transports.
+
+- **SSH** — rsync tunnelled over an `ssh` command line. The job references a
+  connection from the reusable **Connections** tab (shown by name in the UI),
+  which supplies the host, port, remote user and one of three auth methods:
+  **existing key file**, **managed key**, or **password**. A pair's right-hand
+  box is an **absolute filesystem path on the remote host**.
+- **rsync daemon (`rsyncd`)** — rsync's own wire protocol, spoken directly to a
+  TCP port (**873** unless the daemon was configured otherwise). This is the
+  "Rsync Server" that Synology, QNAP, TrueNAS and friends expose. The job
+  references a connection whose **Transport** is *rsync daemon (rsyncd)*; the
+  username and secret on it are that daemon's **module** credentials (its
+  `auth users` / secrets-file entry), **not** an SSH account. A module with no
+  `auth users` is anonymous — leave the secret blank. A pair's right-hand box is
+  a **module reference**: relative, no host, no leading slash — `rsync_bkp`, or
+  `rsync_bkp/photos` for a folder inside the module. The plugin builds the
+  operand `user@host::module` and always passes an explicit `--port`.
+- **Local** — both sides are paths on this server, confined under `/mnt`. No
+  connection and no credentials.
+
+> **The rsync daemon protocol is not encrypted.** Only a challenge/response
+> (the digest is negotiated — **MD4** with an old peer) protects the module
+> secret, and **file names and file contents travel in clear** over the network.
+> Use it only on a network you trust — **SSH remains the recommended transport**
+> everywhere else.
+
+**Test connection** on a daemon connection lists the daemon's public modules. A
+module listing is answered *before* authentication, so a green result proves the
+daemon is reachable and nothing more — it does **not** verify the module user or
+the secret. Use a **Dry-run** to test those.
+
+The **connect timeout** rsync option (`--contimeout`) applies to this transport
+only: rsync refuses it outright on SSH and Local transfers, so the plugin does
+not send it there and warns when one is set.
+
+Managed keys live in their own **Credentials** keychain tab.
 
 ## What ships today
 
@@ -43,11 +79,14 @@ Run multiple **independent** rsync jobs, each with:
   **Jobs**, **Connections**, **Credentials**, **Global Settings**, **Status**
   and **History** tabs.
 - Jobs CRUD + Global Settings (config persisted to `config.json`).
-- A **Connections** tab (see [Credentials](#credentials)): SSH connections with
-  three auth methods — **existing key file** (default), a **managed key** (from
-  the Credentials tab), and **password** (no extra packages needed) — plus **Discover host
-  key**, selectable strict-host-key modes, and a per-connection **Test
-  connection** probe.
+- A **Connections** tab (see [Credentials](#credentials)) in two flavours:
+  **SSH** connections with three auth methods — **existing key file** (default),
+  a **managed key** (from the Credentials tab), and **password** (no extra
+  packages needed) — plus **Discover host key** and selectable strict-host-key
+  modes; and **rsync daemon** connections with a port, a module user and an
+  optional module secret. Both have a per-connection **Test connection** probe
+  (an SSH login probe, or a module listing for a daemon — note a listing is
+  answered *before* authentication, so it does not verify the secret).
 - A **Credentials** tab: a managed SSH key keychain you can **generate** or
   **import**, referenced by connections that use managed-key auth.
 - A safe rsync **execution engine** (whitelisted flags built as an argv array,
@@ -103,18 +142,20 @@ re-applied automatically:
 
 ### Credentials
 
-**SSH** jobs reference a connection by name, so a host's details are defined
-once and shared. (**Local** transport jobs use no connection or credentials.)
-Two tabs cover this:
+**SSH** and **rsync daemon** jobs reference a connection by name, so an
+endpoint's details are defined once and shared. (**Local** transport jobs use no
+connection or credentials.) Two tabs cover this:
 
-- **Connections** — an SSH endpoint (host, port, remote user) plus an **auth
-  method**. Each connection has a **Discover host key** action and a selectable
-  **strict host-key checking** mode (`accept-new` — the default —, `yes`, or
-  `no`), and a per-connection **Test connection** probe.
+- **Connections** — an endpoint plus its **Transport**. An **SSH** connection is
+  host, port and remote user plus an **auth method**, a **Discover host key**
+  action and a selectable **strict host-key checking** mode (`accept-new` — the
+  default —, `yes`, or `no`). An **rsync daemon** connection is host, port (873),
+  the module user and an optional module secret; the SSH-only controls are
+  hidden on it. Both have a per-connection **Test connection** probe.
 - **Credentials** — a managed SSH key keychain you can **generate** or
   **import**, referenced by connections that use managed-key auth.
 
-Each connection picks one of three **auth methods**:
+An **SSH** connection picks one of three **auth methods**:
 
 - **Existing key file** (the default) — point the connection at a key already on
   the server, e.g. `/root/.ssh/id_ed25519`. Nothing is uploaded or copied into
@@ -123,6 +164,10 @@ Each connection picks one of three **auth methods**:
   imported through the UI).
 - **Password** — authenticate with a stored password (see below). Works on a
   stock Unraid box; nothing to install.
+
+An **rsync daemon** connection has no auth method. It either sends a **module
+secret** — the daemon's secrets-file entry for its `auth users` name — or, for a
+module with no `auth users`, nothing at all.
 
 ### Credential security (read this)
 
@@ -141,6 +186,14 @@ do not apply there. Consequences:
   with access to the flash drive can recover them. Prefer **key authentication**
   and, when password auth is unavoidable, use a **dedicated low-privilege remote
   account**.
+- **rsync daemon module secrets** are the fourth case, and they are stored
+  exactly like passwords: **obfuscated (reversible), not encrypted**, on the same
+  world-readable flash. At run time the secret is written to a RAM file at mode
+  `600` and handed to rsync as `--password-file` (rsync refuses a password file
+  any other user can read), so the secret itself never reaches a command line or
+  an environment variable — only that file's path does. Use a **dedicated,
+  least-privileged module user**, and remember the daemon protocol is
+  **unencrypted on the wire** as well.
 
 #### Storing credentials on the array instead of the flash
 

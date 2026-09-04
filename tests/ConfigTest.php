@@ -680,4 +680,346 @@ final class ConfigTest extends TestCase
         $leftovers = glob(rtrim(UR_CONFIG_BASE, '/') . '/.config.json.*');
         $this->assertSame([], $leftovers ?: []);
     }
+
+    // --- issue #139: the DAEMON transport must be additive within schema v2 ---
+    //
+    // The daemon transport deliberately does NOT bump Config::SCHEMA_VERSION and
+    // adds NO key to defaultJob() or defaultRsyncOptions(): 'transport' merely
+    // gains a legal VALUE. A bump would make an OLDER plugin's migrate() throw
+    // ("newer than this plugin supports") and take the whole config down on a
+    // downgrade, so these tests pin the "no schema movement" side of the
+    // contract as hard as the behaviour side.
+
+    /**
+     * A canonical, fully-merged v2 config exactly as this plugin writes it -
+     * one legacy SSH job (with contimeout set, the option the daemon work
+     * changed the EMISSION of but not the STORAGE of), one LOCAL job, and one
+     * DAEMON job whose pair remote is a module reference.
+     *
+     * @return array<string,mixed>
+     */
+    private function canonicalV2Config(): array
+    {
+        $cfg = Config::defaults();
+        $cfg['global']['retention'] = 42;
+
+        $ssh = Config::defaultJob();
+        $ssh['id']           = 'j-ssh';
+        $ssh['name']         = 'SSH job';
+        $ssh['transport']    = 'SSH';
+        $ssh['connectionId'] = 'c-ssh';
+        $ssh['pairs']        = [['local' => '/mnt/user/a/', 'remote' => '/volume1/a/']];
+        $ssh['rsyncOptions']['contimeout'] = '30';
+
+        $local = Config::defaultJob();
+        $local['id']        = 'j-local';
+        $local['name']      = 'Local job';
+        $local['transport'] = 'LOCAL';
+        $local['direction'] = 'PUSH';
+        $local['pairs']     = [['local' => '/mnt/user/b/', 'remote' => '/mnt/disk1/b/']];
+
+        $daemon = Config::defaultJob();
+        $daemon['id']           = 'j-daemon';
+        $daemon['name']         = 'Daemon job';
+        $daemon['transport']    = 'DAEMON';
+        $daemon['connectionId'] = 'c-daemon';
+        $daemon['direction']    = 'PULL';
+        $daemon['pairs']        = [['local' => '/mnt/user/photos/', 'remote' => 'rsync_bkp/photos']];
+        $daemon['rsyncOptions']['contimeout'] = '15';
+
+        $cfg['jobs'] = [$ssh, $local, $daemon];
+        return $cfg;
+    }
+
+    /**
+     * An existing schemaVersion-2 config.json on disk must survive load() and a
+     * subsequent save() COMPLETELY unchanged - same keys, same order, same
+     * values, same version. This is the no-breaking-change proof for every
+     * pre-daemon install: nothing is added, dropped, reordered or re-stamped.
+     */
+    public function testExistingV2ConfigOnDiskRoundTripsCompletelyUnchanged(): void
+    {
+        $disk = $this->canonicalV2Config();
+        file_put_contents(
+            Config::path(),
+            json_encode($disk, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES)
+        );
+
+        // load() = migrate() + mergeDefaults(); on an already-canonical v2 file
+        // both must be the identity, key order included.
+        $loaded = Config::load();
+        $this->assertSame($disk, $loaded);
+
+        // ...and a save/load cycle on top of that is the identity too.
+        Config::save($loaded);
+        $this->assertSame($disk, Config::load());
+
+        // The on-disk version did NOT move, and the daemon job is stored as the
+        // literal 'DAEMON' rather than coerced or dropped.
+        $raw = json_decode((string) file_get_contents(Config::path()), true);
+        $this->assertSame(2, $raw['schemaVersion']);
+        $this->assertSame(2, Config::SCHEMA_VERSION);
+        $this->assertSame(['SSH', 'LOCAL', 'DAEMON'], array_column($raw['jobs'], 'transport'));
+        $this->assertSame('rsync_bkp/photos', $raw['jobs'][2]['pairs'][0]['remote']);
+        // contimeout is still STORED for the SSH job (buildArgv stops EMITTING
+        // it off-daemon; removing the whitelist key would strand the value).
+        $this->assertSame('30', $raw['jobs'][0]['rsyncOptions']['contimeout']);
+    }
+
+    /**
+     * defaultJob() keeps exactly its 15 keys, in order. The daemon transport is
+     * a new VALUE for 'transport', never a new key - a new key would change the
+     * shape every stored job is merged to.
+     */
+    public function testDefaultJobKeySetIsUnchangedAtFifteenKeys(): void
+    {
+        $this->assertSame([
+            'id',
+            'name',
+            'enabled',
+            'manualOnly',
+            'schedule',
+            'transport',
+            'connectionId',
+            'direction',
+            'pairs',
+            'useGlobalDefaults',
+            'rsyncOptions',
+            'logLevel',
+            'preHook',
+            'postHook',
+            'notifyMode',
+        ], array_keys(Config::defaultJob()));
+        $this->assertCount(15, Config::defaultJob());
+        // A brand-new job still defaults to SSH, not to the new transport.
+        $this->assertSame('SSH', Config::defaultJob()['transport']);
+    }
+
+    /**
+     * defaultRsyncOptions() keeps exactly its 40 keys, in order. --port and
+     * --password-file are carried in the transport-pieces bag, NEVER in the
+     * option whitelist: a user-editable --password-file would be an
+     * arbitrary-file-read primitive aimed at a remote daemon, and a whitelisted
+     * --port would split the source of truth with the Connection's own port.
+     */
+    public function testDefaultRsyncOptionsKeySetIsUnchangedAtFortyKeys(): void
+    {
+        $keys = array_keys(Config::defaultRsyncOptions());
+        $this->assertSame([
+            'recursive',
+            'archive',
+            'compress',
+            'humanReadable',
+            'times',
+            'omitDirTimes',
+            'omitLinkTimes',
+            'perms',
+            'owner',
+            'group',
+            'devices',
+            'xattrs',
+            'acls',
+            'symlinks',
+            'hardlinks',
+            'sparse',
+            'numericIds',
+            'partial',
+            'inplace',
+            'checksum',
+            'update',
+            'wholeFile',
+            'sizeOnly',
+            'ignoreExisting',
+            'delete',
+            'deleteExcluded',
+            'mkpath',
+            'filters',
+            'maxDelete',
+            'bwlimit',
+            'timeout',
+            'contimeout',
+            'maxSize',
+            'minSize',
+            'chmod',
+            'tempDir',
+            'backupDir',
+            'compressLevel',
+            'modifyWindow',
+            'remoteRsyncPath',
+        ], $keys);
+        $this->assertCount(40, $keys);
+
+        foreach (['port', 'daemonPort', 'passwordFile', 'passwordfile', 'password'] as $forbidden) {
+            $this->assertNotContains(
+                $forbidden,
+                $keys,
+                "'$forbidden' must never become a whitelisted rsync option: --port and "
+                . '--password-file are supplied by the transport, not by the user.'
+            );
+        }
+        // contimeout stays whitelisted - buildArgv drops it off-daemon, but
+        // removing the key would strand every stored value.
+        $this->assertContains('contimeout', $keys);
+        $this->assertSame('', Config::defaultRsyncOptions()['contimeout']);
+    }
+
+    /**
+     * mergeDefaults() neither drops nor adds anything on an already-canonical
+     * config: it is the identity, and it is idempotent. (The drop/fill
+     * behaviour on a RAGGED config is covered by the two tests above this
+     * block; this one guards the complete-config case that every real install
+     * hits on every single page load.)
+     */
+    public function testMergeDefaultsIsTheIdentityOnACanonicalV2Config(): void
+    {
+        $cfg = $this->canonicalV2Config();
+        $once = Config::mergeDefaults($cfg);
+        $this->assertSame($cfg, $once);
+        $this->assertSame($once, Config::mergeDefaults($once));
+
+        // Top-level: exactly the three canonical keys, in order.
+        $this->assertSame(['schemaVersion', 'global', 'jobs'], array_keys($once));
+        $this->assertSame(
+            ['defaultRsyncOptions', 'retention', 'logDir', 'secretsDir'],
+            array_keys($once['global'])
+        );
+        // Every job keeps the full 15-key default-job shape, in order.
+        foreach ($once['jobs'] as $i => $job) {
+            $this->assertSame(array_keys(Config::defaultJob()), array_keys($job), "job #$i key shape");
+            $this->assertSame(
+                array_keys(Config::defaultRsyncOptions()),
+                array_keys($job['rsyncOptions']),
+                "job #$i rsyncOptions key shape"
+            );
+        }
+    }
+
+    /**
+     * mergeDefaults() drops unknown TOP-LEVEL and unknown JOB keys (the
+     * option-level case is already covered), and fills a missing job
+     * 'transport' from the default rather than inventing one.
+     */
+    public function testMergeDefaultsDropsUnknownTopLevelAndJobKeys(): void
+    {
+        $merged = Config::mergeDefaults([
+            'schemaVersion' => 2,
+            'global'        => ['retention' => 7],
+            'jobs'          => [['id' => 'j1', 'name' => 'n', 'daemonSecret' => 'oops']],
+            'cronLines'     => ['* * * * * evil'],   // not a config key
+        ]);
+
+        $this->assertSame(['schemaVersion', 'global', 'jobs'], array_keys($merged));
+        $this->assertArrayNotHasKey('cronLines', $merged);
+        $this->assertArrayNotHasKey('daemonSecret', $merged['jobs'][0]);
+        $this->assertSame('SSH', $merged['jobs'][0]['transport']);
+        $this->assertSame(7, $merged['global']['retention']);
+    }
+
+    /** A DAEMON job survives Config::save() -> Config::load() intact. */
+    public function testDaemonTransportSurvivesASaveLoadRoundTrip(): void
+    {
+        $cfg = Config::defaults();
+        $cfg['jobs'][] = Job::normalize([
+            'id'           => 'j-daemon',
+            'name'         => 'nas modules',
+            'transport'    => 'DAEMON',
+            'connectionId' => 'c-daemon',
+            'direction'    => 'PULL',
+            'pairs'        => [
+                ['local' => '/mnt/user/photos/', 'remote' => 'rsync_bkp/photos'],
+                ['local' => '/mnt/user/docs/',   'remote' => 'rsync_bkp'],
+            ],
+        ]);
+        Config::save($cfg);
+
+        $loaded = Config::load();
+        // assertEquals, not assertSame: Job::normalize() emits 'filters' LAST
+        // inside rsyncOptions while Config::mergeJob() emits it in whitelist
+        // position - a pre-existing, purely cosmetic key-order difference in the
+        // stored JSON object (Rsync::optionTokens iterates its own flag lists,
+        // never the stored order). The values must match exactly.
+        $this->assertEquals($cfg['jobs'][0], $loaded['jobs'][0]);
+        $this->assertSame('DAEMON', $loaded['jobs'][0]['transport']);
+        // PULL is NOT rewritten for DAEMON (only LOCAL is forced to PUSH) - it
+        // is the primary reported daemon use case.
+        $this->assertSame('PULL', $loaded['jobs'][0]['direction']);
+        // The module references survive verbatim: no leading slash added, no
+        // trailing slash stripped, no host prefixed.
+        $this->assertSame(
+            [
+                ['local' => '/mnt/user/photos/', 'remote' => 'rsync_bkp/photos'],
+                ['local' => '/mnt/user/docs/',   'remote' => 'rsync_bkp'],
+            ],
+            $loaded['jobs'][0]['pairs']
+        );
+        $this->assertSame(2, $loaded['schemaVersion']);
+    }
+
+    /** migrate() must not touch a v2 config just because it carries a daemon job. */
+    public function testMigrateIsANoOpOnAV2ConfigCarryingADaemonJob(): void
+    {
+        $v2 = [
+            'schemaVersion' => 2,
+            'global' => ['defaultRsyncOptions' => ['filters' => [['type' => 'exclude', 'pattern' => '*']]]],
+            'jobs'   => [[
+                'id'        => 'j-daemon',
+                'transport' => 'DAEMON',
+                'pairs'     => [['local' => '/mnt/user/x/', 'remote' => 'rsync_bkp']],
+            ]],
+        ];
+        $this->assertSame($v2, Config::migrate($v2));
+    }
+
+    /**
+     * A hand-edited config.json carrying a junk transport must be handled
+     * safely - and the ownership of that coercion is a real boundary worth
+     * pinning:
+     *
+     *   Config  PRESERVES the value verbatim (mergeJob is a shape merge, not a
+     *           validator) - so nothing is silently rewritten under the user;
+     *   Job::normalize() is the layer that COERCES an unrecognised value back
+     *           to 'SSH', which is what every save and every run goes through.
+     *
+     * Adding 'DAEMON' to Job::TRANSPORTS must not change either half.
+     */
+    public function testJunkTransportIsPreservedByConfigAndCoercedByJobNormalize(): void
+    {
+        file_put_contents(Config::path(), json_encode([
+            'schemaVersion' => 2,
+            'global'        => [],
+            'jobs'          => [
+                ['id' => 'j-junk',    'transport' => 'FTP'],
+                ['id' => 'j-lower',   'transport' => 'daemon'],
+                ['id' => 'j-missing'],
+            ],
+        ]));
+
+        // Loading never throws and never rewrites the stored value...
+        $loaded = Config::load();
+        $this->assertSame('FTP', $loaded['jobs'][0]['transport']);
+        $this->assertSame('daemon', $loaded['jobs'][1]['transport']);
+        // ...except where the key is absent, which is filled from the default.
+        $this->assertSame('SSH', $loaded['jobs'][2]['transport']);
+
+        // Job::normalize() is where an unrecognised value is coerced. 'FTP' is
+        // not a transport and falls back to SSH; 'daemon' is accepted because
+        // normalize() has always upper-cased first (unchanged behaviour, now
+        // reaching one more legal value).
+        $this->assertSame('SSH', Job::normalize($loaded['jobs'][0])['transport']);
+        $this->assertSame('DAEMON', Job::normalize($loaded['jobs'][1])['transport']);
+        $this->assertSame('SSH', Job::normalize($loaded['jobs'][2])['transport']);
+        $this->assertSame('DAEMON', Job::normalize(['transport' => ' DAEMON '])['transport']);
+        $this->assertSame('SSH', Job::normalize(['transport' => 'RSYNCD'])['transport']);
+
+        // And re-saving what the UI normalised leaves only legal values on disk.
+        $cfg = $loaded;
+        $cfg['jobs'] = array_map([Job::class, 'normalize'], $cfg['jobs']);
+        Config::save($cfg);
+        $raw = json_decode((string) file_get_contents(Config::path()), true);
+        $this->assertSame(['SSH', 'DAEMON', 'SSH'], array_column($raw['jobs'], 'transport'));
+        foreach (array_column($raw['jobs'], 'transport') as $t) {
+            $this->assertContains($t, Job::TRANSPORTS);
+        }
+        $this->assertSame(2, $raw['schemaVersion']);
+    }
 }

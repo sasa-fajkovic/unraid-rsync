@@ -25,14 +25,19 @@ declare(strict_types=1);
  */
 
 require_once __DIR__ . '/Config.php';
-// Credentials::findConnection is used by validate() to confirm an SSH job's
-// referenced connection exists when a credentials structure is supplied.
+// Credentials::findConnection is used by validate() to confirm an SSH or rsync
+// daemon job's referenced connection exists, and that its transport matches the
+// job's, when a credentials structure is supplied.
 require_once __DIR__ . '/Credentials.php';
 
 class Job
 {
-    /** Allowed enum values. */
-    const TRANSPORTS  = ['SSH', 'LOCAL'];
+    /**
+     * Allowed enum values. DAEMON speaks the rsync daemon (rsyncd) wire protocol
+     * on a TCP port; its pairs' `remote` side is a MODULE REFERENCE
+     * ("rsync_bkp/photos"), not an absolute path - see checkDaemonModule().
+     */
+    const TRANSPORTS  = ['SSH', 'LOCAL', 'DAEMON'];
     const DIRECTIONS  = ['PUSH', 'PULL'];
     const NOTIFY      = ['off', 'success-only', 'failure-only', 'always'];
     const LOG_LEVELS  = ['quiet', 'normal', 'verbose', 'debug'];
@@ -101,10 +106,16 @@ class Job
      * The one sentence every daemon-module message ends with. Kept as a const so
      * the error in checkRemotePath() and the advisory in daemonModuleNote()
      * cannot drift apart.
+     *
+     * It names the JOB, not the plugin: the old lead "This plugin transfers over
+     * SSH" became false the moment DAEMON transport existed, and both messages
+     * only ever fire on an SSH job's remote path. The final sentence is the way
+     * out for the user who really did paste a module name.
      */
-    const DAEMON_MODULE_HINT = 'This plugin transfers over SSH, so use the '
+    const DAEMON_MODULE_HINT = 'This job transfers over SSH, so use the '
         . 'absolute filesystem path the module points at on the remote host '
-        . '(for example /volume1/Backup/data).';
+        . '(for example /volume1/Backup/data). To address the module by name '
+        . 'instead, set the job Transport to "rsync daemon (rsyncd)".';
 
     /** Scalar key -> rsync flag, for human-readable validation messages. */
     const SCALAR_FLAG_LABELS = [
@@ -150,9 +161,11 @@ class Job
 
         $direction = strtoupper(trim((string) ($raw['direction'] ?? 'PUSH')));
         $job['direction'] = in_array($direction, self::DIRECTIONS, true) ? $direction : 'PUSH';
-        // Direction only applies to SSH (data flows to/from a remote host). For
-        // LOCAL transport both sides are on this box, so persist a canonical
-        // PUSH rather than letting a stored PULL contradict the UI.
+        // Direction only applies to a remote transport (SSH, DAEMON) where data
+        // flows to/from another host. For LOCAL transport both sides are on this
+        // box, so persist a canonical PUSH rather than letting a stored PULL
+        // contradict the UI. DAEMON deliberately keeps PULL: pulling from a NAS
+        // module is the primary reported use case.
         if ($job['transport'] === 'LOCAL') {
             $job['direction'] = 'PUSH';
         }
@@ -258,10 +271,11 @@ class Job
      *
      * @param array<string,mixed>      $job   a job already run through normalize()
      * @param array<string,mixed>|null $creds an optional loaded credentials
-     *        structure. When supplied, an SSH job's connectionId is additionally
-     *        checked to reference a connection that actually exists; when null,
-     *        only the cheap "non-empty connectionId" rule is enforced. The
-     *        server is the source of truth, so the handler passes $creds here.
+     *        structure. When supplied, an SSH or rsync daemon job's connectionId
+     *        is additionally checked to reference a connection that actually
+     *        exists and whose transport matches the job's; when null, only the
+     *        cheap "non-empty connectionId" rule is enforced. The server is the
+     *        source of truth, so the handler passes $creds here.
      * @return array{valid:bool,errors:array<int,string>,warnings:array<int,string>}
      */
     public static function validate(array $job, ?array $creds = null): array
@@ -276,7 +290,7 @@ class Job
 
         // transport / direction / enums
         if (!in_array($job['transport'] ?? '', self::TRANSPORTS, true)) {
-            $errors[] = 'Transport must be SSH or LOCAL.';
+            $errors[] = 'Transport must be SSH, LOCAL or DAEMON.';
         }
         if (!in_array($job['direction'] ?? '', self::DIRECTIONS, true)) {
             $errors[] = 'Direction must be PUSH or PULL.';
@@ -294,18 +308,51 @@ class Job
             $errors[] = 'Schedule must be a valid 5-field cron expression.';
         }
 
-        // connection: an SSH job MUST select a Connection (it is the host/auth
-        // the transport is built from; without it there is nowhere to rsync to).
-        // LOCAL transport never uses a connection, so connectionId is optional
-        // there. When the caller passes a loaded credentials structure we ALSO
-        // confirm the referenced connection still exists (cheap in-memory lookup,
-        // mirrors Credentials::validateConnection's keyId existence check).
-        if (($job['transport'] ?? '') === 'SSH') {
+        // Resolve transport + direction EXACTLY as the RUN-TIME side does
+        // (Runner::run and Runner::guardrailErrors: strtoupper + trim, defaulting
+        // to SSH/PUSH) so the two guards can never disagree about the same stored
+        // bytes. config.json is hand-editable on /boot, and a `"transport":
+        // "daemon"` there used to take the DAEMON arm at run time while this
+        // method treated it as an unknown transport - inverting the role labels
+        // and picking a different --delete destination side than the Runner. The
+        // enum checks above still report such a value as invalid; this only
+        // decides WHICH rules are applied to it.
+        $transport = strtoupper(trim((string) ($job['transport'] ?? 'SSH')));
+        $direction = strtoupper(trim((string) ($job['direction'] ?? 'PUSH')));
+
+        // connection: an SSH or DAEMON job MUST select a Connection (it is the
+        // host/port/auth the transport is built from; without it there is nowhere
+        // to rsync to). LOCAL transport never uses a connection, so connectionId
+        // is optional there. When the caller passes a loaded credentials structure
+        // we ALSO confirm the referenced connection still exists (cheap in-memory
+        // lookup, mirrors Credentials::validateConnection's keyId existence check)
+        // and that its transport agrees with the job's - an SSH connection cannot
+        // build a daemon operand and vice versa, and the Runner re-checks that
+        // authoritatively at run time.
+        if (in_array($transport, ['SSH', 'DAEMON'], true)) {
             $connectionId = trim((string) ($job['connectionId'] ?? ''));
             if ($connectionId === '') {
-                $errors[] = 'An SSH job must select a Connection.';
-            } elseif (is_array($creds) && Credentials::findConnection($creds, $connectionId) === null) {
-                $errors[] = 'The selected Connection does not exist.';
+                $errors[] = ($transport === 'DAEMON')
+                    ? 'An rsync daemon job must select a Connection.'
+                    : 'An SSH job must select a Connection.';
+            } elseif (is_array($creds)) {
+                $conn = Credentials::findConnection($creds, $connectionId);
+                if ($conn === null) {
+                    $errors[] = 'The selected Connection does not exist.';
+                } else {
+                    // findConnection returns the RAW record, not a merged one, so
+                    // a pre-daemon connection has no transport key at all and the
+                    // ?? 'SSH' is mandatory. Without it EVERY existing SSH job
+                    // would report a mismatch on the first save after upgrade.
+                    $connTransport = strtoupper(trim((string) ($conn['transport'] ?? 'SSH')));
+                    if ($connTransport !== $transport) {
+                        $errors[] = ($transport === 'DAEMON')
+                            ? 'This job uses rsync daemon transport, but the selected Connection uses SSH '
+                                . 'transport. Pick a Connection whose Transport is "rsync daemon (rsyncd)".'
+                            : 'This job uses SSH transport, but the selected Connection uses rsync daemon '
+                                . '(rsyncd) transport. Pick a Connection whose Transport is "SSH".';
+                    }
+                }
             }
         }
 
@@ -318,20 +365,29 @@ class Job
         $opts        = isset($job['rsyncOptions']) && is_array($job['rsyncOptions']) ? $job['rsyncOptions'] : [];
         $deleteOn    = !empty($opts['delete']) || !empty($opts['deleteExcluded']);
         $maxDelete   = trim((string) ($opts['maxDelete'] ?? ''));
-        $transport   = $job['transport'] ?? 'SSH';
-        $direction   = $job['direction'] ?? 'PUSH';
 
         // The `local` field is ALWAYS a path on this Unraid box; the `remote`
-        // field is on the other host (SSH) or also on this box (LOCAL). Which
-        // side is the destination depends on direction: PUSH writes to remote,
-        // PULL writes to local. The destructive --delete check must target the
-        // destination side.
-        $destIsRemote = ($direction !== 'PULL'); // PUSH (and LOCAL, coerced to PUSH)
+        // field is on the other host (SSH, DAEMON) or also on this box (LOCAL).
+        // Which side is the destination depends on direction: PUSH writes to
+        // remote, PULL writes to local. The destructive --delete check must
+        // target the destination side.
+        //
+        // Written as an explicit three-way test rather than the old bare
+        // `$direction !== 'PULL'` so it MIRRORS Runner::guardrailErrors exactly.
+        // For an unknown hand-edited transport the Runner resolves the pair with
+        // dest = `remote` unconditionally, so this must too, or the save-time and
+        // run-time --delete guards would disagree about the same job. LOCAL is
+        // unaffected: normalize() coerces it to PUSH, so both forms give true.
+        $destIsRemote = in_array($transport, ['SSH', 'DAEMON'], true) ? ($direction !== 'PULL') : true;
 
-        // The `remote` field is on another host only for SSH transport; under
-        // LOCAL transport it is a second path on this same box. Qualify labels
-        // accordingly so a LOCAL job's errors don't say "(remote)".
-        $remoteQualifier = ($transport === 'LOCAL') ? 'local' : 'remote';
+        // The `remote` field is on another host only for SSH and DAEMON
+        // transport; under LOCAL transport it is a second path on this same box,
+        // and under DAEMON it is a module reference rather than a path. Qualify
+        // labels accordingly so a LOCAL job's errors don't say "(remote)" and a
+        // daemon job's point at the right kind of value.
+        $remoteQualifier = ($transport === 'LOCAL')
+            ? 'local'
+            : (($transport === 'DAEMON') ? 'module' : 'remote');
 
         foreach ($pairs as $i => $pair) {
             $n      = $i + 1;
@@ -360,6 +416,13 @@ class Job
                     foreach (self::checkLocalPath($remote, $remoteLabel) as $e) {
                         $errors[] = $e;
                     }
+                } elseif ($transport === 'DAEMON') {
+                    // A module reference, not a path. No daemonModuleNote here:
+                    // that advisory exists to catch a module name typed into an
+                    // SSH job, which is exactly what this transport wants.
+                    foreach (self::checkDaemonModule($remote, $remoteLabel) as $e) {
+                        $errors[] = $e;
+                    }
                 } else {
                     foreach (self::checkRemotePath($remote, $remoteLabel) as $e) {
                         $errors[] = $e;
@@ -379,7 +442,14 @@ class Job
             // destination is `remote` for PUSH and `local` for PULL.
             if ($deleteOn) {
                 $destPath = $destIsRemote ? $remote : $local;
-                if ($destPath !== '' && !self::isSpecificSubPath($destPath)) {
+                // A daemon destination is a module reference, which
+                // isSpecificSubPath rejects outright (it requires a leading '/'),
+                // so branch on the transport rather than skipping the guard - a
+                // bare module root must be rejected exactly as '/data' is.
+                $specific = ($transport === 'DAEMON' && $destIsRemote)
+                    ? self::isSpecificDaemonTarget($destPath)
+                    : self::isSpecificSubPath($destPath);
+                if ($destPath !== '' && !$specific) {
                     $errors[] = "Pair #$n: a delete option is enabled, so the destination must be a specific sub-directory, not a root.";
                 }
             }
@@ -408,19 +478,32 @@ class Job
         }
 
         // --temp-dir / --backup-dir live on the RECEIVER's filesystem. For a local
-        // receiver (LOCAL transport, or an SSH PULL whose destination is the local
+        // receiver (LOCAL transport, or a PULL whose destination is the local
         // side) they must clear the SAME /mnt guardrail as any local path -
         // otherwise a job could quietly stage into or back up onto /boot, /etc,
-        // etc. For an SSH PUSH the receiver is remote, so the weaker
-        // absolute-non-root check applies (same as a remote pair path).
+        // etc. For a PUSH the receiver is remote, so the weaker absolute-non-root
+        // check applies (same as a remote pair path) - or, on a daemon receiver,
+        // the module-reference check, because rsync resolves both flags relative
+        // to the module root there.
         $receiverIsLocal = ($transport === 'LOCAL') || ($direction === 'PULL');
         foreach (['tempDir' => '--temp-dir', 'backupDir' => '--backup-dir'] as $key => $flag) {
             $p = trim((string) ($opts[$key] ?? ''));
             if ($p === '') {
                 continue;
             }
-            $label  = "Option $flag";
-            $checks = $receiverIsLocal ? self::checkLocalPath($p, $label) : self::checkRemotePath($p, $label);
+            $label = "Option $flag";
+            if ($receiverIsLocal) {
+                $checks = self::checkLocalPath($p, $label);
+            } elseif ($transport === 'DAEMON') {
+                $checks = self::checkDaemonModule($p, $label);
+            } else {
+                // $pairPath = false: these fields are never a module name, so the
+                // daemon-shaped discriminators inside checkRemotePath are nonsense
+                // here - a tempDir of "tmp" was being reported as "looks like an
+                // rsync daemon module name, not a path" instead of the plain
+                // "must be an absolute path".
+                $checks = self::checkRemotePath($p, $label, false);
+            }
             foreach ($checks as $e) {
                 $errors[] = $e;
             }
@@ -433,6 +516,17 @@ class Job
         // --delete safety: warn (do not block) when no max-delete cap is set.
         if ($deleteOn && $maxDelete === '') {
             $warnings[] = 'A delete option is enabled without a "max delete" cap; consider setting one to limit accidental deletions.';
+        }
+
+        // rsync's main.c:1558 exits 1 (RERR_SYNTAX) for --contimeout on ANY
+        // non-daemon connection - remote-shell AND local; only the daemon socket
+        // path returns before that check. Rsync::buildArgv therefore drops the
+        // option for SSH and LOCAL rather than emit an argv that can only fail,
+        // so warn that the stored value is inert. Never an ERROR: that would
+        // reject an existing save that has carried the value for months.
+        if ($transport !== 'DAEMON' && trim((string) ($opts['contimeout'] ?? '')) !== '') {
+            $warnings[] = 'The --contimeout option only applies to rsync daemon (rsyncd) transport; '
+                . 'rsync rejects it outright on SSH and Local transfers, so it is not sent for this job.';
         }
 
         return [
@@ -496,9 +590,14 @@ class Job
      * we cannot bind it to /mnt, but it must still be an absolute, non-root
      * sub-path (reject "/", and require at least one path segment).
      *
+     * @param bool $pairPath true (the default) when $path is a pair's `remote`
+     *        side. false for --temp-dir / --backup-dir, where the daemon-shaped
+     *        discriminators below are nonsense: those fields are never a module
+     *        name, so a non-absolute value there gets the plain "must be an
+     *        absolute path". The default preserves every existing call site.
      * @return array<int,string>
      */
-    public static function checkRemotePath(string $path, string $label): array
+    public static function checkRemotePath(string $path, string $label, bool $pairPath = true): array
     {
         $errors = [];
         $norm = self::normalizePath($path);
@@ -515,14 +614,14 @@ class Job
             // ALREADY-SAVED job at run time. A real daemon address never
             // starts with "/", so this branch is the only safe place for it.
             $raw = trim($path);
-            if (stripos($raw, 'rsync://') === 0 || strpos($raw, '::') !== false) {
+            if ($pairPath && (stripos($raw, 'rsync://') === 0 || strpos($raw, '::') !== false)) {
                 $errors[] = "$label '$path' is an rsync daemon address (host::module or rsync://). "
                     . self::DAEMON_MODULE_HINT;
                 return $errors;
             }
             // A bare token shaped like a name, not a path: exactly how a NAS
             // "Rsync Server" page labels its backup modules.
-            if (preg_match('/^[A-Za-z0-9._-]+$/D', $raw)) {
+            if ($pairPath && preg_match('/^[A-Za-z0-9._-]+$/D', $raw)) {
                 $errors[] = "$label '$path' looks like an rsync daemon module name, not a path. "
                     . self::DAEMON_MODULE_HINT;
                 return $errors;
@@ -542,6 +641,82 @@ class Job
             $errors[] = "$label '$path' must be a specific sub-directory, not the filesystem root.";
         }
         return $errors;
+    }
+
+    /**
+     * Guardrail check for an rsync DAEMON module reference - the `remote` side of
+     * a DAEMON pair, and --temp-dir/--backup-dir on a daemon receiver. The
+     * operand is built as "[user@]host::<this>", so this value is a RELATIVE
+     * module reference: "rsync_bkp", "rsync_bkp/photos", "rsync_bkp/photos/2026".
+     * The host, port, username and secret all come from the job's Connection.
+     *
+     * A trailing slash is meaningful to rsync (it copies the directory's contents
+     * rather than the directory), so it is left alone - rule 9 strips it only to
+     * analyse the segments.
+     *
+     * Returns AT MOST ONE error (first rule wins), mirroring checkRemotePath.
+     *
+     * @return array<int,string>
+     */
+    public static function checkDaemonModule(string $path, string $label): array
+    {
+        $raw = trim($path);
+
+        if ($raw === '') {
+            return ["$label must be an rsync daemon module reference (for example rsync_bkp or rsync_bkp/photos)."];
+        }
+        if (strlen($raw) > 4096) {
+            return ["$label is too long."];
+        }
+        if (preg_match('/[\x00-\x20\x7f]/', $raw)) {
+            return ["$label '$path' contains whitespace or control characters."];
+        }
+        // A leading '-' would be read by rsync as an option, not an operand.
+        if ($raw[0] === '-') {
+            return ["$label '$path' must not begin with \"-\"."];
+        }
+        if (stripos($raw, 'rsync://') === 0 || strpos($raw, '::') !== false) {
+            return ["$label '$path' includes the daemon host. The host, port and username come from the job's "
+                . 'Connection, so enter only the module reference here (for example rsync_bkp or rsync_bkp/photos).'];
+        }
+        if ($raw[0] === '/') {
+            return ["$label '$path' must not begin with \"/\". An rsync daemon path is relative to the module, "
+                . 'so enter the module reference (for example rsync_bkp or rsync_bkp/photos), '
+                . 'not an absolute filesystem path.'];
+        }
+        // A single ':' is left after the "::" test above, so this is the
+        // "nas:module" / "host:873" paste. It matters more here than for an SSH
+        // path: rsync's parse_hostspec breaks the operand's authority at the
+        // FIRST ':' or '/', so a colon in the module half re-splits the whole
+        // operand and can silently retarget the transfer.
+        if (strpos($raw, ':') !== false) {
+            return ["$label '$path' includes a host or port. The host, port and username come from the job's "
+                . 'Connection, so enter only the module reference here.'];
+        }
+        if (preg_match('/[;&|`$()<>"\'\\\\]/', $raw)) {
+            return ["$label '$path' contains unsafe characters."];
+        }
+        foreach (explode('/', rtrim($raw, '/')) as $segment) {
+            if ($segment === '' || $segment === '.' || $segment === '..') {
+                return ["$label '$path' must not contain \".\", \"..\" or empty path segments."];
+            }
+        }
+        // The first segment is the MODULE name. rsyncd.conf.5 ("MODULE
+        // PARAMETERS") only forbids '/' and ']' in a [module] name and collapses
+        // whitespace, so this is OUR narrowing, not rsync's - kept tight because
+        // the value becomes an rsync operand. A LEADING '.' or '_' is legal and
+        // common ("_backup", ".hidden"), so it is accepted: barring it rejected
+        // real modules while the message itself promised "letters, digits, dot,
+        // dash or underscore". A leading '-' stays barred by the rule above (rsync
+        // would read it as an option) and '.'/'..' segments by the segment rule above.
+        $first = explode('/', $raw)[0];
+        if (!preg_match('/^[A-Za-z0-9._][A-Za-z0-9._-]*$/D', $first)) {
+            return ["$label '$path' is not a valid rsync daemon module reference. The first segment is the "
+                . 'module name (letters, digits, dot, dash or underscore), optionally followed by a path '
+                . 'inside it, for example rsync_bkp/photos.'];
+        }
+
+        return [];
     }
 
     /**
@@ -643,6 +818,29 @@ class Job
         }
         $segments = array_values(array_filter(explode('/', $norm), static fn($s) => $s !== ''));
         return count($segments) >= 1;
+    }
+
+    /**
+     * True when a daemon module reference names something specific enough to be a
+     * --delete destination. EXACT PARITY with isSpecificSubPath's rule for SSH,
+     * where one segment ("/data") is enough - so a module ROOT is allowed, exactly
+     * as "/data" is, and only an empty or structurally broken value is not.
+     *
+     * Do NOT skip the --delete guard for daemon instead: that would leave
+     * `host::<typo>` unguarded while both other transports reject a bare root.
+     */
+    public static function isSpecificDaemonTarget(string $moduleRef): bool
+    {
+        $raw = trim($moduleRef);
+        if ($raw === '' || $raw[0] === '/') {
+            return false;
+        }
+        foreach (explode('/', rtrim($raw, '/')) as $segment) {
+            if ($segment !== '' && $segment !== '.' && $segment !== '..') {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

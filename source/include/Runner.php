@@ -3,9 +3,10 @@
 declare(strict_types=1);
 
 /**
- * Runner.php - orchestrates a single job run: state, logging, the SSH transport,
- * preHook -> one rsync per pair -> postHook (ALWAYS), the abort poll, the
- * exit-code -> state mapping, and the persisted last-run summary on /boot.
+ * Runner.php - orchestrates a single job run: state, logging, the remote
+ * transport (SSH or rsync daemon), preHook -> one rsync per pair -> postHook
+ * (ALWAYS), the abort poll, the exit-code -> state mapping, and the persisted
+ * last-run summary on /boot.
  *
  * scripts/runner.php is the thin CLI entry that parses --job/--dry-run and calls
  * Runner::run(); ALL the orchestration logic lives here so it is unit-testable
@@ -239,9 +240,12 @@ class Runner
         $token    = '';
 
         try {
-            // 4. SSH transport: materialise secrets (LOCAL skips this).
+            // 4. Remote transport: materialise secrets (LOCAL skips this).
             $sshPieces = null;
-            $transport = strtoupper((string) ($job['transport'] ?? 'SSH'));
+            // trim() as well as strtoupper(): Job::validate resolves the same
+            // two fields the same way, and the two guards must agree on a
+            // hand-edited config.json byte for byte.
+            $transport = strtoupper(trim((string) ($job['transport'] ?? 'SSH')));
             if ($transport === 'SSH') {
                 $matResult = self::materializeSsh($job, $runLog, $jobId);
                 if ($matResult['ok'] !== true) {
@@ -276,9 +280,42 @@ class Runner
                         $token
                     );
                 }
+            } elseif ($transport === 'DAEMON') {
+                $matResult = self::materializeDaemonConn($job, $runLog, $jobId);
+                if ($matResult['ok'] !== true) {
+                    $state    = Rsync::STATE_FAILED;
+                    $exitCode = 1;
+                    $reason   = (string) $matResult['reason'];
+                    Logger::event($runLog, $jobId, 'rsync daemon transport could not be prepared: ' . $matResult['message']);
+                } else {
+                    $token     = (string) $matResult['token'];
+                    $mat       = $matResult['mat'];
+                    $sshPieces = [
+                        'daemon'       => true,
+                        'daemonPort'   => (int) $mat['port'],
+                        // '' for an anonymous module (no `auth users` on the
+                        // far side): buildArgv then emits no --password-file,
+                        // and nothing was written to tmpfs to clean up.
+                        'passwordFile' => (string) ($mat['passFile'] ?? ''),
+                        // MANDATORY, even though a daemon run carries nothing in
+                        // the child environment: the pair loop below passes
+                        // $sshPieces['sshEnv'] to Ssh::childEnv(array) UNGUARDED,
+                        // so a bag without this key is an undefined-key warning
+                        // plus a TypeError that would fail EVERY daemon run with
+                        // reason 'exception'. childEnv([]) returns null (inherit).
+                        'sshEnv'       => [],
+                    ];
+                    // Arm redaction BEFORE any captured output exists: rsync
+                    // names the password file verbatim in its own errors
+                    // (authenticate.c:188/:215), and those reach the log through
+                    // its --log-file fd as well as through our sink.
+                    // setRedaction ignores empty strings and skips the per-token
+                    // dirs when $token === '', so the anonymous case is a no-op.
+                    Logger::setRedaction([(string) ($mat['passFile'] ?? '')], Ssh::$runtimeBase, $token);
+                }
             }
 
-            // 5. preHook (only if SSH prep didn't already fail).
+            // 5. preHook (only if transport prep didn't already fail).
             $hookEnvBase = self::hookEnv($job, $jobId, $dryRun, null, null, $trigger);
             if ($state !== Rsync::STATE_FAILED) {
                 $preHook = (string) ($job['preHook'] ?? '');
@@ -315,8 +352,10 @@ class Runner
                 $opts     = Rsync::effectiveOptions($job, $global);
                 $logLevel = (string) ($job['logLevel'] ?? 'normal');
                 $pairs    = (isset($job['pairs']) && is_array($job['pairs'])) ? $job['pairs'] : [];
-                // Resolve "user@host" ONCE (not per pair) for SSH operands.
-                $userHost = ($transport === 'SSH') ? self::userHost($job) : '';
+                // Resolve "user@host" ONCE (not per pair) for the remote
+                // operands. DAEMON uses the SAME prefix as SSH - the only
+                // difference is the '::' separator resolvePair() appends.
+                $userHost = in_array($transport, ['SSH', 'DAEMON'], true) ? self::userHost($job) : '';
 
                 if (count($pairs) === 0) {
                     $state    = Rsync::STATE_FAILED;
@@ -377,6 +416,13 @@ class Runner
                     // bypasses the sink's cap; trim the file to the cap now that
                     // this pair's rsync has closed --log-file (F3, complete).
                     Logger::enforceRunLogCap($runLog);
+                    // Cap FIRST (it bounds the file the redactor is about to
+                    // read whole), THEN redact. rsync's own --log-file writes
+                    // never pass through Logger::sink, so this is the only pass
+                    // that scrubs the per-run secret paths out of them - and it
+                    // is safe here precisely because this pair's rsync has
+                    // exited and closed that fd.
+                    Logger::redactRunLog($runLog);
                     $exitCodes[] = $pairExit;
                     Logger::event($runLog, $jobId, "Pair #$n rsync exited with code $pairExit (" . Rsync::exitToState($pairExit) . ').');
 
@@ -428,6 +474,9 @@ class Runner
             if ($token !== '') {
                 Ssh::cleanupRuntime($token);
             }
+            // Final pass, while redaction is still armed: catches anything rsync
+            // or the postHook wrote to the run log after the last pair's cap.
+            Logger::redactRunLog($runLog);
             Logger::clearRedaction();
 
             // 9. Persist the last-run summary to /boot + clear running state.
@@ -754,6 +803,78 @@ class Runner
             $msg = (string) ($mat['error'] ?? 'SSH transport could not be prepared.');
             return ['ok' => false, 'reason' => 'ssh-config', 'message' => $msg];
         }
+        // Ssh::materialize never reads host or username, so a connection missing
+        // either still returns ok:true - and userHost() then yields '', handing
+        // rsync the operand ":/path", which fails opaquely mid-run. Fail fast
+        // instead; such a job could never have succeeded. Cleanup FIRST:
+        // materialize has already written this run's known_hosts (and possibly a
+        // key or pass file).
+        $conn = is_array($mat['conn'] ?? null) ? $mat['conn'] : [];
+        if ((string) ($conn['host'] ?? '') === '' || (string) ($conn['username'] ?? '') === '') {
+            Ssh::cleanupRuntime((string) $mat['token']);
+            return [
+                'ok'      => false,
+                'reason'  => 'connection-incomplete',
+                'message' => 'The selected Connection is incomplete: it needs both a host and a username.',
+            ];
+        }
+        return ['ok' => true, 'token' => (string) $mat['token'], 'mat' => $mat];
+    }
+
+    /**
+     * Materialise the rsync DAEMON pieces for a job's connection: the sibling of
+     * materializeSsh, with the same result shape so run()'s two arms stay
+     * symmetrical.
+     *
+     * The transport and completeness checks are made HERE, from the merged
+     * connection, rather than left to Ssh::materializeDaemon's own guards, so
+     * the run's `reason` names the actual problem instead of collapsing every
+     * misconfiguration into 'daemon-config'. materializeDaemon keeps its guards
+     * as defence in depth (the handler and the test path call it directly).
+     *
+     * @param array<string,mixed> $job
+     * @return array{ok:bool,reason?:string,message?:string,token?:string,mat?:array<string,mixed>}
+     */
+    private static function materializeDaemonConn(array $job, string $runLog, string $jobId): array
+    {
+        $connId = (string) ($job['connectionId'] ?? '');
+        if ($connId === '') {
+            return ['ok' => false, 'reason' => 'no-connection', 'message' => 'rsync daemon transport selected but no connection is set.'];
+        }
+        try {
+            $creds = Credentials::load();
+        } catch (Throwable $e) {
+            return ['ok' => false, 'reason' => 'creds-unreadable', 'message' => 'Could not read credentials: ' . $e->getMessage()];
+        }
+
+        $conn = Credentials::findConnection($creds, $connId);
+        if ($conn === null) {
+            return ['ok' => false, 'reason' => 'daemon-config', 'message' => "Connection not found: $connId"];
+        }
+        $conn = Credentials::mergeConnection($conn);
+        if ((string) $conn['transport'] !== 'DAEMON') {
+            return [
+                'ok'      => false,
+                'reason'  => 'daemon-config',
+                'message' => 'The selected Connection uses SSH transport, but this job uses rsync daemon transport.',
+            ];
+        }
+        if ((string) $conn['host'] === '' || (string) $conn['username'] === '') {
+            return [
+                'ok'      => false,
+                'reason'  => 'connection-incomplete',
+                'message' => 'The selected Connection is incomplete: an rsync daemon job needs both a host and a username.',
+            ];
+        }
+
+        try {
+            $mat = Ssh::materializeDaemon($creds, $connId);
+        } catch (Throwable $e) {
+            return ['ok' => false, 'reason' => 'materialize-failed', 'message' => $e->getMessage()];
+        }
+        if (empty($mat['ok'])) {
+            return ['ok' => false, 'reason' => 'daemon-config', 'message' => (string) ($mat['error'] ?? 'rsync daemon transport could not be prepared.')];
+        }
         return ['ok' => true, 'token' => (string) $mat['token'], 'mat' => $mat];
     }
 
@@ -762,20 +883,35 @@ class Runner
      * pair is {local, remote}. For SSH:
      *   PUSH: local -> user@host:remote   (write to remote)
      *   PULL: user@host:remote -> local   (write to local)
+     * For DAEMON the shape is identical but the separator is '::' and the right
+     * side is a MODULE reference, not a path:
+     *   PUSH: local -> user@host::module
+     *   PULL: user@host::module -> local
      * For LOCAL transport both sides are plain local paths and direction is
      * coerced to PUSH (local -> remote, both on this box).
      *
      * @param array<string,mixed> $job
      * @param array<string,mixed> $pair
-     * @param string              $transport SSH | LOCAL
-     * @param string              $userHost  pre-resolved "user@host" (SSH only)
+     * @param string              $transport SSH | LOCAL | DAEMON
+     * @param string              $userHost  pre-resolved "user@host" (SSH + DAEMON)
      * @return array{src:string,dest:string}
      */
     public static function resolvePair(array $job, array $pair, string $transport, string $userHost = ''): array
     {
         $local  = (string) ($pair['local'] ?? '');
         $remote = (string) ($pair['remote'] ?? '');
-        $direction = strtoupper((string) ($job['direction'] ?? 'PUSH'));
+        $direction = strtoupper(trim((string) ($job['direction'] ?? 'PUSH')));
+
+        // DAEMON must come BEFORE the `!== 'SSH'` fallthrough below: after it, a
+        // daemon job would run as LOCAL with a bare relative operand.
+        if ($transport === 'DAEMON') {
+            // One character's difference from the SSH arm: '::' instead of ':'.
+            $remoteOperand = $userHost . '::' . $remote;
+            if ($direction === 'PULL') {
+                return ['src' => $remoteOperand, 'dest' => $local];
+            }
+            return ['src' => $local, 'dest' => $remoteOperand];
+        }
 
         if ($transport !== 'SSH') {
             // LOCAL: both are local paths; canonical direction is PUSH.
@@ -792,10 +928,11 @@ class Runner
     }
 
     /**
-     * Build the "user@host" operand prefix for an SSH pair from the job's
-     * connection. Returns '' (so the operand is just ":path") only when the
-     * connection can't be resolved - the guardrails/materialisation already fail
-     * the run before we get here in that case.
+     * Build the "user@host" operand prefix for a remote pair from the job's
+     * connection - identical for SSH and DAEMON, which differ only in the
+     * separator resolvePair() appends. Returns '' only when the connection
+     * can't be resolved - the guardrails/materialisation already fail the run
+     * before we get here in that case.
      *
      * @param array<string,mixed> $job
      */
@@ -829,10 +966,12 @@ class Runner
      * on /boot, so we never trust the stored value). Returns a list of error
      * strings (empty == OK).
      *
-     * Mirrors Job::validate's per-pair logic: the `local` field is always a
-     * local path; the `remote` field is a local path under LOCAL transport or a
-     * non-root remote sub-path under SSH; and when a --delete option is on, the
+     * Mirrors Job::validate's per-pair logic, and must keep mirroring it: the
+     * `local` field is always a local path; the `remote` field is a local path
+     * under LOCAL transport, a module reference under DAEMON, and a non-root
+     * remote sub-path under SSH; and when a --delete option is on, the
      * DESTINATION (remote for PUSH, local for PULL) must be a specific sub-dir.
+     * Save-time and run-time use the SAME checkers so they cannot disagree.
      *
      * @param array<string,mixed> $job
      * @param array<string,mixed> $pair
@@ -844,7 +983,7 @@ class Runner
         $errors = [];
         $local  = trim((string) ($pair['local'] ?? ''));
         $remote = trim((string) ($pair['remote'] ?? ''));
-        $direction = strtoupper((string) ($job['direction'] ?? 'PUSH'));
+        $direction = strtoupper(trim((string) ($job['direction'] ?? 'PUSH')));
 
         // local field: always a local path on this box.
         if ($local === '') {
@@ -855,11 +994,22 @@ class Runner
             }
         }
 
-        // remote field: local guardrails under LOCAL, otherwise a non-root sub-path.
+        // remote field: local guardrails under LOCAL, a module reference under
+        // DAEMON, otherwise a non-root remote sub-path.
         if ($remote === '') {
-            $errors[] = ($transport === 'LOCAL' ? 'second local' : 'remote') . ' path is required.';
+            if ($transport === 'LOCAL') {
+                $errors[] = 'second local path is required.';
+            } elseif ($transport === 'DAEMON') {
+                $errors[] = 'daemon module path is required.';
+            } else {
+                $errors[] = 'remote path is required.';
+            }
         } elseif ($transport === 'LOCAL') {
             foreach (Job::checkLocalPath($remote, 'second local path') as $e) {
+                $errors[] = $e;
+            }
+        } elseif ($transport === 'DAEMON') {
+            foreach (Job::checkDaemonModule($remote, 'daemon module path') as $e) {
                 $errors[] = $e;
             }
         } else {
@@ -872,12 +1022,22 @@ class Runner
         // is the destination EXACTLY as resolvePair() does: for LOCAL transport
         // direction is coerced to PUSH (dest = `remote`), so we must not let a
         // hand-edited direction=PULL on a LOCAL job check the wrong side. Only
-        // for SSH does PULL flip the destination to the `local` side.
+        // the two remote transports let PULL flip the destination to the `local`
+        // side - and an unknown hand-edited transport keeps LOCAL's answer,
+        // which is what resolvePair()'s fallthrough does with it too.
         $deleteOn = !empty($opts['delete']) || !empty($opts['deleteExcluded']);
         if ($deleteOn) {
-            $destIsRemote = ($transport !== 'SSH') ? true : ($direction !== 'PULL');
+            $destIsRemote = in_array($transport, ['SSH', 'DAEMON'], true) ? ($direction !== 'PULL') : true;
             $destPath = $destIsRemote ? $remote : $local;
-            if ($destPath !== '' && !Job::isSpecificSubPath($destPath)) {
+            // A module reference has no leading '/', so isSpecificSubPath would
+            // reject every daemon destination. isSpecificDaemonTarget is the
+            // same rule expressed for module references - it is NOT a way of
+            // skipping the guard, which would leave `host::<typo>` unguarded
+            // while both other transports reject a bare root.
+            $specific = ($transport === 'DAEMON' && $destIsRemote)
+                ? Job::isSpecificDaemonTarget($destPath)
+                : Job::isSpecificSubPath($destPath);
+            if ($destPath !== '' && !$specific) {
                 $errors[] = 'a delete option is enabled, so the destination must be a specific sub-directory, not a root.';
             }
         }

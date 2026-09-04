@@ -201,7 +201,7 @@ if (!function_exists('ur_option_help')) {
             'maxDelete'      => 'Refuse to delete more than this many files on the destination (--max-delete=N): the run aborts (exit 25) instead of deleting more. LEAVE BLANK for no cap — any number may be deleted. Note 0 is NOT unlimited: it means delete nothing and only warn. Only applies when a Delete option is on; the form pre-fills 25 as a safe starting point the first time you enable delete.',
             'bwlimit'        => 'Cap the transfer bandwidth in KB/s (--bwlimit=RATE), e.g. 5000 for about 5 MB/s. Leave blank for no limit (full speed).',
             'timeout'        => 'Abort the transfer if no data is sent or received for this many seconds (--timeout=SECONDS). Leave blank for no timeout (wait indefinitely).',
-            'contimeout'     => 'Give up if the connection cannot be established within this many seconds (--contimeout=SECONDS). Leave blank to use the SSH/rsync default.',
+            'contimeout'     => 'Give up if the connection cannot be established within this many seconds (--contimeout=SECONDS). rsync accepts this ONLY when connecting to an rsync daemon (rsyncd) - it rejects it outright on SSH and Local transfers, so it is dropped for those. Leave blank for no connect timeout.',
             'maxSize'        => 'Skip any file larger than this size (--max-size=SIZE), e.g. 100M or 2G. Leave blank for no maximum (transfer files of any size).',
             'minSize'        => 'Skip any file smaller than this size (--min-size=SIZE), e.g. 10K. Leave blank for no minimum.',
             'remoteRsyncPath' => 'Absolute path to the rsync binary on the REMOTE host (--rsync-path=PATH). Only used by SSH jobs. Set this when the remote host keeps rsync somewhere that is not on its default SSH PATH - common on NAS appliances - and a run fails with "rsync: command not found". Must be a bare absolute path such as /usr/local/bin/rsync: no arguments, spaces or shell characters. Leave blank to let the remote shell find rsync itself. Set as a GLOBAL default it applies to every job, so if your jobs target hosts that keep rsync in different places, set it per job instead.',
@@ -306,8 +306,13 @@ if (!function_exists('ur_render_rsync_options')) {
      *                                     "jobs[0][rsyncOptions]"
      * @param string              $idBase a unique DOM-id base so multiple option
      *                                     blocks on one page don't collide
+     * @param string|null         $transport the transport the owning job uses,
+     *                                     so the preview can show the flags that
+     *                                     will REALLY be emitted. null on the
+     *                                     Global Settings block, which has no
+     *                                     job and therefore no transport.
      */
-    function ur_render_rsync_options(array $opts, string $prefix, string $idBase): void
+    function ur_render_rsync_options(array $opts, string $prefix, string $idBase, ?string $transport = null): void
     {
         // The options -a IMPLIES, rendered as a sub-group under the Archive box.
         // They are ordinary standalone options too (a plain -r -t copy uses two
@@ -499,14 +504,19 @@ if (!function_exists('ur_render_rsync_options')) {
         // it, by posting to the read-only previewOptions action - which calls
         // that same mapper, so there is never a JS copy of the flag whitelist to
         // drift out of sync.
-        $previewTokens = Rsync::optionTokens(Config::mergeRsyncOptions($opts));
+        //
+        // The transport is passed through because it changes the answer:
+        // --contimeout is emitted only on rsync daemon transport (rsync refuses
+        // it outright anywhere else), so a preview that ignored the transport
+        // would promise a flag the run drops.
+        $previewTokens = Rsync::optionTokens(Config::mergeRsyncOptions($opts), $transport);
         echo '<div class="ur-preview">';
         echo '<div class="ur-preview-label">' . ur_h(ur_t('rsync options preview')) . '</div>';
         echo '<code class="ur-preview-out" aria-live="polite">'
             . ur_h($previewTokens ? implode(' ', $previewTokens) : ur_t('(no options set)'))
             . '</code>';
         echo '<div class="ur-preview-note">'
-            . ur_h(ur_t('These option flags only. The log-level flags, --log-file, the SSH transport and the source/destination paths are added when the job runs.'))
+            . ur_h(ur_t('These option flags only. The log-level flags, --log-file, the transport flags and the source/destination paths are added when the job runs.'))
             . '</div>';
         echo '</div>';
 
@@ -929,11 +939,24 @@ if (!function_exists('ur_emit_option_help_assets')) {
   var PREVIEW_URL  = <?=ur_js('/plugins/unraid.rsync/include/handler.php')?>;
   var PREVIEW_CSRF = <?=ur_js(ur_render_csrf_token())?>;
 
+  /* The preview depends on the job's transport: --contimeout is emitted only on
+   * rsync daemon transport, because rsync refuses it outright anywhere else.
+   * The Global Settings block sits in no job card and so has no transport -
+   * sending none makes the server show every option, which is the honest answer
+   * for a block shared by jobs of all three transports. */
+  function previewTransport(box) {
+    var card = box.closest ? box.closest('.ur-job-card') : null;
+    var sel  = card ? card.querySelector('.ur-transport-select') : null;
+    return sel ? sel.value : '';
+  }
+
   function previewParams(box) {
     var prefix = box.getAttribute('data-prefix') || '';
     var params = new URLSearchParams();
     params.append('action', 'previewOptions');
     if (PREVIEW_CSRF) { params.append('csrf_token', PREVIEW_CSRF); }
+    var transport = previewTransport(box);
+    if (transport) { params.append('transport', transport); }
 
     var fields = box.querySelectorAll('input[name], select[name]');
     for (var i = 0; i < fields.length; i++) {
@@ -994,6 +1017,15 @@ if (!function_exists('ur_emit_option_help_assets')) {
       var box = ev.target && ev.target.closest ? ev.target.closest('.ur-rsync-options') : null;
       if (box) { schedulePreview(box); }
     });
+  });
+
+  /* The transport select lives OUTSIDE the options block, so the delegated
+   * handler above never sees it - but changing it changes the preview. */
+  document.addEventListener('change', function (ev) {
+    var t = ev.target;
+    if (!t || !t.classList || !t.classList.contains('ur-transport-select')) { return; }
+    var card = t.closest ? t.closest('.ur-job-card') : null;
+    if (card) { schedulePreview(card.querySelector('.ur-rsync-options')); }
   });
 
   /* Previews are server-rendered, so sync() only has to fix up the reorder
