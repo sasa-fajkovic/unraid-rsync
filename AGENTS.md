@@ -225,3 +225,11 @@ packaged** (excluded from the `.txz`).
   directly there (not in a subdirectory).
 - **The parent `.page` body MUST stay empty.** A non-empty `UnraidRsync.page` body
   becomes a blank phantom tab.
+- **Live-box validation must not page the admin or touch accounts.** A scratch
+  `UR_CONFIG_BASE` isolates config/runs/history, but `Runner::notifyHook` still
+  execs the real webGui `notify`, so every throwaway job that fails lands as an
+  alert in the Unraid bell (2026-09-04: five "FAILED" alerts from the rsyncd
+  validation). Stub `Notify::$runner = fn() => 0` (the PHPUnit seam) or set
+  `notifyMode: off` on every throwaway job. Never create webGui users or append
+  to `/root/.ssh/authorized_keys` on the live box; use the existing Tailscale
+  SSH access.
