@@ -88,6 +88,7 @@ declare(strict_types=1);
  */
 
 require_once __DIR__ . '/Credentials.php';
+require_once __DIR__ . '/Util.php';
 
 class Ssh
 {
@@ -135,42 +136,25 @@ class Ssh
      */
     public static function newRuntimeToken(string $connId): string
     {
-        return self::safeId($connId) . '-' . getmypid() . '-' . bin2hex(random_bytes(6));
+        return Util::safeFileId($connId) . '-' . getmypid() . '-' . bin2hex(random_bytes(6));
     }
 
     /** Path a run's private key materialises to (mode 600), keyed by run token. */
     public static function keyPath(string $token): string
     {
-        return static::keysDir() . '/' . self::safeId($token);
+        return static::keysDir() . '/' . Util::safeFileId($token);
     }
 
     /** Path a run's known_hosts materialises to, keyed by run token. */
     public static function knownHostsPath(string $token): string
     {
-        return rtrim(static::$runtimeBase, '/') . '/known_hosts/' . self::safeId($token);
+        return rtrim(static::$runtimeBase, '/') . '/known_hosts/' . Util::safeFileId($token);
     }
 
     /** Path a run's password file materialises to, keyed by run token. */
     public static function passFilePath(string $token): string
     {
-        return rtrim(static::$runtimeBase, '/') . '/pass/' . self::safeId($token);
-    }
-
-    /**
-     * Sanitise an id for use as a filename segment. ids are slug-shaped
-     * (k-/c- + [a-z0-9-]) by construction, but defend against traversal anyway:
-     * strip anything that isn't a safe filename char.
-     */
-    private static function safeId(string $id): string
-    {
-        $clean = preg_replace('/[^A-Za-z0-9._-]/', '', $id);
-        // A pure-dots id ("." / "..") survives the char-class strip but is a
-        // traversal segment, so collapse it to a literal. Mirrors
-        // ur_safe_job_id's pure-dots rejection (defence-in-depth).
-        if ($clean === '' || $clean === null || preg_match('/^\.+$/', $clean)) {
-            return 'unknown';
-        }
-        return $clean;
+        return rtrim(static::$runtimeBase, '/') . '/pass/' . Util::safeFileId($token);
     }
 
     // --- askpass helper -----------------------------------------------------
@@ -932,7 +916,7 @@ class Ssh
             'ok'      => false,
             'reason'  => 'unreachable',
             'message' => 'Connection test returned an unexpected exit code (' . $exitCode . ').'
-                . ($stderr !== '' ? ' ' . self::firstLine($stderr) : ''),
+                . ($stderr !== '' ? ' ' . Util::firstLine($stderr) : ''),
         ];
     }
 
@@ -956,7 +940,7 @@ class Ssh
             return [
                 'reason'  => 'hostkey',
                 'message' => 'Host key verification failed. Use "Discover host key" and save the connection, then retry.'
-                    . ($stderr !== '' ? ' (' . self::firstLine($stderr) . ')' : ''),
+                    . ($stderr !== '' ? ' (' . Util::firstLine($stderr) . ')' : ''),
             ];
         }
 
@@ -970,7 +954,7 @@ class Ssh
             return [
                 'reason'  => 'auth',
                 'message' => 'Authentication failed. Check the username and key/password.'
-                    . ($stderr !== '' ? ' (' . self::firstLine($stderr) . ')' : ''),
+                    . ($stderr !== '' ? ' (' . Util::firstLine($stderr) . ')' : ''),
             ];
         }
 
@@ -987,27 +971,15 @@ class Ssh
             return [
                 'reason'  => 'unreachable',
                 'message' => 'Could not reach the host. Check the host, port and network.'
-                    . ($stderr !== '' ? ' (' . self::firstLine($stderr) . ')' : ''),
+                    . ($stderr !== '' ? ' (' . Util::firstLine($stderr) . ')' : ''),
             ];
         }
 
         // Unknown ssh failure - report it as unreachable-ish with the detail.
         return [
             'reason'  => 'unreachable',
-            'message' => 'Connection failed.' . ($stderr !== '' ? ' ' . self::firstLine($stderr) : ''),
+            'message' => 'Connection failed.' . ($stderr !== '' ? ' ' . Util::firstLine($stderr) : ''),
         ];
-    }
-
-    /** First non-empty line of a (possibly multi-line) stderr blob, trimmed. */
-    private static function firstLine(string $text): string
-    {
-        foreach (preg_split('/\r?\n/', $text) ?: [] as $line) {
-            $line = trim($line);
-            if ($line !== '') {
-                return $line;
-            }
-        }
-        return '';
     }
 
     // --- live-system seams (overridden in tests) ----------------------------

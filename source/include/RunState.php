@@ -36,6 +36,8 @@ if (!defined('UR_RUNTIME_BASE')) {
     define('UR_RUNTIME_BASE', '/tmp/unraid.rsync');
 }
 
+require_once __DIR__ . '/Util.php';
+
 class RunState
 {
     /**
@@ -65,19 +67,19 @@ class RunState
     /** Absolute path of a job's state JSON. */
     public static function statePath(string $jobId): string
     {
-        return self::stateDir() . '/' . self::safeId($jobId) . '.json';
+        return self::stateDir() . '/' . Util::safeFileId($jobId) . '.json';
     }
 
     /** Absolute path of a job's abort flag. */
     public static function abortPath(string $jobId): string
     {
-        return self::stateDir() . '/' . self::safeId($jobId) . '.abort';
+        return self::stateDir() . '/' . Util::safeFileId($jobId) . '.abort';
     }
 
     /** Absolute path of a job's run lock file. */
     public static function lockPath(string $jobId): string
     {
-        return self::stateDir() . '/' . self::safeId($jobId) . '.lock';
+        return self::stateDir() . '/' . Util::safeFileId($jobId) . '.lock';
     }
 
     /**
@@ -124,22 +126,6 @@ class RunState
             @flock($handle, LOCK_UN);
             @fclose($handle);
         }
-    }
-
-    /**
-     * Sanitise a job id for use as a filename segment. Job ids are slug-shaped
-     * ("j-" + [a-z0-9-]) by construction, but defend against traversal anyway.
-     */
-    private static function safeId(string $id): string
-    {
-        $clean = preg_replace('/[^A-Za-z0-9._-]/', '', $id);
-        // A pure-dots id ("." / "..") survives the char-class strip but is a
-        // traversal segment, so collapse it to a literal. Mirrors
-        // ur_safe_job_id's pure-dots rejection (defence-in-depth).
-        if ($clean === '' || $clean === null || preg_match('/^\.+$/', $clean)) {
-            return 'unknown';
-        }
-        return $clean;
     }
 
     /**

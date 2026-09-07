@@ -32,6 +32,8 @@ if (!defined('UR_CONFIG_BASE')) {
     define('UR_CONFIG_BASE', '/boot/config/plugins/unraid.rsync');
 }
 
+require_once __DIR__ . '/Util.php';
+
 class History
 {
     /** Default records kept per job until the retention setting wires in (PR-E). */
@@ -39,21 +41,6 @@ class History
 
     /** Hard ceiling on records kept, mirroring the retention setting's max. */
     const MAX_KEEP = 9999;
-
-    /**
-     * Sanitise a job id for use as a filename segment. Mirrors
-     * Runner::writeSummary / the SEC-01 safeId helpers: strip anything that
-     * isn't a safe filename char, and collapse a pure-dots result (traversal)
-     * to a literal.
-     */
-    private static function safeId(string $jobId): string
-    {
-        $clean = preg_replace('/[^A-Za-z0-9._-]/', '', $jobId);
-        if ($clean === '' || $clean === null || preg_match('/^\.+$/', $clean)) {
-            return 'unknown';
-        }
-        return $clean;
-    }
 
     /** The runs/ directory on the flash (shared with the last-run summaries). */
     private static function dir(): string
@@ -64,7 +51,7 @@ class History
     /** Absolute path of a job's history file. */
     public static function path(string $jobId): string
     {
-        return self::dir() . '/' . self::safeId($jobId) . '.history.jsonl';
+        return self::dir() . '/' . Util::safeFileId($jobId) . '.history.jsonl';
     }
 
     /**

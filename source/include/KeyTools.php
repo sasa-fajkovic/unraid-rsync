@@ -24,6 +24,7 @@ declare(strict_types=1);
  */
 
 require_once __DIR__ . '/ProcIO.php';
+require_once __DIR__ . '/Util.php';
 
 class KeyTools
 {
@@ -94,7 +95,7 @@ class KeyTools
         [$code, , $stderr] = static::runKeygen($argv);
         if ($code !== 0) {
             self::rmTempDir($dir);
-            return ['ok' => false, 'error' => 'ssh-keygen failed: ' . self::firstLine($stderr)];
+            return ['ok' => false, 'error' => 'ssh-keygen failed: ' . Util::firstLine($stderr)];
         }
 
         $private = @file_get_contents($keyFile);
@@ -212,7 +213,7 @@ class KeyTools
         self::rmTempDir($dir);
 
         if ($code !== 0 || trim($stdout) === '') {
-            $msg = self::firstLine($stderr);
+            $msg = Util::firstLine($stderr);
             if (stripos($msg, 'passphrase') !== false || stripos($msg, 'incorrect') !== false) {
                 return ['ok' => false, 'error' => 'The private key is passphrase-protected. Provide a key with an empty passphrase (required for unattended runs).'];
             }
@@ -355,7 +356,7 @@ class KeyTools
 
         $hostKey = self::filterKeyscanOutput($stdout);
         if ($hostKey === '') {
-            $msg = self::firstLine($stderr);
+            $msg = Util::firstLine($stderr);
             return [
                 'ok'    => false,
                 'error' => 'No host key returned. The host may be unreachable or not running SSH'
@@ -418,18 +419,6 @@ class KeyTools
     }
 
     // --- helpers ------------------------------------------------------------
-
-    /** First non-empty trimmed line of a blob. */
-    private static function firstLine(string $text): string
-    {
-        foreach (preg_split('/\r?\n/', $text) ?: [] as $line) {
-            $line = trim($line);
-            if ($line !== '') {
-                return $line;
-            }
-        }
-        return '';
-    }
 
     /**
      * The dir holding the per-call keygen temp dirs: a 'keygen' level under the
