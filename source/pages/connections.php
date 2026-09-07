@@ -255,7 +255,7 @@ function ur_render_connection_card($conn, $index, array $keys): void
     // strict host key
     echo '<dt class="ur-ssh-only"' . $sshOnlyStyle . '><label for="' . ur_h($idb . '_strict') . '">' . ur_h(ur_t('Strict host key checking')) . '</label>:</dt>';
     echo '<dd class="ur-ssh-only"' . $sshOnlyStyle . '><select id="' . ur_h($idb . '_strict') . '" name="' . ur_h($p . '[strictHostKey]') . '">';
-    foreach (['accept-new' => 'accept-new (accept an unknown host key on connect)', 'yes' => 'yes (require a pinned host key)', 'no' => 'no (do not verify - insecure)'] as $val => $lbl) {
+    foreach (['accept-new' => 'accept-new (pin the host key on first connect; reject a changed key)', 'yes' => 'yes (require a host key pinned below)', 'no' => 'no (do not verify - insecure)'] as $val => $lbl) {
         $sel = ($strict === $val) ? ' selected' : '';
         echo '<option value="' . ur_h($val) . '"' . $sel . '>' . ur_h(ur_t($lbl)) . '</option>';
     }
