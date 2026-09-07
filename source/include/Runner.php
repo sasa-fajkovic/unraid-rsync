@@ -47,6 +47,7 @@ require_once __DIR__ . '/RunState.php';
 require_once __DIR__ . '/Logger.php';
 require_once __DIR__ . '/Notify.php';
 require_once __DIR__ . '/History.php';
+require_once __DIR__ . '/Util.php';
 
 class Runner
 {
@@ -1183,8 +1184,7 @@ class Runner
             // A summary failure must not crash the run; log-best-effort + return.
             return;
         }
-        $clean = preg_replace('/[^A-Za-z0-9._-]/', '', $jobId);
-        $clean = ($clean === '' || $clean === null) ? 'unknown' : $clean;
+        $clean = Util::safeFileId($jobId);
         $path  = $dir . '/' . $clean . '.summary.json';
 
         $trigger = (($summary['trigger'] ?? '') === 'schedule') ? 'schedule' : 'manual';
@@ -1222,8 +1222,7 @@ class Runner
      */
     public static function readSummary(string $jobId): ?array
     {
-        $clean = preg_replace('/[^A-Za-z0-9._-]/', '', $jobId);
-        $clean = ($clean === '' || $clean === null) ? 'unknown' : $clean;
+        $clean = Util::safeFileId($jobId);
         $path  = rtrim(UR_CONFIG_BASE, '/') . '/runs/' . $clean . '.summary.json';
         if (!is_file($path)) {
             return null;
