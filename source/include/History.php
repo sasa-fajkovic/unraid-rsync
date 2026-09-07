@@ -195,25 +195,6 @@ class History
     }
 
     /**
-     * Paginated newest-first view across ALL jobs (see allSorted). Same return
-     * shape as list(); each run carries a `jobId`.
-     *
-     * @return array{total:int,offset:int,limit:int,runs:array<int,array<string,mixed>>}
-     */
-    public static function listAll(int $offset = 0, int $limit = 25): array
-    {
-        $offset  = max(0, $offset);
-        $limit   = max(1, min(100, $limit));
-        $records = self::allSorted();
-        return [
-            'total'  => count($records),
-            'offset' => $offset,
-            'limit'  => $limit,
-            'runs'   => array_values(array_slice($records, $offset, $limit)),
-        ];
-    }
-
-    /**
      * Prune to the newest $keep records. LAZY: only rewrites the file when it is
      * actually over the cap (so a run that doesn't exceed the cap pays no extra
      * flash write). Atomic temp + rename. Best-effort; never throws.
@@ -241,18 +222,6 @@ class History
         @chmod($tmp, 0644);
         if (!@rename($tmp, $path)) {
             @unlink($tmp);
-        }
-    }
-
-    /**
-     * Remove a job's history file (best-effort). Called when a job is deleted so
-     * orphaned history files don't accumulate on the flash.
-     */
-    public static function delete(string $jobId): void
-    {
-        $path = self::path($jobId);
-        if (is_file($path)) {
-            @unlink($path);
         }
     }
 }

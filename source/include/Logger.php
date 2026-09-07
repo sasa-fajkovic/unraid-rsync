@@ -190,7 +190,7 @@ class Logger
      * Default number of per-job run logs to keep. On every run start the oldest
      * run-*.log files beyond this many are pruned (so RAM/tmpfs use is bounded).
      * Overridable via the $retention static, which the runner sets from the
-     * global "keep last N executions" setting (Config::retention()); this
+     * global "keep last N executions" setting (Config::clampRetention()); this
      * constant is only the fallback when that static is unset, kept consistent
      * with Config::DEFAULT_RETENTION (100).
      */

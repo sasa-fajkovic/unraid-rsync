@@ -219,29 +219,4 @@ final class NotifyTest extends TestCase
         $this->assertFalse(Notify::available());
     }
 
-    // --- notify init ---------------------------------------------------------
-
-    public function testInitBuildsQuotedInitCommandAndUsesRunner(): void
-    {
-        $captured = null;
-        Notify::$runner = function (string $command) use (&$captured): int {
-            $captured = $command;
-            return 0;
-        };
-
-        $this->assertTrue(Notify::init());
-        $this->assertSame(escapeshellarg($this->fakeBin) . ' init', $captured);
-    }
-
-    public function testInitIsNoOpWhenBinaryMissing(): void
-    {
-        Notify::$notifyPath = '/no/such/notify';
-        $called = false;
-        Notify::$runner = function (string $command) use (&$called): int {
-            $called = true;
-            return 0;
-        };
-        $this->assertFalse(Notify::init());
-        $this->assertFalse($called);
-    }
 }
