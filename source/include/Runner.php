@@ -238,6 +238,9 @@ class Runner
         $exitCode = 0;
         $reason   = '';
         $token    = '';
+        // Declared out here so the finally can harvest this run's host key
+        // before cleanup; only ever set on the SSH arm.
+        $sshMat   = null;
 
         try {
             // 4. Remote transport: materialise secrets (LOCAL skips this).
@@ -257,6 +260,7 @@ class Runner
                 } else {
                     $token     = (string) $matResult['token'];
                     $mat       = $matResult['mat'];
+                    $sshMat    = $mat;
                     $sshPieces = [
                         'dashE'  => (string) $mat['dashE'],
                         // PASSWORD auth rides in the child ENVIRONMENT (the
@@ -466,6 +470,20 @@ class Runner
                 if ($postExit !== 0 && $state === Rsync::STATE_SUCCESS) {
                     $state    = Rsync::STATE_WARNING;
                     $reason   = $reason !== '' ? $reason : 'posthook-failed';
+                }
+            }
+
+            // 7b. Trust on first use: with accept-new and nothing pinned yet, ssh
+            //     appended the key it accepted to this run's known_hosts. Pin it
+            //     into the connection BEFORE cleanup unlinks that file, so a
+            //     CHANGED key fails closed on the next run instead of being
+            //     silently trusted again.
+            if (is_array($sshMat)) {
+                $connId  = (string) ($sshMat['conn']['id'] ?? '');
+                $hostKey = Ssh::harvestHostKey($sshMat);
+                if (Ssh::pinHostKey($connId, $hostKey)) {
+                    // No key material and no tmpfs path in the message.
+                    Logger::event($runLog, $jobId, 'Pinned host key for connection ' . $connId . ' on first use.');
                 }
             }
 

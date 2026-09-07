@@ -707,13 +707,13 @@ class Ssh
      * empty pinned value writes an empty file.
      *
      * NOTE: this known_hosts file is per-RUN tmpfs and is deleted by
-     * cleanupRuntime() after the run. With StrictHostKeyChecking=accept-new ssh
-     * will accept an unknown host key for the duration of THIS run, but because
-     * the file does not persist, nothing is pinned for future runs - persistent
-     * pinning happens only when the user clicks "Discover host key" and SAVES
-     * the resulting remoteHostKey into the connection (which is then written
-     * here on every subsequent run). The UI/docs reflect this; accept-new is a
-     * convenience, not a durable trust-on-first-use store.
+     * cleanupRuntime() after the run, so it is not itself the trust store. With
+     * StrictHostKeyChecking=accept-new ssh APPENDS a newly accepted key to it;
+     * harvestHostKey()/pinHostKey() lift that key into the connection's
+     * remoteHostKey before cleanup, which is what makes accept-new a real
+     * trust-on-first-use (the pinned value is written back here on every
+     * subsequent run, so a CHANGED key then fails closed). "Discover host key"
+     * is the same pin, made explicitly ahead of the first run.
      */
     private static function writeKnownHosts(string $path, string $hostKey): void
     {
@@ -722,6 +722,88 @@ class Ssh
             $body .= "\n";
         }
         self::safeWriteSecret($path, $body, 'known_hosts');
+    }
+
+    // --- trust on first use -------------------------------------------------
+
+    /**
+     * Read back the host key ssh accepted during a run, for pinning.
+     *
+     * With StrictHostKeyChecking=accept-new ssh appends an unknown host's key to
+     * the UserKnownHostsFile we handed it - this run's tmpfs known_hosts. Call
+     * this BEFORE cleanupRuntime() unlinks that file, then pass the result to
+     * pinHostKey(). Without it accept-new pins nothing and EVERY run trusts
+     * whatever key the host presents (a MITM succeeds on any run, and with
+     * PASSWORD auth it gets the password).
+     *
+     * Returns '' unless this connection is accept-new with nothing pinned yet:
+     * an existing pin must never be silently overwritten, and 'yes'/'no' are not
+     * TOFU modes.
+     *
+     * @param array<string,mixed> $mat a successful materialize() result
+     */
+    public static function harvestHostKey(array $mat): string
+    {
+        $conn = is_array($mat['conn'] ?? null) ? $mat['conn'] : [];
+        if ((string) ($conn['strictHostKey'] ?? '') !== 'accept-new') {
+            return '';
+        }
+        if (trim((string) ($conn['remoteHostKey'] ?? '')) !== '') {
+            return '';
+        }
+        $path = (string) ($mat['knownHosts'] ?? '');
+        if ($path === '' || !is_file($path)) {
+            return '';
+        }
+        $body = @file_get_contents($path);
+        if ($body === false) {
+            return '';
+        }
+        $keep = [];
+        foreach (preg_split('/\R/', $body) ?: [] as $line) {
+            $line = trim($line);
+            // ssh writes a "# Host x found: ..." comment line alongside hashed
+            // entries; only real key lines are worth pinning.
+            if ($line !== '' && strncmp($line, '#', 1) !== 0) {
+                $keep[] = $line;
+            }
+        }
+        return implode("\n", $keep);
+    }
+
+    /**
+     * Persist a harvested host key into the connection's remoteHostKey.
+     *
+     * Reload-modify-save against credentials.json (rather than saving a
+     * structure loaded before the run) so a concurrent edit is not clobbered
+     * wholesale, and only when the stored pin is STILL empty - so an explicit
+     * "Discover host key" or another run's pin always wins. Never throws: a
+     * completed run must not fail because pinning did.
+     */
+    public static function pinHostKey(string $connId, string $hostKey): bool
+    {
+        $hostKey = trim($hostKey);
+        if ($connId === '' || $hostKey === '') {
+            return false;
+        }
+        try {
+            $creds = Credentials::load();
+            $conns = is_array($creds['connections'] ?? null) ? $creds['connections'] : [];
+            foreach ($conns as $i => $conn) {
+                if (!is_array($conn) || (string) ($conn['id'] ?? '') !== $connId) {
+                    continue;
+                }
+                if (trim((string) ($conn['remoteHostKey'] ?? '')) !== '') {
+                    return false;
+                }
+                $creds['connections'][$i]['remoteHostKey'] = $hostKey;
+                Credentials::save($creds);
+                return true;
+            }
+        } catch (Throwable $e) {
+            return false;
+        }
+        return false;
     }
 
     // --- test connection ----------------------------------------------------
@@ -795,6 +877,7 @@ class Ssh
 
         $exitCode = self::SSH_EXIT_ERROR;
         $stderr   = '';
+        $hostKey  = '';
         try {
             // REDACTION NOTE: buildSshArgv() composes this probe WITHOUT ssh's -v
             // (verbose) flag, so the captured stderr we surface via firstLine()
@@ -804,9 +887,13 @@ class Ssh
             // file path (and more), so the stderr must then be redacted (see
             // Logger::setRedaction) before it is returned to the browser.
             [$exitCode, $stderr] = static::runProbe($argv, self::childEnv($mat['sshEnv'] ?? []));
+            // TOFU: read back whatever accept-new just accepted, while this
+            // run's known_hosts still exists (the finally deletes it).
+            $hostKey = self::harvestHostKey($mat);
         } finally {
             self::cleanupRuntime((string) $mat['token']);
         }
+        self::pinHostKey($connId, $hostKey);
 
         return self::classifyProbe($conn, (int) $exitCode, (string) $stderr);
     }
