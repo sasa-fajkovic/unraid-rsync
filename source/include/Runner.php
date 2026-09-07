@@ -162,7 +162,7 @@ class Runner
         //    escape - it would contradict the contract (no structured result, no
         //    postHook/summary/markStopped). Catch it and hard-fail cleanly.
         $startedAtTs = time();
-        // STORAGE timestamp: UTC, always. Display is system-local (see CLAUDE.md
+        // STORAGE timestamp: UTC, always. Display is system-local (see AGENTS.md
         // "Timezone: store UTC, display system-local") - do NOT switch this to date().
         $startedAt   = gmdate('Y-m-d\TH:i:s\Z', $startedAtTs);
         try {
