@@ -738,7 +738,8 @@ function ur_action_save_config(): void
     // History is allowed to pile up so a job's past executions remain inspectable
     // (and re-attach automatically if a same-named job is re-created, since job
     // ids are stable name slugs). Per-job growth is still bounded by the
-    // retention prune in Runner. History::delete is reserved for uninstall.
+    // retention prune in Runner. History is never deleted by the plugin;
+    // uninstall removes the whole /boot plugin dir, history included.
 
     // Re-sync the live crontab to the just-saved jobs (per-job schedules /
     // enabled state). Best-effort: the save already succeeded, so a cron-sync

@@ -158,7 +158,7 @@ final class RunnerTest extends TestCase
             $this->assertSame(2, History::list($id, 0, 25)['total']);
             $this->assertLessThanOrEqual(2, count(Logger::listRuns($id, 100)));
         } finally {
-            History::delete($id);
+            @unlink(History::path($id));
         }
     }
 
@@ -178,7 +178,7 @@ final class RunnerTest extends TestCase
             $this->assertStringStartsWith('run-', $r['logRef']);
             $this->assertNotNull(Logger::runLogPathById($id, $r['logRef']));
         } finally {
-            History::delete($id);
+            @unlink(History::path($id));
         }
     }
 
