@@ -431,21 +431,50 @@ class KeyTools
         return '';
     }
 
-    /** Create a private 0700 temp dir, or '' on failure. */
-    private static function tempDir(): string
+    /**
+     * The dir holding the per-call keygen temp dirs: a 'keygen' level under the
+     * plugin's own runtime base (the constant is guarded the same way Logger and
+     * RunState guard it, so KeyTools needs no dependency on Ssh).
+     */
+    private static function keygenBase(): string
     {
-        $base = sys_get_temp_dir() . '/ur-keygen-' . getmypid() . '-' . bin2hex(random_bytes(4));
-        if (!@mkdir($base, 0700, true) && !is_dir($base)) {
-            return '';
-        }
-        @chmod($base, 0700);
-        return $base;
+        $base = defined('UR_RUNTIME_BASE') ? (string) UR_RUNTIME_BASE : '/tmp/unraid.rsync';
+        return rtrim($base, '/') . '/keygen';
     }
 
-    /** Recursively remove a temp dir (best-effort). */
-    private static function rmTempDir(string $dir): void
+    /**
+     * Create a private 0700 temp dir under the plugin's runtime base, or '' on
+     * failure. NOT under world-writable /tmp directly: every level must be a real
+     * 0700 directory we own, never a symlink or a pre-planted non-directory, so a
+     * local user cannot steer our writes (or our cleanup) elsewhere.
+     */
+    protected static function tempDir(): string
     {
-        if ($dir === '' || !is_dir($dir)) {
+        $keygen = self::keygenBase();
+        foreach ([dirname($keygen), $keygen] as $dir) {
+            if (!is_dir($dir)) {
+                @mkdir($dir, 0700);
+            }
+            // Checked AFTER the mkdir so a level planted between the two (a
+            // symlink, or a plain file) is refused rather than written through.
+            if (is_link($dir) || !is_dir($dir)) {
+                return '';
+            }
+            @chmod($dir, 0700);
+        }
+
+        $dir = $keygen . '/ur-keygen-' . getmypid() . '-' . bin2hex(random_bytes(4));
+        if (!@mkdir($dir, 0700) && !is_dir($dir)) {
+            return '';
+        }
+        @chmod($dir, 0700);
+        return $dir;
+    }
+
+    /** Recursively remove a temp dir (best-effort), NEVER following a symlink. */
+    protected static function rmTempDir(string $dir): void
+    {
+        if ($dir === '' || is_link($dir) || !is_dir($dir)) {
             return;
         }
         foreach (scandir($dir) ?: [] as $entry) {
@@ -453,7 +482,9 @@ class KeyTools
                 continue;
             }
             $path = $dir . '/' . $entry;
-            if (is_dir($path)) {
+            // is_dir() FOLLOWS symlinks: recursing into a planted link would
+            // unlink the target directory's contents as root.
+            if (!is_link($path) && is_dir($path)) {
                 self::rmTempDir($path);
             } else {
                 @unlink($path);
@@ -654,10 +685,9 @@ class KeyTools
      */
     private static function scheduleTempDirSweep(): void
     {
-        $base = sys_get_temp_dir();
         $grace = self::DISCOVER_TIMEOUT_MAX + 60; // well past any in-flight child
-        foreach (@glob($base . '/ur-keygen-*') ?: [] as $dir) {
-            if (!is_dir($dir)) {
+        foreach (@glob(self::keygenBase() . '/ur-keygen-*') ?: [] as $dir) {
+            if (is_link($dir) || !is_dir($dir)) {
                 continue;
             }
             $mtime = @filemtime($dir);
