@@ -308,15 +308,13 @@ function ur_csrf_token_candidates(): array
  * csrf_token, and $GLOBALS['var']['csrf_token'] WAS populated). The raw request
  * body still carries the field, so we recover it from there.
  *
- * Order: $_POST -> $_REQUEST -> $_GET -> the raw urlencoded body (php://input).
+ * Order: $_POST -> the raw urlencoded body (php://input).
  * $rawInput is injectable for tests (php://input is not writable under CLI).
  */
 function ur_supplied_csrf_token(?string $rawInput = null): string
 {
-    foreach ([$_POST, $_REQUEST, $_GET] as $src) {
-        if (isset($src['csrf_token']) && is_string($src['csrf_token']) && $src['csrf_token'] !== '') {
-            return (string) $src['csrf_token'];
-        }
+    if (isset($_POST['csrf_token']) && is_string($_POST['csrf_token']) && $_POST['csrf_token'] !== '') {
+        return (string) $_POST['csrf_token'];
     }
     // Fallback: pull ONLY the csrf_token field out of the raw urlencoded body
     // (the front controller can strip it from $_POST but does not rewrite the raw

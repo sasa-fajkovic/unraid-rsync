@@ -759,7 +759,7 @@ final class HandlerCredentialsTest extends TestCase
 
     // --- Supplied-token recovery: the webGui front controller strips csrf_token
     //     out of $_POST before our handler runs, so ur_supplied_csrf_token must
-    //     recover it from $_REQUEST/$_GET or the raw urlencoded body. -----------
+    //     recover it from the raw urlencoded body. -----------------------------
 
     /** $_POST takes precedence when present. */
     public function testSuppliedCsrfPrefersPost(): void
