@@ -139,6 +139,29 @@ final class HandlerTest extends TestCase
         $this->assertSame(200, $code);
     }
 
+    /** A token in the query string alone must never satisfy the CSRF check. */
+    public function testCsrfRejectedWhenOnlyInQueryString(): void
+    {
+        try {
+            $_POST         = [];
+            $_GET['csrf_token'] = 'test-token';
+            [$body, $code] = $this->runCapture(function () {
+                ur_check_csrf('');
+            });
+            $this->assertSame(403, $code);
+            $this->assertStringContainsString('CSRF', $body['error']);
+
+            $_POST['csrf_token'] = 'test-token';
+            $GLOBALS['ur_last_response_code'] = 200;
+            [, $code2] = $this->runCapture(function () {
+                $this->assertTrue(ur_check_csrf(''));
+            });
+            $this->assertSame(200, $code2);
+        } finally {
+            $_GET = [];
+        }
+    }
+
     public function testSaveConfigPersistsAndClampsRetention(): void
     {
         // A global-only save persists retention, clamped to [1,9999].
