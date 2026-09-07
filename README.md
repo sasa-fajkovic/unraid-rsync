@@ -194,6 +194,11 @@ do not apply there. Consequences:
   an environment variable — only that file's path does. Use a **dedicated,
   least-privileged module user**, and remember the daemon protocol is
   **unencrypted on the wire** as well.
+- **Host key pinning:** on `accept-new`, the first successful connection pins
+  the host key it saw to the connection; a later, changed key then fails
+  closed instead of being silently re-accepted. Run **Discover host key**
+  ahead of time to pin it explicitly rather than trusting whatever the first
+  scheduled run sees.
 
 #### Storing credentials on the array instead of the flash
 
