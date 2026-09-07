@@ -28,7 +28,9 @@ on, forked from, or derived from any other plugin.
   path so they survive a reboot. It's plumbed via `Logger::$logsDirOverride`
   (Logger stays decoupled from Config — the Runner and the handler front
   controller push the validated path in); empty = tmpfs. Run state + secrets
-  ALWAYS stay in tmpfs regardless.
+  ALWAYS stay in tmpfs regardless. `ssh-keygen`/`ssh-keyscan` scratch dirs live
+  under `keygen/` in this same 0700 runtime base (`KeyTools` no longer uses bare
+  `/tmp`), and cleanup never follows symlinks.
 - **UI** = a parent hub `source/UnraidRsync.page` (`Menu="Utilities"` →
   **Settings ▸ User Utilities**, `Type="xmenu"`, **empty body**) plus child tab
   pages `source/UR.*.page` (`Menu="UnraidRsync:1..7"` → **Overview / Jobs /
@@ -111,6 +113,13 @@ on, forked from, or derived from any other plugin.
   **tmpfs materialisation is NOT removed** by this (still needed for a discrete
   `ssh -i` key file + per-run isolation + redaction). Per-run tmpfs secrets +
   run state ALWAYS stay in tmpfs regardless.
+- **Host-key pinning (`accept-new`) is a real trust-on-first-use now.**
+  `Ssh::harvestHostKey()` reads back the key OpenSSH appended to the per-run
+  tmpfs known_hosts, and `Ssh::pinHostKey()` writes it into the connection's
+  `remoteHostKey` (reload-modify-save, only while still empty) from both
+  `Runner::run()`'s `finally` (before `cleanupRuntime`) and
+  `Ssh::testConnection()`. Before this, nothing was ever pinned and every run
+  trusted whatever key the host presented.
 - **Timezone: store UTC, display system-local.** Two conventions, both
   deliberate (issue #135). **Stored/interchange** values stay UTC: the
   `startedAt`/`finishedAt` in `runs/<jobid>.summary.json` + History records
