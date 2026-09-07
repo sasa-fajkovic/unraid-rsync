@@ -355,7 +355,7 @@ class Runner
                 // Resolve "user@host" ONCE (not per pair) for the remote
                 // operands. DAEMON uses the SAME prefix as SSH - the only
                 // difference is the '::' separator resolvePair() appends.
-                $userHost = in_array($transport, ['SSH', 'DAEMON'], true) ? self::userHost($job) : '';
+                $userHost = in_array($transport, ['SSH', 'DAEMON'], true) ? self::userHost($mat['conn'] ?? []) : '';
 
                 if (count($pairs) === 0) {
                     $state    = Rsync::STATE_FAILED;
@@ -929,29 +929,16 @@ class Runner
 
     /**
      * Build the "user@host" operand prefix for a remote pair from the job's
-     * connection - identical for SSH and DAEMON, which differ only in the
-     * separator resolvePair() appends. Returns '' only when the connection
-     * can't be resolved - the guardrails/materialisation already fail the run
-     * before we get here in that case.
+     * already-materialised connection (mat['conn'] from materializeSsh /
+     * materializeDaemonConn) - identical for SSH and DAEMON, which differ only
+     * in the separator resolvePair() appends. Returns '' only when the
+     * connection can't be resolved - the guardrails/materialisation already
+     * fail the run before we get here in that case.
      *
-     * @param array<string,mixed> $job
+     * @param array<string,mixed> $conn
      */
-    private static function userHost(array $job): string
+    private static function userHost(array $conn): string
     {
-        $connId = (string) ($job['connectionId'] ?? '');
-        if ($connId === '') {
-            return '';
-        }
-        try {
-            $creds = Credentials::load();
-        } catch (Throwable $e) {
-            return '';
-        }
-        $conn = Credentials::findConnection($creds, $connId);
-        if ($conn === null) {
-            return '';
-        }
-        $conn = Credentials::mergeConnection($conn);
         $user = (string) ($conn['username'] ?? '');
         $host = (string) ($conn['host'] ?? '');
         if ($user === '' || $host === '') {
