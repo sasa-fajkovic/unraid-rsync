@@ -158,7 +158,7 @@ final class RunnerTest extends TestCase
             $this->assertSame(2, History::list($id, 0, 25)['total']);
             $this->assertLessThanOrEqual(2, count(Logger::listRuns($id, 100)));
         } finally {
-            History::delete($id);
+            @unlink(History::path($id));
         }
     }
 
@@ -178,7 +178,7 @@ final class RunnerTest extends TestCase
             $this->assertStringStartsWith('run-', $r['logRef']);
             $this->assertNotNull(Logger::runLogPathById($id, $r['logRef']));
         } finally {
-            History::delete($id);
+            @unlink(History::path($id));
         }
     }
 
@@ -920,6 +920,87 @@ final class RunnerTest extends TestCase
         // Redaction is disarmed after the run (finally), so a later plain write
         // of that same string is NOT scrubbed (no leaked global state).
         $this->assertSame((string) $emittedKey, Logger::redact((string) $emittedKey), 'redaction is disarmed after the run');
+    }
+
+    public function testAcceptNewSshRunPinsTheHostKeyForTheNextRun(): void
+    {
+        // TOFU at the RUNNER level: the connection is accept-new with nothing
+        // pinned, so ssh would accept - and append to this run's known_hosts -
+        // whatever key the host presents. The fake rsync stands in for that
+        // append; the run must lift the key into credentials.json BEFORE
+        // cleanupRuntime() deletes the file, or every future run trusts a MITM.
+        $hostKeyLine    = 'h.example ssh-ed25519 AAAAacceptedbyssh';
+        $seenKnownHosts = null;
+
+        $origBase = Ssh::$runtimeBase;
+        $rt = sys_get_temp_dir() . '/ur-runner-tofu-' . getmypid() . '-' . bin2hex(random_bytes(4));
+        Ssh::$runtimeBase = $rt;
+
+        $creds = Credentials::defaults();
+        $creds['keys'][] = [
+            'id'          => 'k-1',
+            'name'        => 'k1',
+            'privateKey'  => "-----BEGIN OPENSSH PRIVATE KEY-----\nFAKEKEYMATERIAL\n-----END OPENSSH PRIVATE KEY-----\n",
+            'publicKey'   => 'ssh-ed25519 AAAA fake',
+            'fingerprint' => 'SHA256:fake',
+        ];
+        $creds['connections'][] = Credentials::mergeConnection([
+            'id' => 'c-key', 'name' => 'ckey', 'host' => 'h.example', 'username' => 'root',
+            'authMethod' => 'KEY', 'keyId' => 'k-1', 'strictHostKey' => 'accept-new',
+        ]);
+        Credentials::save($creds);
+
+        Rsync::$runner = function (array $argv, $onOutput) use (&$seenKnownHosts, $hostKeyLine): int {
+            $eIdx  = array_search('-e', $argv, true);
+            $dashE = ($eIdx !== false) ? (string) $argv[$eIdx + 1] : '';
+            if (preg_match("#'UserKnownHostsFile=([^']+)'#", $dashE, $m)) {
+                $seenKnownHosts = $m[1];
+                file_put_contents($seenKnownHosts, $hostKeyLine . "\n", FILE_APPEND);
+            }
+            return 0;
+        };
+
+        $config = Config::load();
+        $job = Config::defaultJob();
+        $job['id']           = 'j-tofu';
+        $job['name']         = 'j-tofu';
+        $job['transport']    = 'SSH';
+        $job['direction']    = 'PUSH';
+        $job['connectionId'] = 'c-key';
+        $job['pairs']        = [['local' => '/mnt/user/src/', 'remote' => '/data/dst/']];
+        $config['jobs'][]    = $job;
+        Config::save($config);
+        RunState::clear('j-tofu');
+        RunState::clearAbort('j-tofu');
+
+        try {
+            $res = Runner::run('j-tofu', false);
+            $this->assertSame(Rsync::STATE_SUCCESS, $res['state']);
+            $this->assertNotNull($seenKnownHosts, 'the fake rsync saw the per-run known_hosts in -e');
+
+            $stored = Credentials::findConnection(Credentials::load(), 'c-key');
+            $this->assertIsArray($stored);
+            $this->assertSame($hostKeyLine, trim((string) $stored['remoteHostKey']));
+
+            $log = (string) @file_get_contents($res['runLog']);
+            $this->assertStringContainsString('Pinned host key for connection c-key on first use.', $log);
+            // The log line must carry neither the key material nor the tmpfs path.
+            $this->assertStringNotContainsString('AAAAacceptedbyssh', $log);
+            $this->assertStringNotContainsString((string) $seenKnownHosts, $log);
+        } finally {
+            Ssh::$runtimeBase = $origBase;
+            Credentials::save(Credentials::defaults());
+            if (is_dir($rt)) {
+                $it = new RecursiveIteratorIterator(
+                    new RecursiveDirectoryIterator($rt, FilesystemIterator::SKIP_DOTS),
+                    RecursiveIteratorIterator::CHILD_FIRST
+                );
+                foreach ($it as $f) {
+                    $f->isDir() ? @rmdir($f->getPathname()) : @unlink($f->getPathname());
+                }
+                @rmdir($rt);
+            }
+        }
     }
 
     public function testRunnerCliExitCodeAgreesWithRunnerStateMatrix(): void

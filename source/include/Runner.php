@@ -47,6 +47,7 @@ require_once __DIR__ . '/RunState.php';
 require_once __DIR__ . '/Logger.php';
 require_once __DIR__ . '/Notify.php';
 require_once __DIR__ . '/History.php';
+require_once __DIR__ . '/Util.php';
 
 class Runner
 {
@@ -161,7 +162,7 @@ class Runner
         //    escape - it would contradict the contract (no structured result, no
         //    postHook/summary/markStopped). Catch it and hard-fail cleanly.
         $startedAtTs = time();
-        // STORAGE timestamp: UTC, always. Display is system-local (see CLAUDE.md
+        // STORAGE timestamp: UTC, always. Display is system-local (see AGENTS.md
         // "Timezone: store UTC, display system-local") - do NOT switch this to date().
         $startedAt   = gmdate('Y-m-d\TH:i:s\Z', $startedAtTs);
         try {
@@ -238,6 +239,9 @@ class Runner
         $exitCode = 0;
         $reason   = '';
         $token    = '';
+        // Declared out here so the finally can harvest this run's host key
+        // before cleanup; only ever set on the SSH arm.
+        $sshMat   = null;
 
         try {
             // 4. Remote transport: materialise secrets (LOCAL skips this).
@@ -257,6 +261,7 @@ class Runner
                 } else {
                     $token     = (string) $matResult['token'];
                     $mat       = $matResult['mat'];
+                    $sshMat    = $mat;
                     $sshPieces = [
                         'dashE'  => (string) $mat['dashE'],
                         // PASSWORD auth rides in the child ENVIRONMENT (the
@@ -355,7 +360,7 @@ class Runner
                 // Resolve "user@host" ONCE (not per pair) for the remote
                 // operands. DAEMON uses the SAME prefix as SSH - the only
                 // difference is the '::' separator resolvePair() appends.
-                $userHost = in_array($transport, ['SSH', 'DAEMON'], true) ? self::userHost($job) : '';
+                $userHost = in_array($transport, ['SSH', 'DAEMON'], true) ? self::userHost($mat['conn'] ?? []) : '';
 
                 if (count($pairs) === 0) {
                     $state    = Rsync::STATE_FAILED;
@@ -466,6 +471,20 @@ class Runner
                 if ($postExit !== 0 && $state === Rsync::STATE_SUCCESS) {
                     $state    = Rsync::STATE_WARNING;
                     $reason   = $reason !== '' ? $reason : 'posthook-failed';
+                }
+            }
+
+            // 7b. Trust on first use: with accept-new and nothing pinned yet, ssh
+            //     appended the key it accepted to this run's known_hosts. Pin it
+            //     into the connection BEFORE cleanup unlinks that file, so a
+            //     CHANGED key fails closed on the next run instead of being
+            //     silently trusted again.
+            if (is_array($sshMat)) {
+                $connId  = (string) ($sshMat['conn']['id'] ?? '');
+                $hostKey = Ssh::harvestHostKey($sshMat);
+                if (Ssh::pinHostKey($connId, $hostKey)) {
+                    // No key material and no tmpfs path in the message.
+                    Logger::event($runLog, $jobId, 'Pinned host key for connection ' . $connId . ' on first use.');
                 }
             }
 
@@ -929,29 +948,16 @@ class Runner
 
     /**
      * Build the "user@host" operand prefix for a remote pair from the job's
-     * connection - identical for SSH and DAEMON, which differ only in the
-     * separator resolvePair() appends. Returns '' only when the connection
-     * can't be resolved - the guardrails/materialisation already fail the run
-     * before we get here in that case.
+     * already-materialised connection (mat['conn'] from materializeSsh /
+     * materializeDaemonConn) - identical for SSH and DAEMON, which differ only
+     * in the separator resolvePair() appends. Returns '' only when the
+     * connection can't be resolved - the guardrails/materialisation already
+     * fail the run before we get here in that case.
      *
-     * @param array<string,mixed> $job
+     * @param array<string,mixed> $conn
      */
-    private static function userHost(array $job): string
+    private static function userHost(array $conn): string
     {
-        $connId = (string) ($job['connectionId'] ?? '');
-        if ($connId === '') {
-            return '';
-        }
-        try {
-            $creds = Credentials::load();
-        } catch (Throwable $e) {
-            return '';
-        }
-        $conn = Credentials::findConnection($creds, $connId);
-        if ($conn === null) {
-            return '';
-        }
-        $conn = Credentials::mergeConnection($conn);
         $user = (string) ($conn['username'] ?? '');
         $host = (string) ($conn['host'] ?? '');
         if ($user === '' || $host === '') {
@@ -1178,8 +1184,7 @@ class Runner
             // A summary failure must not crash the run; log-best-effort + return.
             return;
         }
-        $clean = preg_replace('/[^A-Za-z0-9._-]/', '', $jobId);
-        $clean = ($clean === '' || $clean === null) ? 'unknown' : $clean;
+        $clean = Util::safeFileId($jobId);
         $path  = $dir . '/' . $clean . '.summary.json';
 
         $trigger = (($summary['trigger'] ?? '') === 'schedule') ? 'schedule' : 'manual';
@@ -1217,8 +1222,7 @@ class Runner
      */
     public static function readSummary(string $jobId): ?array
     {
-        $clean = preg_replace('/[^A-Za-z0-9._-]/', '', $jobId);
-        $clean = ($clean === '' || $clean === null) ? 'unknown' : $clean;
+        $clean = Util::safeFileId($jobId);
         $path  = rtrim(UR_CONFIG_BASE, '/') . '/runs/' . $clean . '.summary.json';
         if (!is_file($path)) {
             return null;
