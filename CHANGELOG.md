@@ -74,10 +74,10 @@ user-facing highlights.
   **manual (on demand)** cell with a cron time that will never fire — on both the
   **Overview** and **Jobs** tabs. crond never saw the job either way.
 - **A run log no longer ends on a duplicated progress line.** rsync repeats its
-  final redraw, and the last copy carries the stream's only newline, so the
-  final flush wrote the same `100%` line a second time — after the end-of-run
-  summary. An identical repeat is now dropped; one that differs (a moved rate or
-  ETA) still lands.
+  final redraw, and the last copy carries the stream's only newline, so the same
+  `100%` line was written twice — with the end-of-run summary wedged between
+  them. An identical repeat is now dropped; one that differs (a moved rate, ETA
+  or file count) still lands.
 - **`Quiet` was not quiet.** rsync's `--log-file` has its own line format and
   wrote one line per transferred file *regardless* of `-q`, so the level that
   promised the least output still produced a full per-file listing. Both

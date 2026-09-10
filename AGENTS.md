@@ -191,9 +191,13 @@ on, forked from, or derived from any other plugin.
   3. **rsync writes the `\r` as a PREFIX** (`\r<p1>\r<p2>…\r<pN>\n`, exactly one
      LF, at the very end), so the last fragment always waits in the buffer for
      it. That is why the flush is load-bearing, not belt-and-braces, and why a
-     fixture modelling `\r` as a suffix tests the wrong shape. rsync also
-     repeats that final redraw with slightly different rate/ETA figures, so a
-     log legitimately ends on two 100 % lines.
+     fixture modelling `\r` as a suffix tests the wrong shape — that mistake cost
+     a whole release. rsync also REPEATS that final redraw, and because the last
+     copy carries the only `\n` the repeat arrives on the **real-line** path, not
+     the flush path. Both paths therefore drop a redraw byte-identical to the one
+     just written (`$st['last']`, cleared on every real line so it can never
+     swallow an unrelated later line). Byte-exact only: a repeat that differs in
+     rate, ETA or `to-chk` is new information and must still land.
 
   Because it buffers to line boundaries, the Runner **must** call
   `Logger::flushSink($runLog)` once the child has exited — it does, after
