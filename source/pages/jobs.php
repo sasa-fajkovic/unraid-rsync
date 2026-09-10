@@ -911,8 +911,7 @@ ur_emit_time_helpers();
 </div>
 
 <!-- CRUD form ---------------------------------------------------------------->
-<form markdown="1" method="POST" action="<?=htmlspecialchars($handlerUrl, ENT_QUOTES, 'UTF-8')?>" id="ur-jobs-form">
-  <input type="hidden" name="action" value="saveConfig">
+<form markdown="1" method="POST" action="<?=htmlspecialchars($handlerUrl, ENT_QUOTES, 'UTF-8')?>" id="ur-jobs-form" data-ur-action="saveConfig">
   <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf, ENT_QUOTES, 'UTF-8')?>">
   <!-- Sentinel: marks this as a Jobs-tab submission so the handler rebuilds the
        jobs list even when the user has deleted every card (an intentional
