@@ -395,8 +395,7 @@ ur_emit_form_enable_assets();
 ur_emit_ajax_helpers();
 ?>
 
-<form method="POST" action="<?=htmlspecialchars($handlerUrl, ENT_QUOTES, 'UTF-8')?>" id="ur-conns-form">
-  <input type="hidden" name="action" value="saveCredentials">
+<form method="POST" action="<?=htmlspecialchars($handlerUrl, ENT_QUOTES, 'UTF-8')?>" id="ur-conns-form" data-ur-action="saveCredentials">
   <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf, ENT_QUOTES, 'UTF-8')?>">
   <input type="hidden" name="connections_present" value="1">
 

@@ -1144,9 +1144,23 @@ if (!function_exists('ur_emit_ajax_helpers')) {
   /* POST an existing <form> as urlencoded with the same robust parsing.
    * URLSearchParams(new FormData(form)) serialises the form's text fields to
    * urlencoded (there are no file inputs); nested names like jobs[0][name]
-   * round-trip unchanged into $_POST. See postForm for why we avoid multipart. */
+   * round-trip unchanged into $_POST. See postForm for why we avoid multipart.
+   *
+   * The handler action comes from the form's data-ur-action attribute, NOT from
+   * a hidden input named "action". An input of that name becomes a NAMED
+   * PROPERTY of the form element, so `form.action` returns the input instead of
+   * the URL string - and Unraid's own layout JS does
+   * `$(this).prop('action').actionName()` over every form on the page
+   * (BodyInlineJS: the escapeQuotes form parser), which then throws
+   * "$(...).prop(...).actionName is not a function" and aborts the rest of its
+   * ready handler - taking the leave-confirmation guard with it. Keep the wire
+   * protocol identical (action=<x> in the body); just never name an INPUT
+   * "action" inside a form. Same reason this uses getAttribute('action') rather
+   * than form.action for the URL. */
   function postFormElement(form) {
     var params = new URLSearchParams(new FormData(form));
+    var act = form.getAttribute('data-ur-action');
+    if (act) { params.set('action', act); }
     return fetch(form.getAttribute('action'), { method: 'POST', body: params, credentials: 'same-origin' })
       .then(parseResponse)
       .catch(function () {

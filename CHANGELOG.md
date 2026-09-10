@@ -68,6 +68,13 @@ user-facing highlights.
   files and deletions it would have made.
 
 ### Fixed
+- **A JavaScript error on the plugin's pages is gone.** Each form carried a
+  hidden input named `action`, which shadows the form element's own `action`
+  property — and Unraid's page-layout script inspects `form.action` on every
+  form it finds, so it threw `actionName is not a function` on every page load
+  and every Apply, and stopped before installing its "you have unsaved changes"
+  leave confirmation. The handler action now travels as a data attribute
+  instead; nothing about saving changes.
 - **A manual-only job no longer shows a next run time.** Such a job is still
   *enabled* (that is how "run on demand" is stored) and keeps whatever schedule
   it was last saved with, so the 1-second status poll was overwriting the correct

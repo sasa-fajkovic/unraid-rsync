@@ -217,6 +217,20 @@ on, forked from, or derived from any other plugin.
   They are `ur_next_run_label()` (PHP, Jobs), `nextRunLabel()` (JS, Jobs) and
   the `.ur-ov-next` chain (JS, Overview) — the JS ones run every second on top of
   the PHP one, so a clause missing there silently overwrites a correct cell.
+- **NEVER name a form input `action`.** An input named `action` becomes a NAMED
+  PROPERTY of its `<form>`, so `form.action` returns that input instead of the
+  URL string. Unraid's own layout JS runs
+  `$('form').each(function(){ $(this).prop('action').actionName(); … })` over
+  every form on the page (`DefaultPageLayout/BodyInlineJS.php`, the
+  escapeQuotes parser; `String.prototype.actionName` comes from
+  `HeadInlineJS.php`) — with the property shadowed that throws
+  `$(...).prop(...).actionName is not a function` and aborts the rest of
+  Unraid's ready handler, taking its leave-confirmation guard with it. Seen on
+  7.3.2 at every page load AND every Apply. The handler action therefore travels
+  as `data-ur-action="<x>"` on the form and `urAjax.postFormElement()` copies it
+  into the POST body, so the wire protocol is unchanged (`action=<x>`); the same
+  shadowing is why that helper reads `form.getAttribute('action')` for the URL
+  rather than `form.action`. `FormActionTest` guards all of it.
 - **HTML-escape all output**; the log viewer renders `Logger::tail()` output, which
   is already escaped (log-XSS guard). Captured run output is also **redacted** of
   per-run tmpfs secret paths and **size-capped** before it is written
