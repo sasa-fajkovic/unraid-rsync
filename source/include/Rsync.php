@@ -484,7 +484,17 @@ class Rsync
         foreach (self::optionTokens($opts, $optionTransport) as $tok) {
             $argv[] = $tok;
         }
-        foreach (self::logLevelFlags($logLevel) as $tok) {
+        // A DRY RUN is never quieter than `normal`. The quiet levels suppress
+        // exactly the per-file lines a dry run exists to show: at `summary` a
+        // `--delete` preview named neither a file nor a deletion nor even a
+        // count (no stats2), so the Dry-run button - the repo's destructive-
+        // change safety affordance - reported nothing at all. Verified against
+        // rsync 3.5.0. This is the only place a level is overridden; the job's
+        // stored level is untouched.
+        $effectiveLevel = ($dryRun && in_array($logLevel, ['quiet', 'summary'], true))
+            ? 'normal'
+            : $logLevel;
+        foreach (self::logLevelFlags($effectiveLevel) as $tok) {
             $argv[] = $tok;
         }
 

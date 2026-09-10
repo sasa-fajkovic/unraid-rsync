@@ -104,7 +104,7 @@ Managed keys live in their own **Credentials** keychain tab.
 
   | Level | What the run log gets |
   | --- | --- |
-  | `Quiet` | errors and the end-of-run summary only |
+  | `Quiet` | errors, every `deleting <path>`, and the end-of-run summary |
   | `Summary` | *(default for a new job)* + one overall **progress line every 5% or 30s** — no per-file lines |
   | `Normal` | + a line per transferred file |
   | `Verbose` | + itemised changes (`--itemize-changes`) and the full stats block |
@@ -113,7 +113,10 @@ Managed keys live in their own **Credentials** keychain tab.
   rsync redraws its progress line several times a second with a bare `\r`, so
   the plugin collapses those redraws to one line per 5% step or 30 seconds
   (whichever comes first) instead of writing every one. Existing jobs keep the
-  level they were saved with.
+  level they were saved with. Note that **errors and deletions are logged at
+  every level** — a quiet level never hides what a `--delete` job removed — and
+  a **Dry-run is never quieter than `Normal`**, so the preview always names the
+  files and deletions it would have made.
 - A **Status** tab showing the rolling cross-job plugin log and an
   **rsync-binary presence indicator** (detected path + the first line of
   `rsync --version`, or a clear warning if rsync is somehow absent).

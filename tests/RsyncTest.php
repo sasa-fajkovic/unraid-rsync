@@ -362,6 +362,37 @@ final class RsyncTest extends TestCase
         }
     }
 
+    /**
+     * A DRY RUN must never be quieter than `normal`. The quiet levels suppress
+     * exactly the per-file lines a dry run exists to show: verified against
+     * rsync 3.5.0, a `--delete` preview at `summary` named neither a file nor a
+     * deletion nor even a count, so the Dry-run button reported nothing at all.
+     */
+    public function testDryRunIsNeverQuieterThanNormal(): void
+    {
+        $opts = $this->emptyOpts();
+        foreach (['quiet', 'summary'] as $lvl) {
+            $argv = Rsync::buildArgv($opts, $lvl, '/rt/r.log', '/mnt/user/s/', '/mnt/user/d/', null, true);
+            $this->assertContains('--dry-run', $argv);
+            $this->assertNotContains('--log-file-format=', $argv, "$lvl dry run must not suppress per-file lines");
+            $this->assertNotContains('-q', $argv, "$lvl dry run must not stay quiet");
+            foreach (Rsync::logLevelFlags('normal') as $tok) {
+                $this->assertContains($tok, $argv, "$lvl dry run must use the normal level flags");
+            }
+        }
+
+        // A REAL run at those levels is untouched, and a dry run at a level that
+        // is already loud enough is not altered either.
+        foreach (['quiet', 'summary'] as $lvl) {
+            $real = Rsync::buildArgv($opts, $lvl, '/rt/r.log', '/mnt/user/s/', '/mnt/user/d/', null, false);
+            $this->assertContains('--log-file-format=', $real, "$lvl real run keeps its own flags");
+        }
+        $verbose = Rsync::buildArgv($opts, 'verbose', '/rt/r.log', '/mnt/user/s/', '/mnt/user/d/', null, true);
+        foreach (Rsync::logLevelFlags('verbose') as $tok) {
+            $this->assertContains($tok, $verbose);
+        }
+    }
+
     public function testBuildArgvLocalNoSsh(): void
     {
         $opts = $this->emptyOpts();

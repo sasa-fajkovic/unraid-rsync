@@ -55,7 +55,10 @@ user-facing highlights.
   redraws its progress line several times a second with a bare carriage return;
   the plugin now collapses those redraws instead of writing every one, so the
   log viewer shows readable lines at **every** level rather than one enormous
-  smeared line.
+  smeared line. Errors and every `deleting <path>` are still logged at *every*
+  level — a quiet level never hides what a `--delete` job removed — and a
+  **Dry-run is never quieter than *Normal***, so the preview always names the
+  files and deletions it would have made.
 
 ### Fixed
 - **`Quiet` was not quiet.** rsync's `--log-file` has its own line format and

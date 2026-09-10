@@ -593,9 +593,16 @@ class Logger
         // the transfer completed, and it can otherwise fall inside the window
         // (e.g. 99% written, then 100% dropped) and be superseded by the
         // summary line that follows it.
+        // Any CHANGE of PROGRESS_MIN_PCT, in EITHER direction: progress2's
+        // percentage is not monotonic. With incremental recursion the
+        // denominator grows as the file list is discovered, so the figure
+        // regularly drops and can even touch a spurious 100% early. Against a
+        // high-water mark that killed the 5% rule for the rest of the run,
+        // silently degrading the promise to "one line per 30s" on exactly the
+        // big-tree jobs this exists for.
         $due = ($now - $st['at'] >= self::PROGRESS_MIN_SECS)
             || ($pct >= 100 && $st['pct'] < 100)
-            || ($pct >= 0 && $pct >= $st['pct'] + self::PROGRESS_MIN_PCT);
+            || ($pct >= 0 && abs($pct - $st['pct']) >= self::PROGRESS_MIN_PCT);
 
         if (!$due) {
             $st['pending'] = $seg;
@@ -603,7 +610,7 @@ class Logger
         }
         $st['pending'] = '';
         $st['at']      = $now;
-        if ($pct > $st['pct']) {
+        if ($pct >= 0) {
             $st['pct'] = $pct;
         }
         // progress2 pads its line with trailing spaces to erase the previous,

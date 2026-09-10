@@ -101,7 +101,7 @@ final class RunnerTest extends TestCase
             // A realistic --info=progress2 burst: bare-\r redraws, the last of
             // them inside the throttle window, and no trailing newline at all.
             foreach ([0, 1, 2, 3, 99, 100] as $pct) {
-                $onOutput(sprintf('%12s %3d%%   2.93MB/s    0:00:01  ', number_format($pct * 419430), $pct) . "\r");
+                $onOutput("\r" . sprintf('%12s %3d%%   2.93MB/s    0:00:01  ', number_format($pct * 419430), $pct));
             }
             $onOutput('sent 41,953,721 bytes  received 146 bytes');
             return 0;
@@ -118,6 +118,31 @@ final class RunnerTest extends TestCase
         $this->assertStringContainsString('  0%', $log);
         $this->assertStringContainsString('100%', $log);
         $this->assertStringNotContainsString('  2%', $log);
+    }
+
+    /**
+     * The `finally` flush has to happen BEFORE the postHook. runHook() opens a
+     * new sink on the same run log and Logger::sink() RESETS the per-path state,
+     * so a flush placed after the hook finds nothing left to rescue. The pair's
+     * own flush covers every normal and abort path; this is the case that needs
+     * the outer one - output captured, then a throw before that flush.
+     */
+    public function testAnUnterminatedTailSurvivesAThrowOnAJobWithAPostHook(): void
+    {
+        Rsync::$runner = function (array $argv, $onOutput): int {
+            $this->trace[] = 'rsync';
+            $onOutput("\r  41,943,046 100%   7.80MB/s    0:00:05");
+            $onOutput('rsync: partial line with no trailing newline');
+            throw new RuntimeException('boom');
+        };
+
+        $id  = $this->saveLocalJob('j-posthook-flush', ['postHook' => 'POST']);
+        $res = Runner::run($id, false);
+        $this->assertSame(Rsync::STATE_FAILED, $res['state']);
+
+        $log = (string) @file_get_contents($res['runLog']);
+        $this->assertStringContainsString('partial line with no trailing newline', $log);
+        $this->assertStringContainsString('Post-run hook exited', $log, 'the postHook still ran');
     }
 
     public function testHappyPathOrderingPreThenPairsThenPost(): void
