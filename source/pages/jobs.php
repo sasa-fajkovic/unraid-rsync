@@ -290,7 +290,7 @@ function ur_render_job_card($job, $index): void
     }
     echo '</select>';
     echo '<blockquote class="inline_help"><p>'
-        . ur_h(ur_t('Quiet: errors and the end-of-run summary only. Summary: adds one overall progress line every 5% or 30 seconds - no per-file lines, so a big backup stays readable. Normal: a line per transferred file. Verbose/Debug: add itemised changes and rsync protocol debugging - for troubleshooting, and they can make the log very large.'))
+        . ur_h(ur_t('Quiet: errors, every deletion, and the end-of-run summary. Summary: adds one overall progress line every 5% or 30 seconds - no per-file lines, so a big backup stays readable. Normal: a line per transferred file. Verbose/Debug: add itemised changes and rsync protocol debugging - for troubleshooting, and they can make the log very large. Errors and deletions are logged at every level, and a Dry-run is never quieter than Normal so the preview always names what it would change.'))
         . '</p></blockquote>';
     echo '</dd>';
 
@@ -1528,12 +1528,14 @@ ur_emit_time_helpers();
   }
 
   /* The next-run cell label from a getStatus entry, mirroring jobs.php
-   * ur_next_run_label(): a disabled job reads "disabled"; an enabled job with no
-   * computable next fire reads an em-dash; otherwise absolute local time + an
-   * "in …" hint. getStatus always carries both `enabled` (bool) and `nextRun`
-   * (epoch|null), so we read enabled directly to distinguish "disabled" from an
-   * enabled-but-uncomputable schedule. */
+   * ur_next_run_label() CLAUSE FOR CLAUSE: manual-only first, then disabled,
+   * then an enabled job with no computable next fire (em-dash), otherwise
+   * absolute local time + an "in …" hint. getStatus carries `manualOnly`,
+   * `enabled` (bools) and `nextRun` (epoch|null). The manualOnly clause is not
+   * decoration: without it this poller overwrote the correct server-rendered
+   * "manual (on demand)" cell every second with a cron time that never fires. */
   function nextRunLabel(s, nowEpoch) {
+    if (s && s.manualOnly) { return 'manual (on demand)'; }
     if (s && s.enabled === false) { return 'disabled'; }
     if (!s || !s.nextRun) { return '—'; }
     return fmtLocal(s.nextRun) + ' (' + inLabel(s.nextRun, nowEpoch) + ')';

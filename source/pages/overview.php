@@ -132,9 +132,13 @@ ur_emit_badge_assets(); /* the ONE badge palette + window.urBadge */
       // next run
       var nc = tr.querySelector('.ur-ov-next');
       if (nc) {
-        if (!s.enabled) { nc.textContent = 'disabled'; }
+        /* Same vocabulary as the Jobs tab (ur_next_run_label / nextRunLabel):
+         * manual-only first, since such a job IS enabled and keeps a stale
+         * schedule string. */
+        if (s.manualOnly) { nc.textContent = 'manual (on demand)'; }
+        else if (!s.enabled) { nc.textContent = 'disabled'; }
         else if (s.nextRun) { nc.textContent = fmtLocal(s.nextRun) + ' (' + rel(s.nextRun - now) + ')'; }
-        else { nc.textContent = 'manual'; }
+        else { nc.textContent = '—'; }
       }
     });
   }

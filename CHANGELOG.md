@@ -68,6 +68,16 @@ user-facing highlights.
   files and deletions it would have made.
 
 ### Fixed
+- **A manual-only job no longer shows a next run time.** Such a job is still
+  *enabled* (that is how "run on demand" is stored) and keeps whatever schedule
+  it was last saved with, so the 1-second status poll was overwriting the correct
+  **manual (on demand)** cell with a cron time that will never fire — on both the
+  **Overview** and **Jobs** tabs. crond never saw the job either way.
+- **A run log no longer ends on a duplicated progress line.** rsync repeats its
+  final redraw, and the last copy carries the stream's only newline, so the
+  final flush wrote the same `100%` line a second time — after the end-of-run
+  summary. An identical repeat is now dropped; one that differs (a moved rate or
+  ETA) still lands.
 - **`Quiet` was not quiet.** rsync's `--log-file` has its own line format and
   wrote one line per transferred file *regardless* of `-q`, so the level that
   promised the least output still produced a full per-file listing. Both
