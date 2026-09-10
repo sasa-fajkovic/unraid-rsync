@@ -52,6 +52,34 @@ class Logger
     const TAIL_MAX_BYTES = 256 * 1024; // 256 KiB
 
     /**
+     * Progress-line throttle for CAPTURED output. rsync's --info=progress2
+     * redraws one status line with a bare \r several times a second, and the
+     * capture path is byte-oriented (ProcIO hands us raw 8 KiB reads), so
+     * appending chunks verbatim smeared thousands of redraws into a single
+     * unreadable line - bounded only by the 16 MiB cap and the 128 KiB UI tail.
+     * sink() keeps at most one progress line per PCT step or per SECS, whichever
+     * comes first, and drops the rest.
+     */
+    const PROGRESS_MIN_PCT  = 5;
+    const PROGRESS_MIN_SECS = 30.0;
+
+    /**
+     * Flush guard: a child that writes this many bytes with neither \n nor \r
+     * gets them written as-is rather than buffered indefinitely.
+     */
+    const SINK_BUF_MAX = 8192;
+
+    /**
+     * Per-path sink state: the unterminated tail, the last progress percentage
+     * and timestamp we actually wrote, and the newest DROPPED progress redraw
+     * (so flushSink() can still land the final one). Keyed by log path; sink()
+     * resets it, flushSink() removes it.
+     *
+     * @var array<string,array{buf:string,pending:string,pct:int,at:float}>
+     */
+    private static $sinkState = [];
+
+    /**
      * Exact secret strings (per-run materialised tmpfs paths) that MUST be
      * scrubbed from any captured rsync/ssh/hook output before it is written to a
      * run log or plugin.log. Threaded in by the Runner via setRedaction() at run
@@ -471,12 +499,126 @@ class Logger
      */
     public static function sink(string $path): callable
     {
+        // Fresh throttle state per sink: the Runner builds one per rsync pair
+        // and one per hook, so a pair never inherits the previous pair's
+        // percentage and every pair logs its first progress line immediately
+        // (at = 0.0 makes the time condition true on the first redraw).
+        self::$sinkState[$path] = ['buf' => '', 'pending' => '', 'pct' => -1, 'at' => 0.0];
+
         return static function (string $chunk) use ($path): void {
             if ($chunk === '') {
                 return;
             }
-            self::appendCapped($path, self::redact($chunk));
+            self::consume($path, $chunk);
         };
+    }
+
+    /**
+     * Split captured output into lines and decide what reaches the log.
+     *
+     * A \n ends a REAL line - always written. A bare \r ends a progress
+     * REDRAW, which by definition the next redraw supersedes, so only one per
+     * PROGRESS_MIN_PCT step / PROGRESS_MIN_SECS window is written and the rest
+     * are dropped. \r\n is a line ending, not a redraw.
+     */
+    private static function consume(string $path, string $chunk): void
+    {
+        $st = self::$sinkState[$path] ?? ['buf' => '', 'pending' => '', 'pct' => -1, 'at' => 0.0];
+        $st['buf'] .= str_replace("\r\n", "\n", $chunk);
+
+        while (true) {
+            $nl = strpos($st['buf'], "\n");
+            $cr = strpos($st['buf'], "\r");
+            if ($nl === false && $cr === false) {
+                break;
+            }
+            $isLine = ($nl !== false && ($cr === false || $nl < $cr));
+            $at     = $isLine ? $nl : $cr;
+            $seg    = substr($st['buf'], 0, $at);
+            $st['buf'] = substr($st['buf'], $at + 1);
+
+            if ($isLine) {
+                // A real line supersedes any redraw still held back: the held
+                // one is stale and printing it here would read out of order.
+                $st['pending'] = '';
+                self::write($path, $seg . "\n");
+                continue;
+            }
+            self::throttleProgress($path, $seg, $st);
+        }
+
+        // Never hold an unterminated blob forever (a child emitting neither
+        // \n nor \r would otherwise buffer without bound).
+        if (strlen($st['buf']) > self::SINK_BUF_MAX) {
+            self::write($path, $st['buf']);
+            $st['buf'] = '';
+        }
+
+        self::$sinkState[$path] = $st;
+    }
+
+    /**
+     * Write one progress redraw only when it is due (a PROGRESS_MIN_PCT step, or
+     * PROGRESS_MIN_SECS since the last one). Otherwise remember it as the newest
+     * dropped redraw so flushSink() can still land the final percentage.
+     *
+     * @param array{buf:string,pending:string,pct:int,at:float} $st
+     */
+    private static function throttleProgress(string $path, string $seg, array &$st): void
+    {
+        if (trim($seg) === '') {
+            return;
+        }
+        $now = microtime(true);
+        $pct = (preg_match('/(\d+)%/', $seg, $m) === 1) ? (int) $m[1] : -1;
+        // 100% is due ONCE regardless of the throttle: it is the line that says
+        // the transfer completed, and it can otherwise fall inside the window
+        // (e.g. 99% written, then 100% dropped) and be superseded by the
+        // summary line that follows it.
+        $due = ($now - $st['at'] >= self::PROGRESS_MIN_SECS)
+            || ($pct >= 100 && $st['pct'] < 100)
+            || ($pct >= 0 && $pct >= $st['pct'] + self::PROGRESS_MIN_PCT);
+
+        if (!$due) {
+            $st['pending'] = $seg;
+            return;
+        }
+        $st['pending'] = '';
+        $st['at']      = $now;
+        if ($pct > $st['pct']) {
+            $st['pct'] = $pct;
+        }
+        // progress2 pads its line with trailing spaces to erase the previous,
+        // longer redraw; pointless in a file.
+        self::write($path, rtrim($seg) . "\n");
+    }
+
+    /**
+     * Land whatever a sink is still holding: the newest dropped progress redraw
+     * (so the log ends on the real final percentage, not on whatever the 5%/30s
+     * throttle last let through) and any unterminated tail. Idempotent - the
+     * state is removed, so a second call is a no-op. The Runner calls this once
+     * the child has exited and the pipes are drained.
+     */
+    public static function flushSink(string $path): void
+    {
+        $st = self::$sinkState[$path] ?? null;
+        if ($st === null) {
+            return;
+        }
+        unset(self::$sinkState[$path]);
+
+        // buf holds the text after the LAST \r, i.e. newer than pending.
+        $last = ($st['buf'] !== '') ? $st['buf'] : $st['pending'];
+        if (trim($last) !== '') {
+            self::write($path, rtrim($last) . "\n");
+        }
+    }
+
+    /** Redact, then append under the run-log byte cap. The only write path. */
+    private static function write(string $path, string $data): void
+    {
+        self::appendCapped($path, self::redact($data));
     }
 
     /**

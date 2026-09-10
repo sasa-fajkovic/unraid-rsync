@@ -412,6 +412,9 @@ class Runner
                         Logger::sink($runLog),
                         Ssh::childEnv(is_array($sshPieces) ? $sshPieces['sshEnv'] : [])
                     );
+                    // The sink holds back progress redraws (5%/30s throttle) and
+                    // any unterminated tail; rsync has exited, so land them.
+                    Logger::flushSink($runLog);
                     // rsync ALSO writes the run log directly via --log-file, which
                     // bypasses the sink's cap; trim the file to the cap now that
                     // this pair's rsync has closed --log-file (F3, complete).
@@ -474,6 +477,10 @@ class Runner
             if ($token !== '') {
                 Ssh::cleanupRuntime($token);
             }
+            // Belt-and-braces: if a pair threw before its own flush, its last
+            // partial line is still in the sink. Land it BEFORE the redact pass
+            // so it gets scrubbed like everything else.
+            Logger::flushSink($runLog);
             // Final pass, while redaction is still armed: catches anything rsync
             // or the postHook wrote to the run log after the last pair's cap.
             Logger::redactRunLog($runLog);
@@ -1087,10 +1094,16 @@ class Runner
         // redacting, size-capped sink as rsync output (F1 + F3).
         $sink = Logger::sink($runLog);
 
-        if (self::$hookRunner !== null) {
-            return (int) (self::$hookRunner)($hook, $env, $sink);
+        try {
+            if (self::$hookRunner !== null) {
+                return (int) (self::$hookRunner)($hook, $env, $sink);
+            }
+            return self::defaultHookRun($hook, $env, $sink);
+        } finally {
+            // A hook whose last write had no trailing newline would otherwise
+            // stay in the sink buffer until the next sink on this path reset it.
+            Logger::flushSink($runLog);
         }
-        return self::defaultHookRun($hook, $env, $sink);
     }
 
     /**

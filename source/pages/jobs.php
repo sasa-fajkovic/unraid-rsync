@@ -284,11 +284,15 @@ function ur_render_job_card($job, $index): void
     // log level
     echo '<dt><label for="' . ur_h($idb . '_log') . '">' . ur_h(ur_t('Log level')) . '</label>:</dt>';
     echo '<dd><select id="' . ur_h($idb . '_log') . '" name="' . ur_h($p . '[logLevel]') . '">';
-    foreach (['quiet', 'normal', 'verbose', 'debug'] as $lvl) {
+    foreach (Job::LOG_LEVELS as $lvl) {
         $sel = ($logLevel === $lvl) ? ' selected' : '';
         echo '<option value="' . ur_h($lvl) . '"' . $sel . '>' . ur_h(ur_t(ucfirst($lvl))) . '</option>';
     }
-    echo '</select></dd>';
+    echo '</select>';
+    echo '<blockquote class="inline_help"><p>'
+        . ur_h(ur_t('Quiet: errors and the end-of-run summary only. Summary: adds one overall progress line every 5% or 30 seconds - no per-file lines, so a big backup stays readable. Normal: a line per transferred file. Verbose/Debug: add itemised changes and rsync protocol debugging - for troubleshooting, and they can make the log very large.'))
+        . '</p></blockquote>';
+    echo '</dd>';
 
     // notify mode
     echo '<dt><label for="' . ur_h($idb . '_notify') . '">' . ur_h(ur_t('Notify')) . '</label>:</dt>';

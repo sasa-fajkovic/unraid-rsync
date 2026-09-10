@@ -366,13 +366,31 @@ class Rsync
      * --log-file=<runlog> by buildArgv(); these are only the verbosity/info
      * tokens, per the plan's "Log levels -> flags" table.
      *
+     * `--log-file-format=` (EMPTY value) is the ONLY thing that silences the
+     * per-file lines. -v/-q control rsync's STDOUT; the --log-file fd has its
+     * own format, defaulting to "%i %n%L", and rsync writes a line per
+     * transferred file through it REGARDLESS of -v or -q. Verified against
+     * rsync 3.5.0: at `quiet` (-q) the run log still listed every file, which
+     * is why the level that promised the least output produced a full listing.
+     * An empty --log-file-format drops those lines and keeps the errors and the
+     * end-of-run summary.
+     *
+     * `summary` therefore carries NO -v at all (nothing per-file on stdout
+     * either) and no stats2 (the log-file fd already writes the one-line
+     * "sent/received/total size" summary, so asking for stats2 would print the
+     * whole block a second time). What is left is --info=progress2's single
+     * overall-progress line, which Logger::sink() collapses to one line per 5%
+     * or 30s - the forum request this level exists for.
+     *
      * @return array<int,string>
      */
     public static function logLevelFlags(string $logLevel): array
     {
         switch ($logLevel) {
             case 'quiet':
-                return ['-q'];
+                return ['-q', '--log-file-format='];
+            case 'summary':
+                return ['--info=progress2', '--log-file-format='];
             case 'verbose':
                 return ['-vv', '--info=progress2,stats2', '--itemize-changes'];
             case 'debug':

@@ -46,7 +46,22 @@ user-facing highlights.
   its default SSH PATH (common on NAS appliances) and a run fails with
   "rsync: command not found". Constrained to a bare absolute path.
 
+- **`Summary` log level** — a middle setting between *Quiet* and *Normal*, and
+  the default for a **newly created** job. It logs one **overall progress line
+  every 5% or 30 seconds** (whichever comes first) plus the end-of-run summary,
+  and **no per-file lines**, so a nightly backup of a large tree no longer
+  buries its own errors under a file listing. Existing jobs keep the level they
+  were saved with — change it on the job if you want the quieter log. rsync
+  redraws its progress line several times a second with a bare carriage return;
+  the plugin now collapses those redraws instead of writing every one, so the
+  log viewer shows readable lines at **every** level rather than one enormous
+  smeared line.
+
 ### Fixed
+- **`Quiet` was not quiet.** rsync's `--log-file` has its own line format and
+  wrote one line per transferred file *regardless* of `-q`, so the level that
+  promised the least output still produced a full per-file listing. Both
+  *Quiet* and the new *Summary* level now suppress those lines.
 - `--contimeout` is no longer sent on SSH and Local transfers. rsync rejects it
   outright there (*"may only be used when connecting to an rsync daemon"*,
   exit 1), so any job that set it failed before transferring a single file.

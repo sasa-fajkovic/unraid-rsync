@@ -331,12 +331,35 @@ final class RsyncTest extends TestCase
 
     public function testLogLevelFlags(): void
     {
-        $this->assertSame(['-q'], Rsync::logLevelFlags('quiet'));
+        // --log-file-format= (EMPTY) is what actually silences the per-file
+        // lines: the --log-file fd has its own format and writes one line per
+        // transferred file regardless of -v/-q (verified against rsync 3.5.0).
+        $this->assertSame(['-q', '--log-file-format='], Rsync::logLevelFlags('quiet'));
+        $this->assertSame(['--info=progress2', '--log-file-format='], Rsync::logLevelFlags('summary'));
         $this->assertSame(['-v', '--info=stats2,progress2'], Rsync::logLevelFlags('normal'));
         $this->assertSame(['-vv', '--info=progress2,stats2', '--itemize-changes'], Rsync::logLevelFlags('verbose'));
         $this->assertSame(['-vvv', '--debug=all', '--stderr=all'], Rsync::logLevelFlags('debug'));
         // Unknown -> normal default.
         $this->assertSame(Rsync::logLevelFlags('normal'), Rsync::logLevelFlags('bogus'));
+
+        // `summary` must stay free of anything that reintroduces per-file lines
+        // or a second copy of the summary block.
+        $summary = Rsync::logLevelFlags('summary');
+        foreach (['-v', '-vv', '-vvv', '-q'] as $tok) {
+            $this->assertNotContains($tok, $summary, "summary must not carry $tok");
+        }
+        foreach ($summary as $tok) {
+            $this->assertStringNotContainsString('stats2', $tok, 'summary must not ask for stats2');
+        }
+
+        // Every level must silence or own the --log-file format explicitly:
+        // only the levels that WANT per-file lines may omit the override.
+        foreach (['quiet', 'summary'] as $lvl) {
+            $this->assertContains('--log-file-format=', Rsync::logLevelFlags($lvl), "$lvl must empty --log-file-format");
+        }
+        foreach (['normal', 'verbose', 'debug'] as $lvl) {
+            $this->assertNotContains('--log-file-format=', Rsync::logLevelFlags($lvl), "$lvl keeps per-file log lines");
+        }
     }
 
     public function testBuildArgvLocalNoSsh(): void
@@ -851,6 +874,7 @@ final class RsyncTest extends TestCase
         $this->assertSame([
             '/usr/bin/rsync',
             '-q',
+            '--log-file-format=',
             '--log-file=/rt/r.log',
             '--port=873',
             '--password-file=/rt/pass/tok',
@@ -881,6 +905,7 @@ final class RsyncTest extends TestCase
         $this->assertSame([
             '/usr/bin/rsync',
             '-q',
+            '--log-file-format=',
             '--log-file=/rt/r.log',
             '--port=873',
             '--',
@@ -902,6 +927,7 @@ final class RsyncTest extends TestCase
         $this->assertSame([
             '/usr/bin/rsync',
             '-q',
+            '--log-file-format=',
             '--log-file=/rt/r.log',
             '--port=' . Credentials::RSYNCD_PORT,
             '--',

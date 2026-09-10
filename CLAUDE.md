@@ -140,6 +140,27 @@ on, forked from, or derived from any other plugin.
   cells. All JS formatting goes through `window.urFmtLocal` from
   `ur_emit_time_helpers()` (`_options_form.php`), pinned to the `UR_TZ` the server
   emits.
+- **`--log-file-format=` (EMPTY) is the ONLY lever on per-file log lines.**
+  `-v`/`-q` control rsync's STDOUT; the `--log-file` fd has its own format
+  (default `%i %n%L`) and writes a line per transferred file **regardless of
+  `-v` or `-q`** — verified against rsync 3.5.0, where the `quiet` level still
+  produced a full per-file listing. So the two quiet levels (`quiet`, `summary`)
+  emit `--log-file-format=` in `Rsync::logLevelFlags()`; `summary` also carries
+  **no `-v`** (nothing per-file on stdout either) and **no `stats2`** (the
+  log-file fd already writes the one-line sent/received summary, so `stats2`
+  would print the whole block a second time). Do not "fix" a noisy log by
+  adding/removing `-v`.
+- **`Logger::sink()` is line-aware and throttles progress.** `--info=progress2`
+  redraws one status line with a bare `\r` several times a second and the
+  capture path is byte-oriented (`ProcIO` hands raw 8 KiB `fread`s), so the old
+  verbatim append smeared thousands of redraws into one unreadable line. The
+  sink now writes `\n`-terminated lines through unchanged and keeps at most one
+  `\r` redraw per **5 % step or 30 s** (`PROGRESS_MIN_PCT`/`PROGRESS_MIN_SECS`),
+  plus 100 % exactly once. Because it buffers to line boundaries, the Runner
+  **must** call `Logger::flushSink($runLog)` once the child has exited — it does,
+  after `Rsync::run` (before `enforceRunLogCap`) and in a `finally` around the
+  hook run. Anything feeding the sink a string with no trailing newline and
+  reading the file back immediately needs that flush.
 - **HTML-escape all output**; the log viewer renders `Logger::tail()` output, which
   is already escaped (log-XSS guard). Captured run output is also **redacted** of
   per-run tmpfs secret paths and **size-capped** before it is written

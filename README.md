@@ -99,6 +99,21 @@ Managed keys live in their own **Credentials** keychain tab.
   **aborted** (grey), **pending** (grey), **running** (blue, pulsing).
 - A **per-run log viewer**: pick any past run from a selector and watch the log
   tail update live (1-second poll while a run is in progress).
+- A **per-job log level**, so a nightly backup of a large tree does not bury its
+  own errors under a file listing:
+
+  | Level | What the run log gets |
+  | --- | --- |
+  | `Quiet` | errors and the end-of-run summary only |
+  | `Summary` | *(default for a new job)* + one overall **progress line every 5% or 30s** — no per-file lines |
+  | `Normal` | + a line per transferred file |
+  | `Verbose` | + itemised changes (`--itemize-changes`) and the full stats block |
+  | `Debug` | + rsync protocol debugging (`--debug=all`) — troubleshooting only, and large |
+
+  rsync redraws its progress line several times a second with a bare `\r`, so
+  the plugin collapses those redraws to one line per 5% step or 30 seconds
+  (whichever comes first) instead of writing every one. Existing jobs keep the
+  level they were saved with.
 - A **Status** tab showing the rolling cross-job plugin log and an
   **rsync-binary presence indicator** (detected path + the first line of
   `rsync --version`, or a clear warning if rsync is somehow absent).

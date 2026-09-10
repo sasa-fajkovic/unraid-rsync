@@ -88,6 +88,38 @@ final class RunnerTest extends TestCase
         return $id;
     }
 
+    /**
+     * Logger::sink() holds progress redraws back (5%/30s) and buffers an
+     * unterminated tail, so the Runner MUST flush it once rsync has exited -
+     * otherwise the final percentage and any newline-less last line would be
+     * silently dropped from the run log. This is the wiring test for that.
+     */
+    public function testRunnerFlushesTheSinkSoTheFinalProgressLineReachesTheLog(): void
+    {
+        Rsync::$runner = function (array $argv, $onOutput): int {
+            $this->trace[] = 'rsync';
+            // A realistic --info=progress2 burst: bare-\r redraws, the last of
+            // them inside the throttle window, and no trailing newline at all.
+            foreach ([0, 1, 2, 3, 99, 100] as $pct) {
+                $onOutput(sprintf('%12s %3d%%   2.93MB/s    0:00:01  ', number_format($pct * 419430), $pct) . "\r");
+            }
+            $onOutput('sent 41,953,721 bytes  received 146 bytes');
+            return 0;
+        };
+
+        $id  = $this->saveLocalJob('j-flush');
+        $res = Runner::run($id, false);
+        $this->assertSame(Rsync::STATE_SUCCESS, $res['state']);
+
+        $log = (string) @file_get_contents($res['runLog']);
+        $this->assertStringContainsString('sent 41,953,721 bytes', $log, 'the unterminated tail must be flushed');
+        $this->assertStringNotContainsString("\r", $log, 'no bare CR may reach the run log');
+        // The sub-5% redraws were dropped; 0% and 100% survive.
+        $this->assertStringContainsString('  0%', $log);
+        $this->assertStringContainsString('100%', $log);
+        $this->assertStringNotContainsString('  2%', $log);
+    }
+
     public function testHappyPathOrderingPreThenPairsThenPost(): void
     {
         $rsyncCalls = 0;
@@ -1490,8 +1522,8 @@ final class RunnerTest extends TestCase
             '--partial',
             '--mkpath',
             '--contimeout=45',
-            '-v',
-            '--info=stats2,progress2',
+            '--info=progress2',
+            '--log-file-format=',
             '--log-file=' . $res['runLog'],
             '--port=873',
             '--password-file=' . $passDuringRun,
@@ -1550,8 +1582,8 @@ final class RunnerTest extends TestCase
             '-t',
             '--partial',
             '--mkpath',
-            '-v',
-            '--info=stats2,progress2',
+            '--info=progress2',
+            '--log-file-format=',
             '--log-file=' . $res['runLog'],
             '--port=873',
             '--',
@@ -1827,8 +1859,8 @@ final class RunnerTest extends TestCase
             '-t',
             '--partial',
             '--mkpath',
-            '-v',
-            '--info=stats2,progress2',
+            '--info=progress2',
+            '--log-file-format=',
             '--log-file=' . $res['runLog'],
             '--',
             '/mnt/user/src/',
