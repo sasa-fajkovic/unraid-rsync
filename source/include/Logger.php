@@ -519,37 +519,55 @@ class Logger
      * A \n ends a REAL line - always written. A bare \r ends a progress
      * REDRAW, which by definition the next redraw supersedes, so only one per
      * PROGRESS_MIN_PCT step / PROGRESS_MIN_SECS window is written and the rest
-     * are dropped. \r\n is a line ending, not a redraw.
+     * are dropped. \r\n is a LINE ending, not a redraw.
+     *
+     * Which is why a \r that is the LAST byte we hold is left in the buffer:
+     * until the next byte arrives it is genuinely unknowable whether it ends a
+     * redraw or is the first half of a \r\n, and ProcIO's 8 KiB freads can cut
+     * anywhere. Deciding early ate the line - the \r was consumed as a redraw
+     * (dropped by the throttle) and its \n then closed an empty segment.
      */
     private static function consume(string $path, string $chunk): void
     {
         $st = self::$sinkState[$path] ?? ['buf' => '', 'pending' => '', 'pct' => -1, 'at' => 0.0];
-        $st['buf'] .= str_replace("\r\n", "\n", $chunk);
+        $st['buf'] .= $chunk;
 
         while (true) {
             $nl = strpos($st['buf'], "\n");
             $cr = strpos($st['buf'], "\r");
-            if ($nl === false && $cr === false) {
-                break;
-            }
-            $isLine = ($nl !== false && ($cr === false || $nl < $cr));
-            $at     = $isLine ? $nl : $cr;
-            $seg    = substr($st['buf'], 0, $at);
-            $st['buf'] = substr($st['buf'], $at + 1);
 
-            if ($isLine) {
-                // A real line supersedes any redraw still held back: the held
-                // one is stale and printing it here would read out of order.
-                $st['pending'] = '';
-                self::write($path, $seg . "\n");
-                continue;
+            if ($nl !== false && ($cr === false || $nl < $cr)) {
+                $seg = substr($st['buf'], 0, $nl);
+                $st['buf'] = substr($st['buf'], $nl + 1);
+            } elseif ($cr !== false) {
+                if ($cr === strlen($st['buf']) - 1) {
+                    break; // trailing \r: wait for the byte that disambiguates it
+                }
+                $seg  = substr($st['buf'], 0, $cr);
+                $crlf = $st['buf'][$cr + 1] === "\n";
+                $st['buf'] = substr($st['buf'], $cr + ($crlf ? 2 : 1));
+                if (!$crlf) {
+                    self::throttleProgress($path, $seg, $st);
+                    continue;
+                }
+            } else {
+                break; // no terminator held: the rest is a partial line
             }
-            self::throttleProgress($path, $seg, $st);
+
+            // A real line supersedes any redraw still held back: the held one is
+            // stale and printing it here would read out of order.
+            $st['pending'] = '';
+            self::write($path, $seg . "\n");
         }
 
         // Never hold an unterminated blob forever (a child emitting neither
-        // \n nor \r would otherwise buffer without bound).
+        // \n nor \r would otherwise buffer without bound). Land the held-back
+        // redraw first - it was produced BEFORE these bytes.
         if (strlen($st['buf']) > self::SINK_BUF_MAX) {
+            if (trim($st['pending']) !== '') {
+                self::write($path, rtrim($st['pending']) . "\n");
+                $st['pending'] = '';
+            }
             self::write($path, $st['buf']);
             $st['buf'] = '';
         }

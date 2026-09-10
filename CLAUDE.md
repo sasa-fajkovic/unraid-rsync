@@ -156,7 +156,14 @@ on, forked from, or derived from any other plugin.
   verbatim append smeared thousands of redraws into one unreadable line. The
   sink now writes `\n`-terminated lines through unchanged and keeps at most one
   `\r` redraw per **5 % step or 30 s** (`PROGRESS_MIN_PCT`/`PROGRESS_MIN_SECS`),
-  plus 100 % exactly once. Because it buffers to line boundaries, the Runner
+  plus 100 % exactly once. **A `\r` that is the last byte held is left in the
+  buffer** — until the next byte arrives it is unknowable whether it ends a
+  redraw or is the first half of a `\r\n`, and an fread can cut between them.
+  Deciding early ATE THE LINE (the `\r` was consumed as a redraw and dropped by
+  the throttle, its orphaned `\n` then writing a blank line); `LoggerTest`
+  replays one stream at chunk sizes 1..8192 and asserts the log is identical, so
+  never reintroduce a per-chunk `str_replace("\r\n", "\n")`. Because it buffers
+  to line boundaries, the Runner
   **must** call `Logger::flushSink($runLog)` once the child has exited — it does,
   after `Rsync::run` (before `enforceRunLogCap`) and in a `finally` around the
   hook run. Anything feeding the sink a string with no trailing newline and
