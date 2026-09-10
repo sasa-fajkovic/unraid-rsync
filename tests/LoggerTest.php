@@ -238,7 +238,7 @@ final class LoggerTest extends TestCase
         $sink = Logger::sink($path);
         // A representative debug-level rsync line exposing the -e command.
         $sink('opening connection using: ssh -i ' . $keyPath
-            . ' -o UserKnownHostsFile=' . $khPath . ' -p 22 sasa@rpi rsync --server\n');
+            . ' -o UserKnownHostsFile=' . $khPath . " -p 22 sasa@rpi rsync --server\n");
         // And an event line goes through the same redacting append() path.
         Logger::event($path, 'j-ssh', 'transport key at ' . $keyPath);
 
@@ -266,7 +266,7 @@ final class LoggerTest extends TestCase
 
         $path  = Logger::openRun('j-ssh2', 1750000000);
         $scratch = $base . '/keys/' . $token . '/.ur-secret.AB12';
-        Logger::sink($path)('wrote ' . $scratch . ' then renamed\n');
+        Logger::sink($path)('wrote ' . $scratch . " then renamed\n");
 
         $log = file_get_contents($path);
         $this->assertStringNotContainsString($scratch, $log);
@@ -498,6 +498,309 @@ final class LoggerTest extends TestCase
         $this->assertStringNotContainsString('<script>', $out);
         $this->assertStringContainsString('&lt;script&gt;', $out);
         $this->assertStringContainsString('[redacted]', $out);
+    }
+
+    // --- progress-redraw collapsing in sink() --------------------------------
+
+    /**
+     * Build the shape rsync's --info=progress2 actually writes. Verified byte
+     * for byte against rsync 3.5.0: the carriage return LEADS each redraw
+     * (`\r<p1>\r<p2>...\r<pN>\n`, exactly one LF in the whole stream, at the
+     * very end), and each line is padded with trailing spaces to erase the
+     * previous, longer one.
+     */
+    private function progressRedraw(int $pct): string
+    {
+        return "\r" . sprintf('%15s %3d%%   2.93MB/s    0:00:12  ', number_format($pct * 419430), $pct);
+    }
+
+    public function testSinkCollapsesProgressRedrawsToOneLinePerPercentageStep(): void
+    {
+        $path = Logger::openRun('j-prog', 1750000000);
+        $sink = Logger::sink($path);
+
+        // Every 1% from 0 to 100 - what a real run emits many times a second.
+        for ($pct = 0; $pct <= 100; $pct++) {
+            $sink($this->progressRedraw($pct));
+        }
+        Logger::flushSink($path);
+
+        $lines = array_values(array_filter(explode("\n", (string) file_get_contents($path)), 'strlen'));
+        // 0% then every +5% step: exactly 21 lines out of 101 redraws in.
+        $this->assertCount(21, $lines, 'progress must be throttled, not appended verbatim');
+        $this->assertSame(
+            range(0, 100, Logger::PROGRESS_MIN_PCT),
+            array_map(static fn(string $l): int => (int) (preg_match('/(\d+)%/', $l, $m) ? $m[1] : -1), $lines)
+        );
+        $this->assertStringContainsString('100%', end($lines), 'the log must end on the final percentage');
+        // No bare CR survives into the file, and no trailing redraw padding.
+        $this->assertStringNotContainsString("\r", (string) file_get_contents($path));
+        foreach ($lines as $line) {
+            $this->assertSame(rtrim($line), $line, 'progress padding must be trimmed');
+        }
+    }
+
+    public function testSinkDropsRedrawsInsideTheThrottleWindow(): void
+    {
+        $path = Logger::openRun('j-prog2', 1750000000);
+        $sink = Logger::sink($path);
+
+        // A redraw is decided one chunk late: its trailing \r could still turn
+        // out to be the first half of a \r\n, so it is held until the next byte.
+        $sink($this->progressRedraw(1));
+        $this->assertSame('', (string) file_get_contents($path), 'a trailing \r waits to be disambiguated');
+
+        // The 1% redraw lands as soon as the next one proves the \r was bare.
+        $sink($this->progressRedraw(2));
+        $before = (string) file_get_contents($path);
+        $this->assertStringContainsString('1%', $before);
+
+        // 2% onward: under +5% and inside the 30s window, nothing more lands.
+        foreach ([3, 4, 5] as $pct) {
+            $sink($this->progressRedraw($pct));
+        }
+        $this->assertSame($before, (string) file_get_contents($path), 'sub-step redraws must be dropped');
+
+        // Crossing the step writes exactly one more line (once disambiguated).
+        $sink($this->progressRedraw(6));
+        $sink($this->progressRedraw(7));
+        $lines = array_values(array_filter(explode("\n", (string) file_get_contents($path)), 'strlen'));
+        $this->assertCount(2, $lines);
+        $this->assertStringContainsString('6%', $lines[1]);
+    }
+
+    /**
+     * REGRESSION (PR #155 review, found independently by Copilot and a review
+     * agent). ProcIO's 8 KiB freads can cut anywhere, including between the \r
+     * and the \n of a CRLF line ending. Deciding the \r's meaning on arrival
+     * treated it as a bare progress redraw - so the line was handed to the
+     * throttle and DROPPED, and its orphaned \n then wrote a blank line.
+     */
+    public function testSinkHandlesCrlfSplitAcrossTwoChunks(): void
+    {
+        $path = Logger::openRun('j-crlf', 1750000000);
+        $sink = Logger::sink($path);
+
+        $sink("docs/a.txt\r");
+        $sink("\ndocs/b.txt\n");
+        Logger::flushSink($path);
+
+        $this->assertSame("docs/a.txt\ndocs/b.txt\n", (string) file_get_contents($path));
+    }
+
+    public function testSinkDoesNotLoseACrlfLineSplitInsideTheThrottleWindow(): void
+    {
+        // The nastier shape of the same bug: with the throttle window already
+        // open, the misread \r sent a REAL line into throttleProgress(), which
+        // dropped it outright - a lost error or itemize line, not a lost redraw.
+        $path = Logger::openRun('j-crlf2', 1750000000);
+        $sink = Logger::sink($path);
+
+        $sink($this->progressRedraw(10));
+        $sink($this->progressRedraw(11));           // opens the throttle window
+        $sink("rsync: some error\r");
+        $sink("\nnext/file.txt\n");
+        Logger::flushSink($path);
+
+        $log = (string) file_get_contents($path);
+        $this->assertStringContainsString('rsync: some error', $log, 'a CRLF line must never be throttled away');
+        $this->assertStringContainsString('next/file.txt', $log);
+        $this->assertStringNotContainsString("\n\n", $log, 'no orphaned blank line');
+    }
+
+    public function testSinkKeepsAHeldRedrawAheadOfALaterUnterminatedBlob(): void
+    {
+        // The SINK_BUF_MAX escape hatch must not write newer bytes BEFORE the
+        // older redraw still held back by the throttle.
+        $path = Logger::openRun('j-order', 1750000000);
+        $sink = Logger::sink($path);
+
+        $sink($this->progressRedraw(10));
+        $sink($this->progressRedraw(11));   // 11% is held (under the 5% step)
+        $sink(str_repeat('h', Logger::SINK_BUF_MAX + 1));
+
+        $log = (string) file_get_contents($path);
+        $this->assertStringContainsString('11%', $log, 'the held redraw must be written, not left behind');
+        $this->assertLessThan(
+            (int) strpos($log, 'hhhh'),
+            (int) strpos($log, '11%'),
+            'the held redraw was produced first and must be written first'
+        );
+    }
+
+    public function testSinkPassesRealLinesThroughVerbatimAndSplitAcrossChunks(): void
+    {
+        $path = Logger::openRun('j-lines', 1750000000);
+        $sink = Logger::sink($path);
+
+        // A per-file listing line, delivered split across two reads the way
+        // ProcIO's 8 KiB freads actually cut it.
+        $sink("docs/a.txt\ndocs/b");
+        $sink(".txt\n");
+        // \r\n is a LINE ending, not a progress redraw.
+        $sink("sub/c.txt\r\n");
+        Logger::flushSink($path);
+
+        $this->assertSame(
+            "docs/a.txt\ndocs/b.txt\nsub/c.txt\n",
+            (string) file_get_contents($path)
+        );
+    }
+
+    public function testFlushSinkLandsAnUnterminatedTailAndIsIdempotent(): void
+    {
+        $path = Logger::openRun('j-flush', 1750000000);
+        $sink = Logger::sink($path);
+
+        // rsync's final line, or a hook's last echo, with no trailing newline.
+        $sink('sent 41,953,721 bytes  received 146 bytes');
+        $this->assertSame('', (string) file_get_contents($path), 'a partial line waits for its newline');
+
+        Logger::flushSink($path);
+        $this->assertSame("sent 41,953,721 bytes  received 146 bytes\n", (string) file_get_contents($path));
+
+        Logger::flushSink($path);
+        $this->assertSame(
+            "sent 41,953,721 bytes  received 146 bytes\n",
+            (string) file_get_contents($path),
+            'flushSink must be idempotent'
+        );
+    }
+
+    public function testSinkNeverBuffersAnUnterminatedBlobWithoutBound(): void
+    {
+        $path = Logger::openRun('j-blob', 1750000000);
+        $sink = Logger::sink($path);
+
+        // A child emitting neither \n nor \r must not grow the buffer forever.
+        $sink(str_repeat('x', Logger::SINK_BUF_MAX + 10));
+        $this->assertGreaterThan(Logger::SINK_BUF_MAX, filesize($path));
+    }
+
+    public function testSinkRedactsSecretPathsArrivingInsideAProgressRedraw(): void
+    {
+        $base    = '/tmp/unraid.rsync';
+        $token   = 'c-prog-1-abcdef';
+        $keyPath = $base . '/keys/' . $token;
+        Logger::setRedaction([$keyPath], $base, $token);
+
+        $path = Logger::openRun('j-prog3', 1750000000);
+        $sink = Logger::sink($path);
+        // Buffering must not let a secret slip past redact().
+        $sink('rsync: could not read ' . $keyPath);
+        Logger::flushSink($path);
+
+        $log = (string) file_get_contents($path);
+        $this->assertStringNotContainsString($keyPath, $log);
+        $this->assertStringContainsString(Logger::REDACT_PLACEHOLDER, $log);
+    }
+
+    /**
+     * The completion line is the one fragment the throttle must never eat: at
+     * 99%-then-100% the step condition (|100-99| < 5) drops it, and a real line
+     * arriving next (rsync's summary, or an error) supersedes whatever is held
+     * back. So 100% is due once, unconditionally.
+     *
+     * rsync does print its final redraw two or three times with slightly
+     * different rate/ETA figures, so the log can end on two 100% lines; they
+     * are genuinely different redraws, not a repeat this code produced.
+     */
+    public function testSinkAlwaysLandsTheCompletionLine(): void
+    {
+        $path = Logger::openRun('j-done', 1750000000);
+        $sink = Logger::sink($path);
+
+        $sink($this->progressRedraw(0));
+        $sink($this->progressRedraw(99));
+        $sink($this->progressRedraw(100));
+        $sink("sent 41,953,721 bytes  received 146 bytes\n");
+        Logger::flushSink($path);
+
+        $log = (string) file_get_contents($path);
+        $this->assertStringContainsString('100%', $log, '100% must never be throttled away');
+        $this->assertStringContainsString('sent 41,953,721 bytes', $log);
+        // 0%, 99%, 100% - and no more than that from four writes.
+        $lines = array_values(array_filter(explode("\n", $log), 'strlen'));
+        $this->assertLessThanOrEqual(4, count($lines));
+    }
+
+    /**
+     * progress2's percentage is NOT monotonic: with incremental recursion the
+     * denominator grows as the file list is discovered, so the figure drops and
+     * can touch a spurious 100% early. Against a high-water mark that killed the
+     * 5% rule for the rest of the run - the promise silently degraded to "one
+     * line per 30s" on exactly the big-tree jobs this feature is for.
+     */
+    public function testSinkKeepsSteppingAfterThePercentageGoesBackwards(): void
+    {
+        $path = Logger::openRun('j-nonmono', 1750000000);
+        $sink = Logger::sink($path);
+
+        $sink($this->progressRedraw(100));           // spurious early 100%
+        foreach (range(40, 79) as $pct) {            // then the real climb
+            $sink($this->progressRedraw($pct));
+        }
+        Logger::flushSink($path);
+
+        $lines = array_values(array_filter(explode("\n", (string) file_get_contents($path)), 'strlen'));
+        // 100, then 40/45/.../75, then the flushed 79: nowhere near one line.
+        $this->assertGreaterThanOrEqual(8, count($lines), 'the 5% rule must survive a backwards jump');
+    }
+
+    /**
+     * The property that makes the state machine trustworthy: WHERE the reads cut
+     * must not change what lands in the log. ProcIO's fread size is not a
+     * contract, and a 1-byte replay cuts every single \r\n pair, so if any
+     * boundary case is mishandled these runs disagree.
+     */
+    public function testSinkOutputIsIndependentOfChunkBoundaries(): void
+    {
+        // Bare-\r redraws, a CRLF line, an LF line, and an unterminated tail.
+        $stream = $this->progressRedraw(0)
+            . $this->progressRedraw(7)
+            . "docs/a.txt\r\n"
+            . $this->progressRedraw(20)
+            . "docs/b.txt\n"
+            . $this->progressRedraw(100)
+            . 'sent 123 bytes  received 45 bytes';
+
+        $outputs = [];
+        foreach ([1, 2, 3, 7, 64, 8192] as $size) {
+            $path = Logger::openRun('j-cs' . $size, 1750000000);
+            $sink = Logger::sink($path);
+            foreach (str_split($stream, $size) as $chunk) {
+                $sink($chunk);
+            }
+            Logger::flushSink($path);
+            $outputs[$size] = (string) file_get_contents($path);
+        }
+
+        $this->assertCount(1, array_unique($outputs), 'chunk size must not change the log');
+        $first = reset($outputs);
+        $this->assertStringNotContainsString("\r", $first);
+        $this->assertStringNotContainsString("\n\n", $first);
+        $this->assertStringContainsString("docs/a.txt\n", $first);
+        $this->assertStringContainsString("docs/b.txt\n", $first);
+        $this->assertStringContainsString('sent 123 bytes', $first);
+    }
+
+    public function testSinkThrottleStateIsPerSinkNotPerProcess(): void
+    {
+        // The Runner builds a fresh sink per rsync pair; pair #2 must log its
+        // own first progress line rather than inheriting pair #1's percentage.
+        $path = Logger::openRun('j-pairs', 1750000000);
+
+        $first = Logger::sink($path);
+        $first($this->progressRedraw(90));
+        Logger::flushSink($path);
+
+        $second = Logger::sink($path);
+        $second($this->progressRedraw(2));
+        Logger::flushSink($path);
+
+        $lines = array_values(array_filter(explode("\n", (string) file_get_contents($path)), 'strlen'));
+        $this->assertCount(2, $lines);
+        $this->assertStringContainsString('2%', $lines[1], "a new pair's first redraw must land");
     }
 
     public function testPluginLogIsNotSizeCapped(): void

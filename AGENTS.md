@@ -149,6 +149,60 @@ on, forked from, or derived from any other plugin.
   cells. All JS formatting goes through `window.urFmtLocal` from
   `ur_emit_time_helpers()` (`_options_form.php`), pinned to the `UR_TZ` the server
   emits.
+- **`--log-file-format=` (EMPTY) is the ONLY lever on per-file log lines.**
+  `-v`/`-q` control rsync's STDOUT; the `--log-file` fd has its own format
+  (default `%i %n%L`) and writes a line per transferred file **regardless of
+  `-v` or `-q`** — verified against rsync 3.5.0, where the `quiet` level still
+  produced a full per-file listing. So the two quiet levels (`quiet`, `summary`)
+  emit `--log-file-format=` in `Rsync::logLevelFlags()`; `summary` also carries
+  **no `-v`** (nothing per-file on stdout either) and **no `stats2`** (the
+  log-file fd already writes the one-line sent/received summary, so `stats2`
+  would print the whole block a second time). Do not "fix" a noisy log by
+  adding or removing `-v`. **A dry run is never quieter than `normal`**
+  (`buildArgv`'s `$effectiveLevel`, the only place a level is overridden): the
+  quiet levels suppress exactly the per-file lines a dry run exists to show, and
+  at `summary` a `--delete` preview named neither a file nor a deletion nor even
+  a count. What the quiet levels do NOT hide is errors (they arrive twice —
+  rsync's own log-file line and captured stderr) or `deleting <path>` lines:
+  the empty format only kills the `%i %n` per-file format, and rsync's delete
+  path falls back to a plain `deleting <path>`. So there is no data-safety
+  regression on `--delete`.
+- **`Logger::sink()` is line-aware and throttles progress.** `--info=progress2`
+  redraws one status line with a bare `\r` several times a second and the
+  capture path is byte-oriented (`ProcIO` hands raw 8 KiB `fread`s), so the old
+  verbatim append smeared thousands of redraws into one unreadable line. The
+  sink writes `\n`-terminated lines through unchanged and keeps at most one
+  `\r` redraw per **5 % step or 30 s** (`PROGRESS_MIN_PCT`/`PROGRESS_MIN_SECS`),
+  plus 100 % once unconditionally (the step rule alone drops it: |100-99| < 5,
+  and the line that follows supersedes whatever the throttle is holding).
+  Three traps, each paid for once:
+  1. **A `\r` that is the last byte held stays in the buffer.** Until the next
+     byte arrives it is unknowable whether it ends a redraw or is the first half
+     of a `\r\n`, and an fread cuts anywhere. Deciding early ATE THE LINE — the
+     `\r` was read as a redraw and dropped by the throttle, its orphaned `\n`
+     writing a blank line. `LoggerTest` replays one stream at chunk sizes
+     1..8192 and asserts the log is byte-identical, so never reintroduce a
+     per-chunk `str_replace("\r\n", "\n")`.
+  2. **The throttle keys off the ABSOLUTE change in percentage, never a
+     high-water mark.** progress2's figure is not monotonic — incremental
+     recursion grows the denominator, so it drops and can touch a spurious 100 %
+     early — and a high-water mark let one early 100 % kill the 5 % rule for the
+     rest of the run, silently degrading the promise to "one line per 30 s".
+  3. **rsync writes the `\r` as a PREFIX** (`\r<p1>\r<p2>…\r<pN>\n`, exactly one
+     LF, at the very end), so the last fragment always waits in the buffer for
+     it. That is why the flush is load-bearing, not belt-and-braces, and why a
+     fixture modelling `\r` as a suffix tests the wrong shape. rsync also
+     repeats that final redraw with slightly different rate/ETA figures, so a
+     log legitimately ends on two 100 % lines.
+
+  Because it buffers to line boundaries, the Runner **must** call
+  `Logger::flushSink($runLog)` once the child has exited — it does, after
+  `Rsync::run` (before `enforceRunLogCap`), in a `finally` around the hook run,
+  and at the **top** of the run's outer `finally`. That last one has to precede
+  the postHook block: `runHook()` opens a new sink on the same path and `sink()`
+  RESETS the per-path state, so a flush placed after the hook would find nothing
+  left to rescue. Anything feeding the sink a string with no trailing newline
+  and reading the file back immediately needs that flush.
 - **HTML-escape all output**; the log viewer renders `Logger::tail()` output, which
   is already escaped (log-XSS guard). Captured run output is also **redacted** of
   per-run tmpfs secret paths and **size-capped** before it is written
