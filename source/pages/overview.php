@@ -34,20 +34,9 @@ try {
 } catch (Throwable $e) {
     $jobs = [];
 }
+ur_emit_badge_assets(); /* the ONE badge palette + window.urBadge */
 ?>
 <style>
-.ur-badge {
-  display: inline-block; min-width: 70px; padding: 2px 10px; border-radius: 10px;
-  font-size: 11px; font-weight: bold; text-align: center; color: #fff;
-  line-height: 1.6; white-space: nowrap;
-}
-.ur-badge-success { background: #1c7d3f; }
-.ur-badge-warning { background: #b15c00; color: #1a1a1a; }
-.ur-badge-failed  { background: var(--red-800, #b71c1c); }
-.ur-badge-aborted { background: #555; }
-.ur-badge-pending { background: #777; }
-.ur-badge-running { background: #1565c0; animation: ur-ov-pulse 1.3s ease-in-out infinite; }
-@keyframes ur-ov-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.55; } }
 .ur-ov-table { width: 100%; border-collapse: collapse; margin-top: 8px; }
 .ur-ov-table th, .ur-ov-table td { padding: 7px 10px; text-align: left; border-bottom: 1px solid var(--border-color, #444); }
 .ur-ov-table td.ur-ov-name { font-weight: bold; word-break: break-word; }
@@ -96,24 +85,6 @@ try {
   'use strict';
   var STATUS_URL = <?=ur_js($handlerUrl)?> + '?action=getStatus';
 
-  var BADGE_CLASSES = ['ur-badge-running','ur-badge-success','ur-badge-warning','ur-badge-failed','ur-badge-aborted','ur-badge-pending'];
-  function badgeClassFor(state) {
-    switch ((state || '').toUpperCase()) {
-      case 'RUNNING': return 'ur-badge-running';
-      case 'SUCCESS': return 'ur-badge-success';
-      case 'WARNING':
-      case 'PARTIAL': return 'ur-badge-warning';
-      case 'FAILED':
-      case 'TIMEOUT': return 'ur-badge-failed';
-      case 'ABORTED': return 'ur-badge-aborted';
-      default:        return 'ur-badge-pending';
-    }
-  }
-  function labelFor(state) {
-    var s = (state || '').toUpperCase();
-    return s ? s.charAt(0) + s.slice(1).toLowerCase() : 'Pending';
-  }
-
   /* Formats in the SERVER's timezone, not the browser's - see
    * ur_emit_time_helpers() in _options_form.php. */
   /* Late-bound: never capture window.urFmtLocal by value, so a page that emits
@@ -147,11 +118,7 @@ try {
       if (s.running) { anyRunning = true; }
       // state badge
       var b = tr.querySelector('.ur-ov-state .ur-badge');
-      if (b) {
-        BADGE_CLASSES.forEach(function (c) { b.classList.remove(c); });
-        b.classList.add(badgeClassFor(s.state));
-        b.textContent = s.running ? 'Running' : labelFor(s.state);
-      }
+      if (b) { window.urBadge.apply(b, s.running ? 'RUNNING' : s.state); }
       // last run
       var lc = tr.querySelector('.ur-ov-last');
       if (lc) {

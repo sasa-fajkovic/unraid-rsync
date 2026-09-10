@@ -191,17 +191,6 @@ class Config
         return $n;
     }
 
-    /** The effective retention from the loaded config (clamped). */
-    public static function retention(): int
-    {
-        try {
-            $cfg = self::load();
-        } catch (Throwable $e) {
-            return self::DEFAULT_RETENTION;
-        }
-        return self::clampRetention($cfg['global']['retention'] ?? self::DEFAULT_RETENTION);
-    }
-
     /**
      * Confine a user-supplied directory to an Unraid storage path, returning the
      * cleaned absolute path or '' (meaning "unset"). Shared by sanitizeLogDir()

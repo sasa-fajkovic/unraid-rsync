@@ -19,7 +19,7 @@ final class HistoryTest extends TestCase
     protected function tearDown(): void
     {
         foreach ($this->ids as $id) {
-            History::delete($id);
+            @unlink(History::path($id));
         }
         $this->ids = [];
     }
@@ -103,15 +103,6 @@ final class HistoryTest extends TestCase
         // Under-cap prune is a no-op (no data loss).
         History::prune($id, 10);
         $this->assertSame(3, History::list($id, 0, 25)['total']);
-    }
-
-    public function testDeleteRemovesHistory(): void
-    {
-        $id = $this->id('del');
-        History::append($id, $this->rec());
-        $this->assertSame(1, History::list($id, 0, 25)['total']);
-        History::delete($id);
-        $this->assertSame(0, History::list($id, 0, 25)['total']);
     }
 
     public function testMissingJobListsEmpty(): void

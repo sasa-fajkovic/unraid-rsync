@@ -12,6 +12,13 @@ user-facing highlights.
 ## [Unreleased]
 
 ### Added
+- **Host key pinning.** The first successful connection on an `accept-new`
+  Connection (a scheduled run or **Test connection**) now pins the host key it
+  saw into the Connection, making `accept-new` a real trust-on-first-use
+  instead of trusting whatever key the host presents on every run. A
+  subsequently changed key then fails closed instead of being silently
+  re-accepted.
+
 - **rsync daemon (rsyncd) transport.** A Connection now has a **Transport** —
   *SSH* or *rsync daemon (rsyncd)* — and a job a matching `DAEMON` transport,
   which talks rsync's own wire protocol straight to a TCP port (873 by default)
@@ -99,6 +106,21 @@ user-facing highlights.
   global value previously reached rsync unchecked.
 - Dashboard tile "open plugin" link now points at the canonical
   `/Settings/UnraidRsync` (restores the highlighted Settings nav).
+
+### Changed
+- A `TIMEOUT` run now renders as a warning badge on every tab and the
+  dashboard tile. History, Overview and the Dashboard previously showed it as
+  a failure.
+- History's failed log-download now reports inline instead of in a popup.
+
+### Security
+- The CSRF token is read from the POST body only, never from the query string.
+- `ssh-keygen`/`ssh-keyscan` scratch directories are confined to the plugin's
+  0700 runtime dir, with symlink-safe cleanup.
+
+### Removed
+- Unused backend methods with no user-facing effect: `Config::retention`,
+  `Notify::init`/`buildInitCommand`, `History::listAll`/`delete`.
 
 ### Changed (internal)
 - Added a php-cs-fixer formatting gate, `.editorconfig`, commitlint on PR titles,

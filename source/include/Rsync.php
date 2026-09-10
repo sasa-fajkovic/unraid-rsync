@@ -32,6 +32,7 @@ require_once __DIR__ . '/Job.php';
 require_once __DIR__ . '/Ssh.php';
 require_once __DIR__ . '/Credentials.php';
 require_once __DIR__ . '/ProcIO.php';
+require_once __DIR__ . '/Util.php';
 
 class Rsync
 {
@@ -205,14 +206,7 @@ class Rsync
         if (!static::rsyncAvailable()) {
             return '';
         }
-        $out = static::runVersionProbe(static::rsyncPath());
-        foreach (preg_split('/\r?\n/', $out) ?: [] as $line) {
-            $line = trim($line);
-            if ($line !== '') {
-                return $line;
-            }
-        }
-        return '';
+        return Util::firstLine(static::runVersionProbe(static::rsyncPath()));
     }
 
     /**

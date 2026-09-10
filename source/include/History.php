@@ -32,6 +32,8 @@ if (!defined('UR_CONFIG_BASE')) {
     define('UR_CONFIG_BASE', '/boot/config/plugins/unraid.rsync');
 }
 
+require_once __DIR__ . '/Util.php';
+
 class History
 {
     /** Default records kept per job until the retention setting wires in (PR-E). */
@@ -39,21 +41,6 @@ class History
 
     /** Hard ceiling on records kept, mirroring the retention setting's max. */
     const MAX_KEEP = 9999;
-
-    /**
-     * Sanitise a job id for use as a filename segment. Mirrors
-     * Runner::writeSummary / the SEC-01 safeId helpers: strip anything that
-     * isn't a safe filename char, and collapse a pure-dots result (traversal)
-     * to a literal.
-     */
-    private static function safeId(string $jobId): string
-    {
-        $clean = preg_replace('/[^A-Za-z0-9._-]/', '', $jobId);
-        if ($clean === '' || $clean === null || preg_match('/^\.+$/', $clean)) {
-            return 'unknown';
-        }
-        return $clean;
-    }
 
     /** The runs/ directory on the flash (shared with the last-run summaries). */
     private static function dir(): string
@@ -64,7 +51,7 @@ class History
     /** Absolute path of a job's history file. */
     public static function path(string $jobId): string
     {
-        return self::dir() . '/' . self::safeId($jobId) . '.history.jsonl';
+        return self::dir() . '/' . Util::safeFileId($jobId) . '.history.jsonl';
     }
 
     /**
@@ -195,25 +182,6 @@ class History
     }
 
     /**
-     * Paginated newest-first view across ALL jobs (see allSorted). Same return
-     * shape as list(); each run carries a `jobId`.
-     *
-     * @return array{total:int,offset:int,limit:int,runs:array<int,array<string,mixed>>}
-     */
-    public static function listAll(int $offset = 0, int $limit = 25): array
-    {
-        $offset  = max(0, $offset);
-        $limit   = max(1, min(100, $limit));
-        $records = self::allSorted();
-        return [
-            'total'  => count($records),
-            'offset' => $offset,
-            'limit'  => $limit,
-            'runs'   => array_values(array_slice($records, $offset, $limit)),
-        ];
-    }
-
-    /**
      * Prune to the newest $keep records. LAZY: only rewrites the file when it is
      * actually over the cap (so a run that doesn't exceed the cap pays no extra
      * flash write). Atomic temp + rename. Best-effort; never throws.
@@ -241,18 +209,6 @@ class History
         @chmod($tmp, 0644);
         if (!@rename($tmp, $path)) {
             @unlink($tmp);
-        }
-    }
-
-    /**
-     * Remove a job's history file (best-effort). Called when a job is deleted so
-     * orphaned history files don't accumulate on the flash.
-     */
-    public static function delete(string $jobId): void
-    {
-        $path = self::path($jobId);
-        if (is_file($path)) {
-            @unlink($path);
         }
     }
 }

@@ -308,15 +308,13 @@ function ur_csrf_token_candidates(): array
  * csrf_token, and $GLOBALS['var']['csrf_token'] WAS populated). The raw request
  * body still carries the field, so we recover it from there.
  *
- * Order: $_POST -> $_REQUEST -> $_GET -> the raw urlencoded body (php://input).
+ * Order: $_POST -> the raw urlencoded body (php://input).
  * $rawInput is injectable for tests (php://input is not writable under CLI).
  */
 function ur_supplied_csrf_token(?string $rawInput = null): string
 {
-    foreach ([$_POST, $_REQUEST, $_GET] as $src) {
-        if (isset($src['csrf_token']) && is_string($src['csrf_token']) && $src['csrf_token'] !== '') {
-            return (string) $src['csrf_token'];
-        }
+    if (isset($_POST['csrf_token']) && is_string($_POST['csrf_token']) && $_POST['csrf_token'] !== '') {
+        return (string) $_POST['csrf_token'];
     }
     // Fallback: pull ONLY the csrf_token field out of the raw urlencoded body
     // (the front controller can strip it from $_POST but does not rewrite the raw
@@ -738,7 +736,8 @@ function ur_action_save_config(): void
     // History is allowed to pile up so a job's past executions remain inspectable
     // (and re-attach automatically if a same-named job is re-created, since job
     // ids are stable name slugs). Per-job growth is still bounded by the
-    // retention prune in Runner. History::delete is reserved for uninstall.
+    // retention prune in Runner. History is never deleted by the plugin;
+    // uninstall removes the whole /boot plugin dir, history included.
 
     // Re-sync the live crontab to the just-saved jobs (per-job schedules /
     // enabled state). Best-effort: the save already succeeded, so a cron-sync
@@ -1995,6 +1994,35 @@ function ur_action_get_status(): void
 }
 
 /**
+ * Resolve the `id` (+ optional `run`) GET params shared by getJobLog and
+ * downloadJobLog into a job id + log path, sending the appropriate 400 and
+ * returning null when either param is invalid.
+ *
+ * @return array{jobId: string, path: string}|null
+ */
+function ur_resolve_run_log(): ?array
+{
+    $jobId = ur_safe_job_id(isset($_GET['id']) ? (string) $_GET['id'] : '');
+    if ($jobId === '') {
+        sendError('A valid job id is required.', 400);
+        return null;
+    }
+
+    $runId = isset($_GET['run']) ? (string) $_GET['run'] : '';
+    if ($runId !== '') {
+        $path = Logger::runLogPathById($jobId, $runId);
+        if ($path === null) {
+            sendError('Invalid run id.', 400);
+            return null;
+        }
+    } else {
+        $path = Logger::latestRunLogPath($jobId);
+    }
+
+    return ['jobId' => $jobId, 'path' => $path];
+}
+
+/**
  * GET getJobLog: the HTML-escaped tail of a single run log for a job, plus the
  * job's live running flag (so the poller knows whether to keep tailing).
  * Params: id (job id, required) + optional run (a run-file id from listRuns).
@@ -2004,22 +2032,12 @@ function ur_action_get_status(): void
  */
 function ur_action_get_job_log(): void
 {
-    $jobId = ur_safe_job_id(isset($_GET['id']) ? (string) $_GET['id'] : '');
-    if ($jobId === '') {
-        sendError('A valid job id is required.', 400);
+    $resolved = ur_resolve_run_log();
+    if ($resolved === null) {
         return;
     }
-
-    $runId = isset($_GET['run']) ? (string) $_GET['run'] : '';
-    if ($runId !== '') {
-        $path = Logger::runLogPathById($jobId, $runId);
-        if ($path === null) {
-            sendError('Invalid run id.', 400);
-            return;
-        }
-    } else {
-        $path = Logger::latestRunLogPath($jobId);
-    }
+    $jobId = $resolved['jobId'];
+    $path  = $resolved['path'];
 
     // The `running` flag must describe whether the LOG BEING RETURNED is still
     // being written, not merely whether the job is running - otherwise selecting
@@ -2066,22 +2084,12 @@ function ur_action_get_job_log(): void
  */
 function ur_action_download_job_log(): void
 {
-    $jobId = ur_safe_job_id(isset($_GET['id']) ? (string) $_GET['id'] : '');
-    if ($jobId === '') {
-        sendError('A valid job id is required.', 400);
+    $resolved = ur_resolve_run_log();
+    if ($resolved === null) {
         return;
     }
-
-    $runId = isset($_GET['run']) ? (string) $_GET['run'] : '';
-    if ($runId !== '') {
-        $path = Logger::runLogPathById($jobId, $runId);
-        if ($path === null) {
-            sendError('Invalid run id.', 400);
-            return;
-        }
-    } else {
-        $path = Logger::latestRunLogPath($jobId);
-    }
+    $jobId = $resolved['jobId'];
+    $path  = $resolved['path'];
 
     if ($path === '' || !is_file($path) || !is_readable($path)) {
         // The History record persists across reboots but its tmpfs log does not.
@@ -2390,18 +2398,27 @@ function ur_dispatch(): void
         $action = isset($_GET['action']) ? (string) $_GET['action'] : '';
     }
 
+    // Load config ONCE per request (Config::logDir()/secretsDir() would each
+    // re-run Config::load() - a disk read + JSON parse + migrate + merge - and
+    // the action handler below loads it again; getStatus polls this every
+    // second). Mirrors logDir()/secretsDir(): '' when load() throws.
+    try {
+        $cfg = Config::load();
+    } catch (Throwable $e) {
+        $cfg = null;
+    }
+
     // Point the Logger at the configured persistent log dir (if any) so the
     // read actions (getJobLog / listRuns / downloadJobLog / getPluginLog) resolve
     // logs from the SAME place the Runner writes them; '' => RAM/tmpfs default.
-    // Cheap: Config::logDir() reads the already-cached config and validates it.
-    $urLogDir = Config::logDir();
+    $urLogDir = ($cfg !== null) ? Config::sanitizeLogDir($cfg['global']['logDir'] ?? '') : '';
     Logger::$logsDirOverride = ($urLogDir !== '') ? $urLogDir : null;
 
     // Point Credentials at the configured secrets dir (if any) so every action
     // that reads/writes credentials.json resolves it from the SAME place the
     // Runner does; '' => the default /boot config dir. (ur_action_save_config may
     // update this again after migrating credentials.json to a new location.)
-    $urSecretsDir = Config::secretsDir();
+    $urSecretsDir = ($cfg !== null) ? Config::sanitizeSecretsDir($cfg['global']['secretsDir'] ?? '') : '';
     Credentials::$secretsDirOverride = ($urSecretsDir !== '') ? $urSecretsDir : null;
 
     switch ($action) {

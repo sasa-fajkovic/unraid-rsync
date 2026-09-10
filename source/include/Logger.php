@@ -36,6 +36,8 @@ if (!defined('UR_RUNTIME_BASE')) {
     define('UR_RUNTIME_BASE', '/tmp/unraid.rsync');
 }
 
+require_once __DIR__ . '/Util.php';
+
 // Max bytes a single in-progress RUN log may grow to before further captured
 // output is dropped. The run log lives in RAM (tmpfs), so an unbounded
 // verbose/debug run over a huge tree - or a chatty hook - could otherwise
@@ -218,7 +220,7 @@ class Logger
      * Default number of per-job run logs to keep. On every run start the oldest
      * run-*.log files beyond this many are pruned (so RAM/tmpfs use is bounded).
      * Overridable via the $retention static, which the runner sets from the
-     * global "keep last N executions" setting (Config::retention()); this
+     * global "keep last N executions" setting (Config::clampRetention()); this
      * constant is only the fallback when that static is unset, kept consistent
      * with Config::DEFAULT_RETENTION (100).
      */
@@ -284,7 +286,7 @@ class Logger
     /** Per-job log dir. */
     public static function jobLogDir(string $jobId): string
     {
-        return self::logsDir() . '/' . self::safeId($jobId);
+        return self::logsDir() . '/' . Util::safeFileId($jobId);
     }
 
     /** The rolling cross-job plugin log path. */
@@ -302,19 +304,6 @@ class Logger
     {
         $ts = gmdate('Ymd\THis\Z', $now ?? time());
         return self::jobLogDir($jobId) . '/run-' . $ts . '.log';
-    }
-
-    private static function safeId(string $id): string
-    {
-        $clean = preg_replace('/[^A-Za-z0-9._-]/', '', $id);
-        // A pure-dots id ("." / ".." / "...") survives the char-class strip but
-        // is a traversal segment ("logs/.." == base()), so collapse it to a
-        // literal. Mirrors ur_safe_job_id's pure-dots rejection so this inner
-        // defence-in-depth layer can't be the weak link.
-        if ($clean === '' || $clean === null || preg_match('/^\.+$/', $clean)) {
-            return 'unknown';
-        }
-        return $clean;
     }
 
     /**

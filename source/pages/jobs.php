@@ -497,46 +497,6 @@ function ur_relative_time(int $deltaSec): string
 }
 
 /**
- * The CSS modifier class for a state badge. Kept in PHP so the initial
- * server-rendered badge and the JS-updated badge use the same vocabulary.
- * RUNNING is animated (blue); SUCCESS green; WARNING/PARTIAL/TIMEOUT orange;
- * FAILED red; ABORTED grey-red; PENDING grey. Unknown -> grey.
- */
-function ur_state_badge_class(string $state): string
-{
-    switch (strtoupper($state)) {
-        case 'RUNNING': return 'ur-badge-running';
-        case 'SUCCESS': return 'ur-badge-success';
-        case 'WARNING':
-        case 'PARTIAL':
-        case 'TIMEOUT': return 'ur-badge-warning';
-        case 'FAILED':  return 'ur-badge-failed';
-        case 'ABORTED': return 'ur-badge-aborted';
-        case 'PENDING':
-        default:        return 'ur-badge-pending';
-    }
-}
-
-/**
- * Human label for a state badge (RUNNING / Success / ... ). Pending reads as
- * "Never run" which is friendlier than the vocabulary token.
- */
-function ur_state_label(string $state): string
-{
-    switch (strtoupper($state)) {
-        case 'RUNNING': return ur_t('Running');
-        case 'SUCCESS': return ur_t('Success');
-        case 'WARNING': return ur_t('Warning');
-        case 'PARTIAL': return ur_t('Partial');
-        case 'TIMEOUT': return ur_t('Timeout');
-        case 'FAILED':  return ur_t('Failed');
-        case 'ABORTED': return ur_t('Aborted');
-        case 'PENDING':
-        default:        return ur_t('Never run');
-    }
-}
-
-/**
  * Derive a job's display state from its live running flag + last-run summary.
  * RUNNING (live) overrides the summary; otherwise the summary state; PENDING
  * when there is no summary (never run). Mirrors the handler's ur_derive_state.
@@ -661,30 +621,8 @@ input.ur-switch:checked::before { transform: translateX(20px); }
 input.ur-switch:focus-visible { outline: 2px solid var(--blue-500, #2196f3); outline-offset: 2px; }
 input.ur-switch:disabled { opacity: 0.5; cursor: default; }
 
-/* Colored state badges + the per-run log viewer. Colors pull from
-   the inherited dynamix palette where available (--orange-500, --green-...),
-   with safe fallbacks so the badges read correctly under any theme. */
-.ur-badge {
-  display: inline-block;
-  min-width: 64px;
-  padding: 2px 10px;
-  border-radius: 10px;
-  font-size: 11px;
-  font-weight: bold;
-  text-align: center;
-  color: #fff;
-  line-height: 1.6;
-  white-space: nowrap;
-}
-.ur-badge-success  { background: #1c7d3f; }                 /* green  */
-/* Warning badge: dark text on a darkened orange. White-on-#ff8c2f was ~2.4:1,
-   below WCAG AA for small bold text; #b15c00 with near-black text clears AA. */
-.ur-badge-warning  { background: #b15c00; color: #1a1a1a; }
-.ur-badge-failed   { background: var(--red-800, #b71c1c); } /* red    */
-.ur-badge-aborted  { background: #6b6b6b; }                 /* grey   */
-.ur-badge-pending  { background: #9aa0a6; }                 /* grey   */
-.ur-badge-running  { background: #1565c0; animation: ur-pulse 1.3s ease-in-out infinite; }
-@keyframes ur-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.55; } }
+/* The state-badge palette lives in ur_emit_badge_assets() (_options_form.php),
+   shared with the Status / History / Overview tabs. */
 
 .ur-log-modal {
   position: fixed; inset: 0; z-index: 1000;
@@ -866,6 +804,9 @@ input.ur-switch:disabled { opacity: 0.5; cursor: default; }
  * deterministically active; the static guard inside the function then makes the
  * template's and Global Settings' later calls no-ops. */
 ur_emit_option_help_assets();
+/* The ONE state-badge palette + window.urBadge, shared with the Status /
+ * History / Overview tabs. Must precede the badge markup and the script below. */
+ur_emit_badge_assets();
 /* Emit the shared robust-fetch helpers (window.urAjax) so the run/dry/abort and
  * save AJAX surface a non-JSON 403/500 WITH its HTTP status instead of failing
  * silently in r.json() (the same fix the Credentials page already carries). */
@@ -1119,11 +1060,7 @@ ur_emit_time_helpers();
    * confirms/corrects it). */
   function setBadgeRunning(jobId) {
     var badges = document.querySelectorAll('.ur-state-badge[data-jobid="' + cssEsc(jobId) + '"]');
-    badges.forEach(function (b) {
-      BADGE_CLASSES.forEach(function (c) { b.classList.remove(c); });
-      b.classList.add(badgeClassFor('RUNNING'));
-      b.textContent = badgeLabelFor('RUNNING');
-    });
+    badges.forEach(function (b) { window.urBadge.apply(b, 'RUNNING'); });
   }
 
   function postJobAction(action, jobId, btn) {
@@ -1554,38 +1491,6 @@ ur_emit_time_helpers();
 
   var STATUS_URL = HANDLER_URL + '?action=getStatus';
 
-  /* Badge class + label vocabulary - kept in lockstep with jobs.php
-   * (ur_state_badge_class / ur_state_label) so a JS-updated badge matches a
-   * server-rendered one. */
-  var BADGE_CLASSES = [
-    'ur-badge-running', 'ur-badge-success', 'ur-badge-warning',
-    'ur-badge-failed', 'ur-badge-aborted', 'ur-badge-pending'
-  ];
-  function badgeClassFor(state) {
-    switch ((state || '').toUpperCase()) {
-      case 'RUNNING': return 'ur-badge-running';
-      case 'SUCCESS': return 'ur-badge-success';
-      case 'WARNING':
-      case 'PARTIAL':
-      case 'TIMEOUT': return 'ur-badge-warning';
-      case 'FAILED':  return 'ur-badge-failed';
-      case 'ABORTED': return 'ur-badge-aborted';
-      default:        return 'ur-badge-pending';
-    }
-  }
-  function badgeLabelFor(state) {
-    switch ((state || '').toUpperCase()) {
-      case 'RUNNING': return 'Running';
-      case 'SUCCESS': return 'Success';
-      case 'WARNING': return 'Warning';
-      case 'PARTIAL': return 'Partial';
-      case 'TIMEOUT': return 'Timeout';
-      case 'FAILED':  return 'Failed';
-      case 'ABORTED': return 'Aborted';
-      default:        return 'Never run';
-    }
-  }
-
   /* Coarse "x ago" relative label for a past epoch (seconds). */
   function agoLabel(finishedEpoch, nowEpoch) {
     if (!finishedEpoch) { return '—'; }
@@ -1650,11 +1555,7 @@ ur_emit_time_helpers();
       /* Badge (there can be one in the table row + nowhere else; update all
        * badges carrying this job id). */
       var badges = document.querySelectorAll('.ur-state-badge[data-jobid="' + cssEsc(jobId) + '"]');
-      badges.forEach(function (b) {
-        BADGE_CLASSES.forEach(function (c) { b.classList.remove(c); });
-        b.classList.add(badgeClassFor(s.state));
-        b.textContent = badgeLabelFor(s.state);
-      });
+      badges.forEach(function (b) { window.urBadge.apply(b, s.state); });
 
       /* Last-run + next-run cells in the summary row. */
       var row = document.querySelector('tr[data-jobid="' + cssEsc(jobId) + '"]');
