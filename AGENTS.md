@@ -203,6 +203,16 @@ on, forked from, or derived from any other plugin.
   RESETS the per-path state, so a flush placed after the hook would find nothing
   left to rescue. Anything feeding the sink a string with no trailing newline
   and reading the file back immediately needs that flush.
+- **A manual-only job has NO next run, and `getStatus` must say so.** `enabled`
+  + `manualOnly` is exactly how "run on demand" is stored, and such a job keeps
+  whatever `schedule` string it was last saved with — so anything that computes
+  a next fire from that string is reporting a time that will never happen
+  (`Cron::build()` skips the job). `getStatus` carries `manualOnly` and a null
+  `nextRun` for it, and all THREE renderers must agree, in this clause order:
+  manual-only, then disabled, then no computable next (em-dash), then the time.
+  They are `ur_next_run_label()` (PHP, Jobs), `nextRunLabel()` (JS, Jobs) and
+  the `.ur-ov-next` chain (JS, Overview) — the JS ones run every second on top of
+  the PHP one, so a clause missing there silently overwrites a correct cell.
 - **HTML-escape all output**; the log viewer renders `Logger::tail()` output, which
   is already escaped (log-XSS guard). Captured run output is also **redacted** of
   per-run tmpfs secret paths and **size-capped** before it is written

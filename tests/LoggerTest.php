@@ -784,6 +784,45 @@ final class LoggerTest extends TestCase
         $this->assertStringContainsString('sent 123 bytes', $first);
     }
 
+    /**
+     * LIVE REGRESSION. rsync repeats its final redraw, and the last copy is the
+     * one carrying the stream's only \n - so the throttle wrote 100% and then
+     * the flush wrote the identical line again, ending EVERY run's log on a
+     * duplicate. Worse, rsync's own --log-file fd writes the end-of-run summary
+     * in between, so the duplicate landed AFTER the summary. Observed on a real
+     * 268 MB Summary run.
+     */
+    public function testFlushDoesNotRepeatTheProgressLineTheThrottleAlreadyWrote(): void
+    {
+        $path = Logger::openRun('j-dup', 1750000000);
+        $sink = Logger::sink($path);
+
+        $sink($this->progressRedraw(0));
+        $sink($this->progressRedraw(100));   // written by the 100%-once rule
+        $sink($this->progressRedraw(100));   // byte-identical repeat, held back
+        Logger::flushSink($path);
+
+        $log = (string) file_get_contents($path);
+        $this->assertSame(1, substr_count($log, '100%'), 'the identical repeat must not be flushed again');
+    }
+
+    public function testFlushStillLandsARepeatThatCarriesNewInformation(): void
+    {
+        // rsync's repeated final redraws usually differ in rate or ETA (live:
+        // 7.80MB/s then 7.79MB/s). That is new information, not an artefact of
+        // buffering, so the dedupe must be byte-exact and nothing broader.
+        $path = Logger::openRun('j-dup2', 1750000000);
+        $sink = Logger::sink($path);
+
+        $sink("\r     41,943,046 100%    7.80MB/s    0:00:05");
+        $sink("\r     41,943,046 100%    7.79MB/s    0:00:05");
+        Logger::flushSink($path);
+
+        $log = (string) file_get_contents($path);
+        $this->assertStringContainsString('7.80MB/s', $log);
+        $this->assertStringContainsString('7.79MB/s', $log);
+    }
+
     public function testSinkThrottleStateIsPerSinkNotPerProcess(): void
     {
         // The Runner builds a fresh sink per rsync pair; pair #2 must log its

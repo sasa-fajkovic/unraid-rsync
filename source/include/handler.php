@@ -1912,7 +1912,7 @@ function ur_last_run_shape(?array $summary): ?array
 
 /**
  * GET getStatus: a per-job status map for ALL configured jobs. Each entry:
- *   { name, enabled, running, state, lastRun: {...}|null, nextRun: epoch|null }
+ *   { name, enabled, manualOnly, running, state, lastRun: {...}|null, nextRun: epoch|null }
  * running  <- RunState::isRunning (PID-reuse-safe, self-heals stale state)
  * lastRun  <- Runner::readSummary (the /boot durable summary)
  * state    <- ur_derive_state (RUNNING overrides summary; PENDING when none)
@@ -1954,8 +1954,17 @@ function ur_action_get_status(): void
             $running = RunState::isRunning($id);
             $summary = Runner::readSummary($id);
 
-            $nextRun = null;
-            if (!empty($job['enabled'])) {
+            // A MANUAL-ONLY job has no next run, even though it is `enabled`
+            // (enabled + manualOnly is exactly how "run on demand" is stored)
+            // and still carries whatever schedule string it was last saved
+            // with. Computing one from that stale string made the 1s poller
+            // overwrite the correct server-rendered "manual (on demand)" cell
+            // with a cron time that will never fire (live-observed on the
+            // Overview and Jobs tabs). crond never sees a manual-only job:
+            // Cron::build() skips it.
+            $nextRun    = null;
+            $manualOnly = !empty($job['manualOnly']);
+            if (!$manualOnly && !empty($job['enabled'])) {
                 $schedule = trim((string) ($job['schedule'] ?? ''));
                 if ($schedule !== '') {
                     $next = Cron::nextRun($schedule, $now);
@@ -1964,12 +1973,13 @@ function ur_action_get_status(): void
             }
 
             $out[$id] = [
-                'name'    => (string) ($job['name'] ?? $id),
-                'enabled' => !empty($job['enabled']),
-                'running' => $running,
-                'state'   => ur_derive_state($running, $summary),
-                'lastRun' => ur_last_run_shape($summary),
-                'nextRun' => $nextRun,
+                'name'       => (string) ($job['name'] ?? $id),
+                'enabled'    => !empty($job['enabled']),
+                'manualOnly' => $manualOnly,
+                'running'    => $running,
+                'state'      => ur_derive_state($running, $summary),
+                'lastRun'    => ur_last_run_shape($summary),
+                'nextRun'    => $nextRun,
             ];
         } catch (Throwable $e) {
             // Log the detail server-side (webGui PHP log) only - never leak
@@ -1978,14 +1988,15 @@ function ur_action_get_status(): void
                 . get_class($e) . ': ' . $e->getMessage()
                 . ' @ ' . $e->getFile() . ':' . $e->getLine());
             $out[$id] = [
-                'name'    => (string) ($job['name'] ?? $id),
-                'enabled' => !empty($job['enabled']),
-                'running' => false,
+                'name'       => (string) ($job['name'] ?? $id),
+                'enabled'    => !empty($job['enabled']),
+                'manualOnly' => !empty($job['manualOnly']),
+                'running'    => false,
                 // Use the existing badge vocabulary so the UI renders a known
                 // state rather than falling through to the default badge.
-                'state'   => Rsync::STATE_FAILED,
-                'lastRun' => null,
-                'nextRun' => null,
+                'state'      => Rsync::STATE_FAILED,
+                'lastRun'    => null,
+                'nextRun'    => null,
             ];
         }
     }

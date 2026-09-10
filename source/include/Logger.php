@@ -77,7 +77,7 @@ class Logger
      * (so flushSink() can still land the final one). Keyed by log path; sink()
      * resets it, flushSink() removes it.
      *
-     * @var array<string,array{buf:string,pending:string,pct:int,at:float}>
+     * @var array<string,array{buf:string,pending:string,pct:int,at:float,last:string}>
      */
     private static $sinkState = [];
 
@@ -492,7 +492,7 @@ class Logger
         // and one per hook, so a pair never inherits the previous pair's
         // percentage and every pair logs its first progress line immediately
         // (at = 0.0 makes the time condition true on the first redraw).
-        self::$sinkState[$path] = ['buf' => '', 'pending' => '', 'pct' => -1, 'at' => 0.0];
+        self::$sinkState[$path] = ['buf' => '', 'pending' => '', 'pct' => -1, 'at' => 0.0, 'last' => ''];
 
         return static function (string $chunk) use ($path): void {
             if ($chunk === '') {
@@ -518,7 +518,7 @@ class Logger
      */
     private static function consume(string $path, string $chunk): void
     {
-        $st = self::$sinkState[$path] ?? ['buf' => '', 'pending' => '', 'pct' => -1, 'at' => 0.0];
+        $st = self::$sinkState[$path] ?? ['buf' => '', 'pending' => '', 'pct' => -1, 'at' => 0.0, 'last' => ''];
         $st['buf'] .= $chunk;
 
         while (true) {
@@ -569,7 +569,7 @@ class Logger
      * PROGRESS_MIN_SECS since the last one). Otherwise remember it as the newest
      * dropped redraw so flushSink() can still land the final percentage.
      *
-     * @param array{buf:string,pending:string,pct:int,at:float} $st
+     * @param array{buf:string,pending:string,pct:int,at:float,last:string} $st
      */
     private static function throttleProgress(string $path, string $seg, array &$st): void
     {
@@ -604,7 +604,8 @@ class Logger
         }
         // progress2 pads its line with trailing spaces to erase the previous,
         // longer redraw; pointless in a file.
-        self::write($path, rtrim($seg) . "\n");
+        $st['last'] = rtrim($seg);
+        self::write($path, $st['last'] . "\n");
     }
 
     /**
@@ -623,10 +624,21 @@ class Logger
         unset(self::$sinkState[$path]);
 
         // buf holds the text after the LAST \r, i.e. newer than pending.
-        $last = ($st['buf'] !== '') ? $st['buf'] : $st['pending'];
-        if (trim($last) !== '') {
-            self::write($path, rtrim($last) . "\n");
+        $last = rtrim(($st['buf'] !== '') ? $st['buf'] : $st['pending']);
+        if (trim($last) === '') {
+            return;
         }
+        // ...but not if it is byte-identical to the progress line the throttle
+        // already wrote. rsync repeats its final redraw, and when the repeat is
+        // identical the flush landed a duplicate 100% line at the end of EVERY
+        // run - live-observed on a real Summary run, and worse, after the
+        // end-of-run summary that rsync's own --log-file fd had written in
+        // between. A repeat that genuinely differs (a moved rate or ETA) still
+        // lands: it is new information, not an artefact of buffering.
+        if ($last === $st['last']) {
+            return;
+        }
+        self::write($path, $last . "\n");
     }
 
     /** Redact, then append under the run-log byte cap. The only write path. */
