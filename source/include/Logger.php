@@ -546,7 +546,20 @@ class Logger
             // A real line supersedes any redraw still held back: the held one is
             // stale and printing it here would read out of order.
             $st['pending'] = '';
-            self::write($path, $seg . "\n");
+            // rsync ends its progress stream by repeating the final redraw, and
+            // the LAST copy carries the stream's only \n - so it arrives here,
+            // on the real-line path, byte-identical (modulo trailing padding) to
+            // the 100% line throttleProgress just wrote. Every Summary run's log
+            // therefore ended on two identical 100% lines, with rsync's own
+            // --log-file summary wedged between them. Suppress that immediate
+            // repeat; `last` is cleared right after, so this can never swallow
+            // an unrelated later line, and a repeat that genuinely differs (a
+            // moved rate or ETA) still lands because the match is byte-exact.
+            $repeat     = ($st['last'] !== '' && rtrim($seg) === $st['last']);
+            $st['last'] = '';
+            if (!$repeat) {
+                self::write($path, $seg . "\n");
+            }
         }
 
         // Never hold an unterminated blob forever (a child emitting neither

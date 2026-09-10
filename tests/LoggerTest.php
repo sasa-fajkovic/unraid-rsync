@@ -806,6 +806,70 @@ final class LoggerTest extends TestCase
         $this->assertSame(1, substr_count($log, '100%'), 'the identical repeat must not be flushed again');
     }
 
+    /**
+     * LIVE REGRESSION, second attempt. The first fix for the duplicated final
+     * progress line only covered flushSink(), because the test fed the repeat
+     * with NO trailing newline. The real stream ends
+     * `\r<p>\r<p>\r<p>\n` - rsync repeats the final redraw and the LAST copy
+     * carries the stream's only \n - so the duplicate arrives on the REAL-LINE
+     * path, not the flush path, and shipped 2026.09.10a still logged two
+     * identical 100% lines with rsync's own summary wedged between them.
+     * Verified against a live 268 MB Summary run.
+     */
+    public function testTheNewlineTerminatedRepeatOfTheFinalRedrawIsSuppressed(): void
+    {
+        $path = Logger::openRun('j-tail-dup', 1750000000);
+        $sink = Logger::sink($path);
+
+        $sink($this->progressRedraw(90));
+        $sink($this->progressRedraw(95));
+        $sink($this->progressRedraw(100));
+        // rsync's last copy of the same redraw, newline-terminated this time.
+        $sink($this->progressRedraw(100) . "\n");
+        Logger::flushSink($path);
+
+        $log = (string) file_get_contents($path);
+        $this->assertSame(1, substr_count($log, '100%'), 'the final redraw must be logged once');
+        $this->assertStringContainsString('90%', $log);
+        $this->assertStringContainsString('95%', $log);
+    }
+
+    public function testANewlineTerminatedRedrawThatDiffersStillLands(): void
+    {
+        // Live paperless run: the two trailing redraws differed in to-chk, and an
+        // unthrottled copy differed in rate (7.80 then 7.79 MB/s). Byte-exact
+        // matching only, so those still reach the log.
+        $path = Logger::openRun('j-tail-diff', 1750000000);
+        $sink = Logger::sink($path);
+
+        $sink("\r              0   0%    0.00kB/s    0:00:00 (xfr#0, to-chk=1472/1476)");
+        $sink("\r              0   0%    0.00kB/s    0:00:00 (xfr#0, to-chk=0/1476)\n");
+        Logger::flushSink($path);
+
+        $log = (string) file_get_contents($path);
+        $this->assertStringContainsString('to-chk=1472/1476', $log);
+        $this->assertStringContainsString('to-chk=0/1476', $log);
+    }
+
+    /**
+     * The suppression must not reach past the line immediately after the redraw:
+     * `last` is cleared on every real line, so an identical line arriving later
+     * in the run still lands.
+     */
+    public function testSuppressionOnlyAppliesToTheImmediatelyFollowingLine(): void
+    {
+        $path = Logger::openRun('j-tail-scope', 1750000000);
+        $sink = Logger::sink($path);
+
+        $sink($this->progressRedraw(100));
+        $sink($this->progressRedraw(100) . "\n");   // suppressed
+        $sink("some other line\n");
+        $sink(rtrim($this->progressRedraw(100)) . "\n");   // same text, but later
+        Logger::flushSink($path);
+
+        $this->assertSame(2, substr_count((string) file_get_contents($path), '100%'));
+    }
+
     public function testFlushStillLandsARepeatThatCarriesNewInformation(): void
     {
         // rsync's repeated final redraws usually differ in rate or ETA (live:
