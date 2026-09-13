@@ -1046,19 +1046,21 @@ if (!function_exists('ur_emit_option_help_assets')) {
 
 if (!function_exists('ur_emit_ajax_helpers')) {
     /**
-     * Emit the shared robust-fetch helpers (window.urAjax = { parseResponse, postForm,
-     * postFormElement, show, errText }) exactly once per page, mirroring
-     * ur_emit_option_help_assets()'s once-guard. These centralise the "parse the
-     * response body as TEXT, then try
-     * JSON.parse it" pattern so a non-JSON 403/500 from the front controller becomes a
+     * Emit the shared front-end helpers (window.urAjax = { parseResponse, postForm,
+     * postFormElement, show, errText, armOrConfirmDelete, disarmDelete }) exactly
+     * once per page, mirroring ur_emit_option_help_assets()'s once-guard.
+     *
+     * These centralise the "parse the response body as TEXT, then try JSON.parse
+     * it" pattern so a non-JSON 403/500 from the front controller becomes a
      * VISIBLE error WITH its HTTP status, instead of throwing inside r.json() and
      * landing in a generic .catch as a silent "Network error" (the exact class of
      * silent-failure the Credentials page already fixed).
      *
-     * Consumed by jobs.php and settings.php (which previously used the brittle
-     * fetch().then(r=>r.json()) pattern). credentials.php keeps its own local copies
-     * (it wires a lot of behaviour around them); the contract here matches those copies
-     * so the two stay interchangeable.
+     * Consumed by every tab body (jobs, settings, connections, credentials, status).
+     * The Connections and Credentials tabs used to carry their own near-identical
+     * copies of postForm/show/errText plus the two-step delete confirm; those had
+     * already drifted (only one of them handled a client-side timeout), so the
+     * single implementation lives here.
      *
      * The CSRF token is NOT baked in here (it is per-page and per-form); callers pass
      * their own. All static markup; no user data is interpolated.
@@ -1104,14 +1106,37 @@ if (!function_exists('ur_emit_ajax_helpers')) {
    * FastCGI socket), so every plugin POST hung. urlencoded returns in ~13ms.
    * There are NO file inputs anywhere in the plugin (SSH keys are pasted into
    * textareas), so urlencoded is correct and sufficient. fetch() auto-sets the
-   * Content-Type to application/x-www-form-urlencoded for a URLSearchParams body. */
-  function postForm(handlerUrl, fields, csrfToken) {
+   * Content-Type to application/x-www-form-urlencoded for a URLSearchParams body.
+   *
+   * opts.timeoutMs (optional): abort the fetch after this many ms via an
+   * AbortController, so the browser never waits forever if the backend stalls.
+   * An abort resolves with { aborted: true, status: 0 } so errText can show a
+   * distinct "timed out" message rather than a generic network error. */
+  function postForm(handlerUrl, fields, csrfToken, opts) {
+    opts = opts || {};
     var params = new URLSearchParams();
     if (csrfToken) { params.append('csrf_token', csrfToken); }
     Object.keys(fields || {}).forEach(function (k) { params.append(k, fields[k]); });
-    return fetch(handlerUrl, { method: 'POST', body: params, credentials: 'same-origin' })
-      .then(parseResponse)
-      .catch(function () {
+
+    var init = { method: 'POST', body: params, credentials: 'same-origin' };
+    var timer = null;
+    if (opts.timeoutMs && typeof AbortController !== 'undefined') {
+      var controller = new AbortController();
+      init.signal = controller.signal;
+      timer = setTimeout(function () { controller.abort(); }, opts.timeoutMs);
+    }
+    var clearTimer = function () { if (timer) { clearTimeout(timer); timer = null; } };
+
+    return fetch(handlerUrl, init)
+      .then(function (r) { return parseResponse(r).then(function (res) { clearTimer(); return res; }); })
+      .catch(function (e) {
+        clearTimer();
+        /* An AbortError is our own client-side timeout; everything else is a
+           genuine "could not reach the server" (offline / connection reset), and
+           errText renders the two differently. */
+        if (e && e.name === 'AbortError') {
+          return { ok: false, status: 0, body: null, parseError: false, aborted: true };
+        }
         return { ok: false, status: 0, body: null, parseError: false, networkError: true };
       });
   }
@@ -1119,9 +1144,23 @@ if (!function_exists('ur_emit_ajax_helpers')) {
   /* POST an existing <form> as urlencoded with the same robust parsing.
    * URLSearchParams(new FormData(form)) serialises the form's text fields to
    * urlencoded (there are no file inputs); nested names like jobs[0][name]
-   * round-trip unchanged into $_POST. See postForm for why we avoid multipart. */
+   * round-trip unchanged into $_POST. See postForm for why we avoid multipart.
+   *
+   * The handler action comes from the form's data-ur-action attribute, NOT from
+   * a hidden input named "action". An input of that name becomes a NAMED
+   * PROPERTY of the form element, so `form.action` returns the input instead of
+   * the URL string - and Unraid's own layout JS does
+   * `$(this).prop('action').actionName()` over every form on the page
+   * (BodyInlineJS: the escapeQuotes form parser), which then throws
+   * "$(...).prop(...).actionName is not a function" and aborts the rest of its
+   * ready handler - taking the leave-confirmation guard with it. Keep the wire
+   * protocol identical (action=<x> in the body); just never name an INPUT
+   * "action" inside a form. Same reason this uses getAttribute('action') rather
+   * than form.action for the URL. */
   function postFormElement(form) {
     var params = new URLSearchParams(new FormData(form));
+    var act = form.getAttribute('data-ur-action');
+    if (act) { params.set('action', act); }
     return fetch(form.getAttribute('action'), { method: 'POST', body: params, credentials: 'same-origin' })
       .then(parseResponse)
       .catch(function () {
@@ -1140,6 +1179,11 @@ if (!function_exists('ur_emit_ajax_helpers')) {
    * HTTP status (or a network/parse hint), so a failure is never silent. */
   function errText(res, fallback) {
     fallback = fallback || 'Request failed';
+    /* Our own client-side abort (postForm opts.timeoutMs), not an unreachable
+     * server - say so, since the two need different remedies. */
+    if (res.aborted) {
+      return fallback + ': timed out (no response in time).';
+    }
     if (res.networkError || res.status === 0) {
       return fallback + ': could not reach the server (network error).';
     }
@@ -1159,12 +1203,239 @@ if (!function_exists('ur_emit_ajax_helpers')) {
     return fallback + ' (HTTP ' + res.status + ').';
   }
 
+  /* ---- two-step inline delete confirm (replaces window.confirm) ----
+   * First click on a Remove/Delete button ARMS it: the label becomes "Confirm
+   * delete?", a red "armed" class is applied, and the destructive consequence is
+   * shown inline in the supplied result element so the warning is never lost. A
+   * second click within ARM_WINDOW_MS runs the delete; otherwise it auto-reverts.
+   * Arming a DIFFERENT button cancels any other, so two destructive buttons can
+   * never be armed at once. This is non-blocking - there is no popup and
+   * automation is never frozen. */
+  var ARM_WINDOW_MS = 4000;
+
+  // At most ONE delete button is armed at a time.
+  var armedDeleteBtn = null;
+
+  function disarmDelete(btn) {
+    if (!btn || !btn._urArm) { return; }
+    clearTimeout(btn._urArm.timer);
+    btn.textContent = btn._urArm.label;
+    btn.classList.remove('ur-armed-delete');
+    var resultEl = btn._urArm.resultEl;
+    var armedMsg = btn._urArm.message;
+    if (resultEl && resultEl.getAttribute('data-ur-armed') === '1'
+        && resultEl.textContent === armedMsg) {
+      resultEl.className = 'ur-result';
+      resultEl.textContent = '';
+      resultEl.removeAttribute('data-ur-armed');
+    } else if (resultEl && resultEl.getAttribute('data-ur-armed') === '1') {
+      resultEl.removeAttribute('data-ur-armed');
+    }
+    btn._urArm = null;
+    if (armedDeleteBtn === btn) { armedDeleteBtn = null; }
+  }
+
+  function armOrConfirmDelete(btn, opts) {
+    if (btn._urArm) {            // second click within the window -> do it
+      var run = btn._urArm.run;
+      disarmDelete(btn);
+      run();
+      return;
+    }
+    // Arming a new button cancels any other still-armed one.
+    if (armedDeleteBtn && armedDeleteBtn !== btn) { disarmDelete(armedDeleteBtn); }
+    var message = (opts.warning || '') + ' Click "Confirm delete?" again to proceed.';
+    btn._urArm = {
+      label: btn.textContent,
+      resultEl: opts.resultEl || null,
+      message: message,
+      run: opts.run,
+      timer: setTimeout(function () { disarmDelete(btn); }, ARM_WINDOW_MS)
+    };
+    armedDeleteBtn = btn;
+    btn.textContent = 'Confirm delete?';
+    btn.classList.add('ur-armed-delete');
+    if (opts.resultEl && opts.warning) {
+      opts.resultEl.className = 'ur-result ur-err';
+      opts.resultEl.textContent = message;
+      opts.resultEl.setAttribute('data-ur-armed', '1');
+    }
+  }
+
   window.urAjax = {
     parseResponse: parseResponse,
     postForm: postForm,
     postFormElement: postFormElement,
     show: show,
-    errText: errText
+    errText: errText,
+    armOrConfirmDelete: armOrConfirmDelete,
+    disarmDelete: disarmDelete
+  };
+})();
+</script>
+        <?php
+    }
+}
+
+if (!function_exists('ur_state_badge_class')) {
+    /**
+     * The CSS modifier class for a state badge. Kept in PHP so the initial
+     * server-rendered badge and the JS-updated one (window.urBadge.classFor,
+     * emitted by ur_emit_badge_assets()) use the SAME vocabulary - the two had
+     * drifted while each tab carried its own copy.
+     *
+     * RUNNING is animated (blue); SUCCESS green; WARNING/PARTIAL/TIMEOUT orange
+     * (TIMEOUT is a warning, matching Runner::notifyImportance); FAILED red;
+     * ABORTED grey; PENDING/unknown grey.
+     */
+    function ur_state_badge_class(string $state): string
+    {
+        switch (strtoupper($state)) {
+            case 'RUNNING': return 'ur-badge-running';
+            case 'SUCCESS': return 'ur-badge-success';
+            case 'WARNING':
+            case 'PARTIAL':
+            case 'TIMEOUT': return 'ur-badge-warning';
+            case 'FAILED':  return 'ur-badge-failed';
+            case 'ABORTED': return 'ur-badge-aborted';
+            case 'PENDING':
+            default:        return 'ur-badge-pending';
+        }
+    }
+}
+
+if (!function_exists('ur_state_label')) {
+    /**
+     * Human label for a state badge (Running / Success / ... ). Pending reads as
+     * "Never run", which is friendlier than the vocabulary token. Mirrored by
+     * window.urBadge.labelFor.
+     */
+    function ur_state_label(string $state): string
+    {
+        switch (strtoupper($state)) {
+            case 'RUNNING': return ur_t('Running');
+            case 'SUCCESS': return ur_t('Success');
+            case 'WARNING': return ur_t('Warning');
+            case 'PARTIAL': return ur_t('Partial');
+            case 'TIMEOUT': return ur_t('Timeout');
+            case 'FAILED':  return ur_t('Failed');
+            case 'ABORTED': return ur_t('Aborted');
+            case 'PENDING':
+            default:        return ur_t('Never run');
+        }
+    }
+}
+
+if (!function_exists('ur_emit_badge_assets')) {
+    /**
+     * Emit (once per page) the ONE state-badge palette + the client-side badge
+     * vocabulary, mirroring ur_emit_ajax_helpers()'s once-guard.
+     *
+     * WHY it is shared: the Jobs, Status, History and Overview tabs are separate
+     * page bodies and each used to carry its own copy of this CSS and of
+     * badgeClassFor()/labelFor(). They had already drifted - History painted
+     * SUCCESS with .ur-badge-idle, and History/Overview coloured TIMEOUT red while
+     * Jobs (and Runner::notifyImportance, the server's own severity map) treat it
+     * as a WARNING. One palette + one vocabulary is the fix.
+     *
+     * window.urBadge:
+     *   CLASSES        every modifier class, so apply() can clear the previous one;
+     *   classFor(s)    state -> modifier class (matches ur_state_badge_class);
+     *   labelFor(s)    state -> label        (matches ur_state_label);
+     *   apply(el, s)   clear + set the class and the textContent in one call.
+     * All static markup; no user data is interpolated.
+     */
+    function ur_emit_badge_assets(): void
+    {
+        static $done = false;
+        if ($done) {
+            return;
+        }
+        $done = true;
+        ?>
+<style>
+/* State badges. Colors read correctly under any webGui theme (fixed values with
+   a dynamix palette var where one exists). */
+.ur-badge {
+  display: inline-block;
+  min-width: 64px;
+  padding: 2px 10px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: bold;
+  text-align: center;
+  color: #fff;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+.ur-badge-success  { background: #1c7d3f; }                 /* green  */
+/* Warning badge: dark text on a darkened orange. White-on-#ff8c2f was ~2.4:1,
+   below WCAG AA for small bold text; #b15c00 with near-black text clears AA. */
+.ur-badge-warning  { background: #b15c00; color: #1a1a1a; }
+.ur-badge-failed   { background: var(--red-800, #b71c1c); } /* red    */
+.ur-badge-aborted  { background: #6b6b6b; }                 /* grey   */
+.ur-badge-pending  { background: #9aa0a6; }                 /* grey   */
+.ur-badge-running  { background: #1565c0; animation: ur-pulse 1.3s ease-in-out infinite; }
+/* Not part of the run-state vocabulary: the Status tab's binary running/idle and
+   rsync present/missing indicators reuse the badge shape. */
+.ur-badge-idle     { background: #1c7d3f; }
+@keyframes ur-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.55; } }
+</style>
+<script type="text/javascript">
+/* The ONE client-side state-badge vocabulary, kept in lockstep with
+ * ur_state_badge_class() / ur_state_label() so a JS-updated badge always matches
+ * a server-rendered one. */
+(function () {
+  'use strict';
+  if (window.urBadge) { return; }
+
+  var CLASSES = [
+    'ur-badge-running', 'ur-badge-success', 'ur-badge-warning',
+    'ur-badge-failed', 'ur-badge-aborted', 'ur-badge-pending'
+  ];
+
+  function classFor(state) {
+    switch ((state || '').toUpperCase()) {
+      case 'RUNNING': return 'ur-badge-running';
+      case 'SUCCESS': return 'ur-badge-success';
+      case 'WARNING':
+      case 'PARTIAL':
+      /* TIMEOUT is a WARNING, not a failure - it matches the server's own
+         severity map (Runner::notifyImportance). */
+      case 'TIMEOUT': return 'ur-badge-warning';
+      case 'FAILED':  return 'ur-badge-failed';
+      case 'ABORTED': return 'ur-badge-aborted';
+      default:        return 'ur-badge-pending';
+    }
+  }
+
+  function labelFor(state) {
+    switch ((state || '').toUpperCase()) {
+      case 'RUNNING': return 'Running';
+      case 'SUCCESS': return 'Success';
+      case 'WARNING': return 'Warning';
+      case 'PARTIAL': return 'Partial';
+      case 'TIMEOUT': return 'Timeout';
+      case 'FAILED':  return 'Failed';
+      case 'ABORTED': return 'Aborted';
+      default:        return 'Never run';
+    }
+  }
+
+  /* Repaint a badge element: drop whatever modifier it had, apply this state's
+   * class and label. textContent, never innerHTML. */
+  function apply(el, state) {
+    if (!el) { return; }
+    CLASSES.forEach(function (c) { el.classList.remove(c); });
+    el.classList.add(classFor(state));
+    el.textContent = labelFor(state);
+  }
+
+  window.urBadge = {
+    CLASSES: CLASSES,
+    classFor: classFor,
+    labelFor: labelFor,
+    apply: apply
   };
 })();
 </script>

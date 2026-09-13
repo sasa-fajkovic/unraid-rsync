@@ -255,7 +255,7 @@ function ur_render_connection_card($conn, $index, array $keys): void
     // strict host key
     echo '<dt class="ur-ssh-only"' . $sshOnlyStyle . '><label for="' . ur_h($idb . '_strict') . '">' . ur_h(ur_t('Strict host key checking')) . '</label>:</dt>';
     echo '<dd class="ur-ssh-only"' . $sshOnlyStyle . '><select id="' . ur_h($idb . '_strict') . '" name="' . ur_h($p . '[strictHostKey]') . '">';
-    foreach (['accept-new' => 'accept-new (accept an unknown host key on connect)', 'yes' => 'yes (require a pinned host key)', 'no' => 'no (do not verify - insecure)'] as $val => $lbl) {
+    foreach (['accept-new' => 'accept-new (pin the host key on first connect; reject a changed key)', 'yes' => 'yes (require a host key pinned below)', 'no' => 'no (do not verify - insecure)'] as $val => $lbl) {
         $sel = ($strict === $val) ? ' selected' : '';
         echo '<option value="' . ur_h($val) . '"' . $sel . '>' . ur_h(ur_t($lbl)) . '</option>';
     }
@@ -390,10 +390,12 @@ function ur_render_connection_card($conn, $index, array $keys): void
  * (non-markdown) Connection form, which would otherwise leave Apply permanently
  * greyed out and a connection impossible to save through the UI. */
 ur_emit_form_enable_assets();
+/* The shared front-end helpers (window.urAjax: postForm/postFormElement/show/
+ * errText + the two-step delete confirm) this page's script below uses. */
+ur_emit_ajax_helpers();
 ?>
 
-<form method="POST" action="<?=htmlspecialchars($handlerUrl, ENT_QUOTES, 'UTF-8')?>" id="ur-conns-form">
-  <input type="hidden" name="action" value="saveCredentials">
+<form method="POST" action="<?=htmlspecialchars($handlerUrl, ENT_QUOTES, 'UTF-8')?>" id="ur-conns-form" data-ur-action="saveCredentials">
   <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf, ENT_QUOTES, 'UTF-8')?>">
   <input type="hidden" name="connections_present" value="1">
 
@@ -423,149 +425,10 @@ ur_emit_form_enable_assets();
   var HANDLER = <?=ur_js($handlerUrl)?>;
   var CSRF = <?=ur_js($csrf)?>;
 
-  /* POST a form and ALWAYS resolve to { ok, status, body, parseError }:
-   *   - ok         the HTTP response was 2xx;
-   *   - status     the numeric HTTP status (0 if the request never reached the
-   *                server - a true network error);
-   *   - body       the parsed JSON object, or null when the body wasn't JSON;
-   *   - parseError true when a body was returned but was NOT valid JSON (e.g. an
-   *                HTML 403/500 from the front controller) - so callers can show
-   *                a clear "server returned a non-JSON response (HTTP <status>)"
-   *                message instead of silently doing nothing.
-   * This never rejects: a genuine network failure resolves with status 0 so the
-   * UI is ALWAYS updated and an action can never leave a stuck spinner.
-   *
-   * opts.timeoutMs (optional): abort the fetch after this many ms via an
-   * AbortController, so the browser never waits forever if the backend stalls.
-   * An abort resolves with { aborted: true, status: 0 } so the caller can show a
-   * distinct "timed out" message rather than a generic network error. */
-  function postForm(fields, opts) {
-    opts = opts || {};
-    /* Send urlencoded (URLSearchParams), NOT multipart (FormData): a
-       multipart/form-data body STALLS in php-fpm in the live Unraid environment
-       (the worker blocks forever receiving the body over the FastCGI socket), so
-       every plugin POST hung; urlencoded returns in ~13ms. No file inputs exist
-       (keys are pasted into textareas). fetch() auto-sets the urlencoded
-       Content-Type for a URLSearchParams body. */
-    var params = new URLSearchParams();
-    params.append('csrf_token', CSRF);
-    Object.keys(fields).forEach(function (k) { params.append(k, fields[k]); });
-
-    var init = { method: 'POST', body: params, credentials: 'same-origin' };
-    var controller = null, timer = null;
-    if (opts.timeoutMs && typeof AbortController !== 'undefined') {
-      controller = new AbortController();
-      init.signal = controller.signal;
-      timer = setTimeout(function () { controller.abort(); }, opts.timeoutMs);
-    }
-    var clearTimer = function () { if (timer) { clearTimeout(timer); timer = null; } };
-
-    return fetch(HANDLER, init)
-      .then(function (r) {
-        return r.text().then(function (text) {
-          clearTimer();
-          var body = null, parseError = false;
-          try { body = JSON.parse(text); } catch (e) { parseError = (text !== ''); }
-          return { ok: r.ok, status: r.status, body: body, parseError: parseError };
-        });
-      })
-      .catch(function (e) {
-        clearTimer();
-        /* An AbortError is our own client-side timeout; everything else is a
-           genuine "could not reach the server" (offline / connection reset). */
-        if (e && e.name === 'AbortError') {
-          return { ok: false, status: 0, body: null, parseError: false, aborted: true };
-        }
-        return { ok: false, status: 0, body: null, parseError: false, networkError: true };
-      });
-  }
-
-  function show(el, ok, msg) {
-    if (!el) { return; }
-    el.className = 'ur-result ' + (ok ? 'ur-ok' : 'ur-err');
-    el.textContent = msg;
-  }
-
-  /* Build a clear failure message from a postForm result, ALWAYS including the
-   * HTTP status (or a network/parse hint), so a failure is never silent. */
-  function errText(res, fallback) {
-    if (res.aborted) {
-      return (fallback || 'Request failed') + ': timed out (no response in time).';
-    }
-    if (res.networkError || res.status === 0) {
-      return (fallback || 'Request failed') + ': could not reach the server (network error).';
-    }
-    if (res.body && res.body.errors && res.body.errors.length) {
-      return res.body.errors.join('; ') + ' (HTTP ' + res.status + ')';
-    }
-    if (res.body && res.body.error) {
-      return res.body.error + ' (HTTP ' + res.status + ')';
-    }
-    if (res.parseError) {
-      return (fallback || 'Request failed')
-        + ': the server returned a non-JSON response (HTTP ' + res.status + ').';
-    }
-    return (fallback || 'Request failed') + ' (HTTP ' + res.status + ').';
-  }
-
-  /* ---- two-step inline delete confirm (replaces window.confirm) ----
-   * First click on a Remove button ARMS it: the label becomes "Confirm delete?",
-   * a red "armed" class is applied, and the destructive consequence is shown
-   * inline in the supplied result element so the warning is never lost. A second
-   * click within ARM_WINDOW_MS runs the delete; otherwise it auto-reverts.
-   * Re-clicking a DIFFERENT armed button cancels any other. This is non-blocking
-   * — there is no popup and automation is never frozen. */
-  var ARM_WINDOW_MS = 4000;
-
-  // At most ONE delete button is armed at a time. Arming a new one disarms the
-  // previous, so two destructive buttons can never be armed simultaneously.
-  var armedDeleteBtn = null;
-
-  function disarmDelete(btn) {
-    if (!btn || !btn._urArm) { return; }
-    clearTimeout(btn._urArm.timer);
-    btn.textContent = btn._urArm.label;
-    btn.classList.remove('ur-armed-delete');
-    var resultEl = btn._urArm.resultEl;
-    var armedMsg = btn._urArm.message;
-    if (resultEl && resultEl.getAttribute('data-ur-armed') === '1'
-        && resultEl.textContent === armedMsg) {
-      resultEl.className = 'ur-result';
-      resultEl.textContent = '';
-      resultEl.removeAttribute('data-ur-armed');
-    } else if (resultEl && resultEl.getAttribute('data-ur-armed') === '1') {
-      resultEl.removeAttribute('data-ur-armed');
-    }
-    btn._urArm = null;
-    if (armedDeleteBtn === btn) { armedDeleteBtn = null; }
-  }
-
-  function armOrConfirmDelete(btn, opts) {
-    if (btn._urArm) {            // second click within the window -> do it
-      var run = btn._urArm.run;
-      disarmDelete(btn);
-      run();
-      return;
-    }
-    // Arming a new button cancels any other still-armed one.
-    if (armedDeleteBtn && armedDeleteBtn !== btn) { disarmDelete(armedDeleteBtn); }
-    var message = (opts.warning || '') + ' Click "Confirm delete?" again to proceed.';
-    btn._urArm = {
-      label: btn.textContent,
-      resultEl: opts.resultEl || null,
-      message: message,
-      run: opts.run,
-      timer: setTimeout(function () { disarmDelete(btn); }, ARM_WINDOW_MS)
-    };
-    armedDeleteBtn = btn;
-    btn.textContent = 'Confirm delete?';
-    btn.classList.add('ur-armed-delete');
-    if (opts.resultEl && opts.warning) {
-      opts.resultEl.className = 'ur-result ur-err';
-      opts.resultEl.textContent = message;
-      opts.resultEl.setAttribute('data-ur-armed', '1');
-    }
-  }
+  /* All the fetch/response plumbing (postForm with its optional client-side
+   * timeout, show, errText) and the two-step inline delete confirm live in
+   * window.urAjax - ur_emit_ajax_helpers() in _options_form.php. This page used
+   * to carry its own copies; the Credentials tab carried near-identical ones. */
 
   /* ---- delete connection / discover / test (delegated) ---- */
   document.addEventListener('click', function (ev) {
@@ -579,18 +442,18 @@ ur_emit_form_enable_assets();
       if (savedId) {
         // Two-step inline confirm (no popup).
         var connsResult = document.getElementById('ur-conns-result');
-        armOrConfirmDelete(t, {
+        window.urAjax.armOrConfirmDelete(t, {
           warning: 'Delete this saved connection? Jobs that use it will be DISABLED.',
           resultEl: connsResult,
           run: function () {
-            postForm({ action: 'deleteConnection', id: savedId }).then(function (res) {
+            window.urAjax.postForm(HANDLER, { action: 'deleteConnection', id: savedId }, CSRF).then(function (res) {
               if (res.ok && res.body && res.body.ok) {
-                show(connsResult, true, res.body.message || 'Deleted.');
+                window.urAjax.show(connsResult, true, res.body.message || 'Deleted.');
                 setTimeout(function () { window.location.reload(); }, 800);
               } else {
-                show(connsResult, false, errText(res, 'Delete failed.'));
+                window.urAjax.show(connsResult, false, window.urAjax.errText(res, 'Delete failed.'));
               }
-            }).catch(function (e) { show(connsResult, false, 'Unexpected error: ' + (e && e.message ? e.message : e)); });
+            }).catch(function (e) { window.urAjax.show(connsResult, false, 'Unexpected error: ' + (e && e.message ? e.message : e)); });
           }
         });
       } else if (card.parentNode) {
@@ -860,15 +723,17 @@ ur_emit_form_enable_assets();
       }
     }
 
-    postForm(
+    window.urAjax.postForm(
+      HANDLER,
       { action: 'discoverHostKey', host: host, port: port, timeout: DISCOVER_MAX_SECONDS },
+      CSRF,
       { timeoutMs: DISCOVER_CLIENT_ABORT_MS }
     ).then(function (res) {
       if (res.ok && res.body && res.body.ok) {
         if (ta) { ta.value = res.body.hostKey || ''; }
         finishSuccess();
       } else {
-        finishFail(errText(res, 'Host key discovery failed.'));
+        finishFail(window.urAjax.errText(res, 'Host key discovery failed.'));
       }
     }).catch(function (e) {
       finishFail('Unexpected error: ' + (e && e.message ? e.message : e));
@@ -881,7 +746,7 @@ ur_emit_form_enable_assets();
     var card = btn.closest ? btn.closest('.ur-conn-card') : null;
     var resultEl = card ? card.querySelector('.ur-test-result') : null;
     if (resultEl) { resultEl.className = 'ur-test-result'; resultEl.textContent = 'Testing…'; }
-    postForm({ action: 'testConnection', id: connId }).then(function (res) {
+    window.urAjax.postForm(HANDLER, { action: 'testConnection', id: connId }, CSRF).then(function (res) {
       if (!resultEl) { return; }
       var b = res.body || {};
       var ok = res.ok && b.ok;
@@ -894,7 +759,7 @@ ur_emit_form_enable_assets();
       } else {
         // Transport-level failure (non-JSON / non-2xx / network) - surface the
         // status so the user isn't left guessing.
-        resultEl.textContent = errText(res, 'Connection test failed.');
+        resultEl.textContent = window.urAjax.errText(res, 'Connection test failed.');
       }
     }).catch(function (e) {
       if (resultEl) {
@@ -933,48 +798,31 @@ ur_emit_form_enable_assets();
   }
 
   /* ---- connections form submit ----
-   * Uses the SAME robust text->JSON parse as postForm so a non-JSON 403/500
-   * becomes a VISIBLE error WITH the HTTP status, and a success always renders a
-   * clear "Saved" line. */
-  function wireForm(formId, resultId) {
-    var form = document.getElementById(formId);
-    if (!form) { return; }
-    form.addEventListener('submit', function (ev) {
+   * window.urAjax.postFormElement posts the form urlencoded (never multipart -
+   * that stalls php-fpm on the live box) with the same robust text->JSON parse,
+   * so a non-JSON 403/500 becomes a VISIBLE error WITH its HTTP status and a
+   * success always renders a clear "Saved" line. */
+  var connsForm = document.getElementById('ur-conns-form');
+  if (connsForm) {
+    connsForm.addEventListener('submit', function (ev) {
       ev.preventDefault();
-      var result = document.getElementById(resultId);
-      /* urlencoded (URLSearchParams over the form's FormData), NOT multipart:
-         multipart bodies stall in php-fpm in the live environment. Nested field
-         names (connections[0][host], …) round-trip unchanged into $_POST; there
-         are no file inputs on this form. */
-      var params = new URLSearchParams(new FormData(form));
-      show(result, true, 'Saving…');
-      fetch(form.getAttribute('action'), { method: 'POST', body: params, credentials: 'same-origin' })
-        .then(function (r) {
-          return r.text().then(function (text) {
-            var body = null, parseError = false;
-            try { body = JSON.parse(text); } catch (e) { parseError = (text !== ''); }
-            return { ok: r.ok, status: r.status, body: body, parseError: parseError };
-          });
-        })
-        .catch(function () {
-          return { ok: false, status: 0, body: null, parseError: false, networkError: true };
-        })
-        .then(function (res) {
-          if (res.ok && res.body && res.body.ok) {
-            var hasWarnings = res.body.warnings && res.body.warnings.length;
-            var msg = res.body.message || 'Saved.';
-            if (hasWarnings) {
-              msg += ' (' + res.body.warnings.join('; ') + ')';
-            }
-            show(result, true, msg);
-            setTimeout(function () { window.location.reload(); }, hasWarnings ? 2500 : 600);
-          } else {
-            show(result, false, errText(res, 'Save failed.'));
+      var result = document.getElementById('ur-conns-result');
+      window.urAjax.show(result, true, 'Saving…');
+      window.urAjax.postFormElement(connsForm).then(function (res) {
+        if (res.ok && res.body && res.body.ok) {
+          var hasWarnings = res.body.warnings && res.body.warnings.length;
+          var msg = res.body.message || 'Saved.';
+          if (hasWarnings) {
+            msg += ' (' + res.body.warnings.join('; ') + ')';
           }
-        });
+          window.urAjax.show(result, true, msg);
+          setTimeout(function () { window.location.reload(); }, hasWarnings ? 2500 : 600);
+        } else {
+          window.urAjax.show(result, false, window.urAjax.errText(res, 'Save failed.'));
+        }
+      });
     });
   }
-  wireForm('ur-conns-form', 'ur-conns-result');
 
   /* Seed the conditional-required state for all initially-rendered cards.
    * Transport LAST: it re-applies the auth-specific hiding on its SSH branch. */

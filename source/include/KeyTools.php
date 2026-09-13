@@ -24,6 +24,7 @@ declare(strict_types=1);
  */
 
 require_once __DIR__ . '/ProcIO.php';
+require_once __DIR__ . '/Util.php';
 
 class KeyTools
 {
@@ -94,7 +95,7 @@ class KeyTools
         [$code, , $stderr] = static::runKeygen($argv);
         if ($code !== 0) {
             self::rmTempDir($dir);
-            return ['ok' => false, 'error' => 'ssh-keygen failed: ' . self::firstLine($stderr)];
+            return ['ok' => false, 'error' => 'ssh-keygen failed: ' . Util::firstLine($stderr)];
         }
 
         $private = @file_get_contents($keyFile);
@@ -212,7 +213,7 @@ class KeyTools
         self::rmTempDir($dir);
 
         if ($code !== 0 || trim($stdout) === '') {
-            $msg = self::firstLine($stderr);
+            $msg = Util::firstLine($stderr);
             if (stripos($msg, 'passphrase') !== false || stripos($msg, 'incorrect') !== false) {
                 return ['ok' => false, 'error' => 'The private key is passphrase-protected. Provide a key with an empty passphrase (required for unattended runs).'];
             }
@@ -355,7 +356,7 @@ class KeyTools
 
         $hostKey = self::filterKeyscanOutput($stdout);
         if ($hostKey === '') {
-            $msg = self::firstLine($stderr);
+            $msg = Util::firstLine($stderr);
             return [
                 'ok'    => false,
                 'error' => 'No host key returned. The host may be unreachable or not running SSH'
@@ -419,33 +420,50 @@ class KeyTools
 
     // --- helpers ------------------------------------------------------------
 
-    /** First non-empty trimmed line of a blob. */
-    private static function firstLine(string $text): string
+    /**
+     * The dir holding the per-call keygen temp dirs: a 'keygen' level under the
+     * plugin's own runtime base (the constant is guarded the same way Logger and
+     * RunState guard it, so KeyTools needs no dependency on Ssh).
+     */
+    private static function keygenBase(): string
     {
-        foreach (preg_split('/\r?\n/', $text) ?: [] as $line) {
-            $line = trim($line);
-            if ($line !== '') {
-                return $line;
-            }
-        }
-        return '';
+        $base = defined('UR_RUNTIME_BASE') ? (string) UR_RUNTIME_BASE : '/tmp/unraid.rsync';
+        return rtrim($base, '/') . '/keygen';
     }
 
-    /** Create a private 0700 temp dir, or '' on failure. */
-    private static function tempDir(): string
+    /**
+     * Create a private 0700 temp dir under the plugin's runtime base, or '' on
+     * failure. NOT under world-writable /tmp directly: every level must be a real
+     * 0700 directory we own, never a symlink or a pre-planted non-directory, so a
+     * local user cannot steer our writes (or our cleanup) elsewhere.
+     */
+    protected static function tempDir(): string
     {
-        $base = sys_get_temp_dir() . '/ur-keygen-' . getmypid() . '-' . bin2hex(random_bytes(4));
-        if (!@mkdir($base, 0700, true) && !is_dir($base)) {
+        $keygen = self::keygenBase();
+        foreach ([dirname($keygen), $keygen] as $dir) {
+            if (!is_dir($dir)) {
+                @mkdir($dir, 0700);
+            }
+            // Checked AFTER the mkdir so a level planted between the two (a
+            // symlink, or a plain file) is refused rather than written through.
+            if (is_link($dir) || !is_dir($dir)) {
+                return '';
+            }
+            @chmod($dir, 0700);
+        }
+
+        $dir = $keygen . '/ur-keygen-' . getmypid() . '-' . bin2hex(random_bytes(4));
+        if (!@mkdir($dir, 0700) && !is_dir($dir)) {
             return '';
         }
-        @chmod($base, 0700);
-        return $base;
+        @chmod($dir, 0700);
+        return $dir;
     }
 
-    /** Recursively remove a temp dir (best-effort). */
-    private static function rmTempDir(string $dir): void
+    /** Recursively remove a temp dir (best-effort), NEVER following a symlink. */
+    protected static function rmTempDir(string $dir): void
     {
-        if ($dir === '' || !is_dir($dir)) {
+        if ($dir === '' || is_link($dir) || !is_dir($dir)) {
             return;
         }
         foreach (scandir($dir) ?: [] as $entry) {
@@ -453,7 +471,9 @@ class KeyTools
                 continue;
             }
             $path = $dir . '/' . $entry;
-            if (is_dir($path)) {
+            // is_dir() FOLLOWS symlinks: recursing into a planted link would
+            // unlink the target directory's contents as root.
+            if (!is_link($path) && is_dir($path)) {
                 self::rmTempDir($path);
             } else {
                 @unlink($path);
@@ -654,10 +674,9 @@ class KeyTools
      */
     private static function scheduleTempDirSweep(): void
     {
-        $base = sys_get_temp_dir();
         $grace = self::DISCOVER_TIMEOUT_MAX + 60; // well past any in-flight child
-        foreach (@glob($base . '/ur-keygen-*') ?: [] as $dir) {
-            if (!is_dir($dir)) {
+        foreach (@glob(self::keygenBase() . '/ur-keygen-*') ?: [] as $dir) {
+            if (is_link($dir) || !is_dir($dir)) {
                 continue;
             }
             $mtime = @filemtime($dir);

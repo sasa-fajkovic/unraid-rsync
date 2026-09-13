@@ -82,8 +82,10 @@ $mytiles[$slug]['column1'] = <<<'HTML'
     if (running) { return 'ur-d-running'; }
     switch ((state || '').toUpperCase()) {
       case 'SUCCESS': return 'ur-d-success';
-      case 'WARNING': case 'PARTIAL': return 'ur-d-warning';
-      case 'FAILED': case 'TIMEOUT': return 'ur-d-failed';
+      /* TIMEOUT is a WARNING, not a failure - same vocabulary as the tabs
+         (window.urBadge) and the server's own Runner::notifyImportance. */
+      case 'WARNING': case 'PARTIAL': case 'TIMEOUT': return 'ur-d-warning';
+      case 'FAILED': return 'ur-d-failed';
       case 'ABORTED': return 'ur-d-aborted';
       default: return 'ur-d-pending';
     }

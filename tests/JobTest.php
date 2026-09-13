@@ -199,7 +199,19 @@ final class JobTest extends TestCase
         $this->assertSame('SSH', $job['transport']);
         $this->assertSame('PUSH', $job['direction']);
         $this->assertSame('failure-only', $job['notifyMode']);
+        // An unrecognised level falls back to 'normal', NOT to the (quieter)
+        // new-job default: a job must never get quieter than the user asked for.
         $this->assertSame('normal', $job['logLevel']);
+    }
+
+    public function testNormalizeAcceptsEveryDeclaredLogLevel(): void
+    {
+        foreach (Job::LOG_LEVELS as $lvl) {
+            $job = Job::normalize(['name' => 'x', 'logLevel' => $lvl]);
+            $this->assertSame($lvl, $job['logLevel'], "$lvl must survive normalize()");
+        }
+        // 'summary' is the one the new-job default relies on.
+        $this->assertContains('summary', Job::LOG_LEVELS);
     }
 
     // --- PATH GUARDRAILS ---------------------------------------------------

@@ -47,6 +47,7 @@ require_once __DIR__ . '/RunState.php';
 require_once __DIR__ . '/Logger.php';
 require_once __DIR__ . '/Notify.php';
 require_once __DIR__ . '/History.php';
+require_once __DIR__ . '/Util.php';
 
 class Runner
 {
@@ -161,7 +162,7 @@ class Runner
         //    escape - it would contradict the contract (no structured result, no
         //    postHook/summary/markStopped). Catch it and hard-fail cleanly.
         $startedAtTs = time();
-        // STORAGE timestamp: UTC, always. Display is system-local (see CLAUDE.md
+        // STORAGE timestamp: UTC, always. Display is system-local (see AGENTS.md
         // "Timezone: store UTC, display system-local") - do NOT switch this to date().
         $startedAt   = gmdate('Y-m-d\TH:i:s\Z', $startedAtTs);
         try {
@@ -238,6 +239,9 @@ class Runner
         $exitCode = 0;
         $reason   = '';
         $token    = '';
+        // Declared out here so the finally can harvest this run's host key
+        // before cleanup; only ever set on the SSH arm.
+        $sshMat   = null;
 
         try {
             // 4. Remote transport: materialise secrets (LOCAL skips this).
@@ -257,6 +261,7 @@ class Runner
                 } else {
                     $token     = (string) $matResult['token'];
                     $mat       = $matResult['mat'];
+                    $sshMat    = $mat;
                     $sshPieces = [
                         'dashE'  => (string) $mat['dashE'],
                         // PASSWORD auth rides in the child ENVIRONMENT (the
@@ -355,7 +360,7 @@ class Runner
                 // Resolve "user@host" ONCE (not per pair) for the remote
                 // operands. DAEMON uses the SAME prefix as SSH - the only
                 // difference is the '::' separator resolvePair() appends.
-                $userHost = in_array($transport, ['SSH', 'DAEMON'], true) ? self::userHost($job) : '';
+                $userHost = in_array($transport, ['SSH', 'DAEMON'], true) ? self::userHost($mat['conn'] ?? []) : '';
 
                 if (count($pairs) === 0) {
                     $state    = Rsync::STATE_FAILED;
@@ -412,6 +417,9 @@ class Runner
                         Logger::sink($runLog),
                         Ssh::childEnv(is_array($sshPieces) ? $sshPieces['sshEnv'] : [])
                     );
+                    // The sink holds back progress redraws (5%/30s throttle) and
+                    // any unterminated tail; rsync has exited, so land them.
+                    Logger::flushSink($runLog);
                     // rsync ALSO writes the run log directly via --log-file, which
                     // bypasses the sink's cap; trim the file to the cap now that
                     // this pair's rsync has closed --log-file (F3, complete).
@@ -453,6 +461,14 @@ class Runner
             $reason   = 'exception';
             Logger::event($runLog, $jobId, 'Run failed with an internal error: ' . $e->getMessage());
         } finally {
+            // Land whatever the last sink still holds, FIRST. It has to happen
+            // before the postHook: runHook() opens a new sink on this same path
+            // and Logger::sink() RESETS the per-path state, so a flush placed
+            // after the hook would find nothing left to rescue. This is the
+            // abort path's safety net - a SIGTERM'd rsync leaves its last
+            // redraw unterminated, and the trap lets this finally run.
+            Logger::flushSink($runLog);
+
             // 7. postHook ALWAYS runs (even on failure/abort), with the outcome
             //    in its environment.
             $postHook = (string) ($job['postHook'] ?? '');
@@ -469,11 +485,28 @@ class Runner
                 }
             }
 
+            // 7b. Trust on first use: with accept-new and nothing pinned yet, ssh
+            //     appended the key it accepted to this run's known_hosts. Pin it
+            //     into the connection BEFORE cleanup unlinks that file, so a
+            //     CHANGED key fails closed on the next run instead of being
+            //     silently trusted again.
+            if (is_array($sshMat)) {
+                $connId  = (string) ($sshMat['conn']['id'] ?? '');
+                $hostKey = Ssh::harvestHostKey($sshMat);
+                if (Ssh::pinHostKey($connId, $hostKey)) {
+                    // No key material and no tmpfs path in the message.
+                    Logger::event($runLog, $jobId, 'Pinned host key for connection ' . $connId . ' on first use.');
+                }
+            }
+
             // 8. Cleanup the SSH runtime secrets for THIS run's token, and disarm
             //    the secret-path redaction armed at materialisation (F1).
             if ($token !== '') {
                 Ssh::cleanupRuntime($token);
             }
+            // And again for the postHook's own sink, before the redact pass so
+            // an unterminated last line gets scrubbed like everything else.
+            Logger::flushSink($runLog);
             // Final pass, while redaction is still armed: catches anything rsync
             // or the postHook wrote to the run log after the last pair's cap.
             Logger::redactRunLog($runLog);
@@ -929,29 +962,16 @@ class Runner
 
     /**
      * Build the "user@host" operand prefix for a remote pair from the job's
-     * connection - identical for SSH and DAEMON, which differ only in the
-     * separator resolvePair() appends. Returns '' only when the connection
-     * can't be resolved - the guardrails/materialisation already fail the run
-     * before we get here in that case.
+     * already-materialised connection (mat['conn'] from materializeSsh /
+     * materializeDaemonConn) - identical for SSH and DAEMON, which differ only
+     * in the separator resolvePair() appends. Returns '' only when the
+     * connection can't be resolved - the guardrails/materialisation already
+     * fail the run before we get here in that case.
      *
-     * @param array<string,mixed> $job
+     * @param array<string,mixed> $conn
      */
-    private static function userHost(array $job): string
+    private static function userHost(array $conn): string
     {
-        $connId = (string) ($job['connectionId'] ?? '');
-        if ($connId === '') {
-            return '';
-        }
-        try {
-            $creds = Credentials::load();
-        } catch (Throwable $e) {
-            return '';
-        }
-        $conn = Credentials::findConnection($creds, $connId);
-        if ($conn === null) {
-            return '';
-        }
-        $conn = Credentials::mergeConnection($conn);
         $user = (string) ($conn['username'] ?? '');
         $host = (string) ($conn['host'] ?? '');
         if ($user === '' || $host === '') {
@@ -1087,10 +1107,16 @@ class Runner
         // redacting, size-capped sink as rsync output (F1 + F3).
         $sink = Logger::sink($runLog);
 
-        if (self::$hookRunner !== null) {
-            return (int) (self::$hookRunner)($hook, $env, $sink);
+        try {
+            if (self::$hookRunner !== null) {
+                return (int) (self::$hookRunner)($hook, $env, $sink);
+            }
+            return self::defaultHookRun($hook, $env, $sink);
+        } finally {
+            // A hook whose last write had no trailing newline would otherwise
+            // stay in the sink buffer until the next sink on this path reset it.
+            Logger::flushSink($runLog);
         }
-        return self::defaultHookRun($hook, $env, $sink);
     }
 
     /**
@@ -1178,8 +1204,7 @@ class Runner
             // A summary failure must not crash the run; log-best-effort + return.
             return;
         }
-        $clean = preg_replace('/[^A-Za-z0-9._-]/', '', $jobId);
-        $clean = ($clean === '' || $clean === null) ? 'unknown' : $clean;
+        $clean = Util::safeFileId($jobId);
         $path  = $dir . '/' . $clean . '.summary.json';
 
         $trigger = (($summary['trigger'] ?? '') === 'schedule') ? 'schedule' : 'manual';
@@ -1217,8 +1242,7 @@ class Runner
      */
     public static function readSummary(string $jobId): ?array
     {
-        $clean = preg_replace('/[^A-Za-z0-9._-]/', '', $jobId);
-        $clean = ($clean === '' || $clean === null) ? 'unknown' : $clean;
+        $clean = Util::safeFileId($jobId);
         $path  = rtrim(UR_CONFIG_BASE, '/') . '/runs/' . $clean . '.summary.json';
         if (!is_file($path)) {
             return null;

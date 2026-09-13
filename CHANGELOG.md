@@ -12,6 +12,13 @@ user-facing highlights.
 ## [Unreleased]
 
 ### Added
+- **Host key pinning.** The first successful connection on an `accept-new`
+  Connection (a scheduled run or **Test connection**) now pins the host key it
+  saw into the Connection, making `accept-new` a real trust-on-first-use
+  instead of trusting whatever key the host presents on every run. A
+  subsequently changed key then fails closed instead of being silently
+  re-accepted.
+
 - **rsync daemon (rsyncd) transport.** A Connection now has a **Transport** —
   *SSH* or *rsync daemon (rsyncd)* — and a job a matching `DAEMON` transport,
   which talks rsync's own wire protocol straight to a TCP port (873 by default)
@@ -46,7 +53,42 @@ user-facing highlights.
   its default SSH PATH (common on NAS appliances) and a run fails with
   "rsync: command not found". Constrained to a bare absolute path.
 
+- **`Summary` log level** — a middle setting between *Quiet* and *Normal*, and
+  the default for a **newly created** job. It logs one **overall progress line
+  every 5% or 30 seconds** (whichever comes first) plus the end-of-run summary,
+  and **no per-file lines**, so a nightly backup of a large tree no longer
+  buries its own errors under a file listing. Existing jobs keep the level they
+  were saved with — change it on the job if you want the quieter log. rsync
+  redraws its progress line several times a second with a bare carriage return;
+  the plugin now collapses those redraws instead of writing every one, so the
+  log viewer shows readable lines at **every** level rather than one enormous
+  smeared line. Errors and every `deleting <path>` are still logged at *every*
+  level — a quiet level never hides what a `--delete` job removed — and a
+  **Dry-run is never quieter than *Normal***, so the preview always names the
+  files and deletions it would have made.
+
 ### Fixed
+- **A JavaScript error on the plugin's pages is gone.** Each form carried a
+  hidden input named `action`, which shadows the form element's own `action`
+  property — and Unraid's page-layout script inspects `form.action` on every
+  form it finds, so it threw `actionName is not a function` on every page load
+  and every Apply, and stopped before installing its "you have unsaved changes"
+  leave confirmation. The handler action now travels as a data attribute
+  instead; nothing about saving changes.
+- **A manual-only job no longer shows a next run time.** Such a job is still
+  *enabled* (that is how "run on demand" is stored) and keeps whatever schedule
+  it was last saved with, so the 1-second status poll was overwriting the correct
+  **manual (on demand)** cell with a cron time that will never fire — on both the
+  **Overview** and **Jobs** tabs. crond never saw the job either way.
+- **A run log no longer ends on a duplicated progress line.** rsync repeats its
+  final redraw, and the last copy carries the stream's only newline, so the same
+  `100%` line was written twice — with the end-of-run summary wedged between
+  them. An identical repeat is now dropped; one that differs (a moved rate, ETA
+  or file count) still lands.
+- **`Quiet` was not quiet.** rsync's `--log-file` has its own line format and
+  wrote one line per transferred file *regardless* of `-q`, so the level that
+  promised the least output still produced a full per-file listing. Both
+  *Quiet* and the new *Summary* level now suppress those lines.
 - `--contimeout` is no longer sent on SSH and Local transfers. rsync rejects it
   outright there (*"may only be used when connecting to an rsync daemon"*,
   exit 1), so any job that set it failed before transferring a single file.
@@ -81,6 +123,21 @@ user-facing highlights.
   global value previously reached rsync unchecked.
 - Dashboard tile "open plugin" link now points at the canonical
   `/Settings/UnraidRsync` (restores the highlighted Settings nav).
+
+### Changed
+- A `TIMEOUT` run now renders as a warning badge on every tab and the
+  dashboard tile. History, Overview and the Dashboard previously showed it as
+  a failure.
+- History's failed log-download now reports inline instead of in a popup.
+
+### Security
+- The CSRF token is read from the POST body only, never from the query string.
+- `ssh-keygen`/`ssh-keyscan` scratch directories are confined to the plugin's
+  0700 runtime dir, with symlink-safe cleanup.
+
+### Removed
+- Unused backend methods with no user-facing effect: `Config::retention`,
+  `Notify::init`/`buildInitCommand`, `History::listAll`/`delete`.
 
 ### Changed (internal)
 - Added a php-cs-fixer formatting gate, `.editorconfig`, commitlint on PR titles,

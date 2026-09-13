@@ -191,17 +191,6 @@ class Config
         return $n;
     }
 
-    /** The effective retention from the loaded config (clamped). */
-    public static function retention(): int
-    {
-        try {
-            $cfg = self::load();
-        } catch (Throwable $e) {
-            return self::DEFAULT_RETENTION;
-        }
-        return self::clampRetention($cfg['global']['retention'] ?? self::DEFAULT_RETENTION);
-    }
-
     /**
      * Confine a user-supplied directory to an Unraid storage path, returning the
      * cleaned absolute path or '' (meaning "unset"). Shared by sanitizeLogDir()
@@ -447,7 +436,12 @@ class Config
             'pairs'             => [],
             'useGlobalDefaults' => false,
             'rsyncOptions'      => self::defaultRsyncOptions(),
-            'logLevel'          => 'normal',
+            // 'summary' = overall progress only, no per-file lines. A NEW job's
+            // default; stored jobs keep the level they were saved with
+            // (mergeJob only fills keys a job is missing), and an unrecognised
+            // stored value still falls back to 'normal' in Job::normalize - a
+            // job should never get quieter than the user asked for by accident.
+            'logLevel'          => 'summary',
             'preHook'           => '',
             'postHook'          => '',
             'notifyMode'        => 'failure-only',

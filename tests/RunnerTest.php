@@ -88,6 +88,63 @@ final class RunnerTest extends TestCase
         return $id;
     }
 
+    /**
+     * Logger::sink() holds progress redraws back (5%/30s) and buffers an
+     * unterminated tail, so the Runner MUST flush it once rsync has exited -
+     * otherwise the final percentage and any newline-less last line would be
+     * silently dropped from the run log. This is the wiring test for that.
+     */
+    public function testRunnerFlushesTheSinkSoTheFinalProgressLineReachesTheLog(): void
+    {
+        Rsync::$runner = function (array $argv, $onOutput): int {
+            $this->trace[] = 'rsync';
+            // A realistic --info=progress2 burst: bare-\r redraws, the last of
+            // them inside the throttle window, and no trailing newline at all.
+            foreach ([0, 1, 2, 3, 99, 100] as $pct) {
+                $onOutput("\r" . sprintf('%12s %3d%%   2.93MB/s    0:00:01  ', number_format($pct * 419430), $pct));
+            }
+            $onOutput('sent 41,953,721 bytes  received 146 bytes');
+            return 0;
+        };
+
+        $id  = $this->saveLocalJob('j-flush');
+        $res = Runner::run($id, false);
+        $this->assertSame(Rsync::STATE_SUCCESS, $res['state']);
+
+        $log = (string) @file_get_contents($res['runLog']);
+        $this->assertStringContainsString('sent 41,953,721 bytes', $log, 'the unterminated tail must be flushed');
+        $this->assertStringNotContainsString("\r", $log, 'no bare CR may reach the run log');
+        // The sub-5% redraws were dropped; 0% and 100% survive.
+        $this->assertStringContainsString('  0%', $log);
+        $this->assertStringContainsString('100%', $log);
+        $this->assertStringNotContainsString('  2%', $log);
+    }
+
+    /**
+     * The `finally` flush has to happen BEFORE the postHook. runHook() opens a
+     * new sink on the same run log and Logger::sink() RESETS the per-path state,
+     * so a flush placed after the hook finds nothing left to rescue. The pair's
+     * own flush covers every normal and abort path; this is the case that needs
+     * the outer one - output captured, then a throw before that flush.
+     */
+    public function testAnUnterminatedTailSurvivesAThrowOnAJobWithAPostHook(): void
+    {
+        Rsync::$runner = function (array $argv, $onOutput): int {
+            $this->trace[] = 'rsync';
+            $onOutput("\r  41,943,046 100%   7.80MB/s    0:00:05");
+            $onOutput('rsync: partial line with no trailing newline');
+            throw new RuntimeException('boom');
+        };
+
+        $id  = $this->saveLocalJob('j-posthook-flush', ['postHook' => 'POST']);
+        $res = Runner::run($id, false);
+        $this->assertSame(Rsync::STATE_FAILED, $res['state']);
+
+        $log = (string) @file_get_contents($res['runLog']);
+        $this->assertStringContainsString('partial line with no trailing newline', $log);
+        $this->assertStringContainsString('Post-run hook exited', $log, 'the postHook still ran');
+    }
+
     public function testHappyPathOrderingPreThenPairsThenPost(): void
     {
         $rsyncCalls = 0;
@@ -158,7 +215,7 @@ final class RunnerTest extends TestCase
             $this->assertSame(2, History::list($id, 0, 25)['total']);
             $this->assertLessThanOrEqual(2, count(Logger::listRuns($id, 100)));
         } finally {
-            History::delete($id);
+            @unlink(History::path($id));
         }
     }
 
@@ -178,7 +235,7 @@ final class RunnerTest extends TestCase
             $this->assertStringStartsWith('run-', $r['logRef']);
             $this->assertNotNull(Logger::runLogPathById($id, $r['logRef']));
         } finally {
-            History::delete($id);
+            @unlink(History::path($id));
         }
     }
 
@@ -922,6 +979,87 @@ final class RunnerTest extends TestCase
         $this->assertSame((string) $emittedKey, Logger::redact((string) $emittedKey), 'redaction is disarmed after the run');
     }
 
+    public function testAcceptNewSshRunPinsTheHostKeyForTheNextRun(): void
+    {
+        // TOFU at the RUNNER level: the connection is accept-new with nothing
+        // pinned, so ssh would accept - and append to this run's known_hosts -
+        // whatever key the host presents. The fake rsync stands in for that
+        // append; the run must lift the key into credentials.json BEFORE
+        // cleanupRuntime() deletes the file, or every future run trusts a MITM.
+        $hostKeyLine    = 'h.example ssh-ed25519 AAAAacceptedbyssh';
+        $seenKnownHosts = null;
+
+        $origBase = Ssh::$runtimeBase;
+        $rt = sys_get_temp_dir() . '/ur-runner-tofu-' . getmypid() . '-' . bin2hex(random_bytes(4));
+        Ssh::$runtimeBase = $rt;
+
+        $creds = Credentials::defaults();
+        $creds['keys'][] = [
+            'id'          => 'k-1',
+            'name'        => 'k1',
+            'privateKey'  => "-----BEGIN OPENSSH PRIVATE KEY-----\nFAKEKEYMATERIAL\n-----END OPENSSH PRIVATE KEY-----\n",
+            'publicKey'   => 'ssh-ed25519 AAAA fake',
+            'fingerprint' => 'SHA256:fake',
+        ];
+        $creds['connections'][] = Credentials::mergeConnection([
+            'id' => 'c-key', 'name' => 'ckey', 'host' => 'h.example', 'username' => 'root',
+            'authMethod' => 'KEY', 'keyId' => 'k-1', 'strictHostKey' => 'accept-new',
+        ]);
+        Credentials::save($creds);
+
+        Rsync::$runner = function (array $argv, $onOutput) use (&$seenKnownHosts, $hostKeyLine): int {
+            $eIdx  = array_search('-e', $argv, true);
+            $dashE = ($eIdx !== false) ? (string) $argv[$eIdx + 1] : '';
+            if (preg_match("#'UserKnownHostsFile=([^']+)'#", $dashE, $m)) {
+                $seenKnownHosts = $m[1];
+                file_put_contents($seenKnownHosts, $hostKeyLine . "\n", FILE_APPEND);
+            }
+            return 0;
+        };
+
+        $config = Config::load();
+        $job = Config::defaultJob();
+        $job['id']           = 'j-tofu';
+        $job['name']         = 'j-tofu';
+        $job['transport']    = 'SSH';
+        $job['direction']    = 'PUSH';
+        $job['connectionId'] = 'c-key';
+        $job['pairs']        = [['local' => '/mnt/user/src/', 'remote' => '/data/dst/']];
+        $config['jobs'][]    = $job;
+        Config::save($config);
+        RunState::clear('j-tofu');
+        RunState::clearAbort('j-tofu');
+
+        try {
+            $res = Runner::run('j-tofu', false);
+            $this->assertSame(Rsync::STATE_SUCCESS, $res['state']);
+            $this->assertNotNull($seenKnownHosts, 'the fake rsync saw the per-run known_hosts in -e');
+
+            $stored = Credentials::findConnection(Credentials::load(), 'c-key');
+            $this->assertIsArray($stored);
+            $this->assertSame($hostKeyLine, trim((string) $stored['remoteHostKey']));
+
+            $log = (string) @file_get_contents($res['runLog']);
+            $this->assertStringContainsString('Pinned host key for connection c-key on first use.', $log);
+            // The log line must carry neither the key material nor the tmpfs path.
+            $this->assertStringNotContainsString('AAAAacceptedbyssh', $log);
+            $this->assertStringNotContainsString((string) $seenKnownHosts, $log);
+        } finally {
+            Ssh::$runtimeBase = $origBase;
+            Credentials::save(Credentials::defaults());
+            if (is_dir($rt)) {
+                $it = new RecursiveIteratorIterator(
+                    new RecursiveDirectoryIterator($rt, FilesystemIterator::SKIP_DOTS),
+                    RecursiveIteratorIterator::CHILD_FIRST
+                );
+                foreach ($it as $f) {
+                    $f->isDir() ? @rmdir($f->getPathname()) : @unlink($f->getPathname());
+                }
+                @rmdir($rt);
+            }
+        }
+    }
+
     public function testRunnerCliExitCodeAgreesWithRunnerStateMatrix(): void
     {
         // CLI<->Runner consistency: for every terminal STATE the runner can
@@ -1490,8 +1628,8 @@ final class RunnerTest extends TestCase
             '--partial',
             '--mkpath',
             '--contimeout=45',
-            '-v',
-            '--info=stats2,progress2',
+            '--info=progress2',
+            '--log-file-format=',
             '--log-file=' . $res['runLog'],
             '--port=873',
             '--password-file=' . $passDuringRun,
@@ -1550,8 +1688,8 @@ final class RunnerTest extends TestCase
             '-t',
             '--partial',
             '--mkpath',
-            '-v',
-            '--info=stats2,progress2',
+            '--info=progress2',
+            '--log-file-format=',
             '--log-file=' . $res['runLog'],
             '--port=873',
             '--',
@@ -1827,8 +1965,8 @@ final class RunnerTest extends TestCase
             '-t',
             '--partial',
             '--mkpath',
-            '-v',
-            '--info=stats2,progress2',
+            '--info=progress2',
+            '--log-file-format=',
             '--log-file=' . $res['runLog'],
             '--',
             '/mnt/user/src/',
