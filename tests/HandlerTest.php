@@ -139,6 +139,29 @@ final class HandlerTest extends TestCase
         $this->assertSame(200, $code);
     }
 
+    /** A token in the query string alone must never satisfy the CSRF check. */
+    public function testCsrfRejectedWhenOnlyInQueryString(): void
+    {
+        try {
+            $_POST         = [];
+            $_GET['csrf_token'] = 'test-token';
+            [$body, $code] = $this->runCapture(function () {
+                ur_check_csrf('');
+            });
+            $this->assertSame(403, $code);
+            $this->assertStringContainsString('CSRF', $body['error']);
+
+            $_POST['csrf_token'] = 'test-token';
+            $GLOBALS['ur_last_response_code'] = 200;
+            [, $code2] = $this->runCapture(function () {
+                $this->assertTrue(ur_check_csrf(''));
+            });
+            $this->assertSame(200, $code2);
+        } finally {
+            $_GET = [];
+        }
+    }
+
     public function testSaveConfigPersistsAndClampsRetention(): void
     {
         // A global-only save persists retention, clamped to [1,9999].
@@ -151,10 +174,10 @@ final class HandlerTest extends TestCase
         $this->assertSame(200, $code, json_encode($body));
         $this->assertSame(9999, Config::load()['global']['retention']);
 
-        // A valid value round-trips; Config::retention() reflects it.
+        // A valid value round-trips.
         $_POST['global']['retention'] = '7';
         $this->runCapture(fn() => ur_action_save_config());
-        $this->assertSame(7, Config::retention());
+        $this->assertSame(7, Config::load()['global']['retention']);
 
         // Non-numeric clamps to the default.
         $_POST['global']['retention'] = 'lots';
@@ -642,7 +665,7 @@ final class HandlerTest extends TestCase
             // newest-first
             $this->assertSame(3, $body['runs'][0]['exitCode']);
         } finally {
-            History::delete($id);
+            @unlink(History::path($id));
         }
     }
 
@@ -702,8 +725,8 @@ final class HandlerTest extends TestCase
             $this->assertSame('j-b', $body['runs'][1]['jobId']);
             $this->assertSame('a1.log', $body['runs'][2]['logRef']);
         } finally {
-            History::delete('j-a');
-            History::delete('j-b');
+            @unlink(History::path('j-a'));
+            @unlink(History::path('j-b'));
         }
     }
 
@@ -745,7 +768,7 @@ final class HandlerTest extends TestCase
             $this->assertSame(1, $page['total']);
             $this->assertSame(0, $page['runs'][0]['exitCode']);
         } finally {
-            History::delete($jobId);
+            @unlink(History::path($jobId));
         }
     }
 

@@ -1010,7 +1010,7 @@ final class OptionsFormHelpTest extends TestCase
             "resultEl.textContent = b.message + (b.reason ? ' [' + b.reason + ']' : '');",
             $js
         );
-        $this->assertStringContainsString("resultEl.textContent = errText(res, 'Connection test failed.');", $js);
+        $this->assertStringContainsString("resultEl.textContent = window.urAjax.errText(res, 'Connection test failed.');", $js);
 
         // Nothing anywhere on the page may put a RESPONSE value into innerHTML.
         // The three innerHTML sites that exist are page-authored markup (the

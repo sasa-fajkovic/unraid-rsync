@@ -161,38 +161,6 @@ class Notify
     }
 
     /**
-     * Build the `notify init` command line - the one-time idempotent call that
-     * initialises the notification subsystem's permissions on install/upgrade.
-     * The binary path is escapeshellarg'd and "init" is a fixed literal.
-     */
-    public static function buildInitCommand(): string
-    {
-        return escapeshellarg((string) static::$notifyPath) . ' init';
-    }
-
-    /**
-     * Run `notify init` (initialise the notification subsystem - idempotent).
-     * Graceful no-op + false when the binary is absent; never throws.
-     *
-     * Provided as a tested escaping/runner seam. NOTE: the .plg install script
-     * currently shells out to `notify init` directly (unraid.rsync.plg:96, while
-     * the array is stopped during install) rather than calling this method, so
-     * there is no live caller today - it exists for completeness and to keep the
-     * init command path under unit test alongside buildInitCommand().
-     */
-    public static function init(): bool
-    {
-        try {
-            if (!static::available()) {
-                return false;
-            }
-            return static::dispatch(static::buildInitCommand()) === 0;
-        } catch (Throwable $e) {
-            return false;
-        }
-    }
-
-    /**
      * Run the built command. Delegates to the injectable $runner in tests; the
      * live path uses exec() (the notify script is a positional-arg shell script,
      * not an argv-friendly binary). The command is fully escapeshellarg'd by

@@ -1,0 +1,317 @@
+# AGENTS.md
+
+Guidance for AI agents (and humans) working in this repository.
+
+## What this is
+
+A **native Unraid 7.x webGui plugin** (PHP) that schedules and monitors **rsync
+backup jobs over SSH** — a multi-job rsync scheduler, not a
+single-schedule rsync plugin. It is written **from scratch**; it is **not** based
+on, forked from, or derived from any other plugin.
+
+## Architecture
+
+- **`source/`** is packaged into the `.txz` and installs to
+  `/usr/local/emhttp/plugins/unraid.rsync/`.
+- **Persistent config** lives on the USB flash at
+  `/boot/config/plugins/unraid.rsync/` (`config.json`, `credentials.json`, the
+  single `unraid.rsync.cron`, and `runs/<jobid>.summary.json` last-run summaries).
+- **Runtime state + logs** live in RAM at `/tmp/unraid.rsync/` (tmpfs, cleared on
+  reboot): per-run logs under `logs/<jobid>/run-<UTCts>.log`, the rolling
+  cross-job `logs/plugin.log`, run state, and materialised secrets under
+  `keys/<token>`, `pass/<token>`, `known_hosts/<token>`. **Logs are RAM-only by
+  default** (no flash wear, mirrors Unraid's own `/var/log` tmpfs) — only the
+  small `runs/<jobid>.summary.json` is persisted to `/boot`, which is why History
+  survives a reboot but full log bodies don't. **Opt-in persistence:** the
+  `global.logDir` setting (validated/confined to `/mnt/<top>/<leaf>` by
+  `Config::sanitizeLogDir`) relocates run logs + `plugin.log` to an array/pool
+  path so they survive a reboot. It's plumbed via `Logger::$logsDirOverride`
+  (Logger stays decoupled from Config — the Runner and the handler front
+  controller push the validated path in); empty = tmpfs. Run state + secrets
+  ALWAYS stay in tmpfs regardless. `ssh-keygen`/`ssh-keyscan` scratch dirs live
+  under `keygen/` in this same 0700 runtime base (`KeyTools` no longer uses bare
+  `/tmp`), and cleanup never follows symlinks.
+- **UI** = a parent hub `source/UnraidRsync.page` (`Menu="Utilities"` →
+  **Settings ▸ User Utilities**, `Type="xmenu"`, **empty body**) plus child tab
+  pages `source/UR.*.page` (`Menu="UnraidRsync:1..7"` → **Overview / Jobs /
+  Connections / Credentials / Global Settings / Status / History**), each
+  including a `source/pages/*.php` body. **Connections** (host/port/user/auth
+  cards) and **Credentials** (the managed SSH-key keychain) are SEPARATE
+  tabs/bodies (`connections.php` / `credentials.php`); a connection references a
+  managed key by id via its KEY auth method. **Overview** (`overview.php`) is a
+  read-only status board that polls `getStatus`.
+- **Dashboard widget:** `source/UR.Dashboard.page` uses `Menu="Dashboard"` (NOT
+  the `UnraidRsync` xmenu) and sets `$mytiles['unraid.rsync']['column1']` to a
+  self-contained tile string (markup + scoped CSS + a `getStatus` poller) that
+  Unraid's `dynamix/DashStats.page` echoes into the dashboard. This `$mytiles`
+  contract is undocumented but stable since 6.12; the body branches on the
+  Unraid version for the pre-7.2 header fixup.
+- **Backend classes** in `source/include/`: `Config`, `Credentials`, `Job`, `Ssh`,
+  `Rsync`, `RunState`, `Runner`, `Logger`, `Cron`, `Notify`, `KeyTools`,
+  `handler.php` (the POST/GET front controller). Plus
+  `source/scripts/{runner,apply-cron}.php` and the `source/event/started` array-
+  start hook.
+
+## Hard conventions / invariants
+
+- **Slug `unraid.rsync` is identical everywhere** — `.plg` name, install dir,
+  `/boot` config dir, and cron pickup. Do not diverge it.
+- **Build rsync/ssh invocations as argv ARRAYS, never shell strings**, and
+  run them through `proc_open` without a shell. The ONLY intentional shell uses
+  are: `Notify` exec (every arg `escapeshellarg`'d, incl. `-i`), user pre/post
+  **hooks** (`bash -c "$hook"`), and the detached runner launcher.
+- **Password auth uses OpenSSH's `SSH_ASKPASS`, NOT `sshpass`** — the old
+  dependency told users to install **NerdTools**, archived by its authors in
+  March 2024 and gone from Unraid 7, so password auth was advertised in the UI
+  while being impossible on a stock box. `Ssh::buildAuthEnv()` sets
+  `SSH_ASKPASS` → the shipped `source/scripts/askpass.sh` (committed **0755**,
+  like `source/event/started`; it lives in the install dir, NOT tmpfs, so a
+  `noexec` `/tmp` cannot break it), plus `SSH_ASKPASS_REQUIRE=force` and
+  `DISPLAY` for pre-8.4 OpenSSH. The helper cats the existing per-run 0600
+  tmpfs passfile named by `UR_ASKPASS_FILE`, so **the password still reaches
+  neither argv nor env — only its path does.** Do not re-add a wrapper binary:
+  ssh is `argv[0]` for every auth method now, which is why `classifyProbe` has
+  one set of ssh semantics instead of a separate sshpass exit-code table.
+- **rsync flags are a closed whitelist** (`Rsync::BOOL_FLAGS` / `SCALAR_FLAGS` /
+  `FILTER_FLAGS`, mirrored by `Job`'s normalisation and the options form). There is
+  **no free-form flag field** anywhere — never add one.
+- **Only two things in the emitted argv are order-sensitive, and both are
+  load-bearing** (everything else is emitted at most once and rsync ignores its
+  position — do NOT add reordering UI for other flags):
+  1. **Filter rules.** rsync builds ONE ordered filter list and acts on the FIRST
+     rule that matches. They are stored as an ordered `filters` list of
+     `{type, pattern}` (NOT separate `excludes`/`includes` lists — that shape
+     made every include inert behind a broad exclude, issue #128) and
+     `Rsync::optionTokens()` emits them verbatim in stored order. **Never sort,
+     group by type, or dedupe them.**
+  2. **`-a` negations.** `-a` sets its implied options at PARSE TIME, so omitting
+     an unticked option's positive flag does nothing — it must be negated with an
+     explicit `--no-*` emitted **after** the `-a`. `Rsync::ARCHIVE_IMPLIED` maps
+     each implied key to its negation; `Config::ARCHIVE_IMPLIED_KEYS` holds the
+     same keys for the migration (Config cannot depend on Rsync), and `RsyncTest`
+     asserts the two stay in lockstep.
+- **`config.json` is schemaVersion 2.** `Config::migrate()` has a real `case 1:`
+  arm now: it folds `excludes`/`includes` into ordered `filters` (includes first)
+  and, where `archive` is on, forces every `ARCHIVE_IMPLIED_KEYS` option true so
+  an upgrade does not silently start emitting `--no-perms`/`--no-links` and change
+  what existing backups preserve. Migration MUST keep running before
+  `mergeDefaults()` (which drops unknown keys).
+- **Secrets** (SSH keys, passwords) live in `credentials.json`, by default on
+  **FAT32 `/boot` (world-readable)**, so Unix perms don't protect them there. They
+  are copied to **tmpfs at `chmod 600`** immediately before use (OpenSSH refuses a
+  world-readable key) and cleaned up in a `finally`. Passwords are **XOR-obfuscated
+  (reversible, NOT encryption)** — always document them as such. **Never return
+  secrets to the browser.** **Opt-in relocation:** the `global.secretsDir` setting
+  (validated/confined to `/mnt/<top>/<leaf>` by `Config::sanitizeSecretsDir`, which
+  shares `Config::sanitizeMntDir` with `sanitizeLogDir`) moves `credentials.json`
+  to an array/pool path where `chmod 600` actually sticks. It's plumbed via
+  `Credentials::$secretsDirOverride` (Credentials stays decoupled from Config — the
+  Runner and the handler front controller push the validated path in, mirroring
+  `Logger::$logsDirOverride`); empty = `/boot`. Changing it migrates the file
+  (`ur_migrate_credentials`: copy+verify+`chmod 600`+unlink, never clobbers an
+  existing dest, never `rename` across the FAT32↔ext4 device boundary). The
+  **tmpfs materialisation is NOT removed** by this (still needed for a discrete
+  `ssh -i` key file + per-run isolation + redaction). Per-run tmpfs secrets +
+  run state ALWAYS stay in tmpfs regardless.
+- **Host-key pinning (`accept-new`) is a real trust-on-first-use now.**
+  `Ssh::harvestHostKey()` reads back the key OpenSSH appended to the per-run
+  tmpfs known_hosts, and `Ssh::pinHostKey()` writes it into the connection's
+  `remoteHostKey` (reload-modify-save, only while still empty) from both
+  `Runner::run()`'s `finally` (before `cleanupRuntime`) and
+  `Ssh::testConnection()`. Before this, nothing was ever pinned and every run
+  trusted whatever key the host presented.
+- **Timezone: store UTC, display system-local.** Two conventions, both
+  deliberate (issue #135). **Stored/interchange** values stay UTC: the
+  `startedAt`/`finishedAt` in `runs/<jobid>.summary.json` + History records
+  (`gmdate('Y-m-d\TH:i:s\Z')`) and the `run-YYYYmmddTHHMMSSZ.log` filenames —
+  the filename is an identifier that must sort lexically and never repeat across
+  a DST fold, so **never** localise it. **Everything a user reads** is the
+  server's timezone: `Logger::event()` stamps lines as `date('Y-m-d\TH:i:sP')`
+  (offset kept, so it stays unambiguous) to match the rsync lines interleaved
+  beside them in the same file. `Config.php` resolves the system zone
+  (`Config::systemTimezone()`: `$TZ` → `/etc/localtime` → ambient, validated
+  against `DateTimeZone::listIdentifiers()`) and calls
+  `date_default_timezone_set()` **at file load** — it is the ONLY place that does,
+  reading `$TZ` → Unraid's `ident.cfg`/`var.ini` `timeZone` → `/etc/localtime`(`-copied-from`)
+  → ambient. **Do not drop the ident.cfg rung**: php-fpm may scrub `$TZ` and
+  Slackware may write `/etc/localtime` as a plain copy rather than a zoneinfo
+  symlink, so without it a stock box can miss every source and fall back to UTC —
+  silently reproducing #135 while looking fixed. The Runner logs the resolved zone
+  at the top of every run and the UI labels it (`ur_tz_note()`) precisely so that
+  fallback is visible rather than invisible,
+  and it is why `Cron::nextRun()`'s bare `date()`/`mktime()` walk is correct: PHP
+  defaults to UTC whenever php.ini leaves `date.timezone` unset, which would
+  compute every next-run a full UTC offset away from when crond actually fires.
+  Config.php is required transitively by every entry point (pages, `handler.php`,
+  `scripts/runner.php`, `scripts/apply-cron.php`), which is what makes one call
+  enough. **Client-side, never use the browser's zone** — `new Date(...).getHours()`
+  renders wherever the admin's laptop is, which disagreed with the PHP-rendered
+  cells. All JS formatting goes through `window.urFmtLocal` from
+  `ur_emit_time_helpers()` (`_options_form.php`), pinned to the `UR_TZ` the server
+  emits.
+- **`--log-file-format=` (EMPTY) is the ONLY lever on per-file log lines.**
+  `-v`/`-q` control rsync's STDOUT; the `--log-file` fd has its own format
+  (default `%i %n%L`) and writes a line per transferred file **regardless of
+  `-v` or `-q`** — verified against rsync 3.5.0, where the `quiet` level still
+  produced a full per-file listing. So the two quiet levels (`quiet`, `summary`)
+  emit `--log-file-format=` in `Rsync::logLevelFlags()`; `summary` also carries
+  **no `-v`** (nothing per-file on stdout either) and **no `stats2`** (the
+  log-file fd already writes the one-line sent/received summary, so `stats2`
+  would print the whole block a second time). Do not "fix" a noisy log by
+  adding or removing `-v`. **A dry run is never quieter than `normal`**
+  (`buildArgv`'s `$effectiveLevel`, the only place a level is overridden): the
+  quiet levels suppress exactly the per-file lines a dry run exists to show, and
+  at `summary` a `--delete` preview named neither a file nor a deletion nor even
+  a count. What the quiet levels do NOT hide is errors (they arrive twice —
+  rsync's own log-file line and captured stderr) or `deleting <path>` lines:
+  the empty format only kills the `%i %n` per-file format, and rsync's delete
+  path falls back to a plain `deleting <path>`. So there is no data-safety
+  regression on `--delete`.
+- **`Logger::sink()` is line-aware and throttles progress.** `--info=progress2`
+  redraws one status line with a bare `\r` several times a second and the
+  capture path is byte-oriented (`ProcIO` hands raw 8 KiB `fread`s), so the old
+  verbatim append smeared thousands of redraws into one unreadable line. The
+  sink writes `\n`-terminated lines through unchanged and keeps at most one
+  `\r` redraw per **5 % step or 30 s** (`PROGRESS_MIN_PCT`/`PROGRESS_MIN_SECS`),
+  plus 100 % once unconditionally (the step rule alone drops it: |100-99| < 5,
+  and the line that follows supersedes whatever the throttle is holding).
+  Three traps, each paid for once:
+  1. **A `\r` that is the last byte held stays in the buffer.** Until the next
+     byte arrives it is unknowable whether it ends a redraw or is the first half
+     of a `\r\n`, and an fread cuts anywhere. Deciding early ATE THE LINE — the
+     `\r` was read as a redraw and dropped by the throttle, its orphaned `\n`
+     writing a blank line. `LoggerTest` replays one stream at chunk sizes
+     1..8192 and asserts the log is byte-identical, so never reintroduce a
+     per-chunk `str_replace("\r\n", "\n")`.
+  2. **The throttle keys off the ABSOLUTE change in percentage, never a
+     high-water mark.** progress2's figure is not monotonic — incremental
+     recursion grows the denominator, so it drops and can touch a spurious 100 %
+     early — and a high-water mark let one early 100 % kill the 5 % rule for the
+     rest of the run, silently degrading the promise to "one line per 30 s".
+  3. **rsync writes the `\r` as a PREFIX** (`\r<p1>\r<p2>…\r<pN>\n`, exactly one
+     LF, at the very end), so the last fragment always waits in the buffer for
+     it. That is why the flush is load-bearing, not belt-and-braces, and why a
+     fixture modelling `\r` as a suffix tests the wrong shape — that mistake cost
+     a whole release. rsync also REPEATS that final redraw, and because the last
+     copy carries the only `\n` the repeat arrives on the **real-line** path, not
+     the flush path. Both paths therefore drop a redraw byte-identical to the one
+     just written (`$st['last']`, cleared on every real line so it can never
+     swallow an unrelated later line). Byte-exact only: a repeat that differs in
+     rate, ETA or `to-chk` is new information and must still land.
+
+  Because it buffers to line boundaries, the Runner **must** call
+  `Logger::flushSink($runLog)` once the child has exited — it does, after
+  `Rsync::run` (before `enforceRunLogCap`), in a `finally` around the hook run,
+  and at the **top** of the run's outer `finally`. That last one has to precede
+  the postHook block: `runHook()` opens a new sink on the same path and `sink()`
+  RESETS the per-path state, so a flush placed after the hook would find nothing
+  left to rescue. Anything feeding the sink a string with no trailing newline
+  and reading the file back immediately needs that flush.
+- **A manual-only job has NO next run, and `getStatus` must say so.** `enabled`
+  + `manualOnly` is exactly how "run on demand" is stored, and such a job keeps
+  whatever `schedule` string it was last saved with — so anything that computes
+  a next fire from that string is reporting a time that will never happen
+  (`Cron::build()` skips the job). `getStatus` carries `manualOnly` and a null
+  `nextRun` for it, and all THREE renderers must agree, in this clause order:
+  manual-only, then disabled, then no computable next (em-dash), then the time.
+  They are `ur_next_run_label()` (PHP, Jobs), `nextRunLabel()` (JS, Jobs) and
+  the `.ur-ov-next` chain (JS, Overview) — the JS ones run every second on top of
+  the PHP one, so a clause missing there silently overwrites a correct cell.
+- **NEVER name a form input `action`.** An input named `action` becomes a NAMED
+  PROPERTY of its `<form>`, so `form.action` returns that input instead of the
+  URL string. Unraid's own layout JS runs
+  `$('form').each(function(){ $(this).prop('action').actionName(); … })` over
+  every form on the page (`DefaultPageLayout/BodyInlineJS.php`, the
+  escapeQuotes parser; `String.prototype.actionName` comes from
+  `HeadInlineJS.php`) — with the property shadowed that throws
+  `$(...).prop(...).actionName is not a function` and aborts the rest of
+  Unraid's ready handler, taking its leave-confirmation guard with it. Seen on
+  7.3.2 at every page load AND every Apply. The handler action therefore travels
+  as `data-ur-action="<x>"` on the form and `urAjax.postFormElement()` copies it
+  into the POST body, so the wire protocol is unchanged (`action=<x>`); the same
+  shadowing is why that helper reads `form.getAttribute('action')` for the URL
+  rather than `form.action`. `FormActionTest` guards all of it.
+- **HTML-escape all output**; the log viewer renders `Logger::tail()` output, which
+  is already escaped (log-XSS guard). Captured run output is also **redacted** of
+  per-run tmpfs secret paths and **size-capped** before it is written
+  (`Logger::setRedaction` / `Logger::sink` / `UR_MAX_RUN_LOG_BYTES`).
+- **CSRF**: every state-changing POST verifies the webGui `csrf_token` via
+  `hash_equals`; GET pollers are read-only. The check is **match-ANY** across all
+  server-side-trusted token sources (`$GLOBALS['var']['csrf_token']`,
+  `$_SESSION['csrf_token']`, and `var.ini`) — `ur_csrf_token_candidates()` /
+  `ur_check_csrf()`. **Do NOT revert to "first non-empty source wins":** on the
+  live box a stale `$var`/`$_SESSION` token masked the canonical `var.ini` token
+  and 403'd the *correct* token; match-any is the fix (every candidate is a token
+  the page legitimately echoes).
+- **Client AJAX POSTs are `application/x-www-form-urlencoded`, NEVER multipart.**
+  All POSTs go out as `URLSearchParams` via the shared `window.urAjax` helpers
+  (`source/pages/_options_form.php`) and the per-page equivalents in
+  `credentials.php` / `status.php`. **Never use a `FormData` object as a fetch
+  `body`** (use `URLSearchParams(new FormData(form))` to serialize a form):
+  multipart request bodies **stall in php-fpm** on the live box (the worker blocks
+  forever in `skb_wait_for_more_packets` waiting for the body over the FastCGI
+  socket), which hung *every* plugin POST; urlencoded returns in ~13ms. There are
+  **no file inputs** anywhere (SSH keys are pasted into textareas), so urlencoded
+  is correct and sufficient; nested names (`jobs[0][pairs][0][local]`) urlencode
+  fine and PHP parses them into `$_POST` arrays.
+- **Corrected root cause (live-diagnosed):** the earlier "discovery session-lock
+  wedge" (PR#24) was a partial misdiagnosis. POSTs hung because of **multipart
+  bodies stalling at the FastCGI layer** (+ the CSRF stale-token mismatch above),
+  not session locking. PR#24's `session_write_close` / detached keyscan are kept
+  as harmless hardening; the *actual* fixes are urlencoded client POSTs + CSRF
+  match-any.
+- **Path inputs** go through the confinement helpers (`ur_safe_job_id` / `safeId` /
+  `Logger::runLogPathById`) — both the "latest" and "by id" run-log resolvers
+  share `runLogPathById`.
+
+## Release / versioning
+
+- **CalVer**: `YYYY.MM.DD` plus a same-day lowercase suffix (`a`, `b`, …), ordered
+  for Unraid's `strcmp`-based update detection. **Do NOT switch to semver** —
+  `1.10.0` would sort *before* `1.9.0` and break update detection.
+- Every merge to `main` **auto-publishes a GitHub Release**
+  (`.github/workflows/release.yml`, built inside `aclemons/slackware:15.0`),
+  attaching the `.txz` and a regenerated `.plg`. `pluginURL` points at
+  `releases/latest/download/unraid.rsync.plg`. Manual releases via
+  `workflow_dispatch`. The version is auto-computed — do not hand-bump it in a PR.
+
+## Branch protection / CI
+
+- PRs are **required** (0 approvals). Required checks: **`lint`** and **`PHPUnit`**.
+- **`lint`** = `xmllint` on the `.plg`, `bash -n` + `shellcheck` on `pkg_build.sh`,
+  and `php -l` on every PHP file and every `.page` PHP body.
+- **`PHPUnit`** = the unit-test suite.
+- **Runtime PHP = 8.4** (Unraid 7.3.1 ships PHP 8.4.21); **CI runs PHP 8.4** —
+  keep the two in sync (`.github/workflows/lint.yml`). The suite runs under
+  `failOnWarning` / `failOnRisky`, so fix the underlying code for any 8.4
+  deprecation rather than silencing it.
+
+## Dev / test commands
+
+```bash
+composer install --no-interaction
+vendor/bin/phpunit
+```
+
+Tests are I/O-isolated via the `UR_CONFIG_BASE` / `UR_RUNTIME_BASE` env/constant
+overrides plus stubs in `tests/bootstrap.php`. The `tests/` directory is **not
+packaged** (excluded from the `.txz`).
+
+## Gotchas
+
+- **Uninstall wipes data.** Removing the `.plg` runs
+  `rm -rf /boot/config/plugins/unraid.rsync`, which **deletes jobs + credentials**.
+  Installing over the top preserves them.
+- **Cron pickup is non-recursive.** Unraid's `update_cron` globs **top-level
+  `*.cron`** in the plugin's boot dir, so the single `unraid.rsync.cron` must live
+  directly there (not in a subdirectory).
+- **The parent `.page` body MUST stay empty.** A non-empty `UnraidRsync.page` body
+  becomes a blank phantom tab.
+- **Live-box validation must not page the admin or touch accounts.** A scratch
+  `UR_CONFIG_BASE` isolates config/runs/history, but `Runner::notifyHook` still
+  execs the real webGui `notify`, so every throwaway job that fails lands as an
+  alert in the Unraid bell (2026-09-04: five "FAILED" alerts from the rsyncd
+  validation). Stub `Notify::$runner = fn() => 0` (the PHPUnit seam) or set
+  `notifyMode: off` on every throwaway job. Never create webGui users or append
+  to `/root/.ssh/authorized_keys` on the live box; use the existing Tailscale
+  SSH access.

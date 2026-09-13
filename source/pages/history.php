@@ -15,8 +15,8 @@
  * inject markup; the log body from getJobLog is already HTML-escaped server-side
  * (Logger::tail) and is the only thing injected as HTML, into a <pre>.
  *
- * Reuses ur_render_csrf_token + ur_js from the shared options partial; the badge
- * palette is redefined locally because each tab is a separate page body.
+ * Reuses ur_render_csrf_token + ur_js from the shared options partial, and the
+ * ONE badge palette + vocabulary from ur_emit_badge_assets().
  */
 
 require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Config.php';
@@ -43,20 +43,9 @@ try {
 } catch (Throwable $e) {
     $jobs = [];
 }
+ur_emit_badge_assets(); /* the ONE badge palette + window.urBadge */
 ?>
 <style>
-/* Badge palette (mirrors the Status/Jobs tabs; each tab is its own page body). */
-.ur-badge {
-  display: inline-block; min-width: 64px; padding: 2px 10px; border-radius: 10px;
-  font-size: 11px; font-weight: bold; text-align: center; color: #fff;
-  line-height: 1.6; white-space: nowrap;
-}
-.ur-badge-idle    { background: #1c7d3f; }
-.ur-badge-warning { background: #b15c00; color: #1a1a1a; }
-.ur-badge-failed  { background: var(--red-800, #b71c1c); }
-.ur-badge-aborted { background: #555; }
-.ur-badge-running { background: #1565c0; animation: ur-badge-pulse 1.2s ease-in-out infinite; }
-@keyframes ur-badge-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.55; } }
 .ur-hist-controls { margin: 8px 0; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
 .ur-hist-table { width: 100%; border-collapse: collapse; margin-top: 6px; }
 .ur-hist-table th, .ur-hist-table td { padding: 6px 10px; text-align: left; border-bottom: 1px solid var(--border-color, #444); white-space: nowrap; }
@@ -144,6 +133,9 @@ try {
   <span id="ur-hist-pageinfo"></span>
   <button type="button" id="ur-hist-next"><?=_('Older ›')?></button>
 </div>
+<!-- Where a failed row download reports (the modal's <pre> takes over while the
+     modal is open). No popups anywhere in this plugin. -->
+<div id="ur-hist-dl-result" class="ur-result"></div>
 
 <!-- Run-log modal ----------------------------------------------------------->
 <div id="ur-hist-modal" class="ur-hist-modal" role="dialog" aria-modal="true"
@@ -162,7 +154,10 @@ try {
   </div>
 </div>
 
-<?php ur_emit_time_helpers(); /* UR_TZ + window.urFmtLocal (server timezone) */ ?>
+<?php
+ur_emit_time_helpers();  /* UR_TZ + window.urFmtLocal (server timezone) */
+ur_emit_ajax_helpers();  /* window.urAjax.show, for the inline download error */
+?>
 <script type="text/javascript">
 (function () {
   'use strict';
@@ -179,6 +174,7 @@ try {
   var modalPre = document.getElementById('ur-hist-log-pre');
   var modalTit = document.getElementById('ur-hist-modal-title');
   var modalDl  = document.getElementById('ur-hist-log-download');
+  var dlResult = document.getElementById('ur-hist-dl-result');
 
   var offset = 0;
   var total  = 0;
@@ -188,17 +184,6 @@ try {
    * is no constant poller. But while an in-flight RUNNING row is on screen we
    * reload every few seconds so it flips to its final status on its own. */
   function clearPoll() { if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; } }
-
-  function badgeFor(state) {
-    switch (state) {
-      case 'RUNNING':  return 'ur-badge-running';
-      case 'SUCCESS':  return 'ur-badge-idle';
-      case 'WARNING':
-      case 'PARTIAL':  return 'ur-badge-warning';
-      case 'ABORTED':  return 'ur-badge-aborted';
-      default:         return 'ur-badge-failed'; // FAILED, TIMEOUT, unknown
-    }
-  }
 
   /* Records store startedAt as a UTC "...Z" string (Runner.php); render it in
    * the SERVER's timezone, not the browser's - see ur_emit_time_helpers(). */
@@ -256,8 +241,8 @@ try {
       // Status badge
       var stTd = document.createElement('td');
       var b = document.createElement('span');
-      b.className = 'ur-badge ' + badgeFor(r.state);
-      b.textContent = r.state || '—';
+      b.className = 'ur-badge';
+      window.urBadge.apply(b, r.state);
       stTd.appendChild(b);
       tr.appendChild(stTd);
 
@@ -423,7 +408,17 @@ try {
         setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
       })
       .catch(function (err) {
-        alert(err && err.message ? err.message : 'Log not available (run logs live in RAM and are cleared on reboot).');
+        /* No popups anywhere in this plugin: report inline. The modal's <pre> is
+         * the right place while it is open (that is where the user is looking);
+         * a row download reports next to the pager instead. */
+        var msg = (err && err.message)
+          ? err.message
+          : 'Log not available (run logs live in RAM and are cleared on reboot).';
+        if (modal.classList.contains('ur-open')) {
+          modalPre.textContent = msg;
+        } else {
+          window.urAjax.show(dlResult, false, msg);
+        }
       });
   }
 

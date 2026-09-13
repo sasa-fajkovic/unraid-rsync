@@ -40,7 +40,8 @@ class Job
     const TRANSPORTS  = ['SSH', 'LOCAL', 'DAEMON'];
     const DIRECTIONS  = ['PUSH', 'PULL'];
     const NOTIFY      = ['off', 'success-only', 'failure-only', 'always'];
-    const LOG_LEVELS  = ['quiet', 'normal', 'verbose', 'debug'];
+    /** Least -> most output. The UI select renders this order verbatim. */
+    const LOG_LEVELS  = ['quiet', 'summary', 'normal', 'verbose', 'debug'];
 
     /**
      * Local paths must resolve under this root. Anything outside /mnt is

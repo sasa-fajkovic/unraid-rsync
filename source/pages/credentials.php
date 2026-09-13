@@ -169,11 +169,13 @@ $handlerUrl = '/plugins/unraid.rsync/include/handler.php';
  * (non-markdown) forms, which would otherwise leave Apply permanently greyed
  * out. */
 ur_emit_form_enable_assets();
+/* The shared front-end helpers (window.urAjax: postForm/postFormElement/show/
+ * errText + the two-step delete confirm) this page's script below uses. */
+ur_emit_ajax_helpers();
 ?>
 
 <!-- Rename/reorder existing keys (no secret material in this form). -->
-<form method="POST" action="<?=htmlspecialchars($handlerUrl, ENT_QUOTES, 'UTF-8')?>" id="ur-keys-form">
-  <input type="hidden" name="action" value="saveCredentials">
+<form method="POST" action="<?=htmlspecialchars($handlerUrl, ENT_QUOTES, 'UTF-8')?>" id="ur-keys-form" data-ur-action="saveCredentials">
   <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf, ENT_QUOTES, 'UTF-8')?>">
   <input type="hidden" name="keys_present" value="1">
   <div id="ur-keys-container">
@@ -200,104 +202,11 @@ ur_emit_form_enable_assets();
   var HANDLER = <?=ur_js($handlerUrl)?>;
   var CSRF = <?=ur_js($csrf)?>;
 
-  /* POST a form and ALWAYS resolve to { ok, status, body, parseError }; never
-   * rejects (a network failure resolves with status 0) so the UI is ALWAYS
-   * updated and an action can never leave a stuck "Generating…". See the
-   * Connections tab for the full multipart-vs-urlencoded rationale; in short we
-   * send urlencoded because a multipart body stalls php-fpm on the live box. */
-  function postForm(fields) {
-    var params = new URLSearchParams();
-    params.append('csrf_token', CSRF);
-    Object.keys(fields).forEach(function (k) { params.append(k, fields[k]); });
-    return fetch(HANDLER, { method: 'POST', body: params, credentials: 'same-origin' })
-      .then(function (r) {
-        return r.text().then(function (text) {
-          var body = null, parseError = false;
-          try { body = JSON.parse(text); } catch (e) { parseError = (text !== ''); }
-          return { ok: r.ok, status: r.status, body: body, parseError: parseError };
-        });
-      })
-      .catch(function () {
-        return { ok: false, status: 0, body: null, parseError: false, networkError: true };
-      });
-  }
-
-  function show(el, ok, msg) {
-    if (!el) { return; }
-    el.className = 'ur-result ' + (ok ? 'ur-ok' : 'ur-err');
-    el.textContent = msg;
-  }
-
-  /* Build a clear failure message from a postForm result, ALWAYS including the
-   * HTTP status (or a network/parse hint), so a failure is never silent. */
-  function errText(res, fallback) {
-    if (res.networkError || res.status === 0) {
-      return (fallback || 'Request failed') + ': could not reach the server (network error).';
-    }
-    if (res.body && res.body.errors && res.body.errors.length) {
-      return res.body.errors.join('; ') + ' (HTTP ' + res.status + ')';
-    }
-    if (res.body && res.body.error) {
-      return res.body.error + ' (HTTP ' + res.status + ')';
-    }
-    if (res.parseError) {
-      return (fallback || 'Request failed')
-        + ': the server returned a non-JSON response (HTTP ' + res.status + ').';
-    }
-    return (fallback || 'Request failed') + ' (HTTP ' + res.status + ').';
-  }
-
-  /* ---- two-step inline delete confirm (replaces window.confirm) ----
-   * First click ARMS the button (label -> "Confirm delete?", red, inline
-   * warning); a second click within ARM_WINDOW_MS runs the delete; otherwise it
-   * auto-reverts. Non-blocking — no popup. */
-  var ARM_WINDOW_MS = 4000;
-  var armedDeleteBtn = null;
-
-  function disarmDelete(btn) {
-    if (!btn || !btn._urArm) { return; }
-    clearTimeout(btn._urArm.timer);
-    btn.textContent = btn._urArm.label;
-    btn.classList.remove('ur-armed-delete');
-    var resultEl = btn._urArm.resultEl;
-    var armedMsg = btn._urArm.message;
-    if (resultEl && resultEl.getAttribute('data-ur-armed') === '1'
-        && resultEl.textContent === armedMsg) {
-      resultEl.className = 'ur-result';
-      resultEl.textContent = '';
-      resultEl.removeAttribute('data-ur-armed');
-    } else if (resultEl && resultEl.getAttribute('data-ur-armed') === '1') {
-      resultEl.removeAttribute('data-ur-armed');
-    }
-    btn._urArm = null;
-    if (armedDeleteBtn === btn) { armedDeleteBtn = null; }
-  }
-
-  function armOrConfirmDelete(btn, opts) {
-    if (btn._urArm) {            // second click within the window -> do it
-      var run = btn._urArm.run;
-      disarmDelete(btn);
-      run();
-      return;
-    }
-    if (armedDeleteBtn && armedDeleteBtn !== btn) { disarmDelete(armedDeleteBtn); }
-    var message = (opts.warning || '') + ' Click "Confirm delete?" again to proceed.';
-    btn._urArm = {
-      label: btn.textContent,
-      resultEl: opts.resultEl || null,
-      message: message,
-      run: opts.run,
-      timer: setTimeout(function () { disarmDelete(btn); }, ARM_WINDOW_MS)
-    };
-    armedDeleteBtn = btn;
-    btn.textContent = 'Confirm delete?';
-    btn.classList.add('ur-armed-delete');
-    if (opts.resultEl && opts.warning) {
-      opts.resultEl.className = 'ur-result ur-err';
-      opts.resultEl.textContent = message;
-      opts.resultEl.setAttribute('data-ur-armed', '1');
-    }
-  }
+  /* All the fetch/response plumbing (postForm, show, errText) and the two-step
+   * inline delete confirm live in window.urAjax - ur_emit_ajax_helpers() in
+   * _options_form.php. This page used to carry its own copies, as did the
+   * Connections tab. revealPublicKeyInline below stays here: it is specific to
+   * this tab. */
 
   /* ---- inline copy-public-key fallback (replaces window.prompt) ----
    * When the Clipboard API is unavailable, reveal the key in a readonly,
@@ -333,16 +242,16 @@ ur_emit_form_enable_assets();
     genBtn.addEventListener('click', function () {
       var name = (document.getElementById('ur_key_name').value || '').trim();
       var type = document.getElementById('ur_key_type').value;
-      if (!name) { show(keyResult, false, 'Enter a key name first.'); return; }
-      show(keyResult, true, 'Generating…');
-      postForm({ action: 'generateKey', name: name, type: type }).then(function (res) {
+      if (!name) { window.urAjax.show(keyResult, false, 'Enter a key name first.'); return; }
+      window.urAjax.show(keyResult, true, 'Generating…');
+      window.urAjax.postForm(HANDLER, { action: 'generateKey', name: name, type: type }, CSRF).then(function (res) {
         if (res.ok && res.body && res.body.ok) {
-          show(keyResult, true, 'Key "' + res.body.name + '" generated. Fingerprint: ' + (res.body.fingerprint || '?'));
+          window.urAjax.show(keyResult, true, 'Key "' + res.body.name + '" generated. Fingerprint: ' + (res.body.fingerprint || '?'));
           setTimeout(function () { window.location.reload(); }, 800);
         } else {
-          show(keyResult, false, errText(res, 'Key generation failed.'));
+          window.urAjax.show(keyResult, false, window.urAjax.errText(res, 'Key generation failed.'));
         }
-      }).catch(function (e) { show(keyResult, false, 'Unexpected error: ' + (e && e.message ? e.message : e)); });
+      }).catch(function (e) { window.urAjax.show(keyResult, false, 'Unexpected error: ' + (e && e.message ? e.message : e)); });
     });
   }
 
@@ -352,17 +261,17 @@ ur_emit_form_enable_assets();
       var name = (document.getElementById('ur_key_name').value || '').trim();
       var priv = document.getElementById('ur_key_import_priv').value || '';
       var pub  = document.getElementById('ur_key_import_pub').value || '';
-      if (!name) { show(keyResult, false, 'Enter a key name first.'); return; }
-      if (!priv.trim() && !pub.trim()) { show(keyResult, false, 'Paste a private and/or public key.'); return; }
-      show(keyResult, true, 'Importing…');
-      postForm({ action: 'importKey', name: name, privateKey: priv, publicKey: pub }).then(function (res) {
+      if (!name) { window.urAjax.show(keyResult, false, 'Enter a key name first.'); return; }
+      if (!priv.trim() && !pub.trim()) { window.urAjax.show(keyResult, false, 'Paste a private and/or public key.'); return; }
+      window.urAjax.show(keyResult, true, 'Importing…');
+      window.urAjax.postForm(HANDLER, { action: 'importKey', name: name, privateKey: priv, publicKey: pub }, CSRF).then(function (res) {
         if (res.ok && res.body && res.body.ok) {
-          show(keyResult, true, 'Key "' + res.body.name + '" imported. Fingerprint: ' + (res.body.fingerprint || '?'));
+          window.urAjax.show(keyResult, true, 'Key "' + res.body.name + '" imported. Fingerprint: ' + (res.body.fingerprint || '?'));
           setTimeout(function () { window.location.reload(); }, 800);
         } else {
-          show(keyResult, false, errText(res, 'Key import failed.'));
+          window.urAjax.show(keyResult, false, window.urAjax.errText(res, 'Key import failed.'));
         }
-      }).catch(function (e) { show(keyResult, false, 'Unexpected error: ' + (e && e.message ? e.message : e)); });
+      }).catch(function (e) { window.urAjax.show(keyResult, false, 'Unexpected error: ' + (e && e.message ? e.message : e)); });
     });
   }
 
@@ -385,60 +294,44 @@ ur_emit_form_enable_assets();
       }
     } else if (t.classList.contains('ur-key-del-saved')) {
       // Two-step inline confirm (no popup).
-      armOrConfirmDelete(t, {
+      window.urAjax.armOrConfirmDelete(t, {
         warning: 'Delete key "' + (t.getAttribute('data-key-name') || t.getAttribute('data-key-id')) + '"? '
           + 'Connections that use it must be repointed first.',
         resultEl: keyResult,
         run: function () {
           var kid = t.getAttribute('data-key-id');
-          postForm({ action: 'deleteKey', id: kid }).then(function (res) {
+          window.urAjax.postForm(HANDLER, { action: 'deleteKey', id: kid }, CSRF).then(function (res) {
             if (res.ok && res.body && res.body.ok) {
               window.location.reload();
             } else {
-              show(keyResult, false, errText(res, 'Delete failed.'));
+              window.urAjax.show(keyResult, false, window.urAjax.errText(res, 'Delete failed.'));
             }
-          }).catch(function (e) { show(keyResult, false, 'Unexpected error: ' + (e && e.message ? e.message : e)); });
+          }).catch(function (e) { window.urAjax.show(keyResult, false, 'Unexpected error: ' + (e && e.message ? e.message : e)); });
         }
       });
     }
   });
 
   /* ---- key rename form submit ----
-   * Uses the SAME robust text->JSON parse as postForm so a non-JSON 403/500
-   * becomes a VISIBLE error WITH the HTTP status, and a success always renders a
-   * clear "Saved" line. */
-  function wireForm(formId, resultId) {
-    var form = document.getElementById(formId);
-    if (!form) { return; }
-    form.addEventListener('submit', function (ev) {
+   * window.urAjax.postFormElement posts the form urlencoded (never multipart -
+   * that stalls php-fpm on the live box) with the same robust text->JSON parse,
+   * so a non-JSON 403/500 becomes a VISIBLE error WITH its HTTP status and a
+   * success always renders a clear "Saved" line. */
+  var keysForm = document.getElementById('ur-keys-form');
+  if (keysForm) {
+    keysForm.addEventListener('submit', function (ev) {
       ev.preventDefault();
-      var result = document.getElementById(resultId);
-      /* urlencoded (URLSearchParams over the form's FormData), NOT multipart:
-         multipart bodies stall in php-fpm in the live environment. Nested field
-         names (keys[0][id], …) round-trip unchanged into $_POST. */
-      var params = new URLSearchParams(new FormData(form));
-      show(result, true, 'Saving…');
-      fetch(form.getAttribute('action'), { method: 'POST', body: params, credentials: 'same-origin' })
-        .then(function (r) {
-          return r.text().then(function (text) {
-            var body = null, parseError = false;
-            try { body = JSON.parse(text); } catch (e) { parseError = (text !== ''); }
-            return { ok: r.ok, status: r.status, body: body, parseError: parseError };
-          });
-        })
-        .catch(function () {
-          return { ok: false, status: 0, body: null, parseError: false, networkError: true };
-        })
-        .then(function (res) {
-          if (res.ok && res.body && res.body.ok) {
-            show(result, true, res.body.message || 'Saved.');
-            setTimeout(function () { window.location.reload(); }, 600);
-          } else {
-            show(result, false, errText(res, 'Save failed.'));
-          }
-        });
+      var result = document.getElementById('ur-keys-save-result');
+      window.urAjax.show(result, true, 'Saving…');
+      window.urAjax.postFormElement(keysForm).then(function (res) {
+        if (res.ok && res.body && res.body.ok) {
+          window.urAjax.show(result, true, res.body.message || 'Saved.');
+          setTimeout(function () { window.location.reload(); }, 600);
+        } else {
+          window.urAjax.show(result, false, window.urAjax.errText(res, 'Save failed.'));
+        }
+      });
     });
   }
-  wireForm('ur-keys-form', 'ur-keys-save-result');
 })();
 </script>

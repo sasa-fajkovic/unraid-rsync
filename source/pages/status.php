@@ -57,22 +57,14 @@ $rsyncAvailable   = Rsync::rsyncAvailable();
 $rsyncPath        = Rsync::rsyncPath();
 $rsyncVersionLine = $rsyncAvailable ? Rsync::rsyncVersionLine() : '';
 $rsyncMissingMsg  = $rsyncAvailable ? '' : Rsync::rsyncMissingMessage();
+
+/* The ONE badge palette + window.urBadge (shared with Jobs / History /
+ * Overview), and the shared AJAX helpers the abort POST below uses. Both must be
+ * emitted BEFORE the markup and script that follow. */
+ur_emit_badge_assets();
+ur_emit_ajax_helpers();
 ?>
 <style>
-/* Reuse the Jobs-tab badge palette; define it here too so the Status tab is
-   self-contained (the tabs are separate page bodies). */
-.ur-badge {
-  display: inline-block; min-width: 64px; padding: 2px 10px; border-radius: 10px;
-  font-size: 11px; font-weight: bold; text-align: center; color: #fff;
-  line-height: 1.6; white-space: nowrap;
-}
-.ur-badge-running { background: #1565c0; animation: ur-pulse 1.3s ease-in-out infinite; }
-.ur-badge-idle    { background: #1c7d3f; }
-/* Warning badge: dark text on a darkened orange for WCAG AA contrast — kept in
-   lockstep with the Jobs tab's .ur-badge-warning. */
-.ur-badge-warning { background: #b15c00; color: #1a1a1a; }
-.ur-badge-failed  { background: var(--red-800, #b71c1c); }
-@keyframes ur-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.55; } }
 .ur-rsync-status { margin: 8px 0; }
 .ur-rsync-status #ur-rsync-detail { margin-top: 6px; }
 .ur-rsync-status .ur-err { color: var(--red-800, #b71c1c); }
@@ -207,8 +199,8 @@ $rsyncMissingMsg  = $rsyncAvailable ? '' : Rsync::rsyncMissingMessage();
       var label = (jobs[jobId] && jobs[jobId].name) || existingNames[jobId] || jobId;
       name.textContent = label;                           // textContent: no XSS
       var b = document.createElement('span');
-      b.className = 'ur-badge ur-badge-running';
-      b.textContent = 'Running';
+      b.className = 'ur-badge';
+      window.urBadge.apply(b, 'RUNNING');
       var btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'ur-status-abort';
@@ -275,24 +267,18 @@ $rsyncMissingMsg  = $rsyncAvailable ? '' : Rsync::rsyncMissingMessage();
     if (!jobId) { return; }
     var result = document.getElementById('ur-status-result');
     t.disabled = true;
-    /* urlencoded (URLSearchParams), NOT multipart (FormData): a
-       multipart/form-data body stalls in php-fpm in the live Unraid environment,
-       so the POST never returns. fetch() auto-sets the urlencoded Content-Type. */
-    var params = new URLSearchParams();
-    params.append('action', 'abortJob');
-    params.append('csrf_token', CSRF_TOKEN);
-    params.append('id', jobId);
-    fetch(HANDLER_URL, { method: 'POST', body: params, credentials: 'same-origin' })
-      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); })
+    /* window.urAjax.postForm: urlencoded (never multipart - a multipart body
+       stalls php-fpm on the live box) and it NEVER rejects, so a non-JSON 403/500
+       becomes a visible error WITH its HTTP status instead of a silent
+       "Network error". */
+    window.urAjax.postForm(HANDLER_URL, { action: 'abortJob', id: jobId }, CSRF_TOKEN)
       .then(function (res) {
         var ok = res.ok && res.body && res.body.ok;
         if (result) {
           if (ok) {
-            result.className = 'ur-result ur-ok';
-            result.textContent = res.body.message || 'Abort requested.';
+            window.urAjax.show(result, true, res.body.message || 'Abort requested.');
           } else {
-            result.className = 'ur-result ur-err';
-            result.textContent = (res.body && res.body.error) ? res.body.error : 'Abort failed.';
+            window.urAjax.show(result, false, window.urAjax.errText(res, 'Abort failed.'));
           }
         }
         /* On an application-level failure the abort didn't take, so re-enable the
@@ -300,13 +286,6 @@ $rsyncMissingMsg  = $rsyncAvailable ? '' : Rsync::rsyncMissingMessage();
          * away with its row. */
         if (!ok) { t.disabled = false; }
         pollStatus();
-      })
-      .catch(function () {
-        if (result) {
-          result.className = 'ur-result ur-err';
-          result.textContent = 'Network error.';
-        }
-        t.disabled = false;
       });
   });
 

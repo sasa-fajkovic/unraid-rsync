@@ -245,6 +245,31 @@ final class HandlerStatusTest extends TestCase
         $this->assertNull($body['jobs'][$id]['nextRun']);
     }
 
+    /**
+     * A MANUAL-ONLY job has no next run. It is still `enabled` (enabled +
+     * manualOnly is how "run on demand" is stored) and keeps whatever schedule
+     * string it was last saved with, so computing a next fire from that string
+     * made the 1s poller overwrite the correct server-rendered "manual (on
+     * demand)" cell with a cron time that never fires - live-observed on the
+     * Overview and Jobs tabs. crond never sees the job either: Cron::build()
+     * skips it.
+     */
+    public function testGetStatusNextRunNullForManualOnlyJob(): void
+    {
+        $manual = $this->seedJob('Manual', ['manualOnly' => true, 'schedule' => '0 3 * * *']);
+        $cron   = $this->seedJob('Cron', ['schedule' => '0 3 * * *']);
+        [$body] = $this->runCapture('ur_action_get_status');
+
+        $this->assertTrue($body['jobs'][$manual]['enabled'], 'manual-only is still an enabled job');
+        $this->assertTrue($body['jobs'][$manual]['manualOnly']);
+        $this->assertNull($body['jobs'][$manual]['nextRun'], 'a manual-only job must claim no next run');
+
+        // The flag is present and false for a scheduled job, so the UI can
+        // distinguish "manual" from "enabled but uncomputable".
+        $this->assertFalse($body['jobs'][$cron]['manualOnly']);
+        $this->assertIsInt($body['jobs'][$cron]['nextRun']);
+    }
+
     public function testGetStatusHandlesPartialSummaryGracefully(): void
     {
         $id = $this->seedJob('Partial');

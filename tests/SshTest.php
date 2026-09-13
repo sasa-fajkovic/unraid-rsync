@@ -38,6 +38,26 @@ final class FakeSsh extends Ssh
     }
 }
 
+/**
+ * Ssh whose probe behaves like a real `ssh -o StrictHostKeyChecking=accept-new`
+ * against an unknown host: it APPENDS the key it "accepted" to the
+ * UserKnownHostsFile it was handed, which is what harvestHostKey() reads back.
+ */
+final class AcceptNewSsh extends Ssh
+{
+    public static string $appendLine = '';
+
+    protected static function runProbe(array $argv, ?array $env = null): array
+    {
+        foreach ($argv as $tok) {
+            if (strncmp($tok, 'UserKnownHostsFile=', 19) === 0) {
+                file_put_contents(substr($tok, 19), self::$appendLine . "\n", FILE_APPEND);
+            }
+        }
+        return [0, ''];
+    }
+}
+
 /** Ssh with a DETERMINISTIC per-run token, so a test can pre-plant its path. */
 final class FixedTokenSsh extends Ssh
 {
@@ -133,6 +153,66 @@ final class SshTest extends TestCase
         file_put_contents($path, "-----BEGIN OPENSSH PRIVATE KEY-----\nEXISTING\n-----END OPENSSH PRIVATE KEY-----\n");
         @chmod($path, 0600);
         return $path;
+    }
+
+    // --- trust on first use -------------------------------------------------
+
+    public function testAcceptNewPinsTheAcceptedHostKeyOnFirstConnect(): void
+    {
+        $line = 'h.example ssh-ed25519 AAAAharvestedhostkey';
+        AcceptNewSsh::$appendLine = $line;
+
+        $creds = Credentials::defaults();
+        $creds['connections'][] = $this->keyfileConn(['keyFilePath' => $this->makeKeyFile('tofu.key')]);
+        Credentials::save($creds);
+
+        try {
+            $res = AcceptNewSsh::testConnection($creds, 'c-kf');
+            $this->assertTrue($res['ok'], $res['message']);
+
+            // Pinned into credentials.json, so the NEXT run verifies against it.
+            $stored = Credentials::findConnection(Credentials::load(), 'c-kf');
+            $this->assertIsArray($stored);
+            $this->assertSame($line, trim((string) $stored['remoteHostKey']));
+        } finally {
+            Credentials::save(Credentials::defaults());
+        }
+    }
+
+    /**
+     * Pinning is ONLY first-use TOFU: 'yes' is not a TOFU mode, and an already
+     * pinned key must never be silently replaced by whatever the host presented.
+     *
+     * @param array<string,mixed> $over
+     */
+    #[DataProvider('noPinProvider')]
+    public function testNothingIsPinnedOutsideFirstUseAcceptNew(array $over, string $expected): void
+    {
+        AcceptNewSsh::$appendLine = 'h.example ssh-ed25519 AAAAmitmkey';
+
+        $creds = Credentials::defaults();
+        $creds['connections'][] = $this->keyfileConn(
+            array_merge(['keyFilePath' => $this->makeKeyFile('nopin.key')], $over)
+        );
+        Credentials::save($creds);
+
+        try {
+            AcceptNewSsh::testConnection($creds, 'c-kf');
+            $stored = Credentials::findConnection(Credentials::load(), 'c-kf');
+            $this->assertIsArray($stored);
+            $this->assertSame($expected, trim((string) $stored['remoteHostKey']));
+        } finally {
+            Credentials::save(Credentials::defaults());
+        }
+    }
+
+    /** @return array<string,array{0:array<string,mixed>,1:string}> */
+    public static function noPinProvider(): array
+    {
+        return [
+            'strict yes'   => [['strictHostKey' => 'yes'], ''],
+            'already pinned' => [['remoteHostKey' => 'h.example ssh-ed25519 AAAApinned'], 'h.example ssh-ed25519 AAAApinned'],
+        ];
     }
 
     // --- KEYFILE argv + materialise (no tmpfs key) -------------------------

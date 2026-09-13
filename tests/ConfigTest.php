@@ -793,6 +793,20 @@ final class ConfigTest extends TestCase
         $this->assertCount(15, Config::defaultJob());
         // A brand-new job still defaults to SSH, not to the new transport.
         $this->assertSame('SSH', Config::defaultJob()['transport']);
+        // ...and to the progress-only log level (no per-file lines).
+        $this->assertSame('summary', Config::defaultJob()['logLevel']);
+    }
+
+    /**
+     * The new-job default must NOT reach existing jobs: mergeJob only fills keys
+     * a stored job is missing, so a job saved at 'normal' keeps listing files.
+     */
+    public function testMergeJobKeepsAStoredLogLevelAgainstTheNewDefault(): void
+    {
+        $merged = Config::mergeJob(['id' => 'j1', 'name' => 'n', 'logLevel' => 'normal']);
+        $this->assertSame('normal', $merged['logLevel']);
+        // A job with no level at all (hand-edited config.json) takes the default.
+        $this->assertSame('summary', Config::mergeJob(['id' => 'j2', 'name' => 'n'])['logLevel']);
     }
 
     /**

@@ -106,6 +106,16 @@ final class RealRunKeyTools extends KeyTools
         return static::runKeygen($argv);
     }
 
+    public static function publicTempDir(): string
+    {
+        return static::tempDir();
+    }
+
+    public static function publicRmTempDir(string $dir): void
+    {
+        static::rmTempDir($dir);
+    }
+
     /**
      * Run the REAL, time-bounded runKeyscan seam against a real subprocess with
      * an explicit wall-clock deadline. A non-null deadline routes through the
@@ -444,6 +454,55 @@ final class KeyToolsTest extends TestCase
         // The deadline discoverHostKey computed was bounded by the tiny cap.
         $this->assertNotEmpty(HangingKeyscanKeyTools::$deadlines);
         $this->assertNotNull(HangingKeyscanKeyTools::$deadlines[0]);
+    }
+
+    // --- temp dirs: confinement + symlink-safe cleanup ---------------------
+
+    /**
+     * The keygen temp dir lives under the plugin's own 0700 runtime base (not
+     * directly in world-writable /tmp), and cleanup NEVER follows a symlink: a
+     * planted link to a directory must be unlinked, never recursed into. Before
+     * this, rmTempDir()'s is_dir() followed the link and the root php-fpm worker
+     * would have unlinked the TARGET's contents.
+     */
+    public function testTempDirIsConfinedAndCleanupDoesNotFollowSymlinks(): void
+    {
+        $dir = RealRunKeyTools::publicTempDir();
+        $this->assertNotSame('', $dir);
+        $this->assertStringStartsWith(rtrim(UR_RUNTIME_BASE, '/') . '/keygen/', $dir);
+        $this->assertSame(0700, fileperms($dir) & 0777);
+
+        // A directory OUTSIDE the temp dir, holding a canary, reachable only via
+        // a symlink planted inside it.
+        $victim = $dir . '-victim';
+        $this->assertTrue(@mkdir($victim, 0700));
+        file_put_contents($victim . '/canary', 'keep me');
+        $this->assertTrue(@symlink($victim, $dir . '/link'));
+
+        RealRunKeyTools::publicRmTempDir($dir);
+
+        $this->assertDirectoryDoesNotExist($dir, 'the temp dir (and the link in it) must be gone');
+        $this->assertFileExists($victim . '/canary', 'cleanup must not follow a planted symlink');
+
+        @unlink($victim . '/canary');
+        @rmdir($victim);
+    }
+
+    /** A symlinked temp dir is refused outright rather than followed. */
+    public function testRmTempDirRefusesASymlinkedDir(): void
+    {
+        $base = RealRunKeyTools::publicTempDir();
+        $victim = $base . '/victim';
+        $this->assertTrue(@mkdir($victim, 0700));
+        file_put_contents($victim . '/canary', 'keep me');
+        $link = $base . '/link';
+        $this->assertTrue(@symlink($victim, $link));
+
+        RealRunKeyTools::publicRmTempDir($link);
+        $this->assertFileExists($victim . '/canary');
+
+        RealRunKeyTools::publicRmTempDir($base);
+        $this->assertDirectoryDoesNotExist($base);
     }
 
     // --- subprocess seams: deadlock-safety + detached time-bounding --------
