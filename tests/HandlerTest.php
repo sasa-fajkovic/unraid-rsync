@@ -230,6 +230,7 @@ final class HandlerTest extends TestCase
                     'compress'      => '0',
                     'omitDirTimes'  => '1',
                     'omitLinkTimes' => '0',
+                    'statsMode'     => 'legacy',
                     // Exactly what the form posts: parallel type[]/pattern[]
                     // arrays paired by index, with the empty starter row still
                     // in place (it must be dropped, not stored blank).
@@ -261,6 +262,7 @@ final class HandlerTest extends TestCase
                             'pattern' => ['keep/', 'thumbs/'],
                         ],
                         'bwlimit'  => '2000',
+                        'statsMode' => 'none',
                         'rsh'      => 'ssh -i /evil', // not whitelisted -> dropped
                     ],
                     'logLevel'   => 'verbose',
@@ -296,6 +298,7 @@ final class HandlerTest extends TestCase
         // rsyncOptions whitelisted only.
         $this->assertArrayNotHasKey('rsh', $job['rsyncOptions']);
         $this->assertSame('2000', $job['rsyncOptions']['bwlimit']);
+        $this->assertSame('none', $job['rsyncOptions']['statsMode']);
         // The parallel type[]/pattern[] arrays are zipped back into ordered
         // {type, pattern} entries, with the include still first.
         $this->assertSame([
@@ -306,6 +309,7 @@ final class HandlerTest extends TestCase
         $this->assertTrue($cfg['global']['defaultRsyncOptions']['archive']);
         $this->assertTrue($cfg['global']['defaultRsyncOptions']['omitDirTimes']);
         $this->assertFalse($cfg['global']['defaultRsyncOptions']['omitLinkTimes']);
+        $this->assertSame('legacy', $cfg['global']['defaultRsyncOptions']['statsMode']);
         // Blank starter row dropped.
         $this->assertSame(
             [['type' => 'exclude', 'pattern' => '*.tmp']],
@@ -881,6 +885,7 @@ final class HandlerTest extends TestCase
             'compressLevel'   => '',
             'modifyWindow'    => '',
             'remoteRsyncPath' => '',
+            'statsMode'       => 'current',
         ], $overrides);
     }
 
@@ -1110,11 +1115,10 @@ final class HandlerTest extends TestCase
     }
 
     /**
-     * An ordinary SSH job save stores exactly what it stored before the daemon
-     * transport existed: the same 15 job keys in the same order, the same
-     * 40-key options block, nothing added.
+     * An ordinary SSH job keeps its established fields and defaults to the
+     * existing statistics flags when no mode was submitted.
      */
-    public function testSaveConfigStoresAnSshJobExactlyAsBefore(): void
+    public function testSaveConfigStoresAnSshJobWithCurrentStatisticsMode(): void
     {
         $this->seedConnections([$this->sshConnection()]);
 
@@ -1156,9 +1160,9 @@ final class HandlerTest extends TestCase
             'postHook'          => '',
             'notifyMode'        => 'failure-only',
         ], $job);
-        // The no-breaking-change ledger: no new key on either level.
+        // The new mode is additive; the job's own key set stays the same.
         $this->assertCount(15, $job);
-        $this->assertCount(40, $job['rsyncOptions']);
+        $this->assertCount(41, $job['rsyncOptions']);
     }
 
     /**

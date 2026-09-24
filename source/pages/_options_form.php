@@ -210,6 +210,7 @@ if (!function_exists('ur_option_help')) {
             'backupDir'      => 'Move changed or deleted files into this directory instead of overwriting them (--backup-dir=DIR); also enables --backup. Leave blank to disable backups (files are overwritten in place).',
             'compressLevel'  => 'Set the zlib compression level from 0 (none) to 9 (maximum) (--compress-level=N). Leave blank for rsync\'s default level. Only matters when Compress is on.',
             'modifyWindow'   => 'Allow this many seconds of tolerance when comparing modification times (--modify-window=SECONDS). Useful for FAT filesystems with coarse timestamps. Leave blank for exact matching (0 seconds).',
+            'statsMode'      => 'Choose detailed statistics for Normal and Verbose logs and for dry runs: Current (--info=stats2) keeps existing output; Older rsync (--stats) works with older peers such as rsync 3.0.9; No explicit detailed stats sends neither flag. Overall progress (--info=progress2) remains enabled. Verbose (-vv) may still print statistics on its own. An older receiving rsync may also require turning off Create destination path (--mkpath).',
         ];
     }
 }
@@ -489,6 +490,24 @@ if (!function_exists('ur_render_rsync_options')) {
             echo ur_option_help_block($key, $helpId);
             echo '</dd>';
         }
+        echo '</dl>';
+
+        $statsId = $idBase . '_statsMode';
+        $statsHelpId = $statsId . '_help';
+        $statsMode = Config::normalizeStatsMode($opts['statsMode'] ?? null);
+        echo '<dl>';
+        echo '<dt class="ur-dt"><label for="' . ur_h($statsId) . '">' . ur_h(ur_t('Detailed statistics')) . '</label>'
+            . ur_option_help_affordance('statsMode', $statsHelpId) . '</dt>';
+        echo '<dd><select id="' . ur_h($statsId) . '" name="' . ur_h($prefix . '[statsMode]') . '">';
+        foreach ([
+            'current' => 'Current (--info=stats2)',
+            'legacy' => 'Older rsync (--stats)',
+            'none' => 'No explicit detailed stats',
+        ] as $mode => $label) {
+            echo '<option value="' . ur_h($mode) . '"' . ($statsMode === $mode ? ' selected' : '') . '>'
+                . ur_h(ur_t($label)) . '</option>';
+        }
+        echo '</select>' . ur_option_help_block('statsMode', $statsHelpId) . '</dd>';
         echo '</dl>';
 
         // --- live command preview ------------------------------------------

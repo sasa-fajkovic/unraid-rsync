@@ -180,6 +180,8 @@ final class OptionsFormHelpTest extends TestCase
         // see Config::normalizeFilters().
         $this->assertStringContainsString('name="jobs[0][rsyncOptions][archive]"', $html);
         $this->assertStringContainsString('name="jobs[0][rsyncOptions][bwlimit]"', $html);
+        $this->assertStringContainsString('name="jobs[0][rsyncOptions][statsMode]"', $html);
+        $this->assertStringContainsString('<option value="current" selected>', $html);
         $this->assertStringContainsString('name="jobs[0][rsyncOptions][filters][type][]"', $html);
         $this->assertStringContainsString('name="jobs[0][rsyncOptions][filters][pattern][]"', $html);
 
@@ -652,11 +654,11 @@ final class OptionsFormHelpTest extends TestCase
         foreach (['port', 'daemonPort', 'passwordFile', 'password'] as $forbidden) {
             $this->assertNotContains($forbidden, $helpKeys);
         }
-        // The whitelist itself is unchanged, so the help map is unchanged.
+        // The help map tracks the option keys, including the statistics mode.
         // (Canonicalizing, like testHelpMapKeysMatchWhitelistExactly: the help
         // map is grouped for reading, not stored in whitelist order.)
         $this->assertEqualsCanonicalizing(array_keys(Config::defaultRsyncOptions()), $helpKeys);
-        $this->assertCount(40, $helpKeys);
+        $this->assertCount(41, $helpKeys);
 
         $html = $this->renderOptions(Config::defaultRsyncOptions(), 'global[defaultRsyncOptions]', 'ur_t139');
         foreach (['[port]', '[daemonPort]', '[passwordFile]', '--password-file', '--port='] as $needle) {

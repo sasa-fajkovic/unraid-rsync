@@ -128,6 +128,7 @@ class Config
             'compressLevel'   => '',
             'modifyWindow'    => '',
             'remoteRsyncPath' => '',
+            'statsMode'       => 'current',
         ];
     }
 
@@ -743,7 +744,14 @@ class Config
         // path too: a hand-edited config.json must never reach the UI or
         // Rsync::optionTokens() as a ragged array.
         $out['filters'] = self::normalizeFilters($out['filters']);
+        $out['statsMode'] = self::normalizeStatsMode($out['statsMode']);
         return $out;
+    }
+
+    public static function normalizeStatsMode(mixed $value): string
+    {
+        $mode = is_string($value) ? strtolower(trim($value)) : '';
+        return in_array($mode, ['current', 'legacy', 'none'], true) ? $mode : 'current';
     }
 
     /** The filter rule types the plugin will emit. Mirrors Rsync::FILTER_FLAGS. */

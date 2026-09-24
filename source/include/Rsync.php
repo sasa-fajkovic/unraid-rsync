@@ -378,19 +378,32 @@ class Rsync
      *
      * @return array<int,string>
      */
-    public static function logLevelFlags(string $logLevel): array
+    public static function logLevelFlags(string $logLevel, string $statsMode = 'current'): array
     {
+        $statsMode = Config::normalizeStatsMode($statsMode);
         switch ($logLevel) {
             case 'quiet':
                 return ['-q', '--log-file-format='];
             case 'summary':
                 return ['--info=progress2', '--log-file-format='];
             case 'verbose':
+                if ($statsMode === 'legacy') {
+                    return ['-vv', '--info=progress2', '--stats', '--itemize-changes'];
+                }
+                if ($statsMode === 'none') {
+                    return ['-vv', '--info=progress2', '--itemize-changes'];
+                }
                 return ['-vv', '--info=progress2,stats2', '--itemize-changes'];
             case 'debug':
                 return ['-vvv', '--debug=all', '--stderr=all'];
             case 'normal':
             default:
+                if ($statsMode === 'legacy') {
+                    return ['-v', '--info=progress2', '--stats'];
+                }
+                if ($statsMode === 'none') {
+                    return ['-v', '--info=progress2'];
+                }
                 return ['-v', '--info=stats2,progress2'];
         }
     }
@@ -488,7 +501,7 @@ class Rsync
         $effectiveLevel = ($dryRun && in_array($logLevel, ['quiet', 'summary'], true))
             ? 'normal'
             : $logLevel;
-        foreach (self::logLevelFlags($effectiveLevel) as $tok) {
+        foreach (self::logLevelFlags($effectiveLevel, Config::normalizeStatsMode($opts['statsMode'] ?? null)) as $tok) {
             $argv[] = $tok;
         }
 
