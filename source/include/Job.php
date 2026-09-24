@@ -259,6 +259,7 @@ class Job
         // has to run on the config-LOAD path (mergeRsyncOptions), and it accepts
         // both the stored shape and the parallel-array shape the form posts.
         $out['filters'] = Config::normalizeFilters($opts['filters'] ?? []);
+        $out['statsMode'] = Config::normalizeStatsMode($opts['statsMode'] ?? null);
 
         return $out;
     }

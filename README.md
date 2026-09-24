@@ -117,6 +117,12 @@ Managed keys live in their own **Credentials** keychain tab.
   every level** — a quiet level never hides what a `--delete` job removed — and
   a **Dry-run is never quieter than `Normal`**, so the preview always names the
   files and deletions it would have made.
+  **Detailed statistics** is configurable in Global Settings or per job:
+  Current preserves the existing `--info=stats2` output; Older rsync uses
+  `--stats` for peers such as rsync 3.0.9; No explicit detailed stats omits both.
+  Normal and Verbose still use `--info=progress2`, and dry runs use the selected
+  statistics mode when raised to Normal. On an older receiving host, also turn
+  off **Create destination path** (`--mkpath`) if its rsync predates 3.2.3.
 - A **Status** tab showing the rolling cross-job plugin log and an
   **rsync-binary presence indicator** (detected path + the first line of
   `rsync --version`, or a clear warning if rsync is somehow absent).

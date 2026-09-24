@@ -423,6 +423,14 @@ final class ConfigTest extends TestCase
         $this->assertTrue($opts['archive']);
     }
 
+    public function testStatisticsModeDefaultsAndNormalizesOnLoad(): void
+    {
+        $this->assertSame('current', Config::mergeRsyncOptions([])['statsMode']);
+        $this->assertSame('legacy', Config::mergeRsyncOptions(['statsMode' => 'legacy'])['statsMode']);
+        $this->assertSame('current', Config::mergeRsyncOptions(['statsMode' => 'arbitrary'])['statsMode']);
+        $this->assertSame('current', Job::normalizeRsyncOptions(['statsMode' => ['invalid']])['statsMode']);
+    }
+
     public function testMergeJobNormalisesPairsAndOptions(): void
     {
         $merged = Config::mergeJob([
@@ -810,13 +818,13 @@ final class ConfigTest extends TestCase
     }
 
     /**
-     * defaultRsyncOptions() keeps exactly its 40 keys, in order. --port and
+     * defaultRsyncOptions() keeps exactly its 41 keys, in order. --port and
      * --password-file are carried in the transport-pieces bag, NEVER in the
      * option whitelist: a user-editable --password-file would be an
      * arbitrary-file-read primitive aimed at a remote daemon, and a whitelisted
      * --port would split the source of truth with the Connection's own port.
      */
-    public function testDefaultRsyncOptionsKeySetIsUnchangedAtFortyKeys(): void
+    public function testDefaultRsyncOptionsKeySetIncludesStatisticsMode(): void
     {
         $keys = array_keys(Config::defaultRsyncOptions());
         $this->assertSame([
@@ -860,8 +868,9 @@ final class ConfigTest extends TestCase
             'compressLevel',
             'modifyWindow',
             'remoteRsyncPath',
+            'statsMode',
         ], $keys);
-        $this->assertCount(40, $keys);
+        $this->assertCount(41, $keys);
 
         foreach (['port', 'daemonPort', 'passwordFile', 'passwordfile', 'password'] as $forbidden) {
             $this->assertNotContains(

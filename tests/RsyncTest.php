@@ -362,6 +362,40 @@ final class RsyncTest extends TestCase
         }
     }
 
+    public function testStatisticsModesKeepExistingDefaultsAndApplyToDryRuns(): void
+    {
+        $opts = $this->emptyOpts();
+        $this->assertSame('current', $opts['statsMode']);
+
+        foreach (['legacy' => '--stats', 'none' => null] as $mode => $statsFlag) {
+            $opts['statsMode'] = $mode;
+            foreach (['normal', 'verbose'] as $level) {
+                $argv = Rsync::buildArgv($opts, $level, '/rt/r.log', '/mnt/user/s/', '/mnt/user/d/');
+                $this->assertContains('--info=progress2', $argv);
+                $this->assertNotContains('--info=stats2,progress2', $argv);
+                $this->assertNotContains('--info=progress2,stats2', $argv);
+                $this->assertSame($statsFlag !== null, in_array('--stats', $argv, true));
+            }
+
+            $dry = Rsync::buildArgv($opts, 'summary', '/rt/r.log', '/mnt/user/s/', '/mnt/user/d/', null, true);
+            $this->assertContains('-v', $dry);
+            $this->assertContains('--info=progress2', $dry);
+            $this->assertSame($statsFlag !== null, in_array('--stats', $dry, true));
+            $this->assertNotContains('--log-file-format=', $dry);
+
+            $regular = Rsync::buildArgv($opts, 'summary', '/rt/r.log', '/mnt/user/s/', '/mnt/user/d/');
+            $this->assertContains('--info=progress2', $regular);
+            $this->assertContains('--log-file-format=', $regular);
+            $this->assertNotContains('--stats', $regular);
+        }
+
+        $opts['statsMode'] = 'current';
+        $this->assertContains(
+            '--info=stats2,progress2',
+            Rsync::buildArgv($opts, 'summary', '/rt/r.log', '/mnt/user/s/', '/mnt/user/d/', null, true)
+        );
+    }
+
     /**
      * A DRY RUN must never be quieter than `normal`. The quiet levels suppress
      * exactly the per-file lines a dry run exists to show: verified against
@@ -520,22 +554,30 @@ final class RsyncTest extends TestCase
     public function testEffectiveOptionsUsesGlobalWhenFlagSet(): void
     {
         $global = [
-            'defaultRsyncOptions' => Config::mergeRsyncOptions(['compress' => true, 'archive' => false]),
+            'defaultRsyncOptions' => Config::mergeRsyncOptions([
+                'compress' => true, 'archive' => false, 'statsMode' => 'legacy',
+            ]),
         ];
         $job = Config::defaultJob();
-        $job['rsyncOptions'] = Config::mergeRsyncOptions(['compress' => false, 'archive' => true]);
+        $job['rsyncOptions'] = Config::mergeRsyncOptions([
+            'compress' => false, 'archive' => true, 'statsMode' => 'none',
+        ]);
 
         // useGlobalDefaults = true -> the GLOBAL options win.
         $job['useGlobalDefaults'] = true;
         $eff = Rsync::effectiveOptions($job, $global);
         $this->assertTrue($eff['compress']);
         $this->assertFalse($eff['archive']);
+        $this->assertSame('legacy', $eff['statsMode']);
+        $this->assertContains('--stats', Rsync::buildArgv($eff, 'normal', '/rt/r.log', '/a/', '/b/'));
 
         // useGlobalDefaults = false -> the JOB's own options win.
         $job['useGlobalDefaults'] = false;
         $eff = Rsync::effectiveOptions($job, $global);
         $this->assertFalse($eff['compress']);
         $this->assertTrue($eff['archive']);
+        $this->assertSame('none', $eff['statsMode']);
+        $this->assertNotContains('--stats', Rsync::buildArgv($eff, 'normal', '/rt/r.log', '/a/', '/b/'));
     }
 
     public function testRunDelegatesToInjectedRunner(): void
