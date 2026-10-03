@@ -379,7 +379,8 @@ final class LoggerTest extends TestCase
     {
         $tz = date_default_timezone_get();
         try {
-            date_default_timezone_set('Australia/Sydney');
+            // Brisbane: fixed +10:00, so the assertion holds whatever today's date.
+            date_default_timezone_set('Australia/Brisbane');
             $path = Logger::openRun('j-tz-syd', 1750000000);
             Logger::event($path, 'j-tz-syd', 'sydney');
             $syd = file_get_contents($path);

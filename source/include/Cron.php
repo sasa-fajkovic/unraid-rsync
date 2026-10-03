@@ -448,7 +448,7 @@ class Cron
         $ts = $start;
 
         // We iterate by minute but short-circuit on coarser fields to keep the
-        // loop bounded in practice. date()/mktime() honour the process timezone,
+        // loop bounded in practice. date()/localTs() honour the process timezone,
         // which Config.php has pinned to the system zone - so this walks the
         // calendar in the same zone as crond.
         //
@@ -456,8 +456,10 @@ class Cron
         // gap a time that does not exist that day is simply not matched, so a
         // daily job scheduled inside the gap skips to the next day - what
         // vixie-cron does with a fixed-time job in the gap. At a fall-back repeat
-        // mktime() resolves the ambiguous hour to the SECOND occurrence, so the
-        // walk yields one instant rather than two. Both folds terminate.
+        // localTs() resolves the ambiguous hour to the SECOND occurrence, so the
+        // walk yields one instant rather than two. Both folds terminate. Not
+        // mktime(): it resolves an ambiguous hour by whether NOW is in DST, so the
+        // answer flipped twice a year.
         while ($ts <= $horizon) {
             $min   = (int) date('i', $ts);
             $hour  = (int) date('G', $ts);
@@ -475,30 +477,21 @@ class Cron
                     $nextMon = 1;
                     $nextYear++;
                 }
-                $ts = mktime(0, 0, 0, $nextMon, 1, $nextYear);
-                if ($ts === false) {
-                    return null;
-                }
+                $ts = self::localTs(0, $nextMon, 1, $nextYear);
                 continue;
             }
 
             // Day gate with OR semantics.
             if (!self::dayMatches($dom, $dow, $doms, $dows, $domRestricted, $dowRestricted)) {
                 // Jump to 00:00 of the next day.
-                $ts = mktime(0, 0, 0, (int) date('n', $ts), (int) date('j', $ts) + 1, (int) date('Y', $ts));
-                if ($ts === false) {
-                    return null;
-                }
+                $ts = self::localTs(0, (int) date('n', $ts), (int) date('j', $ts) + 1, (int) date('Y', $ts));
                 continue;
             }
 
             // Hour gate.
             if (!isset($hours[$hour])) {
                 // Jump to the top of the next hour.
-                $ts = mktime((int) date('G', $ts) + 1, 0, 0, (int) date('n', $ts), (int) date('j', $ts), (int) date('Y', $ts));
-                if ($ts === false) {
-                    return null;
-                }
+                $ts = self::localTs((int) date('G', $ts) + 1, (int) date('n', $ts), (int) date('j', $ts), (int) date('Y', $ts));
                 continue;
             }
 
@@ -513,6 +506,15 @@ class Cron
         }
 
         return null;
+    }
+
+    /** Top of the given local hour; out-of-range fields roll over like mktime(). */
+    private static function localTs(int $hour, int $mon, int $day, int $year): int
+    {
+        return (new \DateTimeImmutable('now', new \DateTimeZone(date_default_timezone_get())))
+            ->setDate($year, $mon, $day)
+            ->setTime($hour, 0)
+            ->getTimestamp();
     }
 
     /**
