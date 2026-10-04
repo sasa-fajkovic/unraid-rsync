@@ -100,6 +100,7 @@ class Rsync
         // this value is handed to the far side to invoke, so Job::validate
         // constrains it to a bare absolute path (no spaces/shell characters).
         'remoteRsyncPath' => '--rsync-path',
+        'protocol'       => '--protocol',
     ];
 
     /**

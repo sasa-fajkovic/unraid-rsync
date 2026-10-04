@@ -818,7 +818,7 @@ final class ConfigTest extends TestCase
     }
 
     /**
-     * defaultRsyncOptions() keeps exactly its 41 keys, in order. --port and
+     * defaultRsyncOptions() keeps exactly its 42 keys, in order. --port and
      * --password-file are carried in the transport-pieces bag, NEVER in the
      * option whitelist: a user-editable --password-file would be an
      * arbitrary-file-read primitive aimed at a remote daemon, and a whitelisted
@@ -868,9 +868,10 @@ final class ConfigTest extends TestCase
             'compressLevel',
             'modifyWindow',
             'remoteRsyncPath',
+            'protocol',
             'statsMode',
         ], $keys);
-        $this->assertCount(41, $keys);
+        $this->assertCount(42, $keys);
 
         foreach (['port', 'daemonPort', 'passwordFile', 'passwordfile', 'password'] as $forbidden) {
             $this->assertNotContains(
@@ -884,6 +885,7 @@ final class ConfigTest extends TestCase
         // removing the key would strand every stored value.
         $this->assertContains('contimeout', $keys);
         $this->assertSame('', Config::defaultRsyncOptions()['contimeout']);
+        $this->assertSame('', Config::defaultRsyncOptions()['protocol']);
     }
 
     /**

@@ -307,6 +307,7 @@ final class RsyncTest extends TestCase
             'compressLevel' => '--compress-level=5',
             'modifyWindow'  => '--modify-window=5',
             'remoteRsyncPath' => '--rsync-path=5',
+            'protocol'      => '--protocol=5',
         ];
         foreach ($expected as $key => $flag) {
             $opts = $this->emptyOpts();

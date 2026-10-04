@@ -207,15 +207,18 @@ final class HandlerTest extends TestCase
         ));
         // ...and nothing was persisted.
         $this->assertSame('', Config::load()['global']['defaultRsyncOptions']['remoteRsyncPath'] ?? 'MISSING');
+        $this->assertSame('', Config::load()['global']['defaultRsyncOptions']['protocol'] ?? 'MISSING');
 
         // A valid value on the same route still saves.
         $_POST['global']['defaultRsyncOptions']['remoteRsyncPath'] = '/usr/local/bin/rsync';
+        $_POST['global']['defaultRsyncOptions']['protocol'] = '31';
         [$ok, $okCode] = $this->runCapture(fn() => ur_action_save_config());
         $this->assertSame(200, $okCode, json_encode($ok));
         $this->assertSame(
             '/usr/local/bin/rsync',
             Config::load()['global']['defaultRsyncOptions']['remoteRsyncPath']
         );
+        $this->assertSame('31', Config::load()['global']['defaultRsyncOptions']['protocol']);
     }
 
     public function testSaveConfigNestedFormRoundTrip(): void
@@ -833,7 +836,7 @@ final class HandlerTest extends TestCase
     }
 
     /**
-     * The exact 40-key rsyncOptions block a job stores when the form posts no
+     * The exact 42-key rsyncOptions block a job stores when the form posts no
      * rsyncOptions at all (every checkbox unticked, every scalar blank), with
      * $overrides applied. Written out rather than derived from
      * Config::defaultRsyncOptions() so the whole-job assertions below really are
@@ -885,6 +888,7 @@ final class HandlerTest extends TestCase
             'compressLevel'   => '',
             'modifyWindow'    => '',
             'remoteRsyncPath' => '',
+            'protocol'        => '',
             'statsMode'       => 'current',
         ], $overrides);
     }
@@ -1133,7 +1137,12 @@ final class HandlerTest extends TestCase
                     'direction'    => 'PUSH',
                     'connectionId' => 'c-ssh',
                     'pairs'        => [0 => ['local' => '/mnt/user/data/', 'remote' => '/volume1/backup/data/']],
-                    'rsyncOptions' => ['archive' => '1', 'compress' => '1', 'bwlimit' => '2000'],
+                    'rsyncOptions' => [
+                        'archive' => '1',
+                        'compress' => '1',
+                        'bwlimit' => '2000',
+                        'protocol' => '31',
+                    ],
                     'logLevel'     => 'normal',
                     'notifyMode'   => 'failure-only',
                 ],
@@ -1154,7 +1163,12 @@ final class HandlerTest extends TestCase
             'direction'         => 'PUSH',
             'pairs'             => [['local' => '/mnt/user/data/', 'remote' => '/volume1/backup/data/']],
             'useGlobalDefaults' => false,
-            'rsyncOptions'      => $this->storedOptions(['archive' => true, 'compress' => true, 'bwlimit' => '2000']),
+            'rsyncOptions'      => $this->storedOptions([
+                'archive' => true,
+                'compress' => true,
+                'bwlimit' => '2000',
+                'protocol' => '31',
+            ]),
             'logLevel'          => 'normal',
             'preHook'           => '',
             'postHook'          => '',
@@ -1162,7 +1176,7 @@ final class HandlerTest extends TestCase
         ], $job);
         // The new mode is additive; the job's own key set stays the same.
         $this->assertCount(15, $job);
-        $this->assertCount(41, $job['rsyncOptions']);
+        $this->assertCount(42, $job['rsyncOptions']);
     }
 
     /**

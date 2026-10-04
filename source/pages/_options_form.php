@@ -211,6 +211,7 @@ if (!function_exists('ur_option_help')) {
             'compressLevel'  => 'Set the zlib compression level from 0 (none) to 9 (maximum) (--compress-level=N). Leave blank for rsync\'s default level. Only matters when Compress is on.',
             'modifyWindow'   => 'Allow this many seconds of tolerance when comparing modification times (--modify-window=SECONDS). Useful for FAT filesystems with coarse timestamps. Leave blank for exact matching (0 seconds).',
             'statsMode'      => 'Choose detailed statistics for Normal and Verbose logs and for dry runs: Current (--info=stats2) keeps existing output; Older rsync (--stats) works with older peers such as rsync 3.0.9; No explicit detailed stats sends neither flag. Overall progress (--info=progress2) remains enabled. Verbose (-vv) may still print statistics on its own. An older receiving rsync may also require turning off Create destination path (--mkpath).',
+            'protocol'       => 'Force a specific rsync protocol version (--protocol=N). Leave blank for rsync\'s default negotiation; only set this when the remote peer requires a specific version.',
         ];
     }
 }
@@ -370,6 +371,7 @@ if (!function_exists('ur_render_rsync_options')) {
             'compressLevel' => ['Compress level', '--compress-level='],
             'modifyWindow'  => ['Modify window (s)', '--modify-window='],
             'remoteRsyncPath' => ['Remote rsync path (SSH jobs)', '--rsync-path='],
+            'protocol'      => ['Protocol version', '--protocol='],
         ];
 
         // Emit the help CSS + JS exactly once per page, even when several option
@@ -476,6 +478,7 @@ if (!function_exists('ur_render_rsync_options')) {
             'maxDelete' => 'numeric', 'timeout' => 'numeric', 'contimeout' => 'numeric',
             'compressLevel' => 'numeric', 'modifyWindow' => 'numeric',
             'bwlimit' => 'decimal', 'maxSize' => 'decimal', 'minSize' => 'decimal',
+            'protocol' => 'numeric',
         ];
         echo '<dl>';
         foreach ($scalars as $key => [$label, $flag]) {

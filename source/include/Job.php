@@ -83,7 +83,7 @@ class Job
     const SCALAR_OPTION_KEYS = [
         'maxDelete', 'bwlimit', 'timeout', 'contimeout', 'maxSize', 'minSize',
         'chmod', 'tempDir', 'backupDir', 'compressLevel', 'modifyWindow',
-        'remoteRsyncPath',
+        'remoteRsyncPath', 'protocol',
     ];
 
     /**
@@ -94,7 +94,9 @@ class Job
     const FILTER_TYPES = Config::FILTER_TYPES;
 
     /** Scalar option keys whose value must be a non-negative whole number. */
-    const INTEGER_SCALAR_KEYS = ['maxDelete', 'timeout', 'contimeout', 'compressLevel', 'modifyWindow'];
+    const INTEGER_SCALAR_KEYS = [
+        'maxDelete', 'timeout', 'contimeout', 'compressLevel', 'modifyWindow', 'protocol',
+    ];
 
     /**
      * Scalar option keys whose value is an rsync SIZE: a number with an optional
@@ -125,6 +127,7 @@ class Job
         'contimeout'      => '--contimeout',
         'compressLevel'   => '--compress-level',
         'modifyWindow'    => '--modify-window',
+        'protocol'        => '--protocol',
         'bwlimit'         => '--bwlimit',
         'maxSize'         => '--max-size',
         'minSize'         => '--min-size',

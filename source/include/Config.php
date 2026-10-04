@@ -128,6 +128,7 @@ class Config
             'compressLevel'   => '',
             'modifyWindow'    => '',
             'remoteRsyncPath' => '',
+            'protocol'        => '',
             'statsMode'       => 'current',
         ];
     }

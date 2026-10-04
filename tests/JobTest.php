@@ -783,6 +783,7 @@ final class JobTest extends TestCase
             'contimeout'    => ['contimeout', '--contimeout'],
             'compressLevel' => ['compressLevel', '--compress-level'],
             'modifyWindow'  => ['modifyWindow', '--modify-window'],
+            'protocol'      => ['protocol', '--protocol'],
         ];
     }
 
@@ -807,6 +808,7 @@ final class JobTest extends TestCase
         $res = Job::validate($this->validLocalJob(['rsyncOptions' => [
             'maxDelete' => '', 'bwlimit' => '', 'timeout' => '', 'contimeout' => '',
             'maxSize' => '', 'minSize' => '', 'compressLevel' => '', 'modifyWindow' => '',
+            'protocol' => '',
         ]]));
         $this->assertTrue($res['valid'], 'errors: ' . implode(' | ', $res['errors']));
     }
