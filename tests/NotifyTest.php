@@ -19,6 +19,14 @@ final class NotifyTest extends TestCase
     /** @var string a real, executable temp file standing in for the notify binary */
     private string $fakeBin = '';
 
+    private float $t = 0.0;
+
+    /** @var array<int,float> */
+    private array $slept = [];
+
+    /** @var callable|null */
+    private $origSleep = null;
+
     protected function setUp(): void
     {
         // A real executable file so available() returns true in "present" tests.
@@ -28,12 +36,16 @@ final class NotifyTest extends TestCase
 
         Notify::$notifyPath = $this->fakeBin;
         Notify::$runner     = null;
+        $this->origSleep    = Notify::$sleep;
+        @unlink(UR_RUNTIME_BASE . '/notify.last');
     }
 
     protected function tearDown(): void
     {
         Notify::$notifyPath = '/usr/local/emhttp/webGui/scripts/notify';
         Notify::$runner     = null;
+        Notify::$clock      = null;
+        Notify::$sleep      = $this->origSleep;
         if ($this->fakeBin !== '' && is_file($this->fakeBin)) {
             @unlink($this->fakeBin);
         }
@@ -219,4 +231,66 @@ final class NotifyTest extends TestCase
         $this->assertFalse(Notify::available());
     }
 
+
+    // --- send: one notification per unix second ------------------------------
+
+    /**
+     * Drive send() off a fake clock that only sleep advances; $seconds collects
+     * the unix second each dispatch happened in.
+     *
+     * @param array<int,int> $seconds
+     */
+    private function fakeTime(float $start, array &$seconds): void
+    {
+        $this->t     = $start;
+        $this->slept = [];
+        Notify::$clock  = fn(): float => $this->t;
+        Notify::$sleep  = function (float $s): void {
+            $this->slept[] = $s;
+            $this->t += $s;
+        };
+        Notify::$runner = function (string $command) use (&$seconds): int {
+            $seconds[] = (int) floor($this->t);
+            return 0;
+        };
+    }
+
+    public function testSameSecondSendsAreDispatchedInDifferentSeconds(): void
+    {
+        $seconds = [];
+        $this->fakeTime(1000.25, $seconds);
+        $this->assertTrue(Notify::send(['event' => 'Unraid Rsync', 'subject' => 'a']));
+        $this->assertTrue(Notify::send(['event' => 'Unraid Rsync', 'subject' => 'b']));
+        $this->assertSame([1000, 1001], $seconds);
+        $this->assertCount(1, $this->slept);
+        $this->assertEqualsWithDelta(0.75, $this->slept[0], 1e-9);
+    }
+
+    public function testSendsInDifferentSecondsDoNotSleep(): void
+    {
+        $seconds = [];
+        $this->fakeTime(1000.25, $seconds);
+        Notify::send(['event' => 'Unraid Rsync', 'subject' => 'a']);
+        $this->t = 1001.5;
+        Notify::send(['event' => 'Unraid Rsync', 'subject' => 'b']);
+        $this->assertSame([1000, 1001], $seconds);
+        $this->assertSame([], $this->slept);
+    }
+
+    public function testHeldLockTimesOutAndStillSends(): void
+    {
+        $seconds = [];
+        $this->fakeTime(1000.0, $seconds);
+        $held = fopen(UR_RUNTIME_BASE . '/notify.lock', 'c');
+        $this->assertNotFalse($held);
+        $this->assertTrue(flock($held, LOCK_EX | LOCK_NB));
+        try {
+            $this->assertTrue(Notify::send(['event' => 'Unraid Rsync', 'subject' => 'a']));
+        } finally {
+            flock($held, LOCK_UN);
+            fclose($held);
+        }
+        $this->assertCount(1, $seconds, 'sent without the lock');
+        $this->assertEqualsWithDelta(Notify::LOCK_TIMEOUT_SECS, array_sum($this->slept), 0.06);
+    }
 }

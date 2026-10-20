@@ -112,3 +112,8 @@ require_once __DIR__ . '/../source/include/RunState.php';
 require_once __DIR__ . '/../source/include/Logger.php';
 require_once __DIR__ . '/../source/include/Runner.php';
 require_once __DIR__ . '/../source/include/Cron.php';
+
+// Notify::send() spaces sends one unix second apart; real sleeps would add ~25 s
+// to the suite. NotifyTest drives the spacing with its own clock and sleep.
+Notify::$sleep = static function (float $seconds): void {
+};
