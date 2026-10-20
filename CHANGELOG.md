@@ -81,6 +81,12 @@ user-facing highlights.
   files and deletions it would have made.
 
 ### Fixed
+- **Two notifications in the same second no longer drop one.** Unraid's
+  `notify` names each notification after its event and unix second and skips a
+  send whose name is taken, so e.g. a "scheduled run skipped" warning was lost
+  when the same job's finishing run notified in that second. The plugin's sends
+  are now serialised and spaced at least a second apart; a send may wait up to
+  1 s.
 - **A JavaScript error on the plugin's pages is gone.** Each form carried a
   hidden input named `action`, which shadows the form element's own `action`
   property — and Unraid's page-layout script inspects `form.action` on every

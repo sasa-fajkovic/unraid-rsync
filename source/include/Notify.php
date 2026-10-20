@@ -39,6 +39,8 @@ declare(strict_types=1);
  *   - Notify::$runner      fn(string $command): int. null => the live runner
  *                          (exec()). Tests capture the command and assert the
  *                          argv/escaping without spawning anything.
+ *   - Notify::$clock / $sleep  the time source and sleep behind send()'s
+ *                          one-send-per-second spacing (see send()).
  */
 
 class Notify
@@ -64,6 +66,21 @@ class Notify
      * @var callable|null
      */
     public static $runner = null;
+
+    /**
+     * Injectable clock and sleep for the same-second spacing in send():
+     * fn(): float (unix seconds) and fn(float $seconds): void. null => microtime()
+     * and usleep().
+     *
+     * @var callable|null
+     */
+    public static $clock = null;
+
+    /** @var callable|null */
+    public static $sleep = null;
+
+    /** Longest send() waits for another send's lock before sending without it. */
+    const LOCK_TIMEOUT_SECS = 10;
 
     /**
      * True when the notify binary is present + executable on this box (honouring
@@ -142,6 +159,9 @@ class Notify
      * unexpected throw). NEVER throws - a failed notification must not be able to
      * fail the caller (the runner dispatches this inside its `finally`).
      *
+     * Sends are serialised across processes (a flock in the runtime dir) and at
+     * most one goes out per unix second, so a send may wait up to 1 s.
+     *
      * @param array{event?:string,subject?:string,description?:string,importance?:string,message?:string,link?:string} $opts
      */
     public static function send(array $opts): bool
@@ -152,12 +172,76 @@ class Notify
                 return false;
             }
             $command = static::buildCommand($opts);
-            $code    = static::dispatch($command);
+            $lock    = self::acquireSendLock();
+            try {
+                // notify names its archive "<event>-<unix second>" and drops a
+                // send whose file already exists, so never two of ours in one second.
+                $last = (int) @file_get_contents(self::runtimeDir() . '/notify.last');
+                $now  = self::now();
+                if ((int) floor($now) === $last) {
+                    self::pause($last + 1 - $now);
+                }
+                $code = static::dispatch($command);
+                // The second dispatch ENDED in: notify's own stamp is never later.
+                @file_put_contents(self::runtimeDir() . '/notify.last', (string) (int) floor(self::now()));
+            } finally {
+                if ($lock !== null) {
+                    flock($lock, LOCK_UN);
+                    fclose($lock);
+                }
+            }
             return $code === 0;
         } catch (Throwable $e) {
             // Swallow: notification is best-effort and must never propagate.
             return false;
         }
+    }
+
+    /**
+     * Take the cross-process send lock, waiting at most LOCK_TIMEOUT_SECS. Returns
+     * null when it cannot be had: the caller sends anyway, unserialised, rather
+     * than lose the notification to our own lock.
+     *
+     * @return resource|null
+     */
+    private static function acquireSendLock()
+    {
+        $dir = self::runtimeDir();
+        if (!is_dir($dir)) {
+            @mkdir($dir, 0700, true);
+        }
+        $fh = @fopen($dir . '/notify.lock', 'c');
+        if ($fh === false) {
+            return null;
+        }
+        $deadline = self::now() + self::LOCK_TIMEOUT_SECS;
+        while (!flock($fh, LOCK_EX | LOCK_NB, $wouldBlock)) {
+            if (!$wouldBlock || self::now() >= $deadline) {
+                fclose($fh);
+                return null;
+            }
+            self::pause(0.05);
+        }
+        return $fh;
+    }
+
+    private static function runtimeDir(): string
+    {
+        return rtrim(defined('UR_RUNTIME_BASE') ? (string) UR_RUNTIME_BASE : '/tmp/unraid.rsync', '/');
+    }
+
+    private static function now(): float
+    {
+        return static::$clock !== null ? (float) (static::$clock)() : microtime(true);
+    }
+
+    private static function pause(float $seconds): void
+    {
+        if (static::$sleep !== null) {
+            (static::$sleep)($seconds);
+            return;
+        }
+        usleep((int) ceil($seconds * 1e6));
     }
 
     /**
