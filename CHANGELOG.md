@@ -16,10 +16,13 @@ user-facing highlights.
   start (configuration unreadable, job not found, lock or run-state error) sends
   an *alert* `<job>: run did not start`. A scheduled run skipped because the
   previous one is still running sends a *warning*; the same case started by hand
-  stays silent (the UI already says so). A run whose runner died — including one
-  cut off by a reboot or power loss, detected from a small in-flight record on
-  `/boot` — sends an *alert* `<job>: previous run died without finishing` once,
-  noting that the post-hook did not run. `notifyMode: off` is honoured whenever
+  stays silent (the UI already says so). A run whose runner died sends an
+  *alert* `<job>: previous run died without finishing` once, noting that the
+  post-hook did not run. That includes a run cut off by a reboot or power loss,
+  detected from a small in-flight record on `/boot` and reported a few minutes
+  after the array starts (`UR_CRASH_REAP_DELAY`, default 180 s, so notification
+  agents are up first), or earlier by the next status poll or run of the job.
+  `notifyMode: off` is honoured whenever
   the job can be read. Scheduled hard failures and crashed runs appear in
   History as FAILED rows.
 - **Target marker** (per job, optional). Name a small file on the destination

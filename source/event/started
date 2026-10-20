@@ -47,4 +47,16 @@ if [ -f "$APPLY" ]; then
   fi
 fi
 
+# Report runs a reboot cut off. Detached, so array start is never delayed; the
+# script itself waits UR_CRASH_REAP_DELAY seconds (default 180) so notification
+# agents are up before the alert goes out.
+REAP="/usr/local/emhttp/plugins/${PLUGIN}/scripts/reap-crashed.php"
+if [ -f "$REAP" ]; then
+  if command -v setsid >/dev/null 2>&1; then
+    setsid "$PHP_BIN" "$REAP" </dev/null >/dev/null 2>&1 &
+  else
+    "$PHP_BIN" "$REAP" </dev/null >/dev/null 2>&1 &
+  fi
+fi
+
 exit 0

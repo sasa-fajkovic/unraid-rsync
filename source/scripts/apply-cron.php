@@ -22,26 +22,8 @@ declare(strict_types=1);
  */
 
 require_once __DIR__ . '/../include/Cron.php';
-require_once __DIR__ . '/../include/RunState.php';
 
 if (PHP_SAPI === 'cli' && !defined('UR_APPLY_CRON_TESTING')) {
-    // Plugin start: report any run whose runner died since the last look,
-    // including runs a reboot cut off (only their /boot in-flight record is left).
-    try {
-        $ids = [];
-        try {
-            foreach ((Config::load()['jobs'] ?? []) as $job) {
-                if (is_array($job)) {
-                    $ids[] = (string) ($job['id'] ?? '');
-                }
-            }
-        } catch (Throwable $e) {
-            // Unreadable config: the in-flight records still name their jobs.
-        }
-        RunState::reapCrashed($ids);
-    } catch (Throwable $e) {
-        // Non-fatal: the next status poll or run reports it instead.
-    }
     $result = Cron::apply();
     if (!empty($result['ok'])) {
         fwrite(STDOUT, sprintf(
