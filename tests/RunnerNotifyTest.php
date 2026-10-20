@@ -58,6 +58,7 @@ final class RunnerNotifyTest extends TestCase
         Rsync::$rsyncPathOverride = null;
         Rsync::$runner            = null;
         RunState::$baseOverride   = null;
+        Logger::$baseOverride     = null;
         if ($this->fakeBin !== '' && is_file($this->fakeBin)) {
             @unlink($this->fakeBin);
         }
@@ -163,6 +164,10 @@ final class RunnerNotifyTest extends TestCase
             'pre-hook failed'         => [['state' => $F, 'exitCode' => 7, 'reason' => 'prehook-failed'], 'alert', false],
             'aborted, scheduled'      => [['state' => $A, 'exitCode' => 143, 'exitCodes' => [143], 'trigger' => 'schedule'], 'warning', false],
             'aborted, manual'         => [['state' => $A, 'exitCode' => 143, 'exitCodes' => [143], 'trigger' => 'manual'], 'normal', false],
+            'manual abort + post-hook timeout' => [['state' => $A, 'exitCode' => 143, 'exitCodes' => [143], 'trigger' => 'manual', 'reason' => 'posthook-timeout'], 'warning', false],
+            'manual abort + post-hook failed'  => [['state' => $A, 'exitCode' => 143, 'exitCodes' => [143], 'trigger' => 'manual', 'reason' => 'posthook-failed'], 'warning', false],
+            'partial + post-hook failed'       => [['state' => $P, 'exitCode' => 23, 'exitCodes' => [23], 'reason' => 'posthook-failed'], 'warning', false],
+            'failed + post-hook timeout'       => [['state' => $F, 'exitCode' => 12, 'exitCodes' => [12], 'reason' => 'posthook-timeout'], 'alert', false],
             'did not start'           => [['state' => $F, 'exitCode' => 1, 'reason' => 'job-not-found'], 'alert', false],
             'scheduled run skipped'   => [['state' => $F, 'exitCode' => 0, 'reason' => 'already-running', 'trigger' => 'schedule'], 'warning', false],
             'crashed'                 => [['state' => $F, 'exitCode' => 1, 'reason' => 'crashed'], 'alert', false],
@@ -248,6 +253,27 @@ final class RunnerNotifyTest extends TestCase
         $pre = Runner::notifyDescription($this->job('always'), ['state' => Rsync::STATE_FAILED, 'exitCode' => 1, 'exitCodes' => [], 'reason' => 'prehook-failed']);
         $this->assertStringContainsString('Exit code: 1 (pre-run hook).', $pre);
         $this->assertStringContainsString('Duration: unknown.', $pre);
+        // An internal error after a clean pair: the 1 is ours, the 0 is rsync's.
+        $exc = Runner::notifyDescription($this->job('always'), ['state' => Rsync::STATE_FAILED, 'exitCode' => 1, 'exitCodes' => [0], 'reason' => 'exception']);
+        $this->assertStringContainsString('Exit code: 1 (pair #1 0 = success).', $exc);
+    }
+
+    public function testRunExceptionAfterACleanPairIsNotExplainedAsAnRsyncCode(): void
+    {
+        $calls = 0;
+        Rsync::$runner = function (array $argv, $onOutput) use (&$calls): int {
+            if (++$calls === 2) {
+                throw new RuntimeException('boom');
+            }
+            return 0;
+        };
+        Runner::run($this->saveJob('always', ['pairs' => [
+            ['local' => '/mnt/user/a/', 'remote' => '/mnt/disk1/a/'],
+            ['local' => '/mnt/user/b/', 'remote' => '/mnt/disk1/b/'],
+        ]]), false);
+        $this->assertCount(1, $this->captured);
+        $this->assertStringNotContainsString('syntax or usage error', $this->captured[0]);
+        $this->assertStringContainsString('Reason: exception.', $this->captured[0]);
     }
 
     // --- the same decisions through Runner::run ------------------------------
@@ -306,6 +332,27 @@ final class RunnerNotifyTest extends TestCase
     public static function abortProvider(): array
     {
         return ['scheduled abort warns' => ['schedule', 1], 'manual abort is FYI' => ['manual', 0]];
+    }
+
+    /** @return array<string,array{0:int}> */
+    public static function postHookOutcomeProvider(): array
+    {
+        return ['post-hook failed' => [3], 'post-hook timed out' => [Runner::HOOK_TIMED_OUT]];
+    }
+
+    #[DataProvider('postHookOutcomeProvider')]
+    public function testManualAbortWithABrokenPostHookStillWarns(int $postExit): void
+    {
+        $id = $this->saveJob('failure-only', ['postHook' => 'POST']);
+        Rsync::$runner = function (array $argv, $onOutput) use ($id): int {
+            RunState::requestAbort($id);
+            return 143;
+        };
+        Runner::$hookRunner = fn(string $hook): int => $hook === 'POST' ? $postExit : 0;
+        $res = Runner::run($id, false, 'manual');
+        $this->assertSame(Rsync::STATE_ABORTED, $res['state']);
+        $this->assertCount(1, $this->captured);
+        $this->assertSame('warning', $this->importanceOf($this->captured[0]));
     }
 
     #[DataProvider('abortProvider')]
@@ -423,6 +470,22 @@ final class RunnerNotifyTest extends TestCase
         $this->assertSame('alert', $this->importanceOf($this->captured[0]));
     }
 
+    public function testUnopenableLockIsALockErrorNotAlreadyRunning(): void
+    {
+        $id = $this->saveJob('failure-only');
+        RunState::requestAbort($id); // creates the state dir
+        RunState::clearAbort($id);
+        mkdir(RunState::lockPath($id));
+        try {
+            $res = Runner::run($id, false, 'schedule');
+        } finally {
+            @rmdir(RunState::lockPath($id));
+        }
+        $this->assertSame('lock-error', $res['reason']);
+        $this->assertCount(1, $this->captured);
+        $this->assertSame('alert', $this->importanceOf($this->captured[0]));
+    }
+
     public function testStateInitFailureAlerts(): void
     {
         $id = $this->saveJob('failure-only');
@@ -508,6 +571,51 @@ final class RunnerNotifyTest extends TestCase
 
         RunState::isRunning($id);
         $this->assertCount(2, $this->captured, 'nothing left to reap');
+    }
+
+    public function testDeadRunnerIsReportedUnderTheRunLock(): void
+    {
+        // Otherwise a replacement run could record (and prune) a newer History
+        // row before the crash row lands.
+        $id = $this->saveJob('always');
+        $this->writeDeadRunnerState($id);
+        $lockedDuringReport = null;
+        Notify::$runner = function (string $command) use ($id, &$lockedDuringReport): int {
+            $probe = RunState::acquireLock($id);
+            $lockedDuringReport = ($probe === null);
+            RunState::releaseLock($probe);
+            return 0;
+        };
+        RunState::isRunning($id);
+        $this->assertTrue($lockedDuringReport);
+    }
+
+    public function testDeadRunnerThatAlreadyRecordedItsRunIsNotReportedAgain(): void
+    {
+        // Died between History::append and markStopped: the run finished.
+        $id = $this->saveJob('always');
+        $this->writeDeadRunnerState($id);
+        History::append($id, ['startedAt' => '2026-10-20T03:00:00Z', 'state' => Rsync::STATE_SUCCESS]);
+        $this->assertFalse(RunState::isRunning($id));
+        $this->assertCount(0, $this->captured);
+        $this->assertSame(1, History::list($id)['total']);
+        $this->assertFalse(RunState::read($id)['running']);
+    }
+
+    public function testAnUnwritableLogDoesNotSwallowTheCrashReport(): void
+    {
+        $id = $this->saveJob('always');
+        $notADir = sys_get_temp_dir() . '/ur-notalogbase-' . bin2hex(random_bytes(4));
+        touch($notADir);
+        Logger::$baseOverride = $notADir;
+        try {
+            Runner::reportCrashed(['jobId' => $id, 'pid' => 999999, 'startedAt' => '2026-10-20T03:00:00Z', 'trigger' => 'schedule']);
+        } finally {
+            Logger::$baseOverride = null;
+            @unlink($notADir);
+        }
+        $this->assertCount(1, $this->captured);
+        $this->assertSame('crashed', History::list($id)['runs'][0]['reason']);
     }
 
     public function testDeadRunnerHonoursNotifyModeOffButIsStillRecorded(): void

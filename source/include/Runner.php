@@ -526,13 +526,15 @@ class Runner
                     Logger::event($runLog, $jobId, 'Post-run hook exited with code ' . $postExit . '.');
                 }
                 // A failing postHook does NOT override the run's primary outcome,
-                // but we surface it on an otherwise-clean run so it isn't silent.
-                // WARNING too: an exit-24 run notifies as normal unless a reason
-                // says otherwise.
-                if ($postExit !== 0 && $postExit !== self::HOOK_TIMED_OUT
-                    && ($state === Rsync::STATE_SUCCESS || $state === Rsync::STATE_WARNING)) {
-                    $state    = Rsync::STATE_WARNING;
-                    $reason   = $reason !== '' ? $reason : 'posthook-failed';
+                // but we surface it on an otherwise-clean run so it isn't silent,
+                // and record it as the reason wherever none is set yet: an exit-24
+                // run or a manual abort notify as normal unless a reason says
+                // otherwise.
+                if ($postExit !== 0 && $postExit !== self::HOOK_TIMED_OUT && $state !== Rsync::STATE_FAILED) {
+                    if ($state === Rsync::STATE_SUCCESS) {
+                        $state = Rsync::STATE_WARNING;
+                    }
+                    $reason = $reason !== '' ? $reason : 'posthook-failed';
                 }
             }
 
@@ -733,6 +735,7 @@ class Runner
      *   FAILED (incl. pre-hook failure/timeout, hard failures, crashes) => alert
      *   a scheduled run skipped because the previous one still runs   => warning
      *   PARTIAL, TIMEOUT                                                => warning
+     *   a post-hook failure/timeout on any non-FAILED run               => warning
      *   ABORTED: scheduled => warning, manual => normal
      *   WARNING: only exit 24 (files vanished mid-transfer) => normal; exit 25
      *            (max-delete cap) or a post-hook failure/timeout => warning
@@ -744,7 +747,8 @@ class Runner
     {
         $state  = (string) ($run['state'] ?? '');
         $reason = (string) ($run['reason'] ?? '');
-        if ($reason === 'already-running') {
+        if ($reason === 'already-running'
+            || ($state !== Rsync::STATE_FAILED && in_array($reason, ['posthook-failed', 'posthook-timeout'], true))) {
             return Notify::IMPORTANCE_WARNING;
         }
         switch ($state) {
@@ -812,14 +816,17 @@ class Runner
             return (string) $exitCode;
         }
         $explain = static fn(int $c): string => isset(Rsync::EXIT_MEANINGS[$c]) ? $c . ' = ' . Rsync::EXIT_MEANINGS[$c] : (string) $c;
+        // 143 is the abort placeholder; any other code no pair returned (an
+        // internal error after a pair ran) is ours, not rsync's.
+        $head = (in_array($exitCode, $codes, true) || $exitCode === 143) ? $explain($exitCode) : (string) $exitCode;
         if (count(array_unique($codes)) === 1 && $codes[0] === $exitCode) {
-            return $explain($exitCode);
+            return $head;
         }
         $perPair = [];
         foreach ($codes as $i => $c) {
             $perPair[] = 'pair #' . ($i + 1) . ' ' . $explain($c);
         }
-        return $explain($exitCode) . ' (' . implode('; ', $perPair) . ')';
+        return $head . ' (' . implode('; ', $perPair) . ')';
     }
 
     /** Render a duration in seconds as a compact "Hh Mm Ss" / "Mm Ss" / "Ss" string. */
@@ -1655,10 +1662,17 @@ class Runner
             } catch (Throwable $e) {
                 // Unreadable config: still record and alert, by id.
             }
+            // The runner died after recording its own outcome (between History
+            // and markStopped): it finished, there is nothing to report.
+            $startedAt = (string) ($state['startedAt'] ?? '');
+            $newest    = History::list($jobId, 0, 1)['runs'][0] ?? null;
+            if ($startedAt !== '' && $newest !== null && $newest['startedAt'] === $startedAt) {
+                return;
+            }
             $name    = (string) ($job['name'] ?? $jobId);
             $trigger = (($state['trigger'] ?? '') === 'schedule') ? 'schedule' : 'manual';
             $dryRun  = !empty($state['dryRun']);
-            $started = strtotime((string) ($state['startedAt'] ?? ''));
+            $started = strtotime($startedAt);
             $message = sprintf(
                 'Job "%s": previous run died without finishing (pid %d, started %s). '
                 . 'The post-hook did not run, services stopped by the pre-hook may still be down.',
@@ -1666,10 +1680,14 @@ class Runner
                 (int) ($state['pid'] ?? 0),
                 $started === false ? 'unknown' : date('Y-m-d H:i:sP', $started)
             );
-            Logger::event('', $jobId, $message);
+            try {
+                Logger::event('', $jobId, $message);
+            } catch (Throwable $e) {
+                // An unwritable log must not swallow the record and the alert.
+            }
 
             History::append($jobId, [
-                'startedAt'   => (string) ($state['startedAt'] ?? ''),
+                'startedAt'   => $startedAt,
                 'finishedAt'  => gmdate('Y-m-d\TH:i:s\Z'),
                 'jobName'     => $name,
                 'dryRun'      => $dryRun,

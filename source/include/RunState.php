@@ -97,7 +97,11 @@ class RunState
      * dies (so a crashed runner never wedges the lock forever). The caller MUST
      * pass the returned handle to releaseLock() in a finally.
      *
+     * null means contention only; an I/O failure throws, so it is never
+     * mistaken for "already running".
+     *
      * @return resource|null
+     * @throws RuntimeException when the lock file cannot be opened or locked
      */
     public static function acquireLock(string $jobId)
     {
@@ -105,12 +109,16 @@ class RunState
         $path = self::lockPath($jobId);
         $fh = @fopen($path, 'c'); // create if absent, do NOT truncate
         if ($fh === false) {
-            return null;
+            throw new RuntimeException("Unable to open run lock: $path");
         }
-        if (!@flock($fh, LOCK_EX | LOCK_NB)) {
-            // Another live runner holds the lock.
+        $wouldBlock = 0;
+        if (!@flock($fh, LOCK_EX | LOCK_NB, $wouldBlock)) {
             @fclose($fh);
-            return null;
+            if ($wouldBlock) {
+                // Another live runner holds the lock.
+                return null;
+            }
+            throw new RuntimeException("Unable to lock run lock: $path");
         }
         return $fh;
     }
@@ -291,18 +299,24 @@ class RunState
      */
     private static function reapStale(string $jobId): void
     {
-        $lock = self::acquireLock($jobId);
+        try {
+            $lock = self::acquireLock($jobId);
+        } catch (Throwable $e) {
+            return; // a status poll must not fail on it; the next run reports it
+        }
         if ($lock === null) {
             return;
         }
         try {
             $stale = self::takeStale($jobId);
+            // Still under the lock, so a replacement run cannot record a newer
+            // History row (and prune at retention 1) ahead of this one.
+            if ($stale !== null) {
+                require_once __DIR__ . '/Runner.php';
+                Runner::reportCrashed($stale);
+            }
         } finally {
             self::releaseLock($lock);
-        }
-        if ($stale !== null) {
-            require_once __DIR__ . '/Runner.php';
-            Runner::reportCrashed($stale);
         }
     }
 
