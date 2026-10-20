@@ -1047,4 +1047,38 @@ final class ConfigTest extends TestCase
         }
         $this->assertSame(2, $raw['schemaVersion']);
     }
+
+    public function testOptionalJobAndGlobalKeysAreStoredOnlyOnceSet(): void
+    {
+        $cfg = Config::defaults();
+        $job = Config::defaultJob();
+        $job['id'] = 'j-a';
+        $cfg['jobs'][] = $job;
+        Config::save($cfg);
+        $raw = json_decode((string) file_get_contents(Config::path()), true);
+        $this->assertArrayNotHasKey('preHookTimeout', $raw['global']);
+        $this->assertArrayNotHasKey('postHookTimeout', $raw['global']);
+        $this->assertArrayNotHasKey('targetMarker', $raw['jobs'][0]);
+        $this->assertSame(30, Config::hookTimeoutMinutes($raw['global'], 'preHookTimeout'));
+        $this->assertSame(60, Config::hookTimeoutMinutes($raw['global'], 'postHookTimeout'));
+
+        $cfg['global']['preHookTimeout']  = 0;
+        $cfg['global']['postHookTimeout'] = '99999';
+        $cfg['jobs'][0]['targetMarker']        = '/srv/.unraid-rsync-target';
+        $cfg['jobs'][0]['targetMarkerContent'] = 'uuid-1';
+        Config::save($cfg);
+        $loaded = Config::load();
+        $this->assertSame(0, $loaded['global']['preHookTimeout'], '0 = no limit is kept');
+        $this->assertSame(Config::MAX_HOOK_TIMEOUT, $loaded['global']['postHookTimeout']);
+        $this->assertSame('/srv/.unraid-rsync-target', $loaded['jobs'][0]['targetMarker']);
+        $this->assertSame('uuid-1', $loaded['jobs'][0]['targetMarkerContent']);
+
+        // Re-saving the loaded config changes nothing.
+        $before = file_get_contents(Config::path());
+        Config::save($loaded);
+        $this->assertSame($before, file_get_contents(Config::path()));
+
+        $this->assertSame(30, Config::clampHookTimeout('-1', 30));
+        $this->assertSame(30, Config::clampHookTimeout('soon', 30));
+    }
 }

@@ -186,6 +186,15 @@ class Job
         $job['preHook']  = isset($raw['preHook'])  ? (string) $raw['preHook']  : '';
         $job['postHook'] = isset($raw['postHook']) ? (string) $raw['postHook'] : '';
 
+        // Optional and absent unless set, so a job that never used them saves
+        // exactly as before (see Config::OPTIONAL_JOB_KEYS).
+        foreach (Config::OPTIONAL_JOB_KEYS as $key) {
+            $v = (isset($raw[$key]) && is_scalar($raw[$key])) ? trim((string) $raw[$key]) : '';
+            if ($v !== '') {
+                $job[$key] = $v;
+            }
+        }
+
         $notify = strtolower(trim((string) ($raw['notifyMode'] ?? 'failure-only')));
         $job['notifyMode'] = in_array($notify, self::NOTIFY, true) ? $notify : 'failure-only';
 
@@ -285,9 +294,13 @@ class Job
      *        exists and whose transport matches the job's; when null, only the
      *        cheap "non-empty connectionId" rule is enforced. The server is the
      *        source of truth, so the handler passes $creds here.
+     * @param array<string,mixed>|null $global the config's `global` block. When
+     *        supplied, the options checked are the EFFECTIVE ones
+     *        (Rsync::effectiveOptions), so a job on "use global config" is judged
+     *        by the options it will really run with. null = the job's own.
      * @return array{valid:bool,errors:array<int,string>,warnings:array<int,string>}
      */
-    public static function validate(array $job, ?array $creds = null): array
+    public static function validate(array $job, ?array $creds = null, ?array $global = null): array
     {
         $errors   = [];
         $warnings = [];
@@ -371,7 +384,14 @@ class Job
             $errors[] = 'At least one source -> destination pair is required.';
         }
 
-        $opts        = isset($job['rsyncOptions']) && is_array($job['rsyncOptions']) ? $job['rsyncOptions'] : [];
+        if ($global !== null) {
+            if (!class_exists('Rsync', false)) {
+                require_once __DIR__ . '/Rsync.php';
+            }
+            $opts = Rsync::effectiveOptions($job, $global);
+        } else {
+            $opts = isset($job['rsyncOptions']) && is_array($job['rsyncOptions']) ? $job['rsyncOptions'] : [];
+        }
         $deleteOn    = !empty($opts['delete']) || !empty($opts['deleteExcluded']);
         $maxDelete   = trim((string) ($opts['maxDelete'] ?? ''));
 
@@ -450,53 +470,18 @@ class Job
             // sub-directory (defence in depth on top of the root checks). The
             // destination is `remote` for PUSH and `local` for PULL.
             if ($deleteOn) {
-                $destPath = $destIsRemote ? $remote : $local;
-                // A daemon destination is a module reference, which
-                // isSpecificSubPath rejects outright (it requires a leading '/'),
-                // so branch on the transport rather than skipping the guard - a
-                // bare module root must be rejected exactly as '/data' is.
-                $specific = ($transport === 'DAEMON' && $destIsRemote)
-                    ? self::isSpecificDaemonTarget($destPath)
-                    : self::isSpecificSubPath($destPath);
-                if ($destPath !== '' && !$specific) {
-                    $errors[] = "Pair #$n: a delete option is enabled, so the destination must be a specific sub-directory, not a root.";
+                $e = self::deleteDestError($transport, $destIsRemote, $destIsRemote ? $remote : $local);
+                if ($e !== '') {
+                    $errors[] = "Pair #$n: $e";
                 }
             }
         }
 
-        // --temp-dir / --backup-dir live on the RECEIVER's filesystem. For a local
-        // receiver (LOCAL transport, or a PULL whose destination is the local
-        // side) they must clear the SAME /mnt guardrail as any local path -
-        // otherwise a job could quietly stage into or back up onto /boot, /etc,
-        // etc. For a PUSH the receiver is remote, so the weaker absolute-non-root
-        // check applies (same as a remote pair path) - or, on a daemon receiver,
-        // the module-reference check, because rsync resolves both flags relative
-        // to the module root there.
-        $receiverIsLocal = ($transport === 'LOCAL') || ($direction === 'PULL');
-        foreach (['tempDir' => '--temp-dir', 'backupDir' => '--backup-dir'] as $key => $flag) {
-            $p = trim((string) ($opts[$key] ?? ''));
-            if ($p === '') {
-                continue;
-            }
-            $label = "Option $flag";
-            if ($receiverIsLocal) {
-                $checks = self::checkLocalPath($p, $label);
-            } elseif ($transport === 'DAEMON') {
-                $checks = self::checkDaemonModule($p, $label);
-            } else {
-                // $pairPath = false: these fields are never a module name, so the
-                // daemon-shaped discriminators inside checkRemotePath are nonsense
-                // here - a tempDir of "tmp" was being reported as "looks like an
-                // rsync daemon module name, not a path" instead of the plain
-                // "must be an absolute path".
-                $checks = self::checkRemotePath($p, $label, false);
-            }
-            foreach ($checks as $e) {
-                $errors[] = $e;
-            }
+        foreach (self::markerErrors($job, $transport, $direction) as $e) {
+            $errors[] = $e;
         }
 
-        foreach (self::validateRsyncOptions($opts) as $e) {
+        foreach (self::optionErrors($opts, $transport, $direction) as $e) {
             $errors[] = $e;
         }
 
@@ -516,16 +501,284 @@ class Job
                 . 'rsync rejects it outright on SSH and Local transfers, so it is not sent for this job.';
         }
 
-        if ($transport !== 'LOCAL' && self::protocolTooLowForAclsXattrs($opts)) {
-            $errors[] = 'Preserve ACLs (-A) and Preserve extended attributes (-X) need rsync protocol 30 or '
-                . 'higher over SSH or rsync daemon; raise the --protocol value or turn those options off.';
-        }
-
         return [
             'valid'    => count($errors) === 0,
             'errors'   => $errors,
             'warnings' => $warnings,
         ];
+    }
+
+    /**
+     * Errors in a job's (EFFECTIVE) rsync options. Shared by validate() at save
+     * time and Runner's pre-flight at run time, so the two cannot disagree.
+     *
+     * --temp-dir / --backup-dir live on the RECEIVER's filesystem. For a local
+     * receiver (LOCAL transport, or a PULL whose destination is the local side)
+     * they must clear the SAME /mnt guardrail as any local path - otherwise a job
+     * could quietly stage into or back up onto /boot, /etc, etc. For a PUSH the
+     * receiver is remote, so the weaker absolute-non-root check applies (same as
+     * a remote pair path) - or, on a daemon receiver, the module-reference check,
+     * because rsync resolves both flags relative to the module root there.
+     *
+     * @param array<string,mixed> $opts
+     * @return array<int,string>
+     */
+    public static function optionErrors(array $opts, string $transport, string $direction): array
+    {
+        $errors = [];
+        $receiverIsLocal = ($transport === 'LOCAL') || ($direction === 'PULL');
+        foreach (['tempDir' => '--temp-dir', 'backupDir' => '--backup-dir'] as $key => $flag) {
+            $p = trim((string) ($opts[$key] ?? ''));
+            if ($p === '') {
+                continue;
+            }
+            $label  = "Option $flag";
+            $checks = self::rawPathErrors($p, $label);
+            if ($checks === []) {
+                if ($receiverIsLocal) {
+                    $checks = self::checkLocalPath($p, $label);
+                } elseif ($transport === 'DAEMON') {
+                    $checks = self::checkDaemonModule($p, $label);
+                } else {
+                    // $pairPath = false: these fields are never a module name, so
+                    // the daemon-shaped discriminators inside checkRemotePath are
+                    // nonsense here - a tempDir of "tmp" was being reported as
+                    // "looks like an rsync daemon module name, not a path" instead
+                    // of the plain "must be an absolute path".
+                    $checks = self::checkRemotePath($p, $label, false);
+                }
+            }
+            foreach ($checks as $e) {
+                $errors[] = $e;
+            }
+        }
+
+        foreach (self::validateRsyncOptions($opts) as $e) {
+            $errors[] = $e;
+        }
+
+        if ($transport !== 'LOCAL' && self::protocolTooLowForAclsXattrs($opts)) {
+            $errors[] = 'Preserve ACLs (-A) and Preserve extended attributes (-X) need rsync protocol 30 or '
+                . 'higher over SSH or rsync daemon; raise the --protocol value or turn those options off.';
+        }
+
+        return $errors;
+    }
+
+    /**
+     * --temp-dir / --backup-dir checks that hold on EVERY receiver, for the
+     * global defaults (no transport to pick a stricter check by): no control
+     * characters, no ".." segment, and not the filesystem root.
+     *
+     * @param array<string,mixed> $opts
+     * @return array<int,string>
+     */
+    public static function globalOptionPathErrors(array $opts): array
+    {
+        $errors = [];
+        foreach (['tempDir' => '--temp-dir', 'backupDir' => '--backup-dir'] as $key => $flag) {
+            $p = trim((string) ($opts[$key] ?? ''));
+            if ($p === '') {
+                continue;
+            }
+            $checks = self::rawPathErrors($p, "Option $flag");
+            if ($checks === [] && self::normalizePath($p) === '/') {
+                $checks[] = "Option $flag '$p' must not be the filesystem root.";
+            }
+            foreach ($checks as $e) {
+                $errors[] = $e;
+            }
+        }
+        return $errors;
+    }
+
+    /**
+     * Checks on the RAW value, before normalizePath() resolves ".." lexically and
+     * hides it: "../../../../" or "/mnt/x/../../boot" are never what a user meant.
+     *
+     * @return array<int,string>
+     */
+    private static function rawPathErrors(string $path, string $label): array
+    {
+        if (preg_match('/[\x00-\x1f\x7f]/', $path)) {
+            return ["$label contains control characters."];
+        }
+        if (in_array('..', explode('/', $path), true)) {
+            return ["$label '$path' must not contain a \"..\" segment."];
+        }
+        return [];
+    }
+
+    /**
+     * The --delete rule for one pair's destination: '' when it is safe, else the
+     * error (without the "Pair #n: " prefix). Shared by validate() and
+     * Runner::guardrailErrors so save time and run time cannot disagree.
+     *
+     * A daemon module reference keeps its own rule (a module root is allowed,
+     * exact parity with the old one-segment SSH rule). A remote SSH destination
+     * must be at least two segments deep and not a bare /mnt/<disk> root: one
+     * typo'd or empty-variable path segment must not turn a mirror of
+     * /srv/backup/photos into a mirror of /srv. Local destinations already had to
+     * clear checkLocalPath's /mnt/<pool>/<dir> rule.
+     */
+    public static function deleteDestError(string $transport, bool $destIsRemote, string $destPath): string
+    {
+        if ($destPath === '') {
+            return '';
+        }
+        if ($transport === 'DAEMON' && $destIsRemote) {
+            // A module reference has no leading '/', so isSpecificSubPath would
+            // reject every daemon destination - this is NOT a way of skipping
+            // the guard, which would leave `host::<typo>` unguarded.
+            $ok = self::isSpecificDaemonTarget($destPath);
+        } elseif ($transport === 'SSH' && $destIsRemote) {
+            if (!self::isDeepRemoteDeleteTarget($destPath)) {
+                return 'a delete option is enabled, so the remote destination must be at least two directories '
+                    . 'deep (for example /srv/backup) and not a bare /mnt/<disk> root.';
+            }
+            $ok = true;
+        } else {
+            $ok = self::isSpecificSubPath($destPath);
+        }
+        return $ok ? '' : 'a delete option is enabled, so the destination must be a specific sub-directory, not a root.';
+    }
+
+    /** At least two segments, and at least three under /mnt (/mnt/disk1 is a disk root). */
+    public static function isDeepRemoteDeleteTarget(string $path): bool
+    {
+        $norm = self::normalizePath($path);
+        if ($norm === '' || $norm[0] !== '/') {
+            return false;
+        }
+        $segments = array_values(array_filter(explode('/', $norm), static fn($s) => $s !== ''));
+        return count($segments) >= ($segments !== [] && $segments[0] === 'mnt' ? 3 : 2);
+    }
+
+    /**
+     * Where a job writes: a scope (the connection for a remote destination,
+     * 'local' for this box) and the destination path of each pair, keyed by pair
+     * index. Resolved exactly as Runner::resolvePair does.
+     *
+     * @param array<string,mixed> $job
+     * @return array{scope:string,paths:array<int,string>}
+     */
+    public static function destinations(array $job): array
+    {
+        $transport    = strtoupper(trim((string) ($job['transport'] ?? 'SSH')));
+        $direction    = strtoupper(trim((string) ($job['direction'] ?? 'PUSH')));
+        $remoteHost   = in_array($transport, ['SSH', 'DAEMON'], true);
+        $destIsRemote = $remoteHost && $direction !== 'PULL';
+        // Under LOCAL (and an unknown transport) the destination is the `remote`
+        // field, a second path on this box.
+        $field = ($remoteHost && $direction === 'PULL') ? 'local' : 'remote';
+        $paths = [];
+        foreach ((is_array($job['pairs'] ?? null) ? $job['pairs'] : []) as $i => $pair) {
+            $p = is_array($pair) ? trim((string) ($pair[$field] ?? '')) : '';
+            if ($p !== '') {
+                $paths[(int) $i] = $p;
+            }
+        }
+        $scope = $destIsRemote ? $transport . ':' . trim((string) ($job['connectionId'] ?? '')) : 'local';
+        return ['scope' => $scope, 'paths' => $paths];
+    }
+
+    /**
+     * The targets a --delete destination must keep clear of: every OTHER job's
+     * destinations. A list so further protected roots can be appended to it.
+     *
+     * @param array<int,mixed> $jobs
+     * @return array<int,array{scope:string,path:string,label:string}>
+     */
+    public static function protectedTargets(array $jobs, string $exceptJobId): array
+    {
+        $out = [];
+        foreach ($jobs as $other) {
+            if (!is_array($other) || (string) ($other['id'] ?? '') === $exceptJobId) {
+                continue;
+            }
+            $d     = self::destinations($other);
+            $label = 'job "' . (string) (($other['name'] ?? '') !== '' ? $other['name'] : ($other['id'] ?? '')) . '"';
+            foreach ($d['paths'] as $p) {
+                $out[] = ['scope' => $d['scope'], 'path' => $p, 'label' => $label];
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * Ancestry rule: a --delete destination must not equal, contain, or lie
+     * inside a protected target in the same scope - a mirror over another job's
+     * destination deletes that job's backups.
+     *
+     * @param array<string,mixed> $job
+     * @param array<string,mixed> $opts      the job's EFFECTIVE rsync options
+     * @param array<int,array{scope:string,path:string,label:string}> $protected
+     * @return array<int,string>
+     */
+    public static function ancestryErrors(array $job, array $opts, array $protected): array
+    {
+        if (empty($opts['delete']) && empty($opts['deleteExcluded'])) {
+            return [];
+        }
+        $errors = [];
+        $d = self::destinations($job);
+        foreach ($d['paths'] as $i => $path) {
+            $mine = self::normalizePath($path);
+            foreach ($protected as $t) {
+                $theirs = self::normalizePath($t['path']);
+                if ($t['scope'] !== $d['scope'] || $mine === '' || $theirs === '') {
+                    continue;
+                }
+                if ($mine === $theirs || self::pathContains($mine, $theirs) || self::pathContains($theirs, $mine)) {
+                    $errors[] = 'Pair #' . ($i + 1) . ': a delete option is enabled, so the destination must not be, '
+                        . "contain, or lie inside the destination of {$t['label']} ('{$t['path']}').";
+                }
+            }
+        }
+        return $errors;
+    }
+
+    /** True when normalised $inner lies strictly inside normalised $outer. */
+    private static function pathContains(string $outer, string $inner): bool
+    {
+        return $outer === '/' ? $inner !== '/' : str_starts_with($inner, $outer . '/');
+    }
+
+    /**
+     * The optional target marker: a file on the DESTINATION side that must exist
+     * (and, with targetMarkerContent, hold that value) before a run may write.
+     * Validated like any destination path for the transport.
+     *
+     * @param array<string,mixed> $job
+     * @return array<int,string>
+     */
+    public static function markerErrors(array $job, string $transport, string $direction): array
+    {
+        $destIsRemote = in_array($transport, ['SSH', 'DAEMON'], true) && $direction !== 'PULL';
+        $marker  = trim((string) ($job['targetMarker'] ?? ''));
+        $content = trim((string) ($job['targetMarkerContent'] ?? ''));
+        $label   = 'Target marker';
+        $errors  = [];
+        if ($content !== '' && ($marker === '' || strlen($content) > 256 || preg_match('/[\x00-\x1f\x7f]/', $content))) {
+            $errors[] = 'Target marker expected content needs a marker path and must be one line of at most 256 characters.';
+        }
+        if ($marker === '') {
+            return $errors;
+        }
+        $checks = self::rawPathErrors($marker, $label);
+        if ($checks === [] && str_ends_with($marker, '/')) {
+            $checks[] = "$label '$marker' must name a file, not a directory.";
+        }
+        if ($checks === []) {
+            if (!$destIsRemote) {
+                $checks = self::checkLocalPath($marker, $label);
+            } elseif ($transport === 'DAEMON') {
+                $checks = self::checkDaemonModule($marker, $label);
+            } else {
+                $checks = self::checkRemotePath($marker, $label, false);
+            }
+        }
+        return array_merge($errors, $checks);
     }
 
     /**

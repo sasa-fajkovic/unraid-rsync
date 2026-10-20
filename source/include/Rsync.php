@@ -552,6 +552,37 @@ class Rsync
     }
 
     /**
+     * argv for a small auxiliary rsync over a job's transport - the run-time
+     * destination checks. It carries the transfer's --rsync-path and transport
+     * pieces (-e, or --port/--password-file) and none of its other options.
+     *
+     * @param array<int,string>        $flags    leading flags (e.g. --list-only)
+     * @param array<string,mixed>      $opts     the job's EFFECTIVE options
+     * @param array<string,mixed>|null $ssh      transport pieces, as buildArgv()
+     * @param array<int,string>        $operands placed after `--`
+     * @return array<int,string>
+     */
+    public static function auxArgv(array $flags, array $opts, ?array $ssh, array $operands): array
+    {
+        $argv = array_merge([self::rsyncPath()], $flags);
+        $remoteRsync = trim((string) ($opts['remoteRsyncPath'] ?? ''));
+        if ($remoteRsync !== '') {
+            $argv[] = '--rsync-path=' . $remoteRsync;
+        }
+        if (is_array($ssh) && !empty($ssh['daemon'])) {
+            $argv[] = '--port=' . (int) ($ssh['daemonPort'] ?? Credentials::RSYNCD_PORT);
+            if ((string) ($ssh['passwordFile'] ?? '') !== '') {
+                $argv[] = '--password-file=' . $ssh['passwordFile'];
+            }
+        } elseif (is_array($ssh) && (string) ($ssh['dashE'] ?? '') !== '') {
+            $argv[] = '-e';
+            $argv[] = (string) $ssh['dashE'];
+        }
+        $argv[] = '--';
+        return array_merge($argv, $operands);
+    }
+
+    /**
      * Map a process exit code (or terminating signal, encoded as 128+signal by
      * the shell convention) to a run state. PURE.
      *

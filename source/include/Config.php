@@ -163,6 +163,42 @@ class Config
         ];
     }
 
+    /** Global hook-timeout keys => default minutes (0 = no limit). */
+    const HOOK_TIMEOUT_DEFAULTS = ['preHookTimeout' => 30, 'postHookTimeout' => 60];
+    const MAX_HOOK_TIMEOUT      = 1440;
+
+    /**
+     * Clamp a hook timeout in minutes to [0, MAX_HOOK_TIMEOUT]; a non-integer or
+     * negative value falls back to $default.
+     *
+     * @param mixed $value
+     */
+    public static function clampHookTimeout($value, int $default): int
+    {
+        $n = filter_var($value, FILTER_VALIDATE_INT);
+        if ($n === false || $n < 0) {
+            return $default;
+        }
+        return min($n, self::MAX_HOOK_TIMEOUT);
+    }
+
+    /**
+     * The effective timeout in minutes for 'preHookTimeout' / 'postHookTimeout'.
+     *
+     * @param array<string,mixed> $global
+     */
+    public static function hookTimeoutMinutes(array $global, string $key): int
+    {
+        $default = self::HOOK_TIMEOUT_DEFAULTS[$key];
+        return self::clampHookTimeout($global[$key] ?? $default, $default);
+    }
+
+    /**
+     * Optional job keys: kept by mergeJob() only when set, so a config that never
+     * used them round-trips unchanged. See Job::normalize().
+     */
+    const OPTIONAL_JOB_KEYS = ['targetMarker', 'targetMarkerContent'];
+
     /** Default + bounds for the "keep last N executions" retention setting. */
     const DEFAULT_RETENTION = 100;
     const MIN_RETENTION     = 1;
@@ -712,6 +748,13 @@ class Config
             // secretsDir: validate/confine; invalid or missing -> '' (/boot).
             'secretsDir' => self::sanitizeSecretsDir($globalIn['secretsDir'] ?? ''),
         ];
+        // Hook timeouts are written only once set, so an untouched config
+        // re-saves byte-identical; hookTimeoutMinutes() supplies the default.
+        foreach (self::HOOK_TIMEOUT_DEFAULTS as $key => $default) {
+            if (array_key_exists($key, $globalIn)) {
+                $out['global'][$key] = self::clampHookTimeout($globalIn[$key], $default);
+            }
+        }
 
         // jobs: normalise each to the full default-job shape.
         $out['jobs'] = [];
@@ -859,6 +902,11 @@ class Config
             }
         }
         $out['pairs'] = $pairs;
+        foreach (self::OPTIONAL_JOB_KEYS as $key) {
+            if (isset($job[$key]) && is_string($job[$key]) && trim($job[$key]) !== '') {
+                $out[$key] = $job[$key];
+            }
+        }
         return $out;
     }
 }

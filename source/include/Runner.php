@@ -25,9 +25,10 @@ declare(strict_types=1);
  *   - pre/post HOOKS are user-authored shell, run via `bash -c "$hook"` as root
  *     BY DESIGN (a documented privilege surface) - this is the ONE intentional
  *     shell use; their output+exit are captured to the run log.
- *   - path guardrails (Job.php) are RE-ENFORCED at runtime before each pair:
- *     a dest of /boot/system/array-or-pool root, or --delete without a specific
- *     sub-dir destination, fails the run before any rsync starts.
+ *   - path guardrails (Job.php) are RE-ENFORCED at runtime for EVERY pair
+ *     before the pre-hook (preflight()): a dest of /boot/system/array-or-pool
+ *     root, or --delete without a specific sub-dir destination, fails the run
+ *     before any rsync starts.
  *
  * SUMMARY (read by Phase 6 for the Jobs list, and durable across reboot) is
  * written to /boot at <UR_CONFIG_BASE>/runs/<jobid>.summary.json:
@@ -320,15 +321,62 @@ class Runner
                 }
             }
 
-            // 5. preHook (only if transport prep didn't already fail).
+            $global   = (isset($config['global']) && is_array($config['global'])) ? $config['global'] : [];
+            $opts     = Rsync::effectiveOptions($job, $global);
+            $pairs    = (isset($job['pairs']) && is_array($job['pairs'])) ? $job['pairs'] : [];
+            // Resolve "user@host" ONCE (not per pair) for the remote
+            // operands. DAEMON uses the SAME prefix as SSH - the only
+            // difference is the '::' separator resolvePair() appends.
+            $userHost = in_array($transport, ['SSH', 'DAEMON'], true) ? self::userHost($mat['conn'] ?? []) : '';
+
+            // 5. Defensive rsync presence check. rsync ships in Unraid's base OS
+            //    at /usr/bin/rsync, so it should ALWAYS be present; the plugin
+            //    does NOT install it. Guard against a broken system: if the
+            //    binary is missing, fail the run with a clear logged error
+            //    BEFORE the destination checks below need it (postHook still
+            //    fires via finally). We do NOT attempt to install anything.
+            if ($state !== Rsync::STATE_FAILED && !Rsync::rsyncAvailable()) {
+                $state    = Rsync::STATE_FAILED;
+                $exitCode = 1;
+                $reason   = 'rsync-missing';
+                Logger::event($runLog, $jobId, Rsync::rsyncMissingMessage());
+            }
+
+            // 5b. Pre-flight, for EVERY pair, before the pre-hook: a pre-hook may
+            //     stop containers, and pair 1 must not copy before pair 3 is
+            //     rejected.
+            if ($state !== Rsync::STATE_FAILED) {
+                $preflight = self::preflight($job, $config, $transport, $opts, $sshPieces, $userHost, $runLog, $jobId);
+                if ($preflight !== '') {
+                    $state    = Rsync::STATE_FAILED;
+                    $exitCode = 1;
+                    $reason   = $preflight;
+                }
+            }
+
+            // 5c. preHook (only if nothing above failed).
             $hookEnvBase = self::hookEnv($job, $jobId, $dryRun, null, null, $trigger);
             if ($state !== Rsync::STATE_FAILED) {
                 $preHook = (string) ($job['preHook'] ?? '');
                 if (trim($preHook) !== '') {
+                    $preMin = Config::hookTimeoutMinutes($global, 'preHookTimeout');
                     Logger::event($runLog, $jobId, 'Running pre-run hook.');
-                    $preExit = self::runHook($preHook, $hookEnvBase, $runLog);
-                    Logger::event($runLog, $jobId, 'Pre-run hook exited with code ' . $preExit . '.');
-                    if ($preExit !== 0) {
+                    $preExit = self::runHook(
+                        $preHook,
+                        $hookEnvBase,
+                        $runLog,
+                        $preMin * 60,
+                        static fn(): bool => RunState::abortRequested($jobId)
+                    );
+                    if ($preExit === self::HOOK_TIMED_OUT) {
+                        Logger::event($runLog, $jobId, "Pre-run hook timed out after $preMin minute(s) and was killed.");
+                        $state    = Rsync::STATE_FAILED;
+                        $exitCode = 124;
+                        $reason   = 'prehook-timeout';
+                    } else {
+                        Logger::event($runLog, $jobId, 'Pre-run hook exited with code ' . $preExit . '.');
+                    }
+                    if ($preExit !== 0 && $preExit !== self::HOOK_TIMED_OUT) {
                         // A failed preHook fails the run; pairs are skipped, but
                         // postHook STILL runs (the finally-style postHook below).
                         $state    = Rsync::STATE_FAILED;
@@ -338,29 +386,9 @@ class Runner
                 }
             }
 
-            // 5b. Defensive rsync presence check. rsync ships in Unraid's base OS
-            //     at /usr/bin/rsync, so it should ALWAYS be present; the plugin
-            //     does NOT install it. Guard against a broken system: if the
-            //     binary is missing, fail the run with a clear logged error
-            //     BEFORE any pair runs (postHook still fires via finally). We do
-            //     NOT attempt to install anything.
-            if ($state !== Rsync::STATE_FAILED && !Rsync::rsyncAvailable()) {
-                $state    = Rsync::STATE_FAILED;
-                $exitCode = 1;
-                $reason   = 'rsync-missing';
-                Logger::event($runLog, $jobId, Rsync::rsyncMissingMessage());
-            }
-
-            // 6. Pairs: re-enforce guardrails, check abort, build argv, run rsync.
+            // 6. Pairs: check abort, build argv, run rsync.
             if ($state !== Rsync::STATE_FAILED) {
-                $global   = (isset($config['global']) && is_array($config['global'])) ? $config['global'] : [];
-                $opts     = Rsync::effectiveOptions($job, $global);
                 $logLevel = (string) ($job['logLevel'] ?? 'normal');
-                $pairs    = (isset($job['pairs']) && is_array($job['pairs'])) ? $job['pairs'] : [];
-                // Resolve "user@host" ONCE (not per pair) for the remote
-                // operands. DAEMON uses the SAME prefix as SSH - the only
-                // difference is the '::' separator resolvePair() appends.
-                $userHost = in_array($transport, ['SSH', 'DAEMON'], true) ? self::userHost($mat['conn'] ?? []) : '';
 
                 if (count($pairs) === 0) {
                     $state    = Rsync::STATE_FAILED;
@@ -381,16 +409,8 @@ class Runner
                         break;
                     }
 
-                    // Resolve src/dest by direction + re-enforce guardrails.
-                    $resolved    = self::resolvePair($job, $pair, $transport, $userHost);
-                    $guardErrors = self::guardrailErrors($job, $pair, $transport, $opts);
-                    if (!empty($guardErrors)) {
-                        $state    = Rsync::STATE_FAILED;
-                        $exitCode = 1;
-                        $reason   = 'guardrail';
-                        Logger::event($runLog, $jobId, "Pair #$n rejected by path guardrails: " . implode(' ', $guardErrors));
-                        break;
-                    }
+                    // Resolve src/dest by direction (guardrails ran in pre-flight).
+                    $resolved = self::resolvePair($job, $pair, $transport, $userHost);
 
                     Logger::event($runLog, $jobId, sprintf(
                         'Pair #%d: %s -> %s',
@@ -474,12 +494,34 @@ class Runner
             $postHook = (string) ($job['postHook'] ?? '');
             if (trim($postHook) !== '') {
                 $postEnv = self::hookEnv($job, $jobId, $dryRun, $state, $exitCode, $trigger);
+                $postMin = Config::hookTimeoutMinutes(
+                    (isset($config['global']) && is_array($config['global'])) ? $config['global'] : [],
+                    'postHookTimeout'
+                );
+                // The post-hook ALWAYS runs, so an abort that already ended the
+                // run must not kill it; only a fresh Abort during it may.
+                $abortedBefore = RunState::abortRequested($jobId);
                 Logger::event($runLog, $jobId, 'Running post-run hook.');
-                $postExit = self::runHook($postHook, $postEnv, $runLog);
-                Logger::event($runLog, $jobId, 'Post-run hook exited with code ' . $postExit . '.');
+                $postExit = self::runHook(
+                    $postHook,
+                    $postEnv,
+                    $runLog,
+                    $postMin * 60,
+                    $abortedBefore ? null : static fn(): bool => RunState::abortRequested($jobId)
+                );
+                if ($postExit === self::HOOK_TIMED_OUT) {
+                    // Keeps the primary outcome, like a failed post-hook.
+                    Logger::event($runLog, $jobId, "Post-run hook timed out after $postMin minute(s) and was killed.");
+                    $reason = $reason !== '' ? $reason : 'posthook-timeout';
+                    if ($state === Rsync::STATE_SUCCESS) {
+                        $state = Rsync::STATE_WARNING;
+                    }
+                } else {
+                    Logger::event($runLog, $jobId, 'Post-run hook exited with code ' . $postExit . '.');
+                }
                 // A failing postHook does NOT override the run's primary outcome,
                 // but we surface it on an otherwise-clean run so it isn't silent.
-                if ($postExit !== 0 && $state === Rsync::STATE_SUCCESS) {
+                if ($postExit !== 0 && $postExit !== self::HOOK_TIMED_OUT && $state === Rsync::STATE_SUCCESS) {
                     $state    = Rsync::STATE_WARNING;
                     $reason   = $reason !== '' ? $reason : 'posthook-failed';
                 }
@@ -1048,17 +1090,9 @@ class Runner
         $deleteOn = !empty($opts['delete']) || !empty($opts['deleteExcluded']);
         if ($deleteOn) {
             $destIsRemote = in_array($transport, ['SSH', 'DAEMON'], true) ? ($direction !== 'PULL') : true;
-            $destPath = $destIsRemote ? $remote : $local;
-            // A module reference has no leading '/', so isSpecificSubPath would
-            // reject every daemon destination. isSpecificDaemonTarget is the
-            // same rule expressed for module references - it is NOT a way of
-            // skipping the guard, which would leave `host::<typo>` unguarded
-            // while both other transports reject a bare root.
-            $specific = ($transport === 'DAEMON' && $destIsRemote)
-                ? Job::isSpecificDaemonTarget($destPath)
-                : Job::isSpecificSubPath($destPath);
-            if ($destPath !== '' && !$specific) {
-                $errors[] = 'a delete option is enabled, so the destination must be a specific sub-directory, not a root.';
+            $e = Job::deleteDestError($transport, $destIsRemote, $destIsRemote ? $remote : $local);
+            if ($e !== '') {
+                $errors[] = $e;
             }
         }
 
@@ -1071,6 +1105,190 @@ class Runner
         }
 
         return $errors;
+    }
+
+    /** rsync --timeout for the run-time destination checks. */
+    const PROBE_TIMEOUT = 60;
+
+    /** Entries whose presence makes a --delete destination off-limits (see probeDeleteDestinations). */
+    const PROTECTED_ENTRIES = ['.unraid-rsync-target', '.ur-snapshot-root', 'snapshots'];
+
+    /**
+     * Every check that must pass before the pre-hook, in order: the path
+     * guardrails for ALL pairs, the effective options, the target marker, the
+     * --delete ancestry rule, then the two destination round-trips. Returns ''
+     * when the run may proceed, else the failure reason (already logged).
+     *
+     * @param array<string,mixed>      $job
+     * @param array<string,mixed>      $config
+     * @param array<string,mixed>      $opts      EFFECTIVE rsync options
+     * @param array<string,mixed>|null $sshPieces transport pieces (null = LOCAL)
+     */
+    private static function preflight(array $job, array $config, string $transport, array $opts, ?array $sshPieces, string $userHost, string $runLog, string $jobId): string
+    {
+        $direction = strtoupper(trim((string) ($job['direction'] ?? 'PUSH')));
+        $pairs     = (isset($job['pairs']) && is_array($job['pairs'])) ? $job['pairs'] : [];
+
+        $errors = [];
+        foreach ($pairs as $i => $pair) {
+            foreach (self::guardrailErrors($job, is_array($pair) ? $pair : [], $transport, $opts) as $e) {
+                $errors[] = 'Pair #' . ((int) $i + 1) . ': ' . $e;
+            }
+        }
+        $jobs   = (isset($config['jobs']) && is_array($config['jobs'])) ? $config['jobs'] : [];
+        $errors = array_merge(
+            $errors,
+            Job::optionErrors($opts, $transport, $direction),
+            Job::markerErrors($job, $transport, $direction),
+            Job::ancestryErrors($job, $opts, Job::protectedTargets($jobs, $jobId))
+        );
+        if ($errors !== []) {
+            foreach ($errors as $e) {
+                Logger::event($runLog, $jobId, 'Rejected by path guardrails: ' . $e);
+            }
+            return 'guardrail';
+        }
+
+        if (!self::checkTargetMarker($job, $transport, $direction, $opts, $sshPieces, $userHost, $runLog, $jobId)) {
+            return 'dest-not-mounted';
+        }
+
+        if ($transport === 'SSH' && $direction !== 'PULL' && (!empty($opts['delete']) || !empty($opts['deleteExcluded']))) {
+            return self::probeDeleteDestinations($pairs, $opts, $sshPieces, $userHost, $runLog, $jobId);
+        }
+        return '';
+    }
+
+    /**
+     * Optional target-marker check: fetch the job's marker file from the
+     * DESTINATION side over the job's own transport into this run's tmpfs and,
+     * when an expected content is set, compare it. A missing file, an rsync
+     * error or a mismatch means the destination drive is not the one the job
+     * was set up for (typically: not mounted), so nothing may be written.
+     *
+     * @param array<string,mixed>      $job
+     * @param array<string,mixed>      $opts
+     * @param array<string,mixed>|null $sshPieces
+     */
+    private static function checkTargetMarker(array $job, string $transport, string $direction, array $opts, ?array $sshPieces, string $userHost, string $runLog, string $jobId): bool
+    {
+        $marker = trim((string) ($job['targetMarker'] ?? ''));
+        if ($marker === '') {
+            return true;
+        }
+        $remote = in_array($transport, ['SSH', 'DAEMON'], true) && $direction !== 'PULL';
+        $src    = $remote ? $userHost . ($transport === 'DAEMON' ? '::' : ':') . $marker : $marker;
+        $file   = Ssh::ensureMarkersDir() . '/' . Util::safeFileId($jobId . '-' . self::pid() . '-' . bin2hex(random_bytes(6)));
+        $argv   = Rsync::auxArgv(
+            // A marker is a few bytes; anything bigger is not one (and is skipped).
+            ['--max-size=4K', '--timeout=' . self::PROBE_TIMEOUT],
+            $opts,
+            $remote ? $sshPieces : null,
+            [$src, $file]
+        );
+
+        $out = '';
+        try {
+            $exit = Rsync::run(
+                $argv,
+                static function (string $chunk) use (&$out): void {
+                    $out = substr($out . $chunk, 0, 4096);
+                },
+                Ssh::childEnv(($remote && is_array($sshPieces)) ? (array) ($sshPieces['sshEnv'] ?? []) : [])
+            );
+            $body = (is_file($file) && !is_link($file)) ? @file_get_contents($file, false, null, 0, 4096) : false;
+        } finally {
+            @unlink($file);
+        }
+
+        if ($exit !== 0 || $body === false) {
+            Logger::event($runLog, $jobId, "Target marker $marker could not be read (rsync exit $exit), so the "
+                . 'destination is treated as not mounted.' . ($out !== '' ? ' ' . Util::firstLine($out) : ''));
+            return false;
+        }
+        $expected = trim((string) ($job['targetMarkerContent'] ?? ''));
+        if ($expected !== '' && trim($body) !== $expected) {
+            Logger::event($runLog, $jobId, "Target marker $marker does not hold the expected content, so the "
+                . 'destination is treated as not mounted.');
+            return false;
+        }
+        Logger::event($runLog, $jobId, "Target marker $marker found.");
+        return true;
+    }
+
+    /**
+     * Before an SSH --delete mirror, list each destination directory (one level,
+     * same -e and --rsync-path as the transfer) and refuse it when it holds a
+     * PROTECTED_ENTRIES name: it is then a drive root or a snapshot store, which
+     * a mirror would empty. A destination that does not exist yet is fine -
+     * rsync creates it. Returns '' or the failure reason.
+     *
+     * @param array<int,mixed>         $pairs
+     * @param array<string,mixed>      $opts
+     * @param array<string,mixed>|null $sshPieces
+     */
+    private static function probeDeleteDestinations(array $pairs, array $opts, ?array $sshPieces, string $userHost, string $runLog, string $jobId): string
+    {
+        foreach ($pairs as $i => $pair) {
+            $dest = trim((string) (is_array($pair) ? ($pair['remote'] ?? '') : ''));
+            $n    = (int) $i + 1;
+            $argv = Rsync::auxArgv(
+                ['--list-only', '--dirs', '--timeout=' . self::PROBE_TIMEOUT],
+                $opts,
+                $sshPieces,
+                [$userHost . ':' . rtrim($dest, '/') . '/']
+            );
+
+            $found = '';
+            $buf   = '';
+            $head  = '';
+            $onOutput = static function (string $chunk) use (&$found, &$buf, &$head): void {
+                $head = substr($head . $chunk, 0, 4096);
+                $buf .= $chunk;
+                while (($nl = strpos($buf, "\n")) !== false) {
+                    $name = self::listingName(substr($buf, 0, $nl));
+                    $buf  = substr($buf, $nl + 1);
+                    if ($found === '' && in_array($name, self::PROTECTED_ENTRIES, true)) {
+                        $found = $name;
+                    }
+                }
+            };
+            $exit = Rsync::run($argv, $onOutput, Ssh::childEnv(is_array($sshPieces) ? (array) ($sshPieces['sshEnv'] ?? []) : []));
+            $onOutput("\n");
+
+            if ($found !== '') {
+                Logger::event($runLog, $jobId, "Pair #$n: the --delete destination $dest contains '$found', so it is a "
+                    . 'drive root or a snapshot store that a mirror would wipe. Point the job at a sub-directory.');
+                return 'dest-is-protected';
+            }
+            // rsync exits 23 with "change_dir ... No such file or directory" for a
+            // destination that is not there yet.
+            if ($exit === 23 && stripos($head, 'No such file or directory') !== false) {
+                continue;
+            }
+            if ($exit !== 0) {
+                Logger::event($runLog, $jobId, "Pair #$n: could not list the --delete destination $dest (rsync exit $exit)."
+                    . ($head !== '' ? ' ' . Util::firstLine($head) : ''));
+                return 'dest-probe-failed';
+            }
+        }
+        return '';
+    }
+
+    /**
+     * The entry name from one `rsync --list-only` line
+     * ("drwxr-xr-x          4,096 2026/10/20 12:00:00 name"), '' for anything else.
+     */
+    public static function listingName(string $line): string
+    {
+        if (!preg_match('#^([-dlcbps])\S{9}\S*\s+[\d,.]+\s+\d{4}/\d\d/\d\d\s+\d\d:\d\d:\d\d\s(.+)$#', rtrim($line, "\r"), $m)) {
+            return '';
+        }
+        $name = $m[2];
+        if ($m[1] === 'l' && ($arrow = strpos($name, ' -> ')) !== false) {
+            $name = substr($name, 0, $arrow);
+        }
+        return $name;
     }
 
     /**
@@ -1099,9 +1317,12 @@ class Runner
      * live runner runs `bash -c "$hook"` as root (the documented privilege
      * surface) with the outcome env, streaming output to the run log.
      *
-     * @param array<string,string> $env
+     * @param array<string,string>   $env
+     * @param int                    $timeoutSec 0 = no limit
+     * @param (callable():bool)|null $stopWhen   true = kill the hook (Abort)
+     * @return int the exit code, or HOOK_TIMED_OUT
      */
-    private static function runHook(string $hook, array $env, string $runLog): int
+    private static function runHook(string $hook, array $env, string $runLog, int $timeoutSec = 0, ?callable $stopWhen = null): int
     {
         // Hook stdout/stderr (captured + browser-visible) flows through the same
         // redacting, size-capped sink as rsync output (F1 + F3).
@@ -1109,15 +1330,21 @@ class Runner
 
         try {
             if (self::$hookRunner !== null) {
-                return (int) (self::$hookRunner)($hook, $env, $sink);
+                return (int) (self::$hookRunner)($hook, $env, $sink, $timeoutSec);
             }
-            return self::defaultHookRun($hook, $env, $sink);
+            return self::runHookProcess($hook, $env, $sink, $timeoutSec, $stopWhen);
         } finally {
             // A hook whose last write had no trailing newline would otherwise
             // stay in the sink buffer until the next sink on this path reset it.
             Logger::flushSink($runLog);
         }
     }
+
+    /** runHook() result for a hook killed at its deadline (never a real exit code). */
+    const HOOK_TIMED_OUT = -1;
+
+    /** Seconds between SIGTERM and SIGKILL for a hook past its deadline. Overridable for tests. */
+    public static int $hookKillGraceSec = 10;
 
     /**
      * The live hook runner: `bash -c "$hook"` via proc_open (the hook body is a
@@ -1126,10 +1353,18 @@ class Runner
      * the child environment. This is the ONE place the plugin intentionally runs
      * a shell, and only for the user's OWN hook text.
      *
-     * @param array<string,string>  $env
-     * @param callable(string):void $onOutput
+     * The hook gets its own session (setsid) so a deadline or an Abort can
+     * signal everything it started - a hung `docker stop` is a grandchild - and
+     * not just bash: SIGTERM to the process group, SIGKILL $hookKillGraceSec
+     * later. Without setsid only bash itself can be signalled.
+     *
+     * @param array<string,string>   $env
+     * @param callable(string):void  $onOutput
+     * @param int                    $timeoutSec 0 = no limit
+     * @param (callable():bool)|null $stopWhen   true = kill now (exit 143)
+     * @return int the exit code, or HOOK_TIMED_OUT
      */
-    private static function defaultHookRun(string $hook, array $env, callable $onOutput): int
+    public static function runHookProcess(string $hook, array $env, callable $onOutput, int $timeoutSec = 0, ?callable $stopWhen = null): int
     {
         $descriptors = [
             0 => ['file', '/dev/null', 'r'],
@@ -1139,8 +1374,15 @@ class Runner
         $pipes = [];
         // argv form: bash receives the hook as one argument to -c, so the user's
         // shell is bash and nothing of ours is re-parsed.
+        $argv = ['bash', '-c', $hook];
+        foreach (['/usr/bin/setsid', '/bin/setsid'] as $setsid) {
+            if (is_executable($setsid)) {
+                $argv = array_merge([$setsid, '-w'], $argv);
+                break;
+            }
+        }
         $childEnv = array_merge(self::inheritEnv(), $env);
-        $proc = @proc_open(['bash', '-c', $hook], $descriptors, $pipes, null, $childEnv);
+        $proc = @proc_open($argv, $descriptors, $pipes, null, $childEnv);
         if (!is_resource($proc)) {
             $onOutput("Failed to start hook (bash).\n");
             return 127;
@@ -1150,16 +1392,45 @@ class Runner
         // Reading one pipe fully before the other can DEADLOCK: a hook that fills
         // the stderr pipe buffer while we are still blocked on stdout would hang
         // forever (and vice versa). Shared with Rsync/KeyTools. [ROB-01]
+        $deadline = $timeoutSec > 0 ? microtime(true) + $timeoutSec : null;
         ProcIO::drainPipes(
             [1 => $pipes[1], 2 => $pipes[2]],
             static function (int $fd, string $chunk) use ($onOutput): void {
                 $onOutput($chunk);
-            }
+            },
+            $deadline,
+            $stopWhen
         );
+
+        // EOF on both pipes is not proof bash has exited, so the deadline and
+        // the stop request are polled until it has.
+        $kill = '';
+        while (true) {
+            $status = @proc_get_status($proc);
+            if (empty($status['running'])) {
+                break;
+            }
+            if ($deadline !== null && microtime(true) >= $deadline) {
+                $kill = 'timeout';
+            } elseif ($stopWhen !== null && $stopWhen()) {
+                $kill = 'stop';
+            }
+            if ($kill !== '') {
+                self::killHook($proc, (int) $status['pid']);
+                break;
+            }
+            usleep(100000);
+        }
 
         // Capture signal status before proc_close (see Rsync::defaultRun).
         $status = @proc_get_status($proc);
         $code   = proc_close($proc);
+        if ($kill === 'timeout') {
+            return self::HOOK_TIMED_OUT;
+        }
+        if ($kill === 'stop') {
+            return 143;
+        }
         if (is_array($status)) {
             if (!empty($status['signaled']) && isset($status['termsig'])) {
                 return 128 + (int) $status['termsig'];
@@ -1169,6 +1440,35 @@ class Runner
             }
         }
         return $code < 0 ? 1 : $code;
+    }
+
+    /**
+     * SIGTERM the hook's process group, then SIGKILL it after the grace period.
+     * The group is the hook's own (setsid), so this can never reach the runner;
+     * when there is no such group (no setsid) only bash itself is signalled.
+     *
+     * @param resource $proc
+     */
+    private static function killHook($proc, int $pid): void
+    {
+        $signal = static function (int $sig) use ($proc, $pid): void {
+            if ($pid > 0 && function_exists('posix_kill') && @posix_kill(-$pid, $sig)) {
+                return;
+            }
+            @proc_terminate($proc, $sig);
+        };
+        $signal(15);
+        $until = microtime(true) + self::$hookKillGraceSec;
+        while (microtime(true) < $until) {
+            $status = @proc_get_status($proc);
+            if (empty($status['running'])) {
+                break;
+            }
+            usleep(100000);
+        }
+        // Unconditionally: bash may be gone while a child that ignores SIGTERM
+        // still holds the group.
+        $signal(9);
     }
 
     /**

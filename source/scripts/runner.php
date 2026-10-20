@@ -80,8 +80,39 @@ function ur_runner_exit_code(string $state): int
     }
 }
 
+/**
+ * Make this process a session (and process-group) leader unless it already is.
+ * Abort SIGTERMs the runner's process GROUP to reach rsync and ssh; the UI
+ * launcher starts us under setsid, but crond does not, so a scheduled run's
+ * group is crond's job shell and the signal could miss our children. Returns
+ * whether setsid was called. $posix is a test seam: ['getsid' => fn(): int,
+ * 'setsid' => fn(): int, 'pid' => int]; null = the real posix functions, and a
+ * no-op when ext-posix is missing.
+ *
+ * @param array{getsid:callable,setsid:callable,pid:int}|null $posix
+ */
+function ur_runner_ensure_session_leader(?array $posix = null): bool
+{
+    if ($posix === null) {
+        if (!function_exists('posix_setsid') || !function_exists('posix_getsid')) {
+            return false;
+        }
+        $posix = [
+            'getsid' => static fn() => posix_getsid(0),
+            'setsid' => static fn() => posix_setsid(),
+            'pid'    => (int) getmypid(),
+        ];
+    }
+    if (($posix['getsid'])() === $posix['pid']) {
+        return false;
+    }
+    ($posix['setsid'])();
+    return true;
+}
+
 // Only run when invoked as a script (not when required by a test harness).
 if (PHP_SAPI === 'cli' && !defined('UR_RUNNER_TESTING')) {
+    ur_runner_ensure_session_leader();
     $args = ur_runner_parse_args($argv ?? []);
     if ($args['job'] === '') {
         fwrite(STDERR, "usage: runner.php --job=<id> [--dry-run] [--trigger=manual|schedule]\n");

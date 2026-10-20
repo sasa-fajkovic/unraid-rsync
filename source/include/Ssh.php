@@ -44,19 +44,22 @@ declare(strict_types=1);
  *   KEYFILE:
  *     ssh -i <keyFilePath> -o IdentitiesOnly=yes -o BatchMode=yes
  *         -o StrictHostKeyChecking=<mode> -o UserKnownHostsFile=<kh>
- *         -o ConnectTimeout=<n> -p <port>
+ *         -o ConnectTimeout=<n> -o ServerAliveInterval=30
+ *         -o ServerAliveCountMax=6 -p <port>
  *     The key file ALREADY lives on the system (e.g. /root/.ssh/id_ed25519) with
  *     the user's own permissions; OpenSSH reads it directly. We do NOT read,
  *     copy, materialise to tmpfs, or store its contents - we only pass the path.
  *   KEY:
  *     ssh -i <tmpkey> -o IdentitiesOnly=yes -o BatchMode=yes
  *         -o StrictHostKeyChecking=<mode> -o UserKnownHostsFile=<kh>
- *         -o ConnectTimeout=<n> -p <port>
+ *         -o ConnectTimeout=<n> -o ServerAliveInterval=30
+ *         -o ServerAliveCountMax=6 -p <port>
  *   PASSWORD:
  *       wrapping
  *     ssh -o PubkeyAuthentication=no -o PreferredAuthentications=password
  *         -o StrictHostKeyChecking=<mode> -o UserKnownHostsFile=<kh>
- *         -o ConnectTimeout=<n> -p <port>
+ *         -o ConnectTimeout=<n> -o ServerAliveInterval=30
+ *         -o ServerAliveCountMax=6 -p <port>
  *     (NO BatchMode for PASSWORD auth - BatchMode disables the very password
  *      prompt the askpass helper is there to answer.)
  *
@@ -151,6 +154,23 @@ class Ssh
         return rtrim(static::$runtimeBase, '/') . '/known_hosts/' . Util::safeFileId($token);
     }
 
+    /** tmpfs dir (mode 700) a run fetches its target marker file into. */
+    public static function markersDir(): string
+    {
+        return rtrim(static::$runtimeBase, '/') . '/markers';
+    }
+
+    /**
+     * markersDir(), created with the same symlink defences as the secret dirs.
+     *
+     * @throws RuntimeException when the runtime dirs are unsafe or unwritable.
+     */
+    public static function ensureMarkersDir(): string
+    {
+        self::ensureRuntimeDirs();
+        return static::markersDir();
+    }
+
     /** Path a run's password file materialises to, keyed by run token. */
     public static function passFilePath(string $token): string
     {
@@ -241,6 +261,13 @@ class Ssh
         $argv[] = 'GlobalKnownHostsFile=/dev/null';
         $argv[] = '-o';
         $argv[] = 'ConnectTimeout=' . $timeout;
+        // ConnectTimeout only bounds the handshake. A destination that vanishes
+        // mid-transfer (NAS asleep, link down) otherwise hangs the run - and the
+        // job lock - until TCP gives up, which can be hours.
+        $argv[] = '-o';
+        $argv[] = 'ServerAliveInterval=30';
+        $argv[] = '-o';
+        $argv[] = 'ServerAliveCountMax=6';
         $argv[] = '-p';
         $argv[] = (string) $port;
 
@@ -281,20 +308,28 @@ class Ssh
     /**
      * Merge env additions over the CURRENT environment for proc_open. Passing an
      * env array REPLACES the child's environment outright, so we must inherit
-     * first - ssh needs PATH and HOME. Returns null when there is nothing to add,
-     * so the caller can omit the argument and keep plain inheritance.
+     * first - ssh needs PATH and HOME. Returns null when there is nothing to add
+     * or strip, so the caller can omit the argument and keep plain inheritance.
+     *
+     * RSYNC_OLD_ARGS / RSYNC_PROTECT_ARGS are always stripped: either one in the
+     * parent environment changes how rsync splits the remote path operands.
      *
      * @param array<string,string> $extra
      * @return array<string,string>|null
      */
     public static function childEnv(array $extra): ?array
     {
-        if ($extra === []) {
+        $base = getenv();
+        $base = is_array($base) ? $base : [];
+        $strip = array_intersect_key($base, array_flip(self::STRIPPED_ENV));
+        if ($extra === [] && $strip === []) {
             return null;
         }
-        $base = getenv();
-        return array_merge(is_array($base) ? $base : [], $extra);
+        return array_merge(array_diff_key($base, $strip), $extra);
     }
+
+    /** Parent env vars never passed to an rsync/ssh child (see childEnv). */
+    const STRIPPED_ENV = ['RSYNC_OLD_ARGS', 'RSYNC_PROTECT_ARGS'];
 
     /**
      * The VALUE of rsync's `-e` option: the ssh command line as a single
@@ -609,6 +644,7 @@ class Ssh
             static::keysDir(),
             rtrim(static::$runtimeBase, '/') . '/known_hosts',
             rtrim(static::$runtimeBase, '/') . '/pass',
+            static::markersDir(),
         ] as $dir) {
             // Reject a symlink at this path outright (do NOT follow it).
             if (is_link($dir)) {

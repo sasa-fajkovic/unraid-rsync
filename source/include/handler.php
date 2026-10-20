@@ -505,6 +505,41 @@ function ur_migrate_credentials(string $from, string $to): array
 }
 
 /**
+ * Validate a whole job set against a global block: Job::validate on each job's
+ * EFFECTIVE options, plus the cross-job --delete ancestry rule. Messages carry
+ * the job's name.
+ *
+ * @param array<int,mixed>         $jobs
+ * @param array<string,mixed>      $global
+ * @param array<string,mixed>|null $creds
+ * @return array{errors:array<int,string>,warnings:array<int,string>}
+ */
+function ur_validate_jobs(array $jobs, array $global, ?array $creds): array
+{
+    $errors   = [];
+    $warnings = [];
+    foreach (array_values($jobs) as $i => $job) {
+        if (!is_array($job)) {
+            continue;
+        }
+        $label    = ((string) ($job['name'] ?? '') !== '') ? (string) $job['name'] : ('#' . ($i + 1));
+        $result   = Job::validate($job, $creds, $global);
+        $ancestry = Job::ancestryErrors(
+            $job,
+            Rsync::effectiveOptions($job, $global),
+            Job::protectedTargets($jobs, (string) ($job['id'] ?? ''))
+        );
+        foreach (array_merge($result['errors'], $ancestry) as $e) {
+            $errors[] = "Job \"$label\": $e";
+        }
+        foreach ($result['warnings'] as $w) {
+            $warnings[] = "Job \"$label\": $w";
+        }
+    }
+    return ['errors' => $errors, 'warnings' => $warnings];
+}
+
+/**
  * Handle POST saveConfig: rebuild the config from the submission, validate
  * every job, and persist on success. Returns JSON describing the outcome.
  *
@@ -561,6 +596,11 @@ function ur_action_save_config(): void
         if (array_key_exists('retention', $globalIn)) {
             $config['global']['retention'] = Config::clampRetention($globalIn['retention']);
         }
+        foreach (Config::HOOK_TIMEOUT_DEFAULTS as $key => $default) {
+            if (array_key_exists($key, $globalIn)) {
+                $config['global'][$key] = Config::clampHookTimeout($globalIn[$key], $default);
+            }
+        }
     }
 
     $allErrors   = [];
@@ -570,7 +610,8 @@ function ur_action_save_config(): void
     // a job on "use global config" (the default for a new job) takes them
     // verbatim - so they need the same value checks a job's own options get.
     if ($hasGlobal) {
-        foreach (Job::validateRsyncOptions($config['global']['defaultRsyncOptions']) as $e) {
+        $globalOpts = $config['global']['defaultRsyncOptions'];
+        foreach (array_merge(Job::validateRsyncOptions($globalOpts), Job::globalOptionPathErrors($globalOpts)) as $e) {
             $allErrors[] = 'Global settings: ' . $e;
         }
 
@@ -660,8 +701,23 @@ function ur_action_save_config(): void
     }
 
     if (!$hasJobs) {
-        // Settings-only save: persist the (validated-by-load) config with the
-        // updated global section and return.
+        // Settings-only save: every job on "use global config" now runs with
+        // these options, so re-validate the stored jobs against them.
+        $credsForValidation = null;
+        try {
+            $credsForValidation = Credentials::load();
+        } catch (Throwable $e) {
+            $credsForValidation = null;
+        }
+        $jobCheck    = ur_validate_jobs($config['jobs'] ?? [], $config['global'], $credsForValidation);
+        $allWarnings = array_merge($allWarnings, $jobCheck['warnings']);
+        if (!empty($jobCheck['errors'])) {
+            sendError('Validation failed.', 422, [
+                'errors'   => $jobCheck['errors'],
+                'warnings' => $allWarnings,
+            ]);
+            return;
+        }
         try {
             Config::save($config);
         } catch (Throwable $e) {
@@ -694,7 +750,7 @@ function ur_action_save_config(): void
         $credsForValidation = null;
     }
 
-    foreach ($rawJobs as $i => $rawJob) {
+    foreach ($rawJobs as $rawJob) {
         if (!is_array($rawJob)) {
             continue;
         }
@@ -711,17 +767,12 @@ function ur_action_save_config(): void
         }
         $job['id'] = $id;
         $seenIds[$id] = true;
-
-        $result = Job::validate($job, $credsForValidation);
-        $label  = ($job['name'] !== '') ? $job['name'] : ('#' . ($i + 1));
-        foreach ($result['errors'] as $e) {
-            $allErrors[] = "Job \"$label\": $e";
-        }
-        foreach ($result['warnings'] as $w) {
-            $allWarnings[] = "Job \"$label\": $w";
-        }
         $normalized[] = $job;
     }
+
+    $jobCheck    = ur_validate_jobs($normalized, $config['global'], $credsForValidation);
+    $allErrors   = array_merge($allErrors, $jobCheck['errors']);
+    $allWarnings = array_merge($allWarnings, $jobCheck['warnings']);
 
     if (!empty($allErrors)) {
         sendError('Validation failed.', 422, [

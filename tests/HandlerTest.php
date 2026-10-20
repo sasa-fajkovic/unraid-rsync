@@ -1653,4 +1653,92 @@ final class HandlerTest extends TestCase
             $body['error']
         );
     }
+
+    /** An SSH connection + a stored SSH job on "use global config". */
+    private function seedGlobalSshJob(): void
+    {
+        $creds = Credentials::defaults();
+        $creds['connections'][] = Credentials::mergeConnection([
+            'id' => 'c-1', 'name' => 'nas', 'host' => 'nas.local', 'username' => 'root',
+            'authMethod' => 'KEYFILE', 'keyFilePath' => '/root/.ssh/id_ed25519',
+        ]);
+        Credentials::save($creds);
+        $config = Config::load();
+        $config['jobs'][] = Job::normalize([
+            'id' => 'j-photos', 'name' => 'Photos', 'transport' => 'SSH', 'connectionId' => 'c-1',
+            'useGlobalDefaults' => true,
+            'pairs' => [['local' => '/mnt/user/photos/', 'remote' => '/srv/backup/photos/']],
+        ]);
+        Config::save($config);
+    }
+
+    public function testGlobalSaveReValidatesTheJobsThatUseIt(): void
+    {
+        $this->seedGlobalSshJob();
+        $_POST = [
+            'action'     => 'saveConfig',
+            'csrf_token' => 'test-token',
+            'global'     => ['defaultRsyncOptions' => ['protocol' => '29', 'acls' => '1']],
+        ];
+        [$body, $code] = $this->runCapture(fn() => ur_action_save_config());
+        $this->assertSame(422, $code, json_encode($body));
+        $this->assertNotEmpty(array_filter($body['errors'], static fn($e) => str_starts_with($e, 'Job "Photos": ')));
+        $this->assertSame('', Config::load()['global']['defaultRsyncOptions']['protocol'], 'nothing saved');
+
+        // Warnings for the jobs come back like today.
+        $_POST['global']['defaultRsyncOptions'] = ['delete' => '1', 'recursive' => '1'];
+        [$body, $code] = $this->runCapture(fn() => ur_action_save_config());
+        $this->assertSame(200, $code, json_encode($body));
+        $this->assertNotEmpty(array_filter($body['warnings'], static fn($w) => str_contains($w, 'Photos') && str_contains($w, 'max delete')));
+    }
+
+    public function testGlobalTempDirAndBackupDirAreValidated(): void
+    {
+        foreach (['tempDir' => '/', 'backupDir' => '../../../../'] as $key => $value) {
+            $_POST = [
+                'action'     => 'saveConfig',
+                'csrf_token' => 'test-token',
+                'global'     => ['defaultRsyncOptions' => [$key => $value]],
+            ];
+            [$body, $code] = $this->runCapture(fn() => ur_action_save_config());
+            $this->assertSame(422, $code, "$key " . json_encode($body));
+        }
+    }
+
+    public function testJobSaveRejectsADeleteDestinationOverAnotherJobs(): void
+    {
+        $this->seedGlobalSshJob();
+        $_POST = [
+            'action'     => 'saveConfig',
+            'csrf_token' => 'test-token',
+            'jobs'       => [
+                Config::load()['jobs'][0],
+                [
+                    'name' => 'Mirror', 'transport' => 'SSH', 'connectionId' => 'c-1', 'schedule' => '0 4 * * *',
+                    'pairs' => [['local' => '/mnt/user/all/', 'remote' => '/srv/backup']],
+                    'rsyncOptions' => ['delete' => '1', 'maxDelete' => '10'],
+                ],
+            ],
+        ];
+        [$body, $code] = $this->runCapture(fn() => ur_action_save_config());
+        $this->assertSame(422, $code, json_encode($body));
+        $this->assertNotEmpty(array_filter($body['errors'], static fn($e) => str_contains($e, 'Job "Mirror": Pair #1') && str_contains($e, 'job "Photos"')));
+
+        $_POST['jobs'][1]['pairs'][0]['remote'] = '/srv/mirror';
+        [$body, $code] = $this->runCapture(fn() => ur_action_save_config());
+        $this->assertSame(200, $code, json_encode($body));
+    }
+
+    public function testHookTimeoutsAreSavedFromGlobalSettings(): void
+    {
+        $_POST = ['action' => 'saveConfig', 'csrf_token' => 'test-token', 'global' => ['retention' => '10']];
+        $this->runCapture(fn() => ur_action_save_config());
+        $this->assertArrayNotHasKey('preHookTimeout', Config::load()['global'], 'not written unless submitted');
+
+        $_POST['global'] += ['preHookTimeout' => '0', 'postHookTimeout' => '-5'];
+        [$body, $code] = $this->runCapture(fn() => ur_action_save_config());
+        $this->assertSame(200, $code, json_encode($body));
+        $this->assertSame(0, Config::load()['global']['preHookTimeout']);
+        $this->assertSame(60, Config::load()['global']['postHookTimeout'], 'invalid falls back to the default');
+    }
 }
