@@ -182,14 +182,16 @@ class Runner
             Logger::$retention = $retention;
             Logger::pruneRuns($jobId);
             RunState::clearAbort($jobId);
-            RunState::write($jobId, [
+            $runState = [
                 'pid'        => self::pid(),
                 'running'    => true,
                 'dryRun'     => $dryRun,
                 'trigger'    => $trigger,
                 'startedAt'  => $startedAt,
                 'currentLog' => $runLog,
-            ]);
+            ];
+            RunState::write($jobId, $runState);
+            RunState::writeInflight($jobId, $runState);
         } catch (Throwable $e) {
             RunState::releaseLock($lock);
             return self::hardFail($jobId, 'Could not initialise run state/log: ' . $e->getMessage(), 'state-init-failed', $trigger, $dryRun, $job, $retention);
@@ -597,6 +599,7 @@ class Runner
                 'logRef'      => Logger::runIdFromPath($runLog),
                 'reason'      => $reason,
             ]);
+            RunState::clearInflight($jobId);
             History::prune($jobId, $retention);
 
             Logger::event($runLog, $jobId, "Run finished: state=$state exitCode=$exitCode.");
@@ -1673,6 +1676,8 @@ class Runner
             $trigger = (($state['trigger'] ?? '') === 'schedule') ? 'schedule' : 'manual';
             $dryRun  = !empty($state['dryRun']);
             $started = strtotime($startedAt);
+            // tmpfs logs do not survive the reboot that may have killed the run.
+            $log     = (string) ($state['currentLog'] ?? '');
             $message = sprintf(
                 'Job "%s": previous run died without finishing (pid %d, started %s). '
                 . 'The post-hook did not run, services stopped by the pre-hook may still be down.',
@@ -1695,7 +1700,7 @@ class Runner
                 'state'       => Rsync::STATE_FAILED,
                 'exitCode'    => 1,
                 'durationSec' => 0,
-                'logRef'      => Logger::runIdFromPath((string) ($state['currentLog'] ?? '')),
+                'logRef'      => is_file($log) ? Logger::runIdFromPath($log) : '',
                 'reason'      => 'crashed',
             ]);
             History::prune($jobId, Config::clampRetention($config['global']['retention'] ?? Config::DEFAULT_RETENTION));

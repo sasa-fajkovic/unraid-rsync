@@ -15,7 +15,9 @@ on, forked from, or derived from any other plugin.
   `/usr/local/emhttp/plugins/unraid.rsync/`.
 - **Persistent config** lives on the USB flash at
   `/boot/config/plugins/unraid.rsync/` (`config.json`, `credentials.json`, the
-  single `unraid.rsync.cron`, and `runs/<jobid>.summary.json` last-run summaries).
+  single `unraid.rsync.cron`, `runs/<jobid>.summary.json` last-run summaries, and
+  `runs/<jobid>.inflight.json` while a run is in flight, so a run a reboot cut off
+  is still reported as crashed).
 - **Runtime state + logs** live in RAM at `/tmp/unraid.rsync/` (tmpfs, cleared on
   reboot): per-run logs under `logs/<jobid>/run-<UTCts>.log`, the rolling
   cross-job `logs/plugin.log`, run state, and materialised secrets under

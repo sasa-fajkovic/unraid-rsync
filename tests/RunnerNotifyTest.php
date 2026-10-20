@@ -47,6 +47,8 @@ final class RunnerNotifyTest extends TestCase
         Rsync::$rsyncPathOverride  = PHP_BINARY;
         Rsync::$runner             = fn(array $argv, $onOutput): int => 0;
         Config::save(Config::defaults());
+        // The plugin-start pass globs every in-flight record on /boot.
+        array_map('unlink', glob(rtrim(UR_CONFIG_BASE, '/') . '/runs/*.inflight.json') ?: []);
     }
 
     protected function tearDown(): void
@@ -504,15 +506,29 @@ final class RunnerNotifyTest extends TestCase
 
     // --- a runner that died ----------------------------------------------------
 
-    /** Leave the state a runner that died mid-run leaves behind. */
+    /** Leave what a runner that died mid-run leaves behind: tmpfs state, its log and the /boot in-flight record. */
     private function writeDeadRunnerState(string $id, string $trigger = 'schedule'): void
     {
-        RunState::write($id, [
+        $log = Logger::openRun($id, strtotime('2026-10-20T03:00:00Z'));
+        $state = [
             'pid'        => 999999,
             'running'    => true,
             'trigger'    => $trigger,
             'startedAt'  => '2026-10-20T03:00:00Z',
-            'currentLog' => '/tmp/unraid.rsync/logs/' . $id . '/run-20261020T030000Z.log',
+            'currentLog' => $log,
+        ];
+        RunState::write($id, $state);
+        RunState::writeInflight($id, $state);
+    }
+
+    /** What survives a reboot that killed a run: only the /boot in-flight record. */
+    private function writeRebootedRun(string $id): void
+    {
+        RunState::writeInflight($id, [
+            'pid'        => 4242,
+            'trigger'    => 'schedule',
+            'startedAt'  => '2026-10-20T03:00:00Z',
+            'currentLog' => UR_RUNTIME_BASE . '/gone-after-reboot/run-20261020T030000Z.log',
         ]);
     }
 
@@ -536,6 +552,76 @@ final class RunnerNotifyTest extends TestCase
         $this->assertSame(['FAILED', 'crashed', 'schedule'], [$runs[0]['state'], $runs[0]['reason'], $runs[0]['trigger']]);
         $this->assertSame('2026-10-20T03:00:00Z', $runs[0]['startedAt']);
         $this->assertSame('run-20261020T030000Z.log', $runs[0]['logRef'], 'the dead run\'s log stays reachable');
+        $this->assertFileDoesNotExist(RunState::inflightPath($id));
+    }
+
+    public function testRunWritesTheInflightRecordAndRemovesItWhenItRecordsItsOutcome(): void
+    {
+        $id   = $this->saveJob('off');
+        $seen = null;
+        Rsync::$runner = function (array $argv, $onOutput) use ($id, &$seen): int {
+            $seen = RunState::readInflight($id);
+            return 0;
+        };
+        $res = Runner::run($id, true, 'schedule');
+
+        $this->assertIsArray($seen, 'written before the transfer');
+        $this->assertSame($id, $seen['jobId']);
+        $this->assertSame(12345, $seen['pid']);
+        $this->assertSame('schedule', $seen['trigger']);
+        $this->assertTrue($seen['dryRun']);
+        $this->assertSame($res['runLog'], $seen['currentLog']);
+        $this->assertSame(History::list($id)['runs'][0]['startedAt'], $seen['startedAt']);
+        $this->assertFileDoesNotExist(RunState::inflightPath($id));
+    }
+
+    public function testRunCutOffByARebootIsReportedOnceAndTheRecordRemoved(): void
+    {
+        $id = $this->saveJob('failure-only');
+        $this->writeRebootedRun($id);
+
+        $this->assertFalse(RunState::isRunning($id));
+        $this->assertFalse(RunState::isRunning($id));
+
+        $this->assertCount(1, $this->captured);
+        $this->assertSame('alert', $this->importanceOf($this->captured[0]));
+        $this->assertStringContainsString('previous run died without finishing (pid 4242', $this->captured[0]);
+        $runs = History::list($id)['runs'];
+        $this->assertCount(1, $runs);
+        $this->assertSame(['crashed', '2026-10-20T03:00:00Z', ''], [$runs[0]['reason'], $runs[0]['startedAt'], $runs[0]['logRef']]);
+        $this->assertFileDoesNotExist(RunState::inflightPath($id));
+    }
+
+    public function testInflightRecordIsNotReportedWhileTheLockIsHeld(): void
+    {
+        $id = $this->saveJob('always');
+        $this->writeRebootedRun($id);
+        $held = RunState::acquireLock($id);
+        try {
+            $this->assertFalse(RunState::isRunning($id));
+            RunState::reapCrashed([$id]);
+        } finally {
+            RunState::releaseLock($held);
+        }
+        $this->assertCount(0, $this->captured);
+        $this->assertFileExists(RunState::inflightPath($id));
+    }
+
+    public function testPluginStartPassReportsARunCutOffByAReboot(): void
+    {
+        // No tmpfs state at all, and the job id is not passed in: the record
+        // on /boot is enough to find it.
+        $id = $this->saveJob('always');
+        $this->writeRebootedRun($id);
+        $this->assertNull(RunState::read($id));
+
+        RunState::reapCrashed([]);
+        RunState::reapCrashed([$id]);
+
+        $this->assertCount(1, $this->captured);
+        $this->assertStringContainsString("Unraid Rsync: $id: previous run died without finishing", $this->captured[0]);
+        $this->assertSame('crashed', History::list($id)['runs'][0]['reason']);
+        $this->assertFileDoesNotExist(RunState::inflightPath($id));
     }
 
     public function testDeadRunnerIsNotReapedWhileTheLockIsHeld(): void
@@ -600,6 +686,7 @@ final class RunnerNotifyTest extends TestCase
         $this->assertCount(0, $this->captured);
         $this->assertSame(1, History::list($id)['total']);
         $this->assertFalse(RunState::read($id)['running']);
+        $this->assertFileDoesNotExist(RunState::inflightPath($id));
     }
 
     public function testAnUnwritableLogDoesNotSwallowTheCrashReport(): void

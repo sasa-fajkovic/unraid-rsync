@@ -36,6 +36,9 @@ declare(strict_types=1);
 if (!defined('UR_RUNTIME_BASE')) {
     define('UR_RUNTIME_BASE', '/tmp/unraid.rsync');
 }
+if (!defined('UR_CONFIG_BASE')) {
+    define('UR_CONFIG_BASE', '/boot/config/plugins/unraid.rsync');
+}
 
 require_once __DIR__ . '/Util.php';
 
@@ -278,6 +281,10 @@ class RunState
     {
         $state = self::read($jobId);
         if ($state === null || empty($state['running'])) {
+            // tmpfs state is gone after a reboot; the /boot in-flight record is not.
+            if (is_file(self::inflightPath($jobId))) {
+                self::reapStale($jobId);
+            }
             return false;
         }
         $pid = (int) $state['pid'];
@@ -321,19 +328,111 @@ class RunState
     }
 
     /**
-     * With the job's run lock HELD: a state still claiming running=true is a
-     * dead runner's. Mark it stopped and return it (once), else null.
+     * With the job's run lock HELD: a state still claiming running=true, or an
+     * in-flight record on /boot (all that survives a reboot), is a dead
+     * runner's. Clear both and return it (once), else null.
      *
-     * @return array{jobId:string,pid:int,running:bool,dryRun:bool,trigger:string,startedAt:string,currentLog:string}|null
+     * @return array<string,mixed>|null
      */
     public static function takeStale(string $jobId): ?array
     {
-        $state = self::read($jobId);
-        if ($state === null || empty($state['running'])) {
+        $state    = self::read($jobId);
+        $inflight = self::readInflight($jobId);
+        self::clearInflight($jobId);
+        if ($state !== null && !empty($state['running'])) {
+            self::markStopped($jobId);
+            return $state;
+        }
+        return $inflight;
+    }
+
+    /**
+     * Plugin start: reap every job's dead run, including jobs known only from
+     * an in-flight record (after a reboot there is no tmpfs state at all).
+     *
+     * @param array<int,string> $jobIds
+     */
+    public static function reapCrashed(array $jobIds): void
+    {
+        foreach (@glob(self::inflightDir() . '/*.inflight.json') ?: [] as $file) {
+            $data = json_decode((string) @file_get_contents($file), true);
+            if (is_array($data) && is_string($data['jobId'] ?? null)) {
+                $jobIds[] = $data['jobId'];
+            }
+        }
+        foreach (array_unique($jobIds) as $jobId) {
+            if ($jobId !== '') {
+                self::isRunning($jobId);
+            }
+        }
+    }
+
+    // --- persistent in-flight record (survives a reboot) ---------------------
+
+    /** Dir of the in-flight records: /boot, next to the run summaries. */
+    private static function inflightDir(): string
+    {
+        return rtrim(UR_CONFIG_BASE, '/') . '/runs';
+    }
+
+    /** Absolute path of a job's in-flight record. */
+    public static function inflightPath(string $jobId): string
+    {
+        return self::inflightDir() . '/' . Util::safeFileId($jobId) . '.inflight.json';
+    }
+
+    /**
+     * Record on /boot that a run is in flight (atomic temp + rename). One small
+     * flash write per run, removed when the run records its outcome. Best-effort:
+     * the run goes on without it, as it does without its summary.
+     *
+     * @param array<string,mixed> $state
+     */
+    public static function writeInflight(string $jobId, array $state): void
+    {
+        $dir = self::inflightDir();
+        if (!is_dir($dir) && !@mkdir($dir, 0755, true) && !is_dir($dir)) {
+            return;
+        }
+        $json = json_encode([
+            'jobId'      => $jobId,
+            'pid'        => (int) ($state['pid'] ?? 0),
+            'startedAt'  => (string) ($state['startedAt'] ?? ''),
+            'trigger'    => (($state['trigger'] ?? '') === 'schedule') ? 'schedule' : 'manual',
+            'dryRun'     => !empty($state['dryRun']),
+            'currentLog' => (string) ($state['currentLog'] ?? ''),
+        ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+        $tmp = @tempnam($dir, '.inflight.');
+        if ($json === false || $tmp === false) {
+            return;
+        }
+        if (@file_put_contents($tmp, $json . "\n") === false || !@rename($tmp, self::inflightPath($jobId))) {
+            @unlink($tmp);
+        }
+    }
+
+    /**
+     * A job's in-flight record, or null when none (or unreadable).
+     *
+     * @return array<string,mixed>|null
+     */
+    public static function readInflight(string $jobId): ?array
+    {
+        $path = self::inflightPath($jobId);
+        if (!is_file($path)) {
             return null;
         }
-        self::markStopped($jobId);
-        return $state;
+        $data = json_decode((string) @file_get_contents($path), true);
+        return is_array($data) ? array_merge($data, ['jobId' => $jobId]) : null;
+    }
+
+    /** Remove a job's in-flight record (best-effort). */
+    public static function clearInflight(string $jobId): void
+    {
+        $path = self::inflightPath($jobId);
+        if (is_file($path)) {
+            @unlink($path);
+        }
     }
 
     /**
