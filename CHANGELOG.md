@@ -12,6 +12,19 @@ user-facing highlights.
 ## [Unreleased]
 
 ### Added
+- **Notifications for runs that never did their job.** A run that could not
+  start (configuration unreadable, job not found, lock or run-state error) sends
+  an *alert* `<job>: run did not start`. A scheduled run skipped because the
+  previous one is still running sends a *warning*; the same case started by hand
+  stays silent (the UI already says so). A run whose runner died sends an
+  *alert* `<job>: previous run died without finishing` once, noting that the
+  post-hook did not run. That includes a run cut off by a reboot or power loss,
+  detected from a small in-flight record on `/boot` and reported a few minutes
+  after the array starts (`UR_CRASH_REAP_DELAY`, default 180 s, so notification
+  agents are up first), or earlier by the next status poll or run of the job.
+  `notifyMode: off` is honoured whenever
+  the job can be read. Scheduled hard failures and crashed runs appear in
+  History as FAILED rows.
 - **Target marker** (per job, optional). Name a small file on the destination
   side, e.g. `<drive>/.unraid-rsync-target`, optionally with the content it must
   hold (a UUID). Before the pre-run hook the run fetches it over the job's own
@@ -138,6 +151,16 @@ user-facing highlights.
   `/Settings/UnraidRsync` (restores the highlighted Settings nav).
 
 ### Changed
+- **Notification importance is chosen by cause**, not by state alone:
+  *alert* = act now, *warning* = look today, *normal* = FYI. Exit 24 (files
+  vanished during transfer) alone is now *normal*: still sent under
+  `success-only`/`always`, no longer under `failure-only`. Exit 25 (`--max-delete`
+  cap hit), a failed or timed-out post-hook, and a scheduled abort are
+  *warnings*; a manual abort stays *normal*. `failure-only` now sends every
+  non-normal case; exit 25 and post-hook failures no longer go to
+  `success-only`. Every notification lists state, reason, exit code with its
+  meaning, duration, trigger and dry-run.
+- History records the run's **reason**, shown as the state badge tooltip.
 - **Fail early and loudly on a bad destination.** Every pair's path guardrails,
   the effective rsync options, the target marker and the `--delete` checks now
   run *before* the pre-run hook, so a rejected pair 3 no longer lets pair 1 copy

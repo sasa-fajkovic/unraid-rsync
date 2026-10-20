@@ -499,7 +499,7 @@ final class RunnerTest extends TestCase
     {
         $res = Runner::run('j-does-not-exist', false);
         $this->assertSame(Rsync::STATE_FAILED, $res['state']);
-        $this->assertSame('error', $res['reason'] ?? '');
+        $this->assertSame('job-not-found', $res['reason'] ?? '');
     }
 
     public function testNoPairsFails(): void
@@ -798,7 +798,7 @@ final class RunnerTest extends TestCase
         // The summary records WARNING.
         $this->assertSame(Rsync::STATE_WARNING, Runner::readSummary($id)['state']);
         // Importance for the surfaced WARNING maps to "warning" (sanity tie-in).
-        $this->assertSame(Notify::IMPORTANCE_WARNING, Runner::notifyImportance($res['state']));
+        $this->assertSame(Notify::IMPORTANCE_WARNING, Runner::notifyImportance($res));
     }
 
     public function testPostHookFailureDoesNotOverrideARealFailure(): void

@@ -15,7 +15,13 @@ on, forked from, or derived from any other plugin.
   `/usr/local/emhttp/plugins/unraid.rsync/`.
 - **Persistent config** lives on the USB flash at
   `/boot/config/plugins/unraid.rsync/` (`config.json`, `credentials.json`, the
-  single `unraid.rsync.cron`, and `runs/<jobid>.summary.json` last-run summaries).
+  single `unraid.rsync.cron`, `runs/<jobid>.summary.json` last-run summaries, and
+  `runs/<jobid>.inflight.json` while a run is in flight, so a run a reboot cut off
+  is still reported as crashed). It is reaped by status polls, the next run, and
+  `scripts/reap-crashed.php`, started detached from `event/started` after
+  `UR_CRASH_REAP_DELAY` (180 s) - **never from `apply-cron.php`**: the `.plg`
+  runs that at boot, before notification agents can deliver, and reaping deletes
+  the record, so that alert would be lost for good.
 - **Runtime state + logs** live in RAM at `/tmp/unraid.rsync/` (tmpfs, cleared on
   reboot): per-run logs under `logs/<jobid>/run-<UTCts>.log`, the rolling
   cross-job `logs/plugin.log`, run state, and materialised secrets under
