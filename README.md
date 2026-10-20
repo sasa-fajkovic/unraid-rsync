@@ -131,10 +131,14 @@ Managed keys live in their own **Credentials** keychain tab.
   **rsync-binary presence indicator** (detected path + the first line of
   `rsync --version`, or a clear warning if rsync is somehow absent).
 - **Notifications** through Unraid's native `notify`, with a per-job
-  **notify mode** — `off`, `success-only`, `failure-only`, or `always` —
-  mapped to the correct webGui importance (success → *normal*, warning/partial/
-  timeout → *warning*, failure → *alert*). `notify init` is run on install so
-  notifications work out of the box.
+  **notify mode** — `off`, `success-only`, `failure-only`, or `always` — and
+  importance chosen by cause, so it can be routed to agents: *alert* = act now
+  (failed, pre-hook timeout, run did not start, runner died mid-run), *warning*
+  = look today (partial, timeout, `--max-delete` cap hit, post-hook failed or
+  timed out, scheduled run aborted or skipped because the previous one still
+  runs), *normal* = FYI (success, files vanished during transfer (exit 24),
+  manual abort). `failure-only` sends every non-normal one. `notify init` is run
+  on install so notifications work out of the box.
 - Clean uninstall (removes both the runtime `emhttp` tree and the persistent
   `/boot` config dir, and clears the plugin's cron lines from the live crontab).
 

@@ -243,6 +243,7 @@ ur_emit_ajax_helpers();  /* window.urAjax.show, for the inline download error */
       var b = document.createElement('span');
       b.className = 'ur-badge';
       window.urBadge.apply(b, r.state);
+      if (r.reason) { b.title = r.reason; }
       stTd.appendChild(b);
       tr.appendChild(stTd);
 

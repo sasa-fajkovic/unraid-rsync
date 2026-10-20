@@ -19,8 +19,9 @@ declare(strict_types=1);
  *   (2) the recorded pid still exists (posix_kill(pid, 0)), AND
  *   (3) that pid's process is actually OUR runner for THIS job - its cmdline
  *       contains "runner.php" and "--job=<jobid>".
- * If (1) holds but (2)/(3) don't, the state is stale and we CLEAR it (so the UI
- * re-enables the Run button) and report not-running.
+ * If (1) holds but (2)/(3) don't, the state is stale: we CLEAR it (so the UI
+ * re-enables the Run button), report not-running, and hand it to
+ * Runner::reportCrashed exactly once (see reapStale).
  *
  * Every live-system touch (posix_kill, reading /proc/<pid>/cmdline) goes through
  * a thin, overridable seam (pidAlive / pidCmdline) so the reuse-safe logic is
@@ -34,6 +35,9 @@ declare(strict_types=1);
 
 if (!defined('UR_RUNTIME_BASE')) {
     define('UR_RUNTIME_BASE', '/tmp/unraid.rsync');
+}
+if (!defined('UR_CONFIG_BASE')) {
+    define('UR_CONFIG_BASE', '/boot/config/plugins/unraid.rsync');
 }
 
 require_once __DIR__ . '/Util.php';
@@ -96,7 +100,11 @@ class RunState
      * dies (so a crashed runner never wedges the lock forever). The caller MUST
      * pass the returned handle to releaseLock() in a finally.
      *
+     * null means contention only; an I/O failure throws, so it is never
+     * mistaken for "already running".
+     *
      * @return resource|null
+     * @throws RuntimeException when the lock file cannot be opened or locked
      */
     public static function acquireLock(string $jobId)
     {
@@ -104,12 +112,16 @@ class RunState
         $path = self::lockPath($jobId);
         $fh = @fopen($path, 'c'); // create if absent, do NOT truncate
         if ($fh === false) {
-            return null;
+            throw new RuntimeException("Unable to open run lock: $path");
         }
-        if (!@flock($fh, LOCK_EX | LOCK_NB)) {
-            // Another live runner holds the lock.
+        $wouldBlock = 0;
+        if (!@flock($fh, LOCK_EX | LOCK_NB, $wouldBlock)) {
             @fclose($fh);
-            return null;
+            if ($wouldBlock) {
+                // Another live runner holds the lock.
+                return null;
+            }
+            throw new RuntimeException("Unable to lock run lock: $path");
         }
         return $fh;
     }
@@ -269,21 +281,158 @@ class RunState
     {
         $state = self::read($jobId);
         if ($state === null || empty($state['running'])) {
+            // tmpfs state is gone after a reboot; the /boot in-flight record is not.
+            if (is_file(self::inflightPath($jobId))) {
+                self::reapStale($jobId);
+            }
             return false;
         }
         $pid = (int) $state['pid'];
-        if ($pid <= 0 || !static::pidAlive($pid)) {
-            // Recorded pid is gone -> the worker died without clearing state.
-            self::markStopped($jobId);
-            return false;
-        }
-        $cmdline = static::pidCmdline($pid);
-        if (!self::cmdlineMatchesJob($cmdline, $jobId)) {
-            // The pid was REUSED by an unrelated process -> definitely stale.
-            self::markStopped($jobId);
+        // A dead pid, or one REUSED by an unrelated process: the worker died
+        // without clearing state.
+        if ($pid <= 0 || !static::pidAlive($pid) || !self::cmdlineMatchesJob(static::pidCmdline($pid), $jobId)) {
+            self::reapStale($jobId);
             return false;
         }
         return true;
+    }
+
+    /**
+     * Report a dead runner's leftover state exactly once. A live runner holds
+     * the run lock from before it writes running=true until after markStopped,
+     * so running=true under a lock WE hold can only be a dead one; a lock we
+     * cannot get belongs to a starting runner (which reaps it itself) or to a
+     * concurrent detector.
+     */
+    private static function reapStale(string $jobId): void
+    {
+        try {
+            $lock = self::acquireLock($jobId);
+        } catch (Throwable $e) {
+            return; // a status poll must not fail on it; the next run reports it
+        }
+        if ($lock === null) {
+            return;
+        }
+        try {
+            $stale = self::takeStale($jobId);
+            // Still under the lock, so a replacement run cannot record a newer
+            // History row (and prune at retention 1) ahead of this one.
+            if ($stale !== null) {
+                require_once __DIR__ . '/Runner.php';
+                Runner::reportCrashed($stale);
+            }
+        } finally {
+            self::releaseLock($lock);
+        }
+    }
+
+    /**
+     * With the job's run lock HELD: a state still claiming running=true, or an
+     * in-flight record on /boot (all that survives a reboot), is a dead
+     * runner's. Clear both and return it (once), else null.
+     *
+     * @return array<string,mixed>|null
+     */
+    public static function takeStale(string $jobId): ?array
+    {
+        $state    = self::read($jobId);
+        $inflight = self::readInflight($jobId);
+        self::clearInflight($jobId);
+        if ($state !== null && !empty($state['running'])) {
+            self::markStopped($jobId);
+            return $state;
+        }
+        return $inflight;
+    }
+
+    /**
+     * Plugin start: reap every job's dead run, including jobs known only from
+     * an in-flight record (after a reboot there is no tmpfs state at all).
+     *
+     * @param array<int,string> $jobIds
+     */
+    public static function reapCrashed(array $jobIds): void
+    {
+        foreach (@glob(self::inflightDir() . '/*.inflight.json') ?: [] as $file) {
+            $data = json_decode((string) @file_get_contents($file), true);
+            if (is_array($data) && is_string($data['jobId'] ?? null)) {
+                $jobIds[] = $data['jobId'];
+            }
+        }
+        foreach (array_unique($jobIds) as $jobId) {
+            if ($jobId !== '') {
+                self::isRunning($jobId);
+            }
+        }
+    }
+
+    // --- persistent in-flight record (survives a reboot) ---------------------
+
+    /** Dir of the in-flight records: /boot, next to the run summaries. */
+    private static function inflightDir(): string
+    {
+        return rtrim(UR_CONFIG_BASE, '/') . '/runs';
+    }
+
+    /** Absolute path of a job's in-flight record. */
+    public static function inflightPath(string $jobId): string
+    {
+        return self::inflightDir() . '/' . Util::safeFileId($jobId) . '.inflight.json';
+    }
+
+    /**
+     * Record on /boot that a run is in flight (atomic temp + rename). One small
+     * flash write per run, removed when the run records its outcome. Best-effort:
+     * the run goes on without it, as it does without its summary.
+     *
+     * @param array<string,mixed> $state
+     */
+    public static function writeInflight(string $jobId, array $state): void
+    {
+        $dir = self::inflightDir();
+        if (!is_dir($dir) && !@mkdir($dir, 0755, true) && !is_dir($dir)) {
+            return;
+        }
+        $json = json_encode([
+            'jobId'      => $jobId,
+            'pid'        => (int) ($state['pid'] ?? 0),
+            'startedAt'  => (string) ($state['startedAt'] ?? ''),
+            'trigger'    => (($state['trigger'] ?? '') === 'schedule') ? 'schedule' : 'manual',
+            'dryRun'     => !empty($state['dryRun']),
+            'currentLog' => (string) ($state['currentLog'] ?? ''),
+        ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+        $tmp = @tempnam($dir, '.inflight.');
+        if ($json === false || $tmp === false) {
+            return;
+        }
+        if (@file_put_contents($tmp, $json . "\n") === false || !@rename($tmp, self::inflightPath($jobId))) {
+            @unlink($tmp);
+        }
+    }
+
+    /**
+     * A job's in-flight record, or null when none (or unreadable).
+     *
+     * @return array<string,mixed>|null
+     */
+    public static function readInflight(string $jobId): ?array
+    {
+        $path = self::inflightPath($jobId);
+        if (!is_file($path)) {
+            return null;
+        }
+        $data = json_decode((string) @file_get_contents($path), true);
+        return is_array($data) ? array_merge($data, ['jobId' => $jobId]) : null;
+    }
+
+    /** Remove a job's in-flight record (best-effort). */
+    public static function clearInflight(string $jobId): void
+    {
+        $path = self::inflightPath($jobId);
+        if (is_file($path)) {
+            @unlink($path);
+        }
     }
 
     /**
