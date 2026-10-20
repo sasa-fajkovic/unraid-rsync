@@ -19,8 +19,9 @@ declare(strict_types=1);
  *   (2) the recorded pid still exists (posix_kill(pid, 0)), AND
  *   (3) that pid's process is actually OUR runner for THIS job - its cmdline
  *       contains "runner.php" and "--job=<jobid>".
- * If (1) holds but (2)/(3) don't, the state is stale and we CLEAR it (so the UI
- * re-enables the Run button) and report not-running.
+ * If (1) holds but (2)/(3) don't, the state is stale: we CLEAR it (so the UI
+ * re-enables the Run button), report not-running, and hand it to
+ * Runner::reportCrashed exactly once (see reapStale).
  *
  * Every live-system touch (posix_kill, reading /proc/<pid>/cmdline) goes through
  * a thin, overridable seam (pidAlive / pidCmdline) so the reuse-safe logic is
@@ -272,18 +273,53 @@ class RunState
             return false;
         }
         $pid = (int) $state['pid'];
-        if ($pid <= 0 || !static::pidAlive($pid)) {
-            // Recorded pid is gone -> the worker died without clearing state.
-            self::markStopped($jobId);
-            return false;
-        }
-        $cmdline = static::pidCmdline($pid);
-        if (!self::cmdlineMatchesJob($cmdline, $jobId)) {
-            // The pid was REUSED by an unrelated process -> definitely stale.
-            self::markStopped($jobId);
+        // A dead pid, or one REUSED by an unrelated process: the worker died
+        // without clearing state.
+        if ($pid <= 0 || !static::pidAlive($pid) || !self::cmdlineMatchesJob(static::pidCmdline($pid), $jobId)) {
+            self::reapStale($jobId);
             return false;
         }
         return true;
+    }
+
+    /**
+     * Report a dead runner's leftover state exactly once. A live runner holds
+     * the run lock from before it writes running=true until after markStopped,
+     * so running=true under a lock WE hold can only be a dead one; a lock we
+     * cannot get belongs to a starting runner (which reaps it itself) or to a
+     * concurrent detector.
+     */
+    private static function reapStale(string $jobId): void
+    {
+        $lock = self::acquireLock($jobId);
+        if ($lock === null) {
+            return;
+        }
+        try {
+            $stale = self::takeStale($jobId);
+        } finally {
+            self::releaseLock($lock);
+        }
+        if ($stale !== null) {
+            require_once __DIR__ . '/Runner.php';
+            Runner::reportCrashed($stale);
+        }
+    }
+
+    /**
+     * With the job's run lock HELD: a state still claiming running=true is a
+     * dead runner's. Mark it stopped and return it (once), else null.
+     *
+     * @return array{jobId:string,pid:int,running:bool,dryRun:bool,trigger:string,startedAt:string,currentLog:string}|null
+     */
+    public static function takeStale(string $jobId): ?array
+    {
+        $state = self::read($jobId);
+        if ($state === null || empty($state['running'])) {
+            return null;
+        }
+        self::markStopped($jobId);
+        return $state;
     }
 
     /**

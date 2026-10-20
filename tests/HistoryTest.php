@@ -126,7 +126,7 @@ final class HistoryTest extends TestCase
         $this->assertArrayNotHasKey('secret', $r);
         // Exactly the canonical keys, nothing else.
         $this->assertSame(
-            ['startedAt', 'finishedAt', 'jobName', 'dryRun', 'trigger', 'state', 'exitCode', 'durationSec', 'logRef'],
+            ['startedAt', 'finishedAt', 'jobName', 'dryRun', 'trigger', 'state', 'exitCode', 'durationSec', 'logRef', 'reason'],
             array_keys($r)
         );
     }

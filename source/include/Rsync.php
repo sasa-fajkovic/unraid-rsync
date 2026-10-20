@@ -617,6 +617,32 @@ class Rsync
         }
     }
 
+    /** Short meanings of rsync's exit values (rsync(1) EXIT VALUES) for notifications. */
+    const EXIT_MEANINGS = [
+        0   => 'success',
+        1   => 'syntax or usage error',
+        2   => 'protocol incompatibility',
+        3   => 'errors selecting input/output files or dirs',
+        4   => 'requested action not supported',
+        5   => 'error starting client-server protocol',
+        6   => 'daemon unable to append to log-file',
+        10  => 'error in socket I/O',
+        11  => 'error in file I/O',
+        12  => 'error in rsync protocol data stream',
+        13  => 'errors with program diagnostics',
+        14  => 'error in IPC code',
+        20  => 'received SIGUSR1 or SIGINT',
+        21  => 'some error returned by waitpid()',
+        22  => 'error allocating core memory buffers',
+        23  => 'partial transfer due to error',
+        24  => 'files vanished during transfer',
+        25  => 'max-delete limit reached, deletions stopped: the destination is incomplete',
+        30  => 'timeout in data send/receive',
+        35  => 'timeout waiting for daemon connection',
+        143 => 'aborted (SIGTERM)',
+        255 => 'remote shell (ssh) failed',
+    ];
+
     /**
      * Reduce a set of per-pair exit codes to the single WORST state for the run.
      * "Worst" follows a severity ordering so a run that had one FAILED pair and

@@ -74,6 +74,7 @@ class History
             'exitCode'    => (int) ($r['exitCode'] ?? 0),
             'durationSec' => (int) ($r['durationSec'] ?? 0),
             'logRef'      => basename((string) ($r['logRef'] ?? '')),
+            'reason'      => (string) ($r['reason'] ?? ''),
         ];
     }
 

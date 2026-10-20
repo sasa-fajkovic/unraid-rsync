@@ -34,8 +34,8 @@ declare(strict_types=1);
  * written to /boot at <UR_CONFIG_BASE>/runs/<jobid>.summary.json:
  *   {state, startedAt, finishedAt, exitCode, durationSec, dryRun}
  *
- * NOTIFICATIONS are Phase 7: a clearly-marked hook point (Runner::notifyHook)
- * is left here but does nothing yet.
+ * NOTIFICATIONS: Runner::notifyHook, with importance chosen by cause; hard
+ * failures (hardFail) and runners that died (reportCrashed) notify too.
  */
 
 require_once __DIR__ . '/Config.php';
@@ -116,12 +116,12 @@ class Runner
         try {
             $config = Config::load();
         } catch (Throwable $e) {
-            return self::hardFail($jobId, 'Could not read configuration: ' . $e->getMessage());
+            return self::hardFail($jobId, 'Could not read configuration: ' . $e->getMessage(), 'config-unreadable', $trigger, $dryRun);
         }
 
         $job = self::findJob($config, $jobId);
         if ($job === null) {
-            return self::hardFail($jobId, "Job not found: $jobId");
+            return self::hardFail($jobId, "Job not found: $jobId", 'job-not-found', $trigger, $dryRun);
         }
 
         // Effective "keep last N executions" retention, derived ONCE from the
@@ -151,10 +151,10 @@ class Runner
         try {
             $lock = RunState::acquireLock($jobId);
         } catch (Throwable $e) {
-            return self::hardFail($jobId, 'Could not acquire run lock: ' . $e->getMessage());
+            return self::hardFail($jobId, 'Could not acquire run lock: ' . $e->getMessage(), 'lock-error', $trigger, $dryRun, $job, $retention);
         }
         if ($lock === null) {
-            return self::hardFail($jobId, "Job is already running: $jobId", 'already-running');
+            return self::hardFail($jobId, "Job is already running: $jobId", 'already-running', $trigger, $dryRun, $job, $retention);
         }
 
         // From here the lock is held; every exit path must release it.
@@ -167,6 +167,12 @@ class Runner
         // "Timezone: store UTC, display system-local") - do NOT switch this to date().
         $startedAt   = gmdate('Y-m-d\TH:i:s\Z', $startedAtTs);
         try {
+            // We hold the lock, so a state still claiming running=true is a
+            // runner that died.
+            $stale = RunState::takeStale($jobId);
+            if ($stale !== null) {
+                self::reportCrashed($stale);
+            }
             $runLog = Logger::openRun($jobId, $startedAtTs);
             // Retention: the user's "keep last N executions" setting bounds BOTH
             // the tmpfs run logs and the persistent history. Apply it to the log
@@ -186,7 +192,7 @@ class Runner
             ]);
         } catch (Throwable $e) {
             RunState::releaseLock($lock);
-            return self::hardFail($jobId, 'Could not initialise run state/log: ' . $e->getMessage());
+            return self::hardFail($jobId, 'Could not initialise run state/log: ' . $e->getMessage(), 'state-init-failed', $trigger, $dryRun, $job, $retention);
         }
 
         Logger::event($runLog, $jobId, sprintf(
@@ -239,6 +245,7 @@ class Runner
         $state    = Rsync::STATE_SUCCESS;
         $exitCode = 0;
         $reason   = '';
+        $exitCodes = [];
         $token    = '';
         // Declared out here so the finally can harvest this run's host key
         // before cleanup; only ever set on the SSH arm.
@@ -397,7 +404,6 @@ class Runner
                     Logger::event($runLog, $jobId, 'No source -> destination pairs configured; nothing to do.');
                 }
 
-                $exitCodes = [];
                 $aborted   = false;
                 foreach ($pairs as $i => $pair) {
                     $n = (int) $i + 1;
@@ -521,7 +527,10 @@ class Runner
                 }
                 // A failing postHook does NOT override the run's primary outcome,
                 // but we surface it on an otherwise-clean run so it isn't silent.
-                if ($postExit !== 0 && $postExit !== self::HOOK_TIMED_OUT && $state === Rsync::STATE_SUCCESS) {
+                // WARNING too: an exit-24 run notifies as normal unless a reason
+                // says otherwise.
+                if ($postExit !== 0 && $postExit !== self::HOOK_TIMED_OUT
+                    && ($state === Rsync::STATE_SUCCESS || $state === Rsync::STATE_WARNING)) {
                     $state    = Rsync::STATE_WARNING;
                     $reason   = $reason !== '' ? $reason : 'posthook-failed';
                 }
@@ -584,6 +593,7 @@ class Runner
                 'exitCode'    => $exitCode,
                 'durationSec' => $durationSec,
                 'logRef'      => Logger::runIdFromPath($runLog),
+                'reason'      => $reason,
             ]);
             History::prune($jobId, $retention);
 
@@ -594,7 +604,15 @@ class Runner
             // Dispatch the per-job notification (Phase 7). Best-effort: it is
             // gated on the job's notifyMode and NEVER throws (see notifyHook),
             // so a notification failure can't break the run's finally/unwind.
-            self::notifyHook($job, $state, $exitCode, $dryRun);
+            self::notifyHook($job, [
+                'state'       => $state,
+                'exitCode'    => $exitCode,
+                'exitCodes'   => $exitCodes,
+                'reason'      => $reason,
+                'trigger'     => $trigger,
+                'dryRun'      => $dryRun,
+                'durationSec' => $durationSec,
+            ]);
 
             // Release the per-job run lock last, so a queued launch only proceeds
             // once this run has fully wound down (state cleared, summary written).
@@ -632,61 +650,39 @@ class Runner
     const NOTIFY_LINK = '/Settings/UnraidRsync';
 
     /**
-     * Dispatch a per-job notification for a TERMINAL run outcome (Phase 7).
+     * Dispatch the notification for one run outcome. Never throws: a failed
+     * notification must never fail the backup.
      *
-     * Called from run()'s `finally` AFTER the /boot summary is written and state
-     * is cleared. The signature and call-site are fixed; all dispatch logic lives
-     * here. It NEVER throws - any failure is swallowed so a notification problem
-     * can't break the run's unwind (a failed notification must never fail the
-     * backup).
+     * $run carries the CAUSE, not just the state, because importance is chosen
+     * by cause (see notifyImportance): state, exitCode, and optionally exitCodes
+     * (one per pair that ran), reason, trigger, dryRun, durationSec (null =
+     * unknown), and subject/message to replace the default "<job> <STATE>"
+     * subject and "finished." lead (hard failures, crashed runs).
      *
-     * Gating + mapping (no ambiguity):
-     *   - dryRun                  => notified just like a real run (subject to the
-     *                                same notifyMode gating below), but with a
-     *                                "[Dry-run]" marker added to the subject and
-     *                                description so it is never mistaken for a real
-     *                                backup.
-     *   - Classify the state:
-     *       isSuccess = state in {SUCCESS, WARNING}
-     *       isFailure = state in {FAILED, PARTIAL, TIMEOUT}
-     *       ABORTED    = user-initiated (neither success nor failure).
-     *   - notifyMode:
-     *       off           => never;
-     *       success-only  => only when isSuccess;
-     *       failure-only  => only when isFailure;
-     *       always        => every terminal state including ABORTED.
-     *   - importance:
-     *       SUCCESS                  => normal
-     *       WARNING/PARTIAL/TIMEOUT  => warning
-     *       FAILED                   => alert
-     *       ABORTED                  => normal
+     * notifyMode: off = never; always = every outcome; failure-only = every
+     * non-normal importance; success-only = normal importance except ABORTED.
+     * A dry run is gated the same way and marked "[Dry-run]".
      *
      * @param array<string,mixed> $job
+     * @param array<string,mixed> $run
      */
-    public static function notifyHook(array $job, string $state, int $exitCode, bool $dryRun): void
+    public static function notifyHook(array $job, array $run): void
     {
         try {
             $mode = self::normalizeNotifyMode((string) ($job['notifyMode'] ?? self::NOTIFY_OFF));
-            if (!self::shouldNotify($mode, $state)) {
+            if (!self::shouldNotify($mode, $run)) {
                 return;
             }
 
-            $jobName    = (string) ($job['name'] ?? ($job['id'] ?? 'job'));
-            $importance = self::notifyImportance($state);
-            // A dry-run notification is clearly marked so it is never mistaken for
-            // a real backup.
-            $subject    = sprintf('%s: %s %s', self::NOTIFY_EVENT, $jobName, $state)
-                        . ($dryRun ? ' [Dry-run]' : '');
-
-            // Duration is read from the just-written /boot summary if available
-            // (it is written immediately before this hook in run()'s finally).
-            $description = self::notifyDescription($job, $state, $exitCode, $dryRun);
+            $jobName = (string) ($job['name'] ?? ($job['id'] ?? 'job'));
+            $subject = sprintf('%s: %s', self::NOTIFY_EVENT, (string) ($run['subject'] ?? ($jobName . ' ' . $run['state'])))
+                     . (!empty($run['dryRun']) ? ' [Dry-run]' : '');
 
             Notify::send([
                 'event'       => self::NOTIFY_EVENT,
                 'subject'     => $subject,
-                'description' => $description,
-                'importance'  => $importance,
+                'description' => self::notifyDescription($job, $run),
+                'importance'  => self::notifyImportance($run),
                 'link'        => self::NOTIFY_LINK,
             ]);
         } catch (Throwable $e) {
@@ -710,33 +706,21 @@ class Runner
         }
     }
 
-    /** A run state counts as success when it is SUCCESS or WARNING. */
-    public static function isSuccessState(string $state): bool
-    {
-        return $state === Rsync::STATE_SUCCESS || $state === Rsync::STATE_WARNING;
-    }
-
-    /** A run state counts as failure when it is FAILED, PARTIAL or TIMEOUT. */
-    public static function isFailureState(string $state): bool
-    {
-        return $state === Rsync::STATE_FAILED
-            || $state === Rsync::STATE_PARTIAL
-            || $state === Rsync::STATE_TIMEOUT;
-    }
-
     /**
-     * Decide whether a terminal $state should notify under notifyMode $mode.
-     * ABORTED is neither success nor failure, so only `always` notifies on it.
+     * Decide whether a run outcome notifies under notifyMode $mode.
+     *
+     * @param array<string,mixed> $run
      */
-    public static function shouldNotify(string $mode, string $state): bool
+    public static function shouldNotify(string $mode, array $run): bool
     {
+        $normal = self::notifyImportance($run) === Notify::IMPORTANCE_NORMAL;
         switch ($mode) {
             case self::NOTIFY_ALWAYS:
                 return true;
             case self::NOTIFY_SUCCESS_ONLY:
-                return self::isSuccessState($state);
+                return $normal && ($run['state'] ?? '') !== Rsync::STATE_ABORTED;
             case self::NOTIFY_FAILURE_ONLY:
-                return self::isFailureState($state);
+                return !$normal;
             case self::NOTIFY_OFF:
             default:
                 return false;
@@ -744,72 +728,98 @@ class Runner
     }
 
     /**
-     * Map a terminal run state to a webGui importance level:
-     *   SUCCESS => normal; WARNING/PARTIAL/TIMEOUT => warning; FAILED => alert;
-     *   ABORTED => normal.
+     * Importance by cause. Admins route these levels to agents, so they mean
+     * alert = act now, warning = look today, normal = FYI:
+     *   FAILED (incl. pre-hook failure/timeout, hard failures, crashes) => alert
+     *   a scheduled run skipped because the previous one still runs   => warning
+     *   PARTIAL, TIMEOUT                                                => warning
+     *   ABORTED: scheduled => warning, manual => normal
+     *   WARNING: only exit 24 (files vanished mid-transfer) => normal; exit 25
+     *            (max-delete cap) or a post-hook failure/timeout => warning
+     *   SUCCESS => normal
+     *
+     * @param array<string,mixed> $run
      */
-    public static function notifyImportance(string $state): string
+    public static function notifyImportance(array $run): string
     {
+        $state  = (string) ($run['state'] ?? '');
+        $reason = (string) ($run['reason'] ?? '');
+        if ($reason === 'already-running') {
+            return Notify::IMPORTANCE_WARNING;
+        }
         switch ($state) {
             case Rsync::STATE_FAILED:
                 return Notify::IMPORTANCE_ALERT;
-            case Rsync::STATE_WARNING:
             case Rsync::STATE_PARTIAL:
             case Rsync::STATE_TIMEOUT:
                 return Notify::IMPORTANCE_WARNING;
-            case Rsync::STATE_SUCCESS:
             case Rsync::STATE_ABORTED:
+                return ($run['trigger'] ?? '') === 'schedule' ? Notify::IMPORTANCE_WARNING : Notify::IMPORTANCE_NORMAL;
+            case Rsync::STATE_WARNING:
+                $codes = array_map('intval', (array) ($run['exitCodes'] ?? [$run['exitCode'] ?? 0]));
+                $onlyVanished = $reason === '' && in_array(24, $codes, true) && !in_array(25, $codes, true);
+                return $onlyVanished ? Notify::IMPORTANCE_NORMAL : Notify::IMPORTANCE_WARNING;
             default:
                 return Notify::IMPORTANCE_NORMAL;
         }
     }
 
     /**
-     * Compose the notification description: job name, state, rsync exit code, and
-     * (when readily available from the just-written summary) the run duration.
-     * Kept concise - one line.
+     * The notification body: the lead sentence, then state, reason, exit code
+     * with its meaning, duration, trigger and the dry-run flag. One line.
      *
      * @param array<string,mixed> $job
+     * @param array<string,mixed> $run
      */
-    public static function notifyDescription(array $job, string $state, int $exitCode, bool $dryRun = false): string
+    public static function notifyDescription(array $job, array $run): string
     {
-        $jobName = (string) ($job['name'] ?? ($job['id'] ?? 'job'));
-        $parts   = [
-            sprintf(
-                '%sJob "%s" finished with state %s (rsync exit code %d).',
-                $dryRun ? '[Dry-run] ' : '',
-                $jobName,
-                $state,
-                $exitCode
-            ),
-        ];
+        $jobName  = (string) ($job['name'] ?? ($job['id'] ?? 'job'));
+        $reason   = (string) ($run['reason'] ?? '');
+        $dryRun   = !empty($run['dryRun']);
+        $duration = $run['durationSec'] ?? null;
 
-        $duration = self::notifyDuration($job);
-        if ($duration !== null) {
-            $parts[] = 'Duration: ' . self::formatDuration($duration) . '.';
+        $parts = [
+            ($dryRun ? '[Dry-run] ' : '') . (string) ($run['message'] ?? sprintf('Job "%s" finished.', $jobName)),
+            'State: ' . (string) ($run['state'] ?? '') . '.',
+        ];
+        if ($reason !== '') {
+            $parts[] = 'Reason: ' . $reason . '.';
         }
+        $parts[] = 'Exit code: ' . self::exitCodeText($run) . '.';
+        $parts[] = 'Duration: ' . ($duration === null ? 'unknown' : self::formatDuration((int) $duration)) . '.';
+        $parts[] = 'Trigger: ' . ((($run['trigger'] ?? '') === 'schedule') ? 'schedule' : 'manual') . '.';
+        $parts[] = 'Dry-run: ' . ($dryRun ? 'yes' : 'no') . '.';
 
         return implode(' ', $parts);
     }
 
     /**
-     * Best-effort read of this run's duration (seconds) from the /boot summary
-     * that run()'s finally wrote just before calling notifyHook. Returns null
-     * when no usable summary is available - duration is purely advisory.
+     * "25 = <meaning>", or one entry per pair when the pairs disagree. The
+     * meaning is only attached when rsync produced the code: a run that failed
+     * before any pair carries a placeholder 1 (or the pre-hook's own code),
+     * which rsync's table would mislabel.
      *
-     * @param array<string,mixed> $job
+     * @param array<string,mixed> $run
      */
-    private static function notifyDuration(array $job): ?int
+    private static function exitCodeText(array $run): string
     {
-        $jobId = (string) ($job['id'] ?? '');
-        if ($jobId === '') {
-            return null;
+        $exitCode = (int) ($run['exitCode'] ?? 0);
+        $codes    = array_map('intval', (array) ($run['exitCodes'] ?? []));
+        if (strncmp((string) ($run['reason'] ?? ''), 'prehook-', 8) === 0) {
+            return $exitCode . ' (pre-run hook)';
         }
-        $summary = self::readSummary($jobId);
-        if ($summary === null || !array_key_exists('durationSec', $summary)) {
-            return null;
+        if ($codes === []) {
+            return (string) $exitCode;
         }
-        return (int) $summary['durationSec'];
+        $explain = static fn(int $c): string => isset(Rsync::EXIT_MEANINGS[$c]) ? $c . ' = ' . Rsync::EXIT_MEANINGS[$c] : (string) $c;
+        if (count(array_unique($codes)) === 1 && $codes[0] === $exitCode) {
+            return $explain($exitCode);
+        }
+        $perPair = [];
+        foreach ($codes as $i => $c) {
+            $perPair[] = 'pair #' . ($i + 1) . ' ' . $explain($c);
+        }
+        return $explain($exitCode) . ' (' . implode('; ', $perPair) . ')';
     }
 
     /** Render a duration in seconds as a compact "Hh Mm Ss" / "Mm Ss" / "Ss" string. */
@@ -1556,25 +1566,134 @@ class Runner
     }
 
     /**
-     * A hard, pre-run failure: nothing was started (no state/log to keep), so we
-     * just log to the plugin log (best effort) and return a FAILED result. Used
-     * for "job not found", "config unreadable", and "already running" (the
-     * latter gets its own reason so the handler can 409).
+     * A hard, pre-run failure: nothing was started (no state/log to keep). Logs
+     * to the plugin log, records a scheduled run in History (so the UI shows
+     * the run that never happened), notifies, and returns a FAILED result.
+     * 'already-running' keeps its own reason so the handler can 409; started by
+     * hand it does not notify (the UI already said so), by the schedule it is a
+     * warning. A job that could not be read has no notifyMode to honour, so it
+     * always notifies - that is the case most worth hearing about.
      *
+     * @param array<string,mixed>|null $job null = config/job unreadable
      * @return array{state:string,exitCode:int,runLog:string,reason:string}
      */
-    private static function hardFail(string $jobId, string $message, string $reason = 'error'): array
-    {
+    private static function hardFail(
+        string $jobId,
+        string $message,
+        string $reason,
+        string $trigger,
+        bool $dryRun,
+        ?array $job = null,
+        int $retention = Config::DEFAULT_RETENTION
+    ): array {
+        $skipped  = $reason === 'already-running';
+        $exitCode = $skipped ? 0 : 1;
+        $name     = (string) ($job['name'] ?? $jobId);
         try {
             Logger::event('', $jobId, 'Run could not start: ' . $message);
         } catch (Throwable $e) {
             // ignore - logging is best-effort on the hard-fail path.
         }
+
+        if ($trigger === 'schedule') {
+            $now = gmdate('Y-m-d\TH:i:s\Z');
+            History::append($jobId, [
+                'startedAt'   => $now,
+                'finishedAt'  => $now,
+                'jobName'     => $name,
+                'dryRun'      => $dryRun,
+                'trigger'     => $trigger,
+                'state'       => Rsync::STATE_FAILED,
+                'exitCode'    => $exitCode,
+                'durationSec' => 0,
+                'logRef'      => '',
+                'reason'      => $reason,
+            ]);
+            History::prune($jobId, $retention);
+        }
+
+        if (!($skipped && $trigger === 'manual')) {
+            self::notifyHook($job ?? ['id' => $jobId, 'name' => $jobId, 'notifyMode' => self::NOTIFY_ALWAYS], [
+                'state'       => Rsync::STATE_FAILED,
+                'exitCode'    => $exitCode,
+                'reason'      => $reason,
+                'trigger'     => $trigger,
+                'dryRun'      => $dryRun,
+                'durationSec' => 0,
+                'subject'     => $name . ': run did not start',
+                'message'     => $skipped
+                    ? sprintf('Job "%s": previous run still running, scheduled run skipped.', $name)
+                    : sprintf('Job "%s": run did not start. %s', $name, $message),
+            ]);
+        }
+
         return [
             'state'    => Rsync::STATE_FAILED,
-            'exitCode' => $reason === 'already-running' ? 0 : 1,
+            'exitCode' => $exitCode,
             'runLog'   => '',
             'reason'   => $reason,
         ];
+    }
+
+    /**
+     * A runner died without finishing (RunState found running=true with no
+     * live runner behind it). Its finally never ran: no summary, no history,
+     * no post-hook, no notification. Record and alert it here; RunState
+     * guarantees this is called once per stale state. Never throws.
+     *
+     * @param array<string,mixed> $state the dead run's RunState record
+     */
+    public static function reportCrashed(array $state): void
+    {
+        try {
+            $jobId  = (string) ($state['jobId'] ?? '');
+            $config = null;
+            $job    = null;
+            try {
+                $config = Config::load();
+                $job    = self::findJob($config, $jobId);
+            } catch (Throwable $e) {
+                // Unreadable config: still record and alert, by id.
+            }
+            $name    = (string) ($job['name'] ?? $jobId);
+            $trigger = (($state['trigger'] ?? '') === 'schedule') ? 'schedule' : 'manual';
+            $dryRun  = !empty($state['dryRun']);
+            $started = strtotime((string) ($state['startedAt'] ?? ''));
+            $message = sprintf(
+                'Job "%s": previous run died without finishing (pid %d, started %s). '
+                . 'The post-hook did not run, services stopped by the pre-hook may still be down.',
+                $name,
+                (int) ($state['pid'] ?? 0),
+                $started === false ? 'unknown' : date('Y-m-d H:i:sP', $started)
+            );
+            Logger::event('', $jobId, $message);
+
+            History::append($jobId, [
+                'startedAt'   => (string) ($state['startedAt'] ?? ''),
+                'finishedAt'  => gmdate('Y-m-d\TH:i:s\Z'),
+                'jobName'     => $name,
+                'dryRun'      => $dryRun,
+                'trigger'     => $trigger,
+                'state'       => Rsync::STATE_FAILED,
+                'exitCode'    => 1,
+                'durationSec' => 0,
+                'logRef'      => Logger::runIdFromPath((string) ($state['currentLog'] ?? '')),
+                'reason'      => 'crashed',
+            ]);
+            History::prune($jobId, Config::clampRetention($config['global']['retention'] ?? Config::DEFAULT_RETENTION));
+
+            self::notifyHook($job ?? ['id' => $jobId, 'name' => $jobId, 'notifyMode' => self::NOTIFY_ALWAYS], [
+                'state'       => Rsync::STATE_FAILED,
+                'exitCode'    => 1,
+                'reason'      => 'crashed',
+                'trigger'     => $trigger,
+                'dryRun'      => $dryRun,
+                'durationSec' => null,
+                'subject'     => $name . ': previous run died without finishing',
+                'message'     => $message,
+            ]);
+        } catch (Throwable $e) {
+            // Best-effort: reached from status polls, never let it break one.
+        }
     }
 }
