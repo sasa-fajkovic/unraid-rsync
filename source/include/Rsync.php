@@ -415,6 +415,7 @@ class Rsync
      * Order:
      *   <rsyncPath()>                              (the resolved binary, default /usr/bin/rsync)
      *   <whitelisted option tokens>
+     *   <extra tokens>                             (code-computed, extraTokens())
      *   <log-level verbosity flags>
      *   --log-file=<runLog>
      *   [--dry-run]                                (when $dryRun)
@@ -449,6 +450,7 @@ class Rsync
      *        passwordFile ('' for an anonymous module) and sshEnv=[]. `daemon`
      *        and `dashE` are MUTUALLY EXCLUSIVE by construction below.
      * @param bool                $dryRun
+     * @param array<int,string>   $extraTokens code-computed tokens, see extraTokens()
      * @return array<int,string>
      */
     public static function buildArgv(
@@ -458,7 +460,8 @@ class Rsync
         string $src,
         string $dest,
         ?array $ssh = null,
-        bool $dryRun = false
+        bool $dryRun = false,
+        array $extraTokens = []
     ): array {
         $dashE = '';
         if (is_array($ssh) && isset($ssh['dashE']) && is_string($ssh['dashE'])) {
@@ -490,6 +493,9 @@ class Rsync
         $argv[] = self::rsyncPath();
 
         foreach (self::optionTokens($opts, $optionTransport) as $tok) {
+            $argv[] = $tok;
+        }
+        foreach (self::extraTokens($extraTokens) as $tok) {
             $argv[] = $tok;
         }
         // A DRY RUN is never quieter than `normal`. The quiet levels suppress
@@ -549,6 +555,44 @@ class Rsync
         $argv[] = $dest;
 
         return $argv;
+    }
+
+    const MAX_LINK_DEST = 20;
+
+    /**
+     * Validate code-computed tokens for buildArgv(). This is NOT a user option
+     * path: the whitelist stays closed, so anything but --link-dest=<abs path>
+     * (at most MAX_LINK_DEST, rsync's own limit) and one --info=stats2 throws.
+     *
+     * @param array<mixed> $tokens
+     * @return array<int,string>
+     * @throws InvalidArgumentException
+     */
+    public static function extraTokens(array $tokens): array
+    {
+        $linkDests = 0;
+        $stats2 = false;
+        foreach ($tokens as $tok) {
+            if ($tok === '--info=stats2' && !$stats2) {
+                $stats2 = true;
+                continue;
+            }
+            if (!is_string($tok) || !str_starts_with($tok, '--link-dest=')) {
+                throw new InvalidArgumentException('extra rsync token not allowed: ' . var_export($tok, true));
+            }
+            $path = substr($tok, strlen('--link-dest='));
+            if (
+                !str_starts_with($path, '/')
+                || preg_match('/[\x00-\x1f\x7f]/', $path)
+                || in_array('..', explode('/', $path), true)
+            ) {
+                throw new InvalidArgumentException('--link-dest needs an absolute path without control characters or "..": ' . var_export($path, true));
+            }
+            if (++$linkDests > self::MAX_LINK_DEST) {
+                throw new InvalidArgumentException('at most ' . self::MAX_LINK_DEST . ' --link-dest tokens');
+            }
+        }
+        return array_values($tokens);
     }
 
     /**
