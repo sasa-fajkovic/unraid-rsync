@@ -2271,6 +2271,21 @@ final class RunnerTest extends TestCase
         $this->assertSame('posthook-timeout', $res['reason'] ?? '');
     }
 
+    public function testPostHookTimeoutKeepsThePrimaryReason(): void
+    {
+        Runner::$hookRunner = function (string $hook, array $env, $onOutput, int $timeoutSec = -9): int {
+            $this->trace[] = 'hook:' . $hook;
+            return $hook === 'PRE' ? 1 : Runner::HOOK_TIMED_OUT;
+        };
+        $this->fakeRsync();
+        $id  = $this->saveLocalJob('j-pre', ['preHook' => 'PRE', 'postHook' => 'POST']);
+        $res = Runner::run($id, false);
+
+        $this->assertSame(Rsync::STATE_FAILED, $res['state']);
+        $this->assertSame('prehook-failed', $res['reason'] ?? '');
+        $this->assertSame(['hook:PRE', 'hook:POST'], $this->trace);
+    }
+
     public function testRunHookProcessKillsAHookPastItsDeadline(): void
     {
         $out = '';

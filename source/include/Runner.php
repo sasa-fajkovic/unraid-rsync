@@ -512,7 +512,7 @@ class Runner
                 if ($postExit === self::HOOK_TIMED_OUT) {
                     // Keeps the primary outcome, like a failed post-hook.
                     Logger::event($runLog, $jobId, "Post-run hook timed out after $postMin minute(s) and was killed.");
-                    $reason = 'posthook-timeout';
+                    $reason = $reason !== '' ? $reason : 'posthook-timeout';
                     if ($state === Rsync::STATE_SUCCESS) {
                         $state = Rsync::STATE_WARNING;
                     }
