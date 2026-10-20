@@ -32,6 +32,8 @@ $defaultOpts = $config['global']['defaultRsyncOptions'] ?? Config::defaultRsyncO
 $retention   = Config::clampRetention($config['global']['retention'] ?? Config::DEFAULT_RETENTION);
 $logDir      = Config::sanitizeLogDir($config['global']['logDir'] ?? '');
 $secretsDir  = Config::sanitizeSecretsDir($config['global']['secretsDir'] ?? '');
+$preHookMin  = Config::hookTimeoutMinutes($config['global'], 'preHookTimeout');
+$postHookMin = Config::hookTimeoutMinutes($config['global'], 'postHookTimeout');
 $handlerUrl  = '/plugins/unraid.rsync/include/handler.php';
 
 /* Emit the option help CSS/JS once, in LIVE page-body context, before the form
@@ -88,6 +90,26 @@ ur_emit_form_enable_assets();
              value="<?=htmlspecialchars((string)$retention, ENT_QUOTES, 'UTF-8')?>">
       <blockquote class="inline_help ur-help-text">
         <?=_('How many past executions to keep per job — bounds both the run logs and the persistent run history shown on the History tab. Oldest executions beyond this are pruned. 1–9999 (default 100).')?>
+      </blockquote>
+    </dd>
+
+    <dt class="ur-dt"><label for="ur_global_prehook_timeout"><?=_('Pre-run hook timeout (minutes)')?></label></dt>
+    <dd>
+      <input type="number" id="ur_global_prehook_timeout" name="global[preHookTimeout]"
+             min="0" max="<?=Config::MAX_HOOK_TIMEOUT?>" step="1" inputmode="numeric"
+             value="<?=htmlspecialchars((string)$preHookMin, ENT_QUOTES, 'UTF-8')?>">
+      <blockquote class="inline_help ur-help-text">
+        <?=_('A pre-run hook still running after this long is stopped (SIGTERM, then SIGKILL 10 seconds later) and the run fails before anything is copied, so a hung command cannot hold the job forever. 0 = no limit (default 30).')?>
+      </blockquote>
+    </dd>
+
+    <dt class="ur-dt"><label for="ur_global_posthook_timeout"><?=_('Post-run hook timeout (minutes)')?></label></dt>
+    <dd>
+      <input type="number" id="ur_global_posthook_timeout" name="global[postHookTimeout]"
+             min="0" max="<?=Config::MAX_HOOK_TIMEOUT?>" step="1" inputmode="numeric"
+             value="<?=htmlspecialchars((string)$postHookMin, ENT_QUOTES, 'UTF-8')?>">
+      <blockquote class="inline_help ur-help-text">
+        <?=_('A post-run hook still running after this long is stopped the same way; the run keeps its result, and a successful run is reported as a warning. 0 = no limit (default 60).')?>
       </blockquote>
     </dd>
 

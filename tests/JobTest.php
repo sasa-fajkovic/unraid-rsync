@@ -1645,4 +1645,173 @@ final class JobTest extends TestCase
         $this->assertStringEndsWith(Job::DAEMON_MODULE_HINT, Job::daemonModuleNote('/rsync_bkp'));
         $this->assertStringEndsWith(Job::DAEMON_MODULE_HINT, Job::checkRemotePath('rsync_bkp', 'x')[0]);
     }
+
+    // --- guardrails and transport hardening -------------------------------
+
+    /** An SSH PUSH --delete job to $remote, with a max-delete cap so no warning is in the way. */
+    private function sshDeleteJob(string $remote, array $overrides = []): array
+    {
+        return Job::normalize(array_merge([
+            'id'           => 'j-mirror',
+            'name'         => 'mirror',
+            'schedule'     => '0 3 * * *',
+            'transport'    => 'SSH',
+            'connectionId' => 'c-1',
+            'pairs'        => [['local' => '/mnt/user/appdata/', 'remote' => $remote]],
+            'rsyncOptions' => ['delete' => true, 'maxDelete' => '100'],
+        ], $overrides));
+    }
+
+    /** @return array<string,array{0:string,1:bool}> */
+    public static function deleteDepthProvider(): array
+    {
+        return [
+            'disk root'                 => ['/mnt/disk', false],
+            'disk root, trailing slash' => ['/mnt/disk/', false],
+            'one segment'               => ['/srv', false],
+            'root'                      => ['/', false],
+            'dotdot back to one'        => ['/srv/backup/..', false],
+            'disk sub-dir'              => ['/mnt/disk/appdata/', true],
+            'two segments'              => ['/srv/backup', true],
+        ];
+    }
+
+    #[DataProvider('deleteDepthProvider')]
+    public function testSshDeleteDestinationMustBeTwoSegmentsDeep(string $remote, bool $ok): void
+    {
+        $res = Job::validate($this->sshDeleteJob($remote));
+        $this->assertSame($ok, $res['valid'], implode(' | ', $res['errors']));
+
+        // Save time and run time agree.
+        $runtime = Runner::guardrailErrors(
+            ['direction' => 'PUSH'],
+            ['local' => '/mnt/user/appdata/', 'remote' => $remote],
+            'SSH',
+            Config::mergeRsyncOptions(['delete' => true])
+        );
+        $this->assertSame($ok, $runtime === [], implode(' | ', $runtime));
+    }
+
+    public function testDepthRuleLeavesNonDeleteAndDaemonJobsAlone(): void
+    {
+        $noDelete = $this->sshDeleteJob('/srv', ['rsyncOptions' => []]);
+        $this->assertSame([], Job::validate($noDelete)['errors']);
+        // The DAEMON rule is unchanged: a bare module root is still a legal target.
+        $this->assertSame('', Job::deleteDestError('DAEMON', true, 'rsync_bkp'));
+    }
+
+    public function testValidateUsesTheEffectiveOptionsWhenGlobalsAreSupplied(): void
+    {
+        // Own options: --delete with no cap (would warn). On "use global" with
+        // safe globals, that warning was a false alarm.
+        $job = $this->sshDeleteJob('/srv/backup', [
+            'useGlobalDefaults' => true,
+            'rsyncOptions'      => ['delete' => true],
+        ]);
+        $this->assertNotEmpty(Job::validate($job)['warnings']);
+        $this->assertSame([], Job::validate($job, null, ['defaultRsyncOptions' => Config::defaultRsyncOptions()])['warnings']);
+
+        // ...and a real problem in the globals is now caught on the job.
+        $global = ['defaultRsyncOptions' => Config::mergeRsyncOptions(['tempDir' => '/'])];
+        $this->assertFalse(Job::validate($job, null, $global)['valid']);
+        $global = ['defaultRsyncOptions' => Config::mergeRsyncOptions(['delete' => true])];
+        $this->assertNotEmpty(Job::validate($job, null, $global)['warnings'], 'no max-delete cap in the globals');
+
+        // A job with its own options ignores the globals.
+        $own = $this->sshDeleteJob('/srv/backup');
+        $this->assertTrue(Job::validate($own, null, ['defaultRsyncOptions' => Config::mergeRsyncOptions(['tempDir' => '/'])])['valid']);
+    }
+
+    public function testTempDirAndBackupDirRejectDotDotSegmentsOnEveryReceiver(): void
+    {
+        foreach (['SSH' => 'PUSH', 'LOCAL' => 'PUSH', 'DAEMON' => 'PUSH'] as $transport => $direction) {
+            foreach (['tempDir', 'backupDir'] as $key) {
+                $errors = Job::optionErrors([$key => '../../../../'], $transport, $direction);
+                $this->assertNotEmpty($errors, "$transport $key");
+                $this->assertStringContainsString('".."', $errors[0]);
+            }
+        }
+        // ".." that lexically resolves to an allowed path is still refused.
+        $this->assertNotEmpty(Job::optionErrors(['backupDir' => '/srv/backup/../old'], 'SSH', 'PUSH'));
+        $this->assertNotEmpty(Job::optionErrors(['tempDir' => '/'], 'SSH', 'PUSH'));
+        $this->assertSame([], Job::optionErrors(['tempDir' => '/srv/tmp', 'backupDir' => '/srv/old'], 'SSH', 'PUSH'));
+    }
+
+    public function testGlobalTempDirAndBackupDirAreChecked(): void
+    {
+        $this->assertNotEmpty(Job::globalOptionPathErrors(['tempDir' => '/']));
+        $this->assertNotEmpty(Job::globalOptionPathErrors(['backupDir' => '../../../../']));
+        $this->assertNotEmpty(Job::globalOptionPathErrors(['backupDir' => "/srv/x\ny"]));
+        // Transport-specific shapes stay legal: relative is right for a daemon receiver.
+        $this->assertSame([], Job::globalOptionPathErrors(['tempDir' => '/srv/tmp', 'backupDir' => 'old']));
+    }
+
+    /** @return array<string,array{0:string,1:bool}> */
+    public static function ancestryProvider(): array
+    {
+        return [
+            'equal'          => ['/srv/backup/a', false],
+            'equal, slashes' => ['/srv/backup/a/', false],
+            'parent'         => ['/srv/backup', false],
+            'child'          => ['/srv/backup/a/photos', false],
+            'sibling'        => ['/srv/backup/b', true],
+            'prefix only'    => ['/srv/backup/ab', true],
+        ];
+    }
+
+    #[DataProvider('ancestryProvider')]
+    public function testDeleteDestinationMustNotOverlapAnotherJobsDestination(string $mine, bool $ok): void
+    {
+        $other = $this->sshDeleteJob('/srv/backup/a', ['id' => 'j-other', 'name' => 'other', 'rsyncOptions' => []]);
+        $job   = $this->sshDeleteJob($mine);
+        $errors = Job::ancestryErrors($job, $job['rsyncOptions'], Job::protectedTargets([$job, $other], 'j-mirror'));
+        $this->assertSame($ok, $errors === [], implode(' | ', $errors));
+        if (!$ok) {
+            $this->assertStringContainsString('job "other"', $errors[0]);
+        }
+    }
+
+    public function testAncestryOnlyAppliesToDeleteJobsOnTheSameConnection(): void
+    {
+        $other = $this->sshDeleteJob('/srv/backup/a', ['id' => 'j-other', 'name' => 'other']);
+
+        $elsewhere = $this->sshDeleteJob('/srv/backup', ['connectionId' => 'c-2']);
+        $this->assertSame([], Job::ancestryErrors($elsewhere, $elsewhere['rsyncOptions'], Job::protectedTargets([$other], 'j-mirror')));
+
+        $noDelete = $this->sshDeleteJob('/srv/backup', ['rsyncOptions' => []]);
+        $this->assertSame([], Job::ancestryErrors($noDelete, $noDelete['rsyncOptions'], Job::protectedTargets([$other], 'j-mirror')));
+
+        // A job never collides with itself.
+        $self = $this->sshDeleteJob('/srv/backup/a');
+        $this->assertSame([], Job::ancestryErrors($self, $self['rsyncOptions'], Job::protectedTargets([$self], 'j-mirror')));
+
+        // A pull writes to this box: its destination is the local side.
+        $pull = Job::destinations(['transport' => 'SSH', 'direction' => 'PULL', 'connectionId' => 'c-1',
+            'pairs' => [['local' => '/mnt/user/x', 'remote' => '/srv/x']]]);
+        $this->assertSame(['scope' => 'local', 'paths' => [0 => '/mnt/user/x']], $pull);
+    }
+
+    public function testTargetMarkerFieldsAreOptionalAndValidated(): void
+    {
+        $plain = $this->sshDeleteJob('/srv/backup');
+        $this->assertArrayNotHasKey('targetMarker', $plain);
+        $this->assertArrayNotHasKey('targetMarkerContent', $plain);
+
+        $job = $this->sshDeleteJob('/srv/backup', [
+            'targetMarker'        => ' /srv/.unraid-rsync-target ',
+            'targetMarkerContent' => '3f2b1c9e-0000-4000-8000-000000000000',
+        ]);
+        $this->assertSame('/srv/.unraid-rsync-target', $job['targetMarker']);
+        $this->assertTrue(Job::validate($job)['valid'], implode(' | ', Job::validate($job)['errors']));
+
+        foreach (['relative/marker', '/srv/dir/', '/srv/../etc/passwd'] as $bad) {
+            $this->assertFalse(Job::validate($this->sshDeleteJob('/srv/backup', ['targetMarker' => $bad]))['valid'], $bad);
+        }
+        $this->assertFalse(Job::validate($this->sshDeleteJob('/srv/backup', ['targetMarkerContent' => 'x']))['valid']);
+
+        // A pull's marker is on this box, so it must clear the local /mnt rule.
+        $pull = $this->sshDeleteJob('/srv/backup', ['direction' => 'PULL', 'pairs' => [['local' => '/mnt/disks/usb/backup', 'remote' => '/srv/a']]]);
+        $this->assertTrue(Job::validate(array_merge($pull, ['targetMarker' => '/mnt/disks/usb/.unraid-rsync-target']))['valid']);
+        $this->assertFalse(Job::validate(array_merge($pull, ['targetMarker' => '/srv/.unraid-rsync-target']))['valid']);
+    }
 }

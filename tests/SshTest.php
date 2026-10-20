@@ -1222,12 +1222,15 @@ final class SshTest extends TestCase
                 '-o', 'UserKnownHostsFile=' . $kh,
                 '-o', 'GlobalKnownHostsFile=/dev/null',
                 '-o', 'ConnectTimeout=10',
+                '-o', 'ServerAliveInterval=30',
+                '-o', 'ServerAliveCountMax=6',
                 '-p', '22',
             ],
             'sshEnv'     => [],
             'dashE'      => "'ssh' '-i' '$kp' '-o' 'IdentitiesOnly=yes' '-o' 'BatchMode=yes'"
                 . " '-o' 'StrictHostKeyChecking=accept-new' '-o' 'UserKnownHostsFile=$kh'"
-                . " '-o' 'GlobalKnownHostsFile=/dev/null' '-o' 'ConnectTimeout=10' '-p' '22'",
+                . " '-o' 'GlobalKnownHostsFile=/dev/null' '-o' 'ConnectTimeout=10'"
+                . " '-o' 'ServerAliveInterval=30' '-o' 'ServerAliveCountMax=6' '-p' '22'",
             'keyPath'    => $kp,
             'passFile'   => '',
             'knownHosts' => $kh,
@@ -1265,12 +1268,15 @@ final class SshTest extends TestCase
                 '-o', 'UserKnownHostsFile=' . $kh,
                 '-o', 'GlobalKnownHostsFile=/dev/null',
                 '-o', 'ConnectTimeout=10',
+                '-o', 'ServerAliveInterval=30',
+                '-o', 'ServerAliveCountMax=6',
                 '-p', '22',
             ],
             'sshEnv'     => [],
             'dashE'      => "'ssh' '-i' '$keyFile' '-o' 'IdentitiesOnly=yes' '-o' 'BatchMode=yes'"
                 . " '-o' 'StrictHostKeyChecking=accept-new' '-o' 'UserKnownHostsFile=$kh'"
-                . " '-o' 'GlobalKnownHostsFile=/dev/null' '-o' 'ConnectTimeout=10' '-p' '22'",
+                . " '-o' 'GlobalKnownHostsFile=/dev/null' '-o' 'ConnectTimeout=10'"
+                . " '-o' 'ServerAliveInterval=30' '-o' 'ServerAliveCountMax=6' '-p' '22'",
             'keyPath'    => $keyFile,
             'passFile'   => '',
             'knownHosts' => $kh,
@@ -1311,6 +1317,8 @@ final class SshTest extends TestCase
                 '-o', 'UserKnownHostsFile=' . $kh,
                 '-o', 'GlobalKnownHostsFile=/dev/null',
                 '-o', 'ConnectTimeout=10',
+                '-o', 'ServerAliveInterval=30',
+                '-o', 'ServerAliveCountMax=6',
                 '-p', '22',
             ],
             'sshEnv' => [
@@ -1322,12 +1330,47 @@ final class SshTest extends TestCase
             'dashE'      => "'ssh' '-o' 'PubkeyAuthentication=no' '-o' 'PreferredAuthentications=password'"
                 . " '-o' 'NumberOfPasswordPrompts=1' '-o' 'StrictHostKeyChecking=accept-new'"
                 . " '-o' 'UserKnownHostsFile=$kh' '-o' 'GlobalKnownHostsFile=/dev/null'"
-                . " '-o' 'ConnectTimeout=10' '-p' '22'",
+                . " '-o' 'ConnectTimeout=10'"
+                . " '-o' 'ServerAliveInterval=30' '-o' 'ServerAliveCountMax=6' '-p' '22'",
             'keyPath'    => '',
             'passFile'   => $pf,
             'knownHosts' => $kh,
         ], $mat);
 
         Ssh::cleanupRuntime($token);
+    }
+
+    public function testChildEnvStripsTheRsyncArgSplittingVariables(): void
+    {
+        putenv('RSYNC_OLD_ARGS=1');
+        putenv('RSYNC_PROTECT_ARGS=0');
+        try {
+            foreach ([[], ['UR_ASKPASS_FILE' => '/x']] as $extra) {
+                $env = Ssh::childEnv($extra);
+                $this->assertIsArray($env);
+                $this->assertArrayNotHasKey('RSYNC_OLD_ARGS', $env);
+                $this->assertArrayNotHasKey('RSYNC_PROTECT_ARGS', $env);
+                $this->assertArrayHasKey('PATH', $env, 'everything else is still inherited');
+                foreach ($extra as $k => $v) {
+                    $this->assertSame($v, $env[$k]);
+                }
+            }
+        } finally {
+            putenv('RSYNC_OLD_ARGS');
+            putenv('RSYNC_PROTECT_ARGS');
+        }
+        $this->assertNull(Ssh::childEnv([]), 'nothing to add or strip: plain inheritance');
+    }
+
+    public function testEverySshArgvCarriesTheKeepAliveOptions(): void
+    {
+        foreach ([[$this->keyConn(), '/k'], [$this->passConn(), '']] as [$conn, $key]) {
+            $argv = Ssh::buildSshArgv($conn, $key, '/kh');
+            $i = array_search('ServerAliveInterval=30', $argv, true);
+            $this->assertNotFalse($i);
+            $this->assertSame('-o', $argv[$i - 1]);
+            $this->assertSame('ServerAliveCountMax=6', $argv[$i + 2]);
+            $this->assertSame('-p', $argv[$i + 3], 'right after ConnectTimeout, before the port');
+        }
     }
 }

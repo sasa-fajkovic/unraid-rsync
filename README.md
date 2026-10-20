@@ -264,7 +264,8 @@ Key auth is still the recommended method.
 - **Pre/post hooks run as `root`** (via `bash -c`) before/after the transfer,
   and their stdout/stderr is **captured into the per-run log, which is rendered
   in the browser**. Do **not** echo secrets in a hook — they would land in a
-  root-written, browser-visible log.
+  root-written, browser-visible log. A hook still running after its timeout
+  (Global Settings: 30 / 60 minutes by default, `0` = no limit) is killed.
 
 ### rsync binary
 

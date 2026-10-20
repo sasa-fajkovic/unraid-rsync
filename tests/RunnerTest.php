@@ -1973,4 +1973,407 @@ final class RunnerTest extends TestCase
             '/mnt/disk1/dst/',
         ], $seenArgv);
     }
+
+    // =====================================================================
+    // Pre-flight (guardrails, target marker, --delete probe), hook deadlines
+    // and abortable scheduled runs.
+    // =====================================================================
+
+    /** @var array<int,array<int,string>> argv of every fake rsync call, in order */
+    private array $argvs = [];
+
+    /**
+     * Fake rsync that tells the three kinds of call apart: the marker fetch
+     * (--max-size=4K, writes $marker to the destination file, or "not found"
+     * when null), the --delete probe (--list-only, emits $listing) and the
+     * transfer.
+     */
+    private function fakeRsync(?string $marker = null, string $listing = '', int $listExit = 0): void
+    {
+        $this->argvs = [];
+        Rsync::$runner = function (array $argv, $onOutput) use ($marker, $listing, $listExit): int {
+            $this->argvs[] = $argv;
+            if (in_array('--max-size=4K', $argv, true)) {
+                $this->trace[] = 'marker';
+                if ($marker === null) {
+                    $onOutput("rsync: link_stat \"/x\" failed: No such file or directory (2)\n");
+                    return 23;
+                }
+                file_put_contents((string) end($argv), $marker);
+                return 0;
+            }
+            if (in_array('--list-only', $argv, true)) {
+                $this->trace[] = 'probe';
+                $onOutput($listing);
+                return $listExit;
+            }
+            $this->trace[] = 'rsync';
+            return 0;
+        };
+    }
+
+    /** Seed a KEY-auth SSH connection + job; returns the temp runtime base (caller cleans up). */
+    private function seedSshJob(string $jobId, array $jobOverrides = []): string
+    {
+        $rt = sys_get_temp_dir() . '/ur-runner-pre-' . getmypid() . '-' . bin2hex(random_bytes(4));
+        Ssh::$runtimeBase = $rt;
+        $creds = Credentials::defaults();
+        $creds['keys'][] = [
+            'id' => 'k-1', 'name' => 'k1', 'privateKey' => "KEY\n",
+            'publicKey' => 'ssh-ed25519 AAAA fake', 'fingerprint' => 'SHA256:fake',
+        ];
+        $creds['connections'][] = Credentials::mergeConnection([
+            'id' => 'c-key', 'name' => 'ckey', 'host' => 'h.example', 'username' => 'root',
+            'authMethod' => 'KEY', 'keyId' => 'k-1', 'remoteHostKey' => 'h.example ssh-ed25519 AAAAhostkey',
+        ]);
+        Credentials::save($creds);
+
+        $config = Config::load();
+        $job = Config::defaultJob();
+        $job['id']           = $jobId;
+        $job['name']         = $jobId;
+        $job['connectionId'] = 'c-key';
+        $job['pairs']        = [['local' => '/mnt/user/src/', 'remote' => '/srv/backup/a']];
+        $job['rsyncOptions'] = Config::mergeRsyncOptions(['delete' => true, 'maxDelete' => '50', 'remoteRsyncPath' => '/usr/bin/rsync']);
+        $config['jobs'][]    = array_merge($job, $jobOverrides);
+        Config::save($config);
+        RunState::clear($jobId);
+        RunState::clearAbort($jobId);
+        return $rt;
+    }
+
+    private function runInTempRuntime(string $rt, string $jobId): array
+    {
+        $orig = Ssh::$runtimeBase;
+        Ssh::$runtimeBase = $rt;
+        try {
+            $res = Runner::run($jobId, false);
+            $res['leftoverMarkers'] = glob($rt . '/markers/*') ?: [];
+            return $res;
+        } finally {
+            Ssh::$runtimeBase = $orig === $rt ? '/tmp/unraid.rsync' : $orig;
+            Credentials::save(Credentials::defaults());
+            $this->rmTree($rt);
+        }
+    }
+
+    private function newRuntime(): string
+    {
+        return sys_get_temp_dir() . '/ur-runner-pre-' . getmypid() . '-' . bin2hex(random_bytes(4));
+    }
+
+    public function testPreflightRunsMarkerThenProbeBeforeThePreHook(): void
+    {
+        $this->fakeRsync("uuid-1\n", "drwxr-xr-x          4,096 2026/10/20 12:00:00 .\n-rw-r--r--             12 2026/10/20 12:00:00 notes.txt\n");
+        $rt = $this->seedSshJob('j-order', [
+            'preHook' => 'PRE', 'postHook' => 'POST',
+            'targetMarker' => '/srv/.unraid-rsync-target', 'targetMarkerContent' => 'uuid-1',
+        ]);
+        $res = $this->runInTempRuntime($rt, 'j-order');
+
+        $this->assertSame(Rsync::STATE_SUCCESS, $res['state'], (string) @file_get_contents($res['runLog']));
+        $this->assertSame(['marker', 'probe', 'hook:PRE:', 'rsync', 'hook:POST:SUCCESS'], $this->trace);
+        $this->assertSame([], $res['leftoverMarkers'], 'the fetched marker is removed');
+
+        [$marker, $probe] = $this->argvs;
+        $this->assertSame('root@h.example:/srv/.unraid-rsync-target', $marker[count($marker) - 2]);
+        // The probe uses the transfer's transport and --rsync-path, one level deep.
+        $this->assertContains('--list-only', $probe);
+        $this->assertContains('--rsync-path=/usr/bin/rsync', $probe);
+        $this->assertContains('-e', $probe);
+        $this->assertNotContains('-r', $probe);
+        $this->assertSame(['--', 'root@h.example:/srv/backup/a/'], array_slice($probe, -2));
+        $this->assertSame($probe[array_search('-e', $probe, true) + 1], $this->argvs[2][array_search('-e', $this->argvs[2], true) + 1]);
+    }
+
+    public function testAGuardrailOnALaterPairFailsBeforeThePreHookAndAnyCopy(): void
+    {
+        $this->fakeRsync();
+        $id = $this->saveLocalJob('j-guard', [
+            'preHook' => 'PRE', 'postHook' => 'POST',
+            'pairs'   => [
+                ['local' => '/mnt/user/a/', 'remote' => '/mnt/disk1/a/'],
+                ['local' => '/mnt/user/b/', 'remote' => '/mnt/disk1/b/'],
+                ['local' => '/mnt/user/c/', 'remote' => '/boot/c'],
+            ],
+        ]);
+        $res = Runner::run($id, false);
+
+        $this->assertSame(Rsync::STATE_FAILED, $res['state']);
+        $this->assertSame('guardrail', $res['reason'] ?? '');
+        $this->assertSame(['hook:POST:FAILED'], $this->trace, 'no pre-hook, no copy; the post-hook still runs');
+        $this->assertStringContainsString('Pair #3', (string) file_get_contents($res['runLog']));
+    }
+
+    /** @return array<string,array{0:array<string,string>}> */
+    public static function badGlobalReceiverDirProvider(): array
+    {
+        return [
+            'tempDir root'      => [['tempDir' => '/']],
+            'backupDir dotdots' => [['backupDir' => '../../../../']],
+        ];
+    }
+
+    #[DataProvider('badGlobalReceiverDirProvider')]
+    public function testTempDirAndBackupDirAreReCheckedAtRunTimeOnTheEffectiveOptions(array $globalOpts): void
+    {
+        $this->fakeRsync();
+        $config = Config::load();
+        $config['global']['defaultRsyncOptions'] = Config::mergeRsyncOptions($globalOpts);
+        Config::save($config);
+        $rt = $this->seedSshJob('j-recv', ['useGlobalDefaults' => true, 'preHook' => 'PRE', 'rsyncOptions' => Config::defaultRsyncOptions()]);
+        $res = $this->runInTempRuntime($rt, 'j-recv');
+
+        $this->assertSame('guardrail', $res['reason'] ?? '');
+        $this->assertSame([], $this->trace);
+    }
+
+    public function testAncestryIsReEnforcedAtRunTime(): void
+    {
+        $this->fakeRsync();
+        $this->saveLocalJob('j-inner', ['pairs' => [['local' => '/mnt/user/a/', 'remote' => '/mnt/disk1/dst/inner']]]);
+        $id = $this->saveLocalJob('j-outer', [
+            'rsyncOptions' => Config::mergeRsyncOptions(['delete' => true, 'maxDelete' => '5']),
+            'pairs'        => [['local' => '/mnt/user/b/', 'remote' => '/mnt/disk1/dst/']],
+        ]);
+        $res = Runner::run($id, false);
+
+        $this->assertSame('guardrail', $res['reason'] ?? '');
+        $this->assertSame([], $this->trace);
+        $this->assertStringContainsString('job "j-inner"', (string) file_get_contents($res['runLog']));
+    }
+
+    /** @return array<string,array{0:?string,1:string,2:bool}> */
+    public static function markerProvider(): array
+    {
+        return [
+            'missing'          => [null, '', false],
+            'wrong content'    => ["other\n", 'uuid-1', false],
+            'present, no want' => ["anything\n", '', true],
+            'matching content' => ["uuid-1\n", 'uuid-1', true],
+        ];
+    }
+
+    #[DataProvider('markerProvider')]
+    public function testTargetMarkerGatesTheRunBeforeThePreHook(?string $body, string $expected, bool $ok): void
+    {
+        $this->fakeRsync($body);
+        $rt = $this->newRuntime();
+        $overrides = ['preHook' => 'PRE', 'postHook' => 'POST', 'targetMarker' => '/mnt/disk1/.unraid-rsync-target'];
+        if ($expected !== '') {
+            $overrides['targetMarkerContent'] = $expected;
+        }
+        $id  = $this->saveLocalJob('j-marker', $overrides);
+        $res = $this->runInTempRuntime($rt, $id);
+
+        $this->assertSame([], $res['leftoverMarkers']);
+        // A LOCAL job's marker is a plain local path: no transport pieces.
+        $this->assertSame('/mnt/disk1/.unraid-rsync-target', $this->argvs[0][count($this->argvs[0]) - 2]);
+        $this->assertNotContains('-e', $this->argvs[0]);
+        if ($ok) {
+            $this->assertSame(Rsync::STATE_SUCCESS, $res['state']);
+            $this->assertSame(['marker', 'hook:PRE:', 'rsync', 'hook:POST:SUCCESS'], $this->trace);
+        } else {
+            $this->assertSame(Rsync::STATE_FAILED, $res['state']);
+            $this->assertSame('dest-not-mounted', $res['reason'] ?? '');
+            $this->assertSame(['marker', 'hook:POST:FAILED'], $this->trace);
+        }
+    }
+
+    /** @return array<string,array{0:string,1:int,2:string}> */
+    public static function probeProvider(): array
+    {
+        $dir = "drwxr-xr-x          4,096 2026/10/20 12:00:00 ";
+        return [
+            'snapshot store'   => [$dir . ".\n" . $dir . "snapshots\n", 0, 'dest-is-protected'],
+            'snapshot root'    => [$dir . ".\n-rw-r--r--              0 2026/10/20 12:00:00 .ur-snapshot-root\n", 0, 'dest-is-protected'],
+            'drive root'       => ["-rw-r--r--             36 2026/10/20 12:00:00 .unraid-rsync-target\n", 0, 'dest-is-protected'],
+            'ordinary dir'     => [$dir . ".\n" . $dir . "snapshots-old\n", 0, ''],
+            'not there yet'    => ["rsync: [sender] change_dir \"/srv/backup/a\" failed: No such file or directory (2)\n", 23, ''],
+            'unreachable host' => ["ssh: connect to host h.example port 22: Connection refused\n", 255, 'dest-probe-failed'],
+        ];
+    }
+
+    #[DataProvider('probeProvider')]
+    public function testDeleteProbeRefusesAProtectedDestinationBeforeThePreHook(string $listing, int $exit, string $reason): void
+    {
+        $this->fakeRsync(null, $listing, $exit);
+        $rt  = $this->seedSshJob('j-probe', ['preHook' => 'PRE']);
+        $res = $this->runInTempRuntime($rt, 'j-probe');
+
+        $this->assertSame($reason, $res['reason'] ?? '');
+        $this->assertSame($reason === '' ? ['probe', 'hook:PRE:', 'rsync'] : ['probe'], $this->trace);
+    }
+
+    public function testNoProbeForAJobWithoutDelete(): void
+    {
+        $this->fakeRsync();
+        $rt  = $this->seedSshJob('j-noprobe', ['rsyncOptions' => Config::defaultRsyncOptions()]);
+        $res = $this->runInTempRuntime($rt, 'j-noprobe');
+        $this->assertSame(Rsync::STATE_SUCCESS, $res['state']);
+        $this->assertSame(['rsync'], $this->trace);
+    }
+
+    public function testListingName(): void
+    {
+        $this->assertSame('snapshots', Runner::listingName('drwxr-xr-x          4,096 2026/10/20 12:00:00 snapshots'));
+        $this->assertSame('a b', Runner::listingName("-rw-r--r--              1 2026/10/20 12:00:00 a b\r"));
+        $this->assertSame('snapshots', Runner::listingName('lrwxrwxrwx              9 2026/10/20 12:00:00 snapshots -> /x/y'));
+        $this->assertSame('', Runner::listingName('rsync: change_dir failed: snapshots'));
+        $this->assertSame('', Runner::listingName(''));
+    }
+
+    public function testPreHookTimeoutFailsTheRunAndSkipsThePairs(): void
+    {
+        $timeouts = [];
+        Runner::$hookRunner = function (string $hook, array $env, $onOutput, int $timeoutSec = -9) use (&$timeouts): int {
+            $this->trace[] = 'hook:' . $hook;
+            $timeouts[$hook] = $timeoutSec;
+            return $hook === 'PRE' ? Runner::HOOK_TIMED_OUT : 0;
+        };
+        $this->fakeRsync();
+        $id  = $this->saveLocalJob('j-pre', ['preHook' => 'PRE', 'postHook' => 'POST']);
+        $res = Runner::run($id, false);
+
+        $this->assertSame(Rsync::STATE_FAILED, $res['state']);
+        $this->assertSame('prehook-timeout', $res['reason'] ?? '');
+        $this->assertSame(124, $res['exitCode']);
+        $this->assertSame(['hook:PRE', 'hook:POST'], $this->trace);
+        $this->assertSame(['PRE' => 30 * 60, 'POST' => 60 * 60], $timeouts, 'defaults: 30 and 60 minutes');
+        $this->assertStringContainsString('Pre-run hook timed out after 30 minute(s)', (string) file_get_contents($res['runLog']));
+    }
+
+    public function testPostHookTimeoutKeepsTheOutcomeButWarnsAndHonoursTheSetting(): void
+    {
+        $timeouts = [];
+        Runner::$hookRunner = function (string $hook, array $env, $onOutput, int $timeoutSec = -9) use (&$timeouts): int {
+            $timeouts[$hook] = $timeoutSec;
+            return $hook === 'POST' ? Runner::HOOK_TIMED_OUT : 0;
+        };
+        $this->fakeRsync();
+        $config = Config::load();
+        $config['global']['preHookTimeout']  = 0;
+        $config['global']['postHookTimeout'] = 5;
+        Config::save($config);
+        $id  = $this->saveLocalJob('j-pre', ['preHook' => 'PRE', 'postHook' => 'POST']);
+        $res = Runner::run($id, false);
+
+        $this->assertSame(Rsync::STATE_WARNING, $res['state']);
+        $this->assertSame('posthook-timeout', $res['reason'] ?? '');
+        $this->assertSame(0, $res['exitCode']);
+        $this->assertSame(['PRE' => 0, 'POST' => 300], $timeouts, '0 = no limit');
+
+        // A failed run stays FAILED.
+        $this->fakeRsync();
+        Rsync::$runner = static fn(array $argv, $onOutput): int => 12;
+        $res = Runner::run($id, false);
+        $this->assertSame(Rsync::STATE_FAILED, $res['state']);
+        $this->assertSame('posthook-timeout', $res['reason'] ?? '');
+    }
+
+    public function testRunHookProcessKillsAHookPastItsDeadline(): void
+    {
+        $out = '';
+        $t0  = microtime(true);
+        $code = Runner::runHookProcess('echo started; sleep 30', [], static function (string $c) use (&$out): void {
+            $out .= $c;
+        }, 1);
+        $this->assertSame(Runner::HOOK_TIMED_OUT, $code);
+        $this->assertLessThan(10, microtime(true) - $t0);
+        $this->assertStringContainsString('started', $out);
+    }
+
+    public function testRunHookProcessEscalatesToSigkill(): void
+    {
+        $prev = Runner::$hookKillGraceSec;
+        Runner::$hookKillGraceSec = 1;
+        try {
+            $t0   = microtime(true);
+            $code = Runner::runHookProcess("trap '' TERM; while :; do sleep 0.2; done", [], static function (string $c): void {
+            }, 1);
+            $this->assertSame(Runner::HOOK_TIMED_OUT, $code);
+            $this->assertLessThan(10, microtime(true) - $t0);
+        } finally {
+            Runner::$hookKillGraceSec = $prev;
+        }
+    }
+
+    public function testRunHookProcessKillsTheWholeHookProcessGroup(): void
+    {
+        if (!is_executable('/usr/bin/setsid') && !is_executable('/bin/setsid')) {
+            $this->markTestSkipped('needs util-linux setsid (present on Unraid and in CI)');
+        }
+        $pidFile = tempnam(sys_get_temp_dir(), 'ur-hook-');
+        try {
+            Runner::runHookProcess('sleep 60 & echo $! > ' . escapeshellarg($pidFile) . '; wait', [], static function (string $c): void {
+            }, 1);
+            $child = (int) trim((string) file_get_contents($pidFile));
+            $this->assertGreaterThan(0, $child);
+            $alive = true;
+            for ($i = 0; $i < 30 && $alive; $i++) {
+                $alive = @posix_kill($child, 0);
+                usleep(100000);
+            }
+            $this->assertFalse($alive, 'the hook\'s own child is killed with it');
+        } finally {
+            @unlink($pidFile);
+        }
+    }
+
+    public function testRunHookProcessStopsOnAbortAndPassesExitCodesThrough(): void
+    {
+        $noop = static function (string $c): void {
+        };
+        $this->assertSame(143, Runner::runHookProcess('sleep 30', [], $noop, 0, static fn(): bool => true));
+        $this->assertSame(3, Runner::runHookProcess('exit 3', [], $noop, 60));
+        $this->assertSame(0, Runner::runHookProcess('[ "$UR_X" = y ]', ['UR_X' => 'y'], $noop));
+    }
+
+    public function testRunnerBecomesASessionLeaderOnlyWhenItIsNotOne(): void
+    {
+        if (!defined('UR_RUNNER_TESTING')) {
+            define('UR_RUNNER_TESTING', true);
+        }
+        require_once __DIR__ . '/../source/scripts/runner.php';
+
+        $calls = 0;
+        $posix = static function (int $sid) use (&$calls): array {
+            return [
+                'getsid' => static fn(): int => $sid,
+                'setsid' => static function () use (&$calls): int {
+                    $calls++;
+                    return 4242;
+                },
+                'pid'    => 4242,
+            ];
+        };
+        // Started by crond: some other process leads the session.
+        $this->assertTrue(ur_runner_ensure_session_leader($posix(100)));
+        $this->assertSame(1, $calls);
+        // Started by the UI launcher under setsid: already the leader.
+        $this->assertFalse(ur_runner_ensure_session_leader($posix(4242)));
+        $this->assertSame(1, $calls);
+    }
+
+    /** @return array<string,array{0:string}> */
+    public static function triggerProvider(): array
+    {
+        return ['manual' => ['manual'], 'schedule' => ['schedule']];
+    }
+
+    #[DataProvider('triggerProvider')]
+    public function testAbortDuringAPairYieldsAbortedForEveryTrigger(string $trigger): void
+    {
+        $id = $this->saveLocalJob('j-abort-' . $trigger, ['postHook' => 'POST']);
+        RunState::clearAbort($id);
+        Rsync::$runner = function (array $argv, $onOutput) use ($id): int {
+            RunState::requestAbort($id);
+            return 143;
+        };
+        $res = Runner::run($id, false, $trigger);
+        $this->assertSame(Rsync::STATE_ABORTED, $res['state']);
+        $this->assertSame($trigger, Runner::readSummary($id)['trigger']);
+        $this->assertContains('hook:POST:ABORTED', $this->trace);
+        $this->assertFalse(RunState::abortRequested($id));
+    }
 }

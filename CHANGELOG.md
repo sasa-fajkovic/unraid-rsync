@@ -12,6 +12,19 @@ user-facing highlights.
 ## [Unreleased]
 
 ### Added
+- **Target marker** (per job, optional). Name a small file on the destination
+  side, e.g. `<drive>/.unraid-rsync-target`, optionally with the content it must
+  hold (a UUID). Before the pre-run hook the run fetches it over the job's own
+  transport; if it is missing, unreadable or different, the run fails with reason
+  `dest-not-mounted` and nothing is written. Protects against writing to an
+  unmounted drive. Empty (the default) = off.
+
+- **Hook timeouts** (Global Settings): pre-run hook 30 minutes and post-run hook
+  60 minutes by default, `0` = no limit. A hook past its deadline is sent SIGTERM
+  (its whole process group), then SIGKILL 10 s later. A timed-out pre-run hook
+  fails the run (`prehook-timeout`); a timed-out post-run hook keeps the run's
+  result and turns a clean run into a WARNING (`posthook-timeout`).
+
 - **Host key pinning.** The first successful connection on an `accept-new`
   Connection (a scheduled run or **Test connection**) now pins the host key it
   saw into the Connection, making `accept-new` a real trust-on-first-use
@@ -125,6 +138,30 @@ user-facing highlights.
   `/Settings/UnraidRsync` (restores the highlighted Settings nav).
 
 ### Changed
+- **Fail early and loudly on a bad destination.** Every pair's path guardrails,
+  the effective rsync options, the target marker and the `--delete` checks now
+  run *before* the pre-run hook, so a rejected pair 3 no longer lets pair 1 copy
+  (or the pre-run hook stop containers) first. The post-run hook still runs.
+- **`--delete` guardrails.** A remote SSH `--delete` destination must be at least
+  two directories deep and not a bare `/mnt/<disk>` (`/srv/backup`,
+  `/mnt/disk1/appdata` are fine; `/srv`, `/mnt/disk1` are refused). A `--delete`
+  destination may not equal, contain or lie inside another job's destination on
+  the same connection. Before an SSH mirror runs, its destination is listed one
+  level deep and the run is refused (`dest-is-protected`) if it holds
+  `.unraid-rsync-target`, `.ur-snapshot-root` or `snapshots`. The rsync daemon
+  rule is unchanged.
+- **Validation uses the effective options.** A job on "use global config" is
+  validated against the global options (no more false "no max delete cap"
+  warnings, and problems in the globals are caught), at save and at run time.
+  Saving Global Settings re-validates every job against the new values. Global
+  `--temp-dir`/`--backup-dir` are now checked too, and a `..` segment is refused
+  in both everywhere.
+- **SSH keep-alive.** Every ssh the plugin starts adds
+  `ServerAliveInterval=30` / `ServerAliveCountMax=6`, so a destination that
+  vanishes mid-run fails after about three minutes instead of hanging the job.
+- `RSYNC_OLD_ARGS` / `RSYNC_PROTECT_ARGS` are no longer passed on to rsync.
+- Scheduled runs are now their own session, so **Abort** reaches their rsync and
+  ssh the same way it does for runs started from the UI.
 - A `TIMEOUT` run now renders as a warning badge on every tab and the
   dashboard tile. History, Overview and the Dashboard previously showed it as
   a failure.

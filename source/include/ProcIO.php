@@ -34,10 +34,12 @@ class ProcIO
      *        of each iteration - so a child that produces NO output at all is still
      *        bounded (to at most one 1s select tick past the deadline). The caller
      *        still owns reaping/killing the child. Default null = the original
-     *        behaviour, byte-identical for the three two-argument callers
-     *        (Rsync::defaultRun, Runner::defaultHookRun, KeyTools::runArgv).
+     *        behaviour, byte-identical for the two-argument callers
+     *        (Rsync::defaultRun, KeyTools::runArgv).
+     * @param (callable():bool)|null $stopWhen polled at the same point as the
+     *        deadline; returning true ends the drain early (an abort request).
      */
-    public static function drainPipes(array $pipes, callable $onChunk, ?float $deadlineAt = null): void
+    public static function drainPipes(array $pipes, callable $onChunk, ?float $deadlineAt = null, ?callable $stopWhen = null): void
     {
         $open = [];
         foreach ($pipes as $fd => $stream) {
@@ -49,6 +51,9 @@ class ProcIO
 
         while (!empty($open)) {
             if ($deadlineAt !== null && microtime(true) >= $deadlineAt) {
+                break;
+            }
+            if ($stopWhen !== null && $stopWhen()) {
                 break;
             }
             $read   = array_values($open);

@@ -99,6 +99,8 @@ function ur_render_job_card($job, $index): void
     $notifyMode  = (string) ($job['notifyMode'] ?? 'failure-only');
     $preHook     = (string) ($job['preHook'] ?? '');
     $postHook    = (string) ($job['postHook'] ?? '');
+    $marker      = (string) ($job['targetMarker'] ?? '');
+    $markerText  = (string) ($job['targetMarkerContent'] ?? '');
     $pairs       = (isset($job['pairs']) && is_array($job['pairs'])) ? $job['pairs'] : [];
     $opts        = (isset($job['rsyncOptions']) && is_array($job['rsyncOptions']))
         ? $job['rsyncOptions'] : Config::defaultRsyncOptions();
@@ -303,6 +305,17 @@ function ur_render_job_card($job, $index): void
     }
     echo '</select></dd>';
 
+    // optional target marker (empty = off)
+    echo '<dt><label for="' . ur_h($idb . '_marker') . '">' . ur_h(ur_t('Target marker')) . '</label>:</dt>';
+    echo '<dd><input type="text" id="' . ur_h($idb . '_marker') . '" name="' . ur_h($p . '[targetMarker]')
+        . '" value="' . ur_h($marker) . '" placeholder="/mnt/disks/backup/.unraid-rsync-target" spellcheck="false">';
+    echo ' <input type="text" id="' . ur_h($idb . '_marker_content') . '" name="' . ur_h($p . '[targetMarkerContent]')
+        . '" value="' . ur_h($markerText) . '" placeholder="' . ur_h(ur_t('expected content (optional)')) . '" spellcheck="false"'
+        . ' aria-label="' . ur_h(ur_t('Target marker expected content')) . '">';
+    echo '<blockquote class="inline_help"><p>'
+        . ur_h(ur_t('Protects against writing to an unmounted drive. Optional: the path of a small file on the DESTINATION side (on the remote host for a push, on this server for a pull or a local job) that must exist before the run starts - for example a .unraid-rsync-target file in the root of the backup drive. If it is missing, cannot be read, or does not contain the expected content (when one is set, e.g. a UUID), the run fails before the pre-run hook and before anything is copied. Leave empty to turn the check off.'))
+        . '</p></blockquote></dd>';
+
     // pre/post hooks. Both run as ROOT via a SINGLE `bash -c "$hook"` call
     // (Runner::runHook) — the whole textarea value is one bash script, so
     // multi-line hooks just execute top-to-bottom in one shell session
@@ -318,6 +331,7 @@ function ur_render_job_card($job, $index): void
     echo '<dt>' . ur_h(ur_t('Pre / post-run hooks')) . ':</dt>';
     echo '<dd><div class="ur-hook-help">';
     echo '<p>' . ur_h(ur_t('Optional shell commands run on THIS server as root (via bash -c) around the transfer: the pre-run hook just before rsync starts, the post-run hook just after it finishes. The post-run hook ALWAYS runs — even when the transfer fails or is aborted.')) . '</p>';
+    echo '<p>' . ur_h(ur_t('A hook that runs longer than the pre-/post-run hook timeout on the Global Settings tab (30 and 60 minutes by default) is killed: a timed-out pre-run hook fails the run, a timed-out post-run hook turns a successful run into a warning.')) . '</p>';
     echo '<p>' . ur_h(ur_t('Use them to prepare or clean up around a backup — e.g. mount/unmount a share, spin a disk up or down, or send a custom notification. Write it like a small bash script: one command per line, or a single long one-liner — no shebang needed.')) . '</p>';
     echo '<p>' . ur_h(ur_t('The whole box runs as ONE shell session, top to bottom, in order: line 1 finishes before line 2 starts, and a variable or `cd` from an earlier line still applies later — just like running a saved .sh file. The numbers on the left mark each line so you can see exactly what runs and in what order.')) . '</p>';
     echo '<p>' . ur_h(ur_t('Available to both hooks as environment variables')) . ': <code>' . ur_h($hookEnvVars) . '</code>. '
