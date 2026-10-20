@@ -83,7 +83,7 @@ class Job
     const SCALAR_OPTION_KEYS = [
         'maxDelete', 'bwlimit', 'timeout', 'contimeout', 'maxSize', 'minSize',
         'chmod', 'tempDir', 'backupDir', 'compressLevel', 'modifyWindow',
-        'remoteRsyncPath',
+        'remoteRsyncPath', 'protocol',
     ];
 
     /**
@@ -94,7 +94,13 @@ class Job
     const FILTER_TYPES = Config::FILTER_TYPES;
 
     /** Scalar option keys whose value must be a non-negative whole number. */
-    const INTEGER_SCALAR_KEYS = ['maxDelete', 'timeout', 'contimeout', 'compressLevel', 'modifyWindow'];
+    const INTEGER_SCALAR_KEYS = [
+        'maxDelete', 'timeout', 'contimeout', 'compressLevel', 'modifyWindow', 'protocol',
+    ];
+
+    /** The --protocol range rsync 3.x accepts (MIN_PROTOCOL_VERSION..PROTOCOL_VERSION). */
+    const PROTOCOL_MIN = 20;
+    const PROTOCOL_MAX = 32;
 
     /**
      * Scalar option keys whose value is an rsync SIZE: a number with an optional
@@ -125,6 +131,7 @@ class Job
         'contimeout'      => '--contimeout',
         'compressLevel'   => '--compress-level',
         'modifyWindow'    => '--modify-window',
+        'protocol'        => '--protocol',
         'bwlimit'         => '--bwlimit',
         'maxSize'         => '--max-size',
         'minSize'         => '--min-size',
@@ -457,28 +464,6 @@ class Job
             }
         }
 
-        // Numeric scalar options. A non-numeric value here would otherwise sail
-        // through to rsync as `--max-delete=abc` and fail the run mid-flight with
-        // a confusing rsync error; reject it at save time instead. (The `=value`
-        // argv form already prevents option-injection - this is correctness/UX.)
-        foreach (self::INTEGER_SCALAR_KEYS as $key) {
-            $v = trim((string) ($opts[$key] ?? ''));
-            if ($v !== '' && !ctype_digit($v)) {
-                $errors[] = 'The ' . self::SCALAR_FLAG_LABELS[$key] . ' value must be a whole number.';
-            }
-        }
-        foreach (self::SIZE_SCALAR_KEYS as $key) {
-            $v = trim((string) ($opts[$key] ?? ''));
-            // number (+ optional decimal), then an OPTIONAL suffix that is either
-            // a unit letter [KMGTP] with optional binary "i" and optional "B"
-            // (K, KiB, MB, G, ...), OR a bare "B" for bytes. A standalone "iB"
-            // (no unit letter) is rejected.
-            if ($v !== '' && !preg_match('/^\d+(\.\d+)?([KkMmGgTtPp]i?[Bb]?|[Bb])?$/', $v)) {
-                $errors[] = 'The ' . self::SCALAR_FLAG_LABELS[$key]
-                    . ' value must be a number, optionally with a size suffix (K, M, G, ...).';
-            }
-        }
-
         // --temp-dir / --backup-dir live on the RECEIVER's filesystem. For a local
         // receiver (LOCAL transport, or a PULL whose destination is the local
         // side) they must clear the SAME /mnt guardrail as any local path -
@@ -529,6 +514,11 @@ class Job
         if ($transport !== 'DAEMON' && trim((string) ($opts['contimeout'] ?? '')) !== '') {
             $warnings[] = 'The --contimeout option only applies to rsync daemon (rsyncd) transport; '
                 . 'rsync rejects it outright on SSH and Local transfers, so it is not sent for this job.';
+        }
+
+        if ($transport !== 'LOCAL' && self::protocolTooLowForAclsXattrs($opts)) {
+            $errors[] = 'Preserve ACLs (-A) and Preserve extended attributes (-X) need rsync protocol 30 or '
+                . 'higher over SSH or rsync daemon; raise the --protocol value or turn those options off.';
         }
 
         return [
@@ -804,7 +794,61 @@ class Job
                 . ' (for example /usr/local/bin/rsync), with no spaces or shell characters.';
         }
 
+        // Numeric scalar options. A non-numeric value here would otherwise sail
+        // through to rsync as `--max-delete=abc` and fail the run mid-flight with
+        // a confusing rsync error; reject it at save time instead. (The `=value`
+        // argv form already prevents option-injection - this is correctness/UX.)
+        // rsync parses these integers base-0 (popt), so a leading zero means
+        // OCTAL: --protocol=031 negotiates 25 and --timeout=08 is a syntax error.
+        foreach (self::INTEGER_SCALAR_KEYS as $key) {
+            $v = trim((string) ($opts[$key] ?? ''));
+            if ($v !== '' && !preg_match('/^(0|[1-9]\d*)$/D', $v)) {
+                $errors[] = 'The ' . self::SCALAR_FLAG_LABELS[$key]
+                    . ' value must be a whole number without leading zeros.';
+            }
+        }
+        foreach (self::SIZE_SCALAR_KEYS as $key) {
+            $v = trim((string) ($opts[$key] ?? ''));
+            // number (+ optional decimal), then an OPTIONAL suffix that is either
+            // a unit letter [KMGTP] with optional binary "i" and optional "B"
+            // (K, KiB, MB, G, ...), OR a bare "B" for bytes. A standalone "iB"
+            // (no unit letter) is rejected.
+            if ($v !== '' && !preg_match('/^\d+(\.\d+)?([KkMmGgTtPp]i?[Bb]?|[Bb])?$/', $v)) {
+                $errors[] = 'The ' . self::SCALAR_FLAG_LABELS[$key]
+                    . ' value must be a number, optionally with a size suffix (K, M, G, ...).';
+            }
+        }
+
+        // rsync 3.x speaks protocols 20-32 and refuses anything else at run time
+        // (0 or 99 surface as "protocol version mismatch -- is your shell clean?").
+        // Forcing a version only ever LOWERS it - negotiation already picks the
+        // highest both sides share - so a future rsync raising its maximum
+        // cannot make a value above 32 useful.
+        $protocol = trim((string) ($opts['protocol'] ?? ''));
+        if (preg_match('/^(0|[1-9]\d*)$/D', $protocol)) {
+            $n = (int) $protocol;
+            if ($n < self::PROTOCOL_MIN || $n > self::PROTOCOL_MAX) {
+                $errors[] = 'The ' . self::SCALAR_FLAG_LABELS['protocol'] . ' value must be between '
+                    . self::PROTOCOL_MIN . ' and ' . self::PROTOCOL_MAX . '.';
+            }
+        }
+
         return $errors;
+    }
+
+    /**
+     * True when -A/-X meet a forced protocol below 30, which rsync refuses with
+     * exit 2 ("--acls requires protocol 30 or higher") on SSH and daemon
+     * transfers. A local copy is exempt, so callers decide by transport.
+     *
+     * @param array<string,mixed> $opts
+     */
+    public static function protocolTooLowForAclsXattrs(array $opts): bool
+    {
+        $p = trim((string) ($opts['protocol'] ?? ''));
+        return preg_match('/^[1-9]\d*$/D', $p) === 1
+            && (int) $p >= self::PROTOCOL_MIN && (int) $p < 30
+            && (!empty($opts['acls']) || !empty($opts['xattrs']));
     }
 
     /**

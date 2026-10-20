@@ -587,6 +587,14 @@ function ur_action_save_config(): void
                 . '(rsyncd) transport; rsync rejects it outright on SSH and Local transfers, so it is '
                 . 'not sent for jobs on those transports.';
         }
+
+        // A warning, not an error: the global block has no transport, and a
+        // LOCAL job inheriting it runs fine (rsync exempts local copies).
+        if (Job::protocolTooLowForAclsXattrs($config['global']['defaultRsyncOptions'])) {
+            $allWarnings[] = 'Global settings: Preserve ACLs (-A) and Preserve extended attributes (-X) need '
+                . 'rsync protocol 30 or higher, so SSH and rsync daemon jobs that use these defaults will '
+                . 'fail; raise the --protocol value or turn those options off.';
+        }
     }
 
     // logDir (persistent log directory): validate/confine. A non-empty value that

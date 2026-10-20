@@ -508,13 +508,20 @@ class Cron
         return null;
     }
 
-    /** Top of the given local hour; out-of-range fields roll over like mktime(). */
+    /**
+     * Top of the given local hour; out-of-range fields roll over like mktime().
+     * An hour that occurs twice (DST fall-back) resolves to the SECOND one,
+     * explicitly: PHP picks between the two by the time of day of the object
+     * it modifies, so leaving it to setTime() made the answer depend on when
+     * this ran (CronTest failed whenever it ran at 00:00-03:00 Sydney time).
+     */
     private static function localTs(int $hour, int $mon, int $day, int $year): int
     {
-        return (new \DateTimeImmutable('now', new \DateTimeZone(date_default_timezone_get())))
+        $ts = (new \DateTimeImmutable('now', new \DateTimeZone(date_default_timezone_get())))
             ->setDate($year, $mon, $day)
             ->setTime($hour, 0)
             ->getTimestamp();
+        return date('Y-m-d H', $ts + 3600) === date('Y-m-d H', $ts) ? $ts + 3600 : $ts;
     }
 
     /**

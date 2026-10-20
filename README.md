@@ -123,6 +123,10 @@ Managed keys live in their own **Credentials** keychain tab.
   Normal and Verbose still use `--info=progress2`, and dry runs use the selected
   statistics mode when raised to Normal. On an older receiving host, also turn
   off **Create destination path** (`--mkpath`) if its rsync predates 3.2.3.
+  **Protocol version** (`--protocol=N`, 20–32) caps the negotiated rsync
+  protocol for a peer that misbehaves at the version it advertises; leave it
+  blank otherwise. ACL and extended-attribute preservation over SSH or rsync
+  daemon need 30 or higher.
 - A **Status** tab showing the rolling cross-job plugin log and an
   **rsync-binary presence indicator** (detected path + the first line of
   `rsync --version`, or a clear warning if rsync is somehow absent).

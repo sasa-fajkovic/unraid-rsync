@@ -807,8 +807,77 @@ final class JobTest extends TestCase
         $res = Job::validate($this->validLocalJob(['rsyncOptions' => [
             'maxDelete' => '', 'bwlimit' => '', 'timeout' => '', 'contimeout' => '',
             'maxSize' => '', 'minSize' => '', 'compressLevel' => '', 'modifyWindow' => '',
+            'protocol' => '',
         ]]));
         $this->assertTrue($res['valid'], 'errors: ' . implode(' | ', $res['errors']));
+    }
+
+    /** rsync parses integer options base-0: `010` is octal 8, `08` a syntax error. */
+    #[DataProvider('integerScalarProvider')]
+    public function testIntegerScalarRejectsLeadingZeros(string $key, string $flag): void
+    {
+        $this->assertNotEmpty(array_filter(
+            Job::validateRsyncOptions([$key => '010']),
+            static fn($e) => stripos($e, $flag) !== false
+        ));
+        $this->assertSame([], Job::validateRsyncOptions([$key => '0']));
+    }
+
+    /** @return array<string,array{0:string,1:bool}> */
+    public static function protocolProvider(): array
+    {
+        return [
+            'blank'          => ['', true],
+            'minimum'        => ['20', true],
+            'rsync 3.0.9'    => ['30', true],
+            'maximum'        => ['32', true],
+            'zero'           => ['0', false],
+            'below minimum'  => ['19', false],
+            'above maximum'  => ['33', false],
+            'far above'      => ['99', false],
+            'octal 25'       => ['031', false],
+            'invalid octal'  => ['029', false],
+            'overflow'       => ['99999999999999999999999', false],
+            'not a number'   => ['abc', false],
+            'negative'       => ['-30', false],
+        ];
+    }
+
+    /** Out-of-range values used to save fine and fail the run with "protocol version mismatch". */
+    #[DataProvider('protocolProvider')]
+    public function testProtocolIsLimitedToRsyncsSupportedRange(string $value, bool $ok): void
+    {
+        $res = Job::validate($this->validLocalJob(['rsyncOptions' => ['protocol' => $value]]));
+        if ($ok) {
+            $this->assertTrue($res['valid'], 'errors: ' . implode(' | ', $res['errors']));
+            return;
+        }
+        $this->assertFalse($res['valid']);
+        $this->assertNotEmpty(array_filter($res['errors'], static fn($e) => stripos($e, '--protocol') !== false));
+    }
+
+    /** rsync exits 2 with -A/-X below protocol 30 on SSH and daemon transfers, never on a local copy. */
+    public function testProtocolBelow30RejectsAclsAndXattrsOnRemoteTransports(): void
+    {
+        $ssh = ['transport' => 'SSH', 'connectionId' => 'c-x',
+            'pairs' => [['local' => '/mnt/user/media/', 'remote' => '/srv/backup/media/']]];
+        $isAclError = static fn($e) => str_contains($e, '-A');
+        foreach (['acls', 'xattrs'] as $key) {
+            $opts = ['rsyncOptions' => ['protocol' => '29', $key => true]];
+            $res = Job::validate($this->validLocalJob($ssh + $opts));
+            $this->assertNotEmpty(array_filter($res['errors'], $isAclError), $key);
+            $res = Job::validate($this->validDaemonJob($opts));
+            $this->assertNotEmpty(array_filter($res['errors'], $isAclError), $key);
+            $res = Job::validate($this->validLocalJob($opts));
+            $this->assertTrue($res['valid'], "LOCAL $key: " . implode(' | ', $res['errors']));
+
+            $this->assertTrue(Job::protocolTooLowForAclsXattrs(['protocol' => '29', $key => true]));
+            $this->assertFalse(Job::protocolTooLowForAclsXattrs(['protocol' => '30', $key => true]));
+            $this->assertFalse(Job::protocolTooLowForAclsXattrs(['protocol' => '', $key => true]));
+        }
+        $this->assertFalse(Job::protocolTooLowForAclsXattrs(['protocol' => '29']));
+        // An out-of-range protocol reports the range only, not -A as well.
+        $this->assertFalse(Job::protocolTooLowForAclsXattrs(['protocol' => '19', 'acls' => true]));
     }
 
     // --- VAL-01: tempDir / backupDir guardrails ----------------------------
