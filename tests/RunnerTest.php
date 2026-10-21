@@ -2154,10 +2154,16 @@ final class RunnerTest extends TestCase
         ];
     }
 
-    public function testASnapshotJobIsRefusedBeforeThePreHookUntilSnapshotRunsLand(): void
+    /**
+     * Golden: snapshot mode must leave a mirror run byte-for-byte as it was -
+     * the transfer argv, both hook environments, the History record, the
+     * summary and the notification. Every expected value below was produced
+     * by the code before snapshot runs existed.
+     */
+    public function testAMirrorRunIsUnchangedBySnapshotMode(): void
     {
-        $this->fakeRsync("uuid-1\n");
-        $fakeBin = sys_get_temp_dir() . '/ur-rnotify-snap-' . getmypid() . '-' . bin2hex(random_bytes(4));
+        $this->fakeRsync("uuid-1\n", "drwxr-xr-x          4,096 2026/10/20 12:00:00 .\n");
+        $fakeBin = sys_get_temp_dir() . '/ur-rnotify-golden-' . getmypid() . '-' . bin2hex(random_bytes(4));
         file_put_contents($fakeBin, "#!/bin/sh\nexit 0\n");
         chmod($fakeBin, 0755);
         $origPath = Notify::$notifyPath;
@@ -2167,35 +2173,76 @@ final class RunnerTest extends TestCase
             $captured[] = $command;
             return 0;
         };
+        $envs = [];
+        Runner::$hookRunner = function (string $hook, array $env) use (&$envs): int {
+            $envs[$hook] = $env;
+            return 0;
+        };
 
         try {
-            $rt = $this->seedSshJob('j-snap', ['preHook' => 'PRE', 'postHook' => 'POST', 'notifyMode' => 'failure-only'] + $this->snapshotFields());
-            $this->assertSame(3, Config::load()['schemaVersion'], 'precondition: stored as an enabled snapshot job');
-            $res = $this->runInTempRuntime($rt, 'j-snap');
+            $rt = $this->seedSshJob('j-golden', [
+                'name' => 'golden', 'preHook' => 'PRE', 'postHook' => 'POST', 'notifyMode' => 'always',
+                'targetMarker' => '/srv/.unraid-rsync-target', 'targetMarkerContent' => 'uuid-1',
+            ]);
+            Ssh::$runtimeBase = $rt;
+            $res = Runner::run('j-golden', false, 'schedule');
+            $log = $res['runLog'];
+            Ssh::$runtimeBase = '/tmp/unraid.rsync';
+            Credentials::save(Credentials::defaults());
+            $this->rmTree($rt);
 
-            $this->assertSame(Rsync::STATE_FAILED, $res['state']);
-            $this->assertSame(1, $res['exitCode']);
-            $this->assertSame('snapshot-not-implemented', $res['reason'] ?? '');
-            $this->assertSame([], $this->argvs, 'no rsync at all, not even the marker fetch');
-            $this->assertSame(['hook:POST:FAILED'], $this->trace, 'no pre-hook; the post-hook still runs');
-            $this->assertStringContainsString(
-                'Snapshot mode is not available in this build yet; the job was not run.',
-                (string) file_get_contents($res['runLog'])
+            $this->assertSame(['state' => 'SUCCESS', 'exitCode' => 0, 'runLog' => $log], $res);
+            $argv = $this->argvs[2];
+            $e    = $argv[array_search('-e', $argv, true) + 1];
+            $this->assertMatchesRegularExpression("#^'ssh' '-i' '[^']+' .* '-p' '22'\$#", $e);
+            $this->assertSame([
+                PHP_BINARY, '-r', '-h', '-t', '--partial', '--delete', '--mkpath', '--max-delete=50', '--rsync-path=/usr/bin/rsync',
+                '--info=progress2', '--log-file-format=', '--log-file=' . $log, '-e', $e, '--', '/mnt/user/src/', 'root@h.example:/srv/backup/a',
+            ], $argv);
+            $base = ['UR_JOB_ID' => 'j-golden', 'UR_JOB_NAME' => 'golden', 'UR_DRY_RUN' => '0', 'UR_TRIGGER' => 'schedule'];
+            $this->assertSame($base + ['UR_JOB_STATUS' => '', 'UR_EXIT_CODE' => ''], $envs['PRE']);
+            $this->assertSame($base + ['UR_JOB_STATUS' => 'SUCCESS', 'UR_EXIT_CODE' => '0'], $envs['POST']);
+
+            $row = History::list('j-golden', 0, 1)['runs'][0];
+            $this->assertSame(
+                ['startedAt', 'finishedAt', 'jobName', 'dryRun', 'trigger', 'state', 'exitCode', 'durationSec', 'logRef', 'reason'],
+                array_keys($row)
+            );
+            $this->assertSame(['golden', false, 'schedule', 'SUCCESS', 0, basename($log), ''], [
+                $row['jobName'], $row['dryRun'], $row['trigger'], $row['state'], $row['exitCode'], $row['logRef'], $row['reason'],
+            ]);
+            $line = (string) file_get_contents(History::path('j-golden'));
+            $this->assertSame(1, preg_match('/^\{"startedAt":"[^"]+","finishedAt":"[^"]+","jobName":"golden","dryRun":false,"trigger":"schedule","state":"SUCCESS","exitCode":0,"durationSec":\d+,"logRef":"run-[^"]+\.log","reason":""\}\n$/D', $line), $line);
+            $this->assertSame(
+                ['state', 'startedAt', 'finishedAt', 'exitCode', 'durationSec', 'dryRun', 'trigger'],
+                array_keys((array) Runner::readSummary('j-golden'))
             );
 
-            $rows = History::list('j-snap', 0, 25)['runs'];
-            $this->assertCount(1, $rows);
-            $this->assertSame(Rsync::STATE_FAILED, $rows[0]['state']);
-            $this->assertSame('snapshot-not-implemented', $rows[0]['reason']);
-
             $this->assertCount(1, $captured);
-            $this->assertStringContainsString("'-i' 'alert'", $captured[0]);
+            $this->assertSame(
+                "'$fakeBin' '-e' 'Unraid Rsync' '-s' 'Unraid Rsync: golden SUCCESS' '-d' 'Job \"golden\" finished. State: SUCCESS. "
+                . "Exit code: 0 = success. Duration: Ns. Trigger: schedule. Dry-run: no.' '-i' 'normal' '-l' '/Settings/UnraidRsync'",
+                preg_replace('/Duration: \d+s\./', 'Duration: Ns.', $captured[0])
+            );
         } finally {
             Notify::$notifyPath = $origPath;
             Notify::$runner = null;
             @unlink($fakeBin);
-            @unlink(History::path('j-snap'));
+            @unlink(History::path('j-golden'));
         }
+    }
+
+    public function testTheInflightRecordOfAMirrorHasNoSnapshotKey(): void
+    {
+        $this->fakeRsync();
+        $seen = null;
+        Runner::$hookRunner = function (string $hook) use (&$seen): int {
+            $seen = RunState::readInflight('j-inflight');
+            return 0;
+        };
+        $rt = $this->seedSshJob('j-inflight', ['preHook' => 'PRE', 'notifyMode' => 'off', 'rsyncOptions' => Config::mergeRsyncOptions([])]);
+        $this->runInTempRuntime($rt, 'j-inflight');
+        $this->assertSame(['jobId', 'pid', 'startedAt', 'trigger', 'dryRun', 'currentLog'], array_keys((array) $seen));
     }
 
     public function testAMirrorInsideASnapshotRootIsRefusedAtRunTime(): void
@@ -2439,6 +2486,14 @@ final class RunnerTest extends TestCase
         $this->assertSame(143, Runner::runHookProcess('sleep 30', [], $noop, 0, static fn(): bool => true));
         $this->assertSame(3, Runner::runHookProcess('exit 3', [], $noop, 60));
         $this->assertSame(0, Runner::runHookProcess('[ "$UR_X" = y ]', ['UR_X' => 'y'], $noop));
+    }
+
+    public function testAHookKilledByASignalReportsTheSignalNotExit1(): void
+    {
+        $noop = static function (string $c): void {
+        };
+        $this->assertSame(137, Runner::runHookProcess('kill -KILL $$', [], $noop, 60));
+        $this->assertSame(143, Runner::runHookProcess('kill -TERM $$', [], $noop));
     }
 
     public function testRunnerBecomesASessionLeaderOnlyWhenItIsNotOne(): void

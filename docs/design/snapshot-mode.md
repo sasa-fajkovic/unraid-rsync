@@ -311,7 +311,7 @@ Two new lists sit beside the existing reason rules. An alert reason always wins.
 | 16 | protected (delete refusals) |
 | 17 | not root, or a tool or primitive is missing |
 | 18 | I/O failure (`mkdir`, `mv`, `rm`, `sync`) |
-| 19 | API version mismatch |
+| 19 | unused: an unknown API version is rejected by `Snapshot::parseHelper` from the reply header |
 | anything else (1 = `sudo -n` needs a password, 126/127 = shell, 255 = ssh) | transport failure |
 
 ### 5.4 Shipping and verification

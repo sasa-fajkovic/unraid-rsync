@@ -189,6 +189,63 @@ final class SnapshotTest extends TestCase
         $this->assertStringContainsString('300 s behind', (string) Snapshot::checkSkew(700, 1000));
     }
 
+    // --- free space, anomalies ----------------------------------------------------
+
+    public function testFreeSpaceNeedsTheLargerOfFivePercentAndTenGiB(): void
+    {
+        $this->assertNull(Snapshot::freeSpaceError(['size' => 100000000, 'used' => 0, 'avail' => 10485760]));
+        $this->assertNotNull(Snapshot::freeSpaceError(['size' => 100000000, 'used' => 0, 'avail' => 10485759]));
+        $this->assertNull(Snapshot::freeSpaceError(['size' => 1000000000, 'used' => 0, 'avail' => 50000000]));
+        $this->assertStringContainsString('needs at least 50000000 KB', (string) Snapshot::freeSpaceError(['size' => 1000000000, 'used' => 0, 'avail' => 49999999]));
+    }
+
+    /** @return array<string,mixed> */
+    private static function pair(string $sub, ?int $files, ?int $bytes, bool $basisMissing = false): array
+    {
+        return ['sub' => $sub, 'files' => $files, 'bytes' => $bytes, 'basisMissing' => $basisMissing];
+    }
+
+    public function testAnomaliesFlagHalvedFilesAndBytesAboveTheMinimums(): void
+    {
+        $meta = ['subs' => [
+            'a' => ['files' => 100, 'bytes' => 1073741824],
+            'b' => ['files' => 99, 'bytes' => 1073741823],
+        ]];
+        $r = Snapshot::anomalies([self::pair('a', 49, 536870911), self::pair('b', 1, 1)], $meta, null, []);
+        $this->assertSame(['a: files dropped from 100 to 49', 'a: bytes dropped from 1073741824 to 536870911'], $r['suspect']);
+
+        $r = Snapshot::anomalies([self::pair('a', 50, 536870912)], $meta, null, []);
+        $this->assertSame([], $r['suspect'], 'exactly half is not suspect');
+
+        $r = Snapshot::anomalies([self::pair('a', null, 2000000000), self::pair('new', 1, 1)], $meta, null, []);
+        $this->assertSame([], $r['suspect']);
+        $this->assertContains("a: the files count could not be read from rsync's statistics", $r['skipped']);
+        $this->assertContains('new: no baseline in the previous snapshot', $r['skipped']);
+    }
+
+    public function testAnomaliesWithoutABaselineSkipTheCountsButNotTheMissingBasis(): void
+    {
+        $r = Snapshot::anomalies([self::pair('a', 1, 1, true)], null, 999999999, [1, 1, 1]);
+        $this->assertSame(["a: rsync reported that the previous snapshot's copy does not exist"], $r['suspect']);
+        $this->assertSame(['no baseline (the previous snapshot has no metadata), so the file, size and growth checks were skipped'], $r['skipped']);
+    }
+
+    public function testAnomaliesGrowthUsesTheMedianOfTheLastSevenOnceThreeExist(): void
+    {
+        $meta = ['subs' => []];
+        $min  = Snapshot::GROWTH_MIN_KB;
+        $this->assertSame([], Snapshot::anomalies([], $meta, $min * 100, [1, 1])['suspect'], 'fewer than 3 values: skipped');
+        $this->assertSame([], Snapshot::anomalies([], $meta, $min, [1, 1, 1])['suspect'], 'the 5 GiB floor');
+        $this->assertNotSame([], Snapshot::anomalies([], $meta, $min + 1, [1, 1, 1])['suspect']);
+        // median of [min, 2min, 3min, 4min] = 2.5min -> limit 7.5min
+        $past = [$min, 2 * $min, 3 * $min, 4 * $min];
+        $this->assertSame([], Snapshot::anomalies([], $meta, (int) (7.5 * $min), $past)['suspect']);
+        $this->assertNotSame([], Snapshot::anomalies([], $meta, (int) (7.5 * $min) + 1, $past)['suspect']);
+        // Only the newest seven count: an old huge value falls out of the window.
+        $this->assertNotSame([], Snapshot::anomalies([], $meta, $min + 1, [1, 1, 1, 1, 1, 1, 1, 100 * $min, 100 * $min])['suspect']);
+        $this->assertContains('growth was not measured', Snapshot::anomalies([], $meta, null, [1, 1, 1])['skipped']);
+    }
+
     // --- rsync stats ------------------------------------------------------------
 
     private static function fixture(string $name): string
