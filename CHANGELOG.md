@@ -122,7 +122,7 @@ user-facing highlights.
   names the `.inprogress` it left.
 - **Back up the flash drive.** A snapshot job (SSH + Push) may use exactly
   `/boot/` as a source; `/boot` stays forbidden everywhere else, including any
-  folder inside it and every destination.
+  folder inside it and as a destination on this server.
 - Mirror jobs are unchanged; `config.json` only moves to schema 3 while a
   snapshot job is enabled, so an older release refuses it rather than running a
   snapshot job as a mirror. The README covers setup, restores, migrating an

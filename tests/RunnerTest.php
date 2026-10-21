@@ -1479,6 +1479,59 @@ final class RunnerTest extends TestCase
         $this->assertSame($savedOk, $runOk, 'save time and run time disagree');
     }
 
+    /** @return array<string,array{0:array<string,mixed>,1:string,2:bool}> */
+    public static function bootHandEditProvider(): array
+    {
+        $on = ['snapshot' => ['enabled' => true, 'root' => '/srv/backup/snapshots/boot']];
+        $cases = [
+            'whitespace is trimmed' => [$on, " /boot/\t", true],
+            'lower-case enums'      => [['transport' => 'ssh', 'direction' => 'push'] + $on, '/boot/', true],
+            'missing direction'     => [['direction' => null] + $on, '/boot', true],
+            'lower-case pull'       => [['direction' => 'pull'] + $on, '/boot/', false],
+        ];
+        foreach (['/boot//', '/boot/.', '/./boot', '/mnt/../boot', '/BOOT'] as $p) {
+            $cases["path $p"] = [$on, $p, false];
+        }
+        foreach (['int 1' => 1, 'string 1' => '1', 'string true' => 'true', 'null' => null] as $name => $v) {
+            $cases["enabled $name"] = [['snapshot' => ['enabled' => $v, 'root' => '/srv/backup/snapshots/boot']], '/boot/', false];
+        }
+        return $cases;
+    }
+
+    /**
+     * Hand-edited config.json shapes that never pass through the form's
+     * normalisation: only a JSON true enables snapshot mode, only the exact
+     * strings open /boot, and save time and run time agree on each.
+     *
+     * @param array<string,mixed> $overrides
+     */
+    #[DataProvider('bootHandEditProvider')]
+    public function testHandEditedBootJobsAgreeAtSaveAndRunTime(array $overrides, string $path, bool $expected): void
+    {
+        $build = static function (string $local) use ($overrides): array {
+            $job = array_merge(Config::defaultJob(), [
+                'name' => 'boot', 'transport' => 'SSH', 'direction' => 'PUSH', 'connectionId' => 'c-1',
+                'targetMarker' => '/srv/backup/.unraid-rsync-target', 'targetMarkerContent' => 'uuid-1',
+                'rsyncOptions' => Config::mergeRsyncOptions(['archive' => true, 'times' => true]),
+                'pairs' => [['local' => $local, 'remote' => '', 'sub' => 'boot']],
+            ], $overrides);
+            return array_filter($job, static fn($v): bool => $v !== null);
+        };
+        $runTime = static function (array $job): array {
+            $transport = strtoupper(trim((string) ($job['transport'] ?? 'SSH')));
+            $direction = strtoupper(trim((string) ($job['direction'] ?? 'PUSH')));
+            return array_merge(
+                Runner::guardrailErrors($job, $job['pairs'][0], $transport, $job['rsyncOptions']),
+                Job::snapshotErrors($job, $job['rsyncOptions'], $transport, $direction)
+            );
+        };
+
+        $savedOk = Job::validate($build($path))['errors'] === Job::validate($build('/mnt/user/x'))['errors'];
+        $runOk   = $runTime($build($path)) === $runTime($build('/mnt/user/x'));
+        $this->assertSame($expected, $savedOk, 'save time');
+        $this->assertSame($savedOk, $runOk, 'save time and run time disagree');
+    }
+
     /**
      * The --delete destination side, pinned WHOLE-ARRAY per transport.
      *

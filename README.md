@@ -344,7 +344,7 @@ runs nothing.
 
 A snapshot job may use `/boot` as a pair's source; no other job can. It must be
 exactly `/boot/` (or `/boot`), never a folder inside it, in an SSH Push job with
-snapshot mode on. `/boot` can never be a destination.
+snapshot mode on. This server's `/boot` can never be a destination.
 
 - **Use a dedicated job**: one pair, local `/boot/` → sub `boot`, with its own
   snapshot root (for example `/mnt/backup/snapshots/flash`). Keep the trailing
@@ -358,8 +358,9 @@ snapshot mode on. `/boot` can never be a destination.
     server, so leave it out and re-authenticate after a restore.
 - **FAT32**: its 2-second mtime granularity is harmless, since the receiver keeps
   the source's mtimes as they are. If `/boot` is not mounted with a fixed
-  timezone, a daylight-saving change shifts every mtime by an hour, and the next
-  run copies everything once in full (about 1–2 GB) before linking again.
+  timezone, a daylight-saving change can shift every mtime by an hour, and the
+  next run then copies everything once in full (about 1–2 GB) before linking
+  again.
 - **Security**: this snapshot holds the license key, password hashes, SSH keys and
   this plugin's `credentials.json`. Keep the root 0700 root, and never copy it
   offsite unencrypted.
