@@ -1911,6 +1911,17 @@ final class JobTest extends TestCase
         $this->assertFalse($hit($this->snapErrors($viaGlob, ['defaultRsyncOptions' => Config::mergeRsyncOptions($base)])));
     }
 
+    /** --append / --append-verify are not in the whitelist, so no input can emit them. */
+    public function testAppendCannotBeEmitted(): void
+    {
+        $opts = Job::normalizeRsyncOptions(['append' => '1', 'appendVerify' => '1', 'append-verify' => '1', 'recursive' => '1']);
+        $this->assertArrayNotHasKey('append', $opts);
+        foreach (Rsync::optionTokens(Config::mergeRsyncOptions($opts), 'SSH') as $token) {
+            $this->assertStringNotContainsString('append', $token);
+        }
+        $this->assertSame([], preg_grep('/append/i', array_merge(array_keys(Rsync::BOOL_FLAGS), array_values(Rsync::BOOL_FLAGS))));
+    }
+
     /** @return array<string,array{0:array<string,mixed>,1:string}> */
     public static function forcedSnapshotOptionProvider(): array
     {

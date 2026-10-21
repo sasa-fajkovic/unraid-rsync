@@ -2205,6 +2205,7 @@ final class RunnerTest extends TestCase
         $config['jobs'][] = array_merge(Config::defaultJob(), ['id' => 'j-snap', 'name' => 'snap', 'connectionId' => 'c-key'], $this->snapshotFields());
         Config::save($config);
         $rt  = $this->seedSshJob('j-stray', [
+            'notifyMode'   => 'off',
             'pairs'        => [['local' => '/mnt/user/src/', 'remote' => '/srv/backup/snapshots/snap/stray']],
             'rsyncOptions' => Config::mergeRsyncOptions([]),
         ]);
@@ -2212,7 +2213,31 @@ final class RunnerTest extends TestCase
 
         $this->assertSame('guardrail', $res['reason'] ?? '');
         $this->assertSame([], $this->argvs);
-        $this->assertStringContainsString('the snapshot root of job "snap"', (string) file_get_contents($res['runLog']));
+        $this->assertStringContainsString(
+            'Pair #1: the destination must not be or lie inside the snapshot root of job "snap"',
+            (string) file_get_contents($res['runLog'])
+        );
+    }
+
+    public function testADeleteMirrorOverASnapshotRootsParentIsRefusedAtRunTime(): void
+    {
+        $this->fakeRsync();
+        $config = Config::load();
+        $config['jobs'][] = array_merge(Config::defaultJob(), ['id' => 'j-snap', 'name' => 'snap', 'connectionId' => 'c-key'], $this->snapshotFields());
+        Config::save($config);
+        // seedSshJob's mirror has --delete on.
+        $rt  = $this->seedSshJob('j-over', [
+            'notifyMode' => 'off',
+            'pairs'      => [['local' => '/mnt/user/src/', 'remote' => '/srv/backup/snapshots']],
+        ]);
+        $res = $this->runInTempRuntime($rt, 'j-over');
+
+        $this->assertSame('guardrail', $res['reason'] ?? '');
+        $this->assertSame([], $this->argvs, 'refused before the marker fetch and the --delete probe');
+        $this->assertStringContainsString(
+            "inside the destination of the snapshot root of job \"snap\" ('/srv/backup/snapshots/snap')",
+            (string) file_get_contents($res['runLog'])
+        );
     }
 
     /** @return array<string,array{0:?string,1:string,2:bool}> */

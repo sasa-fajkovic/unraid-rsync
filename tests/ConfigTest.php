@@ -1223,6 +1223,25 @@ final class ConfigTest extends TestCase
         $this->assertContains('Snapshot setting keepDaily must be a whole number from 0 to 366.', Job::validate($job)['errors']);
     }
 
+    public function testMergeJobKeepsAPresentEmptySubAndOnlyAStrictTrueSeed(): void
+    {
+        $job = Config::mergeJob([
+            'id' => 'j', 'snapshot' => $this->snapshotBlock(),
+            'pairs' => [
+                ['local' => '/a', 'remote' => '', 'sub' => '', 'seed' => false],
+                ['local' => '/b', 'remote' => '', 'sub' => '  ', 'seed' => 'true'],
+                ['local' => '/c', 'remote' => '', 'seed' => 1],
+                ['local' => '/d', 'remote' => '', 'sub' => ['x'], 'seed' => true],
+            ],
+        ]);
+        $this->assertSame([
+            ['local' => '/a', 'remote' => '', 'sub' => ''],
+            ['local' => '/b', 'remote' => '', 'sub' => ''],
+            ['local' => '/c', 'remote' => ''],
+            ['local' => '/d', 'remote' => '', 'sub' => '', 'seed' => true],
+        ], $job['pairs']);
+    }
+
     public function testDefaultSnapshotKeyOrder(): void
     {
         $this->assertSame([

@@ -1847,24 +1847,94 @@ final class HandlerTest extends TestCase
         ], $raw['jobs'][0]['pairs']);
     }
 
-    public function testAGlobalSaveThatBreaksASnapshotJobIsRefusedNamingIt(): void
+    /** @return array<string,array{0:array<string,string>,1:string}> */
+    public static function rejectedGlobalOptionProvider(): array
+    {
+        return [
+            'inplace'        => [['inplace' => '1'], '--inplace'],
+            'backupDir'      => [['backupDir' => '/srv/old'], '--backup-dir'],
+            'checksum'       => [['checksum' => '1'], '--checksum'],
+            'sizeOnly'       => [['sizeOnly' => '1'], '--size-only'],
+            'ignoreExisting' => [['ignoreExisting' => '1'], '--ignore-existing'],
+            'update'         => [['update' => '1'], '--update'],
+            'times off'      => [['times' => '0'], 'Preserve times (-t)'],
+        ];
+    }
+
+    /** @param array<string,string> $opt */
+    #[DataProvider('rejectedGlobalOptionProvider')]
+    public function testAGlobalSaveThatBreaksASnapshotJobIsRefusedNamingIt(array $opt, string $needle): void
     {
         $this->seedSnapshotJob();
         $before = file_get_contents(Config::path());
         $_POST = [
             'action'     => 'saveConfig',
             'csrf_token' => 'test-token',
-            'global'     => ['defaultRsyncOptions' => ['recursive' => '1', 'times' => '1', 'checksum' => '1']],
+            'global'     => ['defaultRsyncOptions' => array_merge(['recursive' => '1', 'times' => '1'], $opt)],
         ];
         [$body, $code] = $this->runCapture(fn() => ur_action_save_config());
 
         $this->assertSame(422, $code, json_encode($body));
-        $this->assertNotEmpty(array_filter($body['errors'], static fn($e) => str_starts_with($e, 'Job "Snap": Snapshot mode') && str_contains($e, '--checksum')));
-        $this->assertSame($before, file_get_contents(Config::path()));
+        $this->assertNotEmpty(array_filter($body['errors'], static fn($e) => str_starts_with($e, 'Job "Snap": Snapshot mode') && str_contains($e, $needle)));
+        $this->assertSame($before, file_get_contents(Config::path()), 'nothing saved');
+    }
 
-        unset($_POST['global']['defaultRsyncOptions']['checksum']);
+    /** @return array<string,array{0:array<string,string>,1:string}> */
+    public static function forcedGlobalOptionProvider(): array
+    {
+        return [
+            'mkpath'         => [['mkpath' => '1'], '--mkpath'],
+            'delete'         => [['delete' => '1'], '--delete'],
+            'deleteExcluded' => [['deleteExcluded' => '1'], '--delete-excluded'],
+            'maxDelete'      => [['maxDelete' => '10'], '--max-delete'],
+            'hardlinks'      => [['hardlinks' => '1'], 'Preserve hard links (-H)'],
+        ];
+    }
+
+    /** @param array<string,string> $opt */
+    #[DataProvider('forcedGlobalOptionProvider')]
+    public function testAGlobalSaveWithAForcedOffOptionSavesWithAWarningAndKeepsTheValue(array $opt, string $label): void
+    {
+        $this->seedSnapshotJob();
+        $_POST = [
+            'action'     => 'saveConfig',
+            'csrf_token' => 'test-token',
+            'global'     => ['defaultRsyncOptions' => array_merge(['recursive' => '1', 'times' => '1'], $opt)],
+        ];
         [$body, $code] = $this->runCapture(fn() => ur_action_save_config());
+
         $this->assertSame(200, $code, json_encode($body));
+        $this->assertContains("Job \"Snap\": $label is forced off in snapshot mode.", $body['warnings']);
+        $stored = Config::load()['global']['defaultRsyncOptions'];
+        $key    = array_key_first($opt);
+        $this->assertSame($key === 'maxDelete' ? '10' : true, $stored[$key], 'the stored value is not rewritten');
+    }
+
+    public function testCarryOverIsSkippedWhenAnyPostedPairCarriesASub(): void
+    {
+        $this->seedSnapshotJob();
+        $before = file_get_contents(Config::path());
+        $job = $this->snapshotJobAsTheFormPostsIt();
+        $job['pairs'][0]['sub'] = 'appdata';
+        $_POST = ['action' => 'saveConfig', 'csrf_token' => 'test-token', 'jobs' => [$job]];
+        [$body, $code] = $this->runCapture(fn() => ur_action_save_config());
+
+        $this->assertSame(422, $code, json_encode($body));
+        $this->assertContains('Job "Snap": Pair #2: a snapshot sub-directory name is required.', $body['errors']);
+        $this->assertSame($before, file_get_contents(Config::path()));
+    }
+
+    public function testCarryOverToleratesWhitespaceAroundAnUnchangedLocal(): void
+    {
+        $this->seedSnapshotJob();
+        $before = file_get_contents(Config::path());
+        $job = $this->snapshotJobAsTheFormPostsIt();
+        $job['pairs'][1]['local'] = '  /mnt/user/docs/ ';
+        $_POST = ['action' => 'saveConfig', 'csrf_token' => 'test-token', 'jobs' => [$job]];
+        [$body, $code] = $this->runCapture(fn() => ur_action_save_config());
+
+        $this->assertSame(200, $code, json_encode($body));
+        $this->assertSame($before, file_get_contents(Config::path()), 'saved as the trimmed, unchanged pair');
     }
 
     public function testJobsSaveRefusesAMirrorInsideASnapshotRoot(): void
