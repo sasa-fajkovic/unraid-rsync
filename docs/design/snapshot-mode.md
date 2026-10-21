@@ -224,7 +224,7 @@ A suspect run **still commits**. It creates `.ur-hold`, pins the previous comple
 `History::normalizeRecord` gets optional keys, written only for snapshot jobs so mirror records keep their shape:
 - `snapshot` (stamp or ''), `committed` (bool), `suspect` (bool), `pruned` (int), `growthKB` (int, or absent).
 
-The summary file (`Runner::writeSummary`) gets `snapshot` and `committed`. `getStatus` shows the last committed stamp (PR-I).
+The summary file (`Runner::writeSummary`) gets `snapshot` and `committed`. `getStatus` shows the last run's stamp and whether it was committed, read from that summary (PR-I); a run that created no stamp (a dry run, or a failure before `mkstamp`) shows none.
 
 ### 4.4 Notification reasons (mapped into `Runner::notifyImportance`)
 
@@ -494,15 +494,16 @@ The operational detail (backups first, verification commands, restore drills) li
   - a real-rsync E2E with the helper through `sh -c`, 4+ runs, inode and link-count assertions, prune and leftover cleanup;
   - stats capture at every log level.
 
-**PR-H `feat: snapshot fields in the Jobs form`**
+**PR-H `feat: snapshot mode in the UI`** (PR-I is folded in)
 - Scope:
   - the job-level block (enable, root, retention, prune dry-run);
   - pair-row `sub` and `seed` inputs, with `remote` hidden, emptied and not `required` in snapshot mode;
   - the Connections `useSudo` checkbox;
   - PHP and JS templates kept in step; help text; the README section with migration and rollback scripts. This folds in the old PR-K docs.
+  - everything listed under PR-I below.
 - Tests: FormActionTest, OptionsFormHelpTest, and form → handler → stored-shape round-trips.
 
-**PR-I `feat: snapshot state in status, history and alerts`**
+**PR-I `feat: snapshot state in status, history and alerts`** (folded into PR-H; no separate PR)
 - Scope: `writeSummary`, `getStatus`/Overview/Jobs/History columns (stamp, committed, suspect, pruned); the stamp in the in-flight record and crash alert; the "not committed for N runs" text.
 - Tests: HistoryTest, HandlerStatusTest, RunnerNotifyTest.
 

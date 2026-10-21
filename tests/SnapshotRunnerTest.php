@@ -712,6 +712,47 @@ final class SnapshotRunnerTest extends TestCase
         $this->assertSame('alert', $this->importance());
     }
 
+    public function testTheAlertCountsRunsThatDidNotCommit(): void
+    {
+        $this->saveJob();
+        $this->seedSnapshot($this->stamp(1));
+        $streak = 'Job "snap" has not committed a snapshot for';
+        $this->pairExit = ['a' => 23];
+
+        $this->runJob();
+        $this->assertStringNotContainsString('has not committed', $this->notified[0], 'one run is not a streak');
+        $this->assertStringContainsString('Job "snap" finished.', $this->notified[0]);
+
+        $this->clock += 3600;
+        $this->runJob();
+        $this->assertSame('alert', $this->importance(), 'the reason still decides the importance');
+        $this->assertStringContainsString("$streak 2 runs.", $this->notified[0]);
+
+        // A dry run and an abort neither count nor break the streak.
+        $this->clock += 3600;
+        $this->runJob(true);
+        $this->assertStringNotContainsString('has not committed', $this->notified[0]);
+        $this->clock += 3600;
+        $this->duringTransfer = fn(string $sub) => RunState::requestAbort(self::JOB);
+        $this->runJob();
+        $this->assertStringNotContainsString('has not committed', $this->notified[0]);
+        $this->duringTransfer = null;
+
+        $this->clock += 3600;
+        $this->runJob();
+        $this->assertStringContainsString("$streak 3 runs.", $this->notified[0]);
+
+        // A commit resets it.
+        $this->pairExit = [];
+        $this->clock += 3600;
+        $this->runJob();
+        $this->assertStringNotContainsString('has not committed', $this->notified[0]);
+        $this->pairExit = ['a' => 23];
+        $this->clock += 3600;
+        $this->runJob();
+        $this->assertStringNotContainsString('has not committed', $this->notified[0]);
+    }
+
     public function testThreeRunsThatDoNotCommitKeepOnlyTheNewestStaleInprogress(): void
     {
         $this->saveJob();

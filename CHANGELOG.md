@@ -12,12 +12,6 @@ user-facing highlights.
 ## [Unreleased]
 
 ### Added
-- Snapshot mode (in development on feat/snapshot-mode): per-job settings and
-  validation.
-- Snapshot mode (in development on feat/snapshot-mode): snapshot planner and
-  remote helper.
-- Snapshot mode (in development on feat/snapshot-mode): runs jobs in snapshot
-  mode.
 - **Notifications for runs that never did their job.** A run that could not
   start (configuration unreadable, job not found, lock or run-state error) sends
   an *alert* `<job>: run did not start`. A scheduled run skipped because the
@@ -98,6 +92,38 @@ user-facing highlights.
   level — a quiet level never hides what a `--delete` job removed — and a
   **Dry-run is never quieter than *Normal***, so the preview always names the
   files and deletions it would have made.
+
+#### Snapshot mode
+- **Snapshot mode** (per job, SSH + Push). Instead of one mirror, every run
+  writes a new dated copy on the receiver, with unchanged files hard-linked to
+  the previous snapshot (`rsync --link-dest`), so each snapshot costs only the
+  space of what changed. Turn it on in the job card: a snapshot root inside the
+  target marker's directory (the marker and its content become mandatory), and
+  a retention of daily / weekly / monthly snapshots. Each pair gets a
+  sub-directory name instead of a remote path, plus a **seed** flag that allows
+  its first, full copy.
+- **Only complete runs count.** A snapshot is committed only when every pair
+  finished cleanly; otherwise it stays `<stamp>.inprogress` and is reused as a
+  link basis by the next run. Every operation on the receiver re-checks the
+  marker, the root and a `.ur-snapshot-root` sentinel naming the job, and a
+  missing or wrong one fails the run before the pre-run hook.
+- **Careful pruning.** Pruning starts as a dry run that only logs its plan; turn
+  **Prune dry run** off once the plans look right. At most **Max deletions per
+  run** snapshots are deleted per run, the newest snapshot and any pinned one
+  (`.ur-keep`) are never deleted, and a run that looks suspect (far fewer files
+  or bytes, runaway growth) still commits but puts deletions on hold
+  (`.ur-hold`), pins the previous snapshot and alerts.
+- **Use sudo on the receiver** (Connections tab, SSH only) for a non-root login
+  with passwordless sudo for `sh`; only the snapshot helper uses it.
+- **Status everywhere.** Jobs, Overview and the Dashboard tile show the last
+  snapshot and whether it was committed; History shows each run's snapshot,
+  committed, suspect and pruned count. Alerts name the reason, a run that keeps
+  failing says `has not committed a snapshot for N runs`, and a crash report
+  names the `.inprogress` it left.
+- Mirror jobs are unchanged; `config.json` only moves to schema 3 while a
+  snapshot job is enabled, so an older release refuses it rather than running a
+  snapshot job as a mirror. The README covers setup, restores, migrating an
+  existing mirror and rolling back.
 
 ### Fixed
 - **Two notifications in the same second no longer drop one.** Unraid's

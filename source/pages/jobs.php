@@ -102,6 +102,9 @@ function ur_render_job_card($job, $index): void
     $marker      = (string) ($job['targetMarker'] ?? '');
     $markerText  = (string) ($job['targetMarkerContent'] ?? '');
     $pairs       = (isset($job['pairs']) && is_array($job['pairs'])) ? $job['pairs'] : [];
+    $snapshot    = Config::normalizeSnapshot($job['snapshot'] ?? null);
+    $snapOn      = $snapshot !== null;
+    $snapshot    = $snapshot ?? Config::defaultSnapshot();
     $opts        = (isset($job['rsyncOptions']) && is_array($job['rsyncOptions']))
         ? $job['rsyncOptions'] : Config::defaultRsyncOptions();
 
@@ -249,10 +252,10 @@ function ur_render_job_card($job, $index): void
     echo '<dd>';
     echo '<div class="ur-pairs" id="' . ur_h($pairsRowsId) . '" data-prefix="' . ur_h($p . '[pairs]') . '">';
     if (empty($pairs)) {
-        ur_render_pair_row($p, 0, '', '');
+        ur_render_pair_row($p, 0, [], $snapOn);
     } else {
         foreach ($pairs as $k => $pair) {
-            ur_render_pair_row($p, (int) $k, (string) ($pair['local'] ?? ''), (string) ($pair['remote'] ?? ''));
+            ur_render_pair_row($p, (int) $k, is_array($pair) ? $pair : [], $snapOn);
         }
     }
     echo '</div>';
@@ -272,6 +275,11 @@ function ur_render_job_card($job, $index): void
         . '</p><p>'
         . ur_h(ur_t('For an rsync daemon job the right box is a MODULE reference on the daemon - just "rsync_bkp", or "rsync_bkp/photos" for a folder inside it. No host and no leading slash: the host, port, username and module secret all come from the Connection.'))
         . '</p></blockquote>';
+    echo '<div class="ur-snap-only"' . ur_snap_style($snapOn) . '><blockquote class="inline_help" style="display:block;margin:6px 0 0"><p>'
+        . ur_h(ur_t('In snapshot mode the right box is a sub-directory NAME instead of a path: each snapshot holds this pair under <root>/<stamp>/<name>/. Use 1 to 64 letters, digits, "_" or "-", starting with a letter or digit; "latest" is reserved, and each pair of the job needs its own name (compared ignoring case).'))
+        . '</p><p>'
+        . ur_h(ur_t('Seed: allow this pair\'s first copy without a previous snapshot to link against: a full copy. Every pair needs it on the job\'s first snapshot, and so does a pair added later. Once the pair is in a snapshot the flag has no effect and can be cleared.'))
+        . '</p></blockquote></div>';
     echo '</dd>';
 
     // use global config toggle
@@ -315,6 +323,50 @@ function ur_render_job_card($job, $index): void
     echo '<blockquote class="inline_help"><p>'
         . ur_h(ur_t('Protects against writing to an unmounted drive. Optional: the path of a small file on the DESTINATION side (on the remote host for a push, on this server for a pull or a local job) that must exist before the run starts - for example a .unraid-rsync-target file in the root of the backup drive. If it is missing, cannot be read, or does not contain the expected content (when one is set, e.g. a UUID), the run fails before the pre-run hook and before anything is copied. Leave empty to turn the check off.'))
         . '</p></blockquote></dd>';
+
+    // snapshot mode. Every field is always rendered (the JS template is this
+    // same card) and only shown and enabled while the switch is on: a disabled
+    // field is not posted, so a mirror job posts just snapshot[enabled]=0.
+    $sp = $p . '[snapshot]';
+    echo '<dt>' . ur_h(ur_t('Snapshot mode')) . ':</dt>';
+    echo '<dd>';
+    echo '<input type="hidden" name="' . ur_h($sp . '[enabled]') . '" value="0">';
+    echo '<input type="checkbox" class="ur-switch ur-snap-toggle" name="' . ur_h($sp . '[enabled]') . '" value="1"' . ($snapOn ? ' checked' : '') . '>';
+    echo '<blockquote class="inline_help"><p>' . ur_h(ur_t('When ON, every run writes a new dated copy (a snapshot) on the receiver instead of updating one mirror. SSH transport and Push only.')) . '</p></blockquote>';
+    echo '<div class="ur-snap-only"' . ur_snap_style($snapOn) . '><blockquote class="inline_help" style="display:block;margin:6px 0 0"><p>'
+        . ur_h(ur_t('A snapshot is a complete, dated copy of every pair under <root>/<stamp>/ on the receiver. Files that did not change since the previous snapshot are hard links to it (rsync --link-dest), so each snapshot only costs the space of what changed. A snapshot counts only once its run finished cleanly; old ones are pruned by the retention below.'))
+        . '</p><p>'
+        . ur_h(ur_t('The target marker and its expected content above become mandatory, and the snapshot root must be the marker\'s directory or lie inside it. You create the root (mode 0700) and its .ur-snapshot-root file holding this job\'s id; the plugin never creates them.'))
+        . '</p><p>'
+        . ur_h(ur_t('The transfer\'s SSH login must be able to read the root as root: either log in as root, or point Remote rsync path at a wrapper on the receiver that runs rsync through sudo, and turn on "Use sudo on the receiver" on the connection.'))
+        . '</p><p>'
+        . ur_h(ur_t('Pruning starts as a dry run: it logs what it would delete and deletes nothing until you turn "Prune dry run" off.'))
+        . '</p></blockquote></div>';
+    echo '</dd>';
+
+    echo '<dt class="ur-snap-only"' . ur_snap_style($snapOn) . '><label for="' . ur_h($idb . '_snaproot') . '">' . ur_h(ur_t('Snapshot root')) . '</label>' . ur_required_mark() . ':</dt>';
+    echo '<dd class="ur-snap-only"' . ur_snap_style($snapOn) . '><input type="text" class="ur-snap-field" id="' . ur_h($idb . '_snaproot') . '" name="' . ur_h($sp . '[root]')
+        . '" value="' . ur_h($snapshot['root']) . '" placeholder="/mnt/backup/snapshots/appdata" spellcheck="false"' . ur_snap_disabled($snapOn) . '>';
+    echo '<blockquote class="inline_help"><p>' . ur_h(ur_t('Absolute path on the receiver that holds this job\'s snapshots and nothing else; no other job may write into it. At least two directories deep, three under /mnt.')) . '</p></blockquote></dd>';
+
+    echo '<dt class="ur-snap-only"' . ur_snap_style($snapOn) . '>' . ur_h(ur_t('Keep snapshots')) . ':</dt>';
+    echo '<dd class="ur-snap-only"' . ur_snap_style($snapOn) . '>';
+    foreach (['keepDaily' => 'daily', 'keepWeekly' => 'weekly', 'keepMonthly' => 'monthly'] as $key => $lbl) {
+        echo '<label>' . ur_h(ur_t($lbl)) . ' <input type="text" class="ur-snap-field" inputmode="numeric" size="4" name="' . ur_h($sp . '[' . $key . ']')
+            . '" value="' . ur_h((string) $snapshot[$key]) . '"' . ur_snap_disabled($snapOn) . '></label> ';
+    }
+    echo '<blockquote class="inline_help"><p>' . ur_h(ur_t('Keeps the newest snapshot of each of the last N days (0-366), ISO weeks (0-260) and months (0-120) that have one; at least one in total. The newest snapshot is always kept.')) . '</p></blockquote></dd>';
+
+    echo '<dt class="ur-snap-only"' . ur_snap_style($snapOn) . '><label for="' . ur_h($idb . '_snapmax') . '">' . ur_h(ur_t('Max deletions per run')) . '</label>:</dt>';
+    echo '<dd class="ur-snap-only"' . ur_snap_style($snapOn) . '><input type="text" class="ur-snap-field" inputmode="numeric" size="4" id="' . ur_h($idb . '_snapmax') . '" name="' . ur_h($sp . '[maxPrunePerRun]')
+        . '" value="' . ur_h((string) $snapshot['maxPrunePerRun']) . '"' . ur_snap_disabled($snapOn) . '>';
+    echo '<blockquote class="inline_help"><p>' . ur_h(ur_t('At most this many old snapshots (1-20) are deleted per run; the rest wait for the next run.')) . '</p></blockquote></dd>';
+
+    echo '<dt class="ur-snap-only"' . ur_snap_style($snapOn) . '>' . ur_h(ur_t('Prune dry run')) . ':</dt>';
+    echo '<dd class="ur-snap-only"' . ur_snap_style($snapOn) . '>';
+    echo '<input type="hidden" class="ur-snap-field" name="' . ur_h($sp . '[pruneDryRun]') . '" value="0"' . ur_snap_disabled($snapOn) . '>';
+    echo '<input type="checkbox" class="ur-switch ur-snap-field" name="' . ur_h($sp . '[pruneDryRun]') . '" value="1"' . ($snapshot['pruneDryRun'] ? ' checked' : '') . ur_snap_disabled($snapOn) . '>';
+    echo '<blockquote class="inline_help"><p>' . ur_h(ur_t('When ON, each run only logs which snapshots it would delete. Review those plans for a while, then turn it OFF to let pruning delete.')) . '</p></blockquote></dd>';
 
     // pre/post hooks. Both run as ROOT via a SINGLE `bash -c "$hook"` call
     // (Runner::runHook) — the whole textarea value is one bash script, so
@@ -423,20 +475,41 @@ function ur_hook_gutter_html(int $lines): string
  * Render a single source->dest pair row. $k is an int row index or "__PIDX__"
  * for the JS template.
  *
- * @param int|string $k
+ * @param int|string          $k
+ * @param array<string,mixed> $pair
  */
-function ur_render_pair_row(string $prefix, $k, string $local, string $remote): void
+function ur_render_pair_row(string $prefix, $k, array $pair, bool $snapOn): void
 {
     // Both the source (local) and destination (remote) of a pair are mandatory;
     // mark them required so the browser blocks a half-filled pair before submit
-    // (the server re-enforces this and the path guardrails).
+    // (the server re-enforces this and the path guardrails). In snapshot mode
+    // the sub name takes the remote's place; whichever one is inactive is
+    // disabled, so it is neither validated nor posted.
     $base = $prefix . '[pairs][' . $k . ']';
     echo '<div class="ur-pair-row">';
-    echo '<input type="text" name="' . ur_h($base . '[local]') . '" value="' . ur_h($local) . '" placeholder="/mnt/user/share/sub/" required>';
+    echo '<input type="text" name="' . ur_h($base . '[local]') . '" value="' . ur_h((string) ($pair['local'] ?? '')) . '" placeholder="/mnt/user/share/sub/" required>';
     echo ' &rarr; ';
-    echo '<input type="text" name="' . ur_h($base . '[remote]') . '" value="' . ur_h($remote) . '" placeholder="/mnt/disk/backup/ or /remote/path/on/host/" required>';
+    echo '<input type="text" class="ur-pair-remote" name="' . ur_h($base . '[remote]') . '" value="' . ur_h((string) ($pair['remote'] ?? ''))
+        . '" placeholder="/mnt/disk/backup/ or /remote/path/on/host/"' . ($snapOn ? ' disabled style="display:none"' : ' required') . '>';
+    echo '<input type="text" class="ur-snap-field ur-snap-only ur-pair-sub" name="' . ur_h($base . '[sub]') . '" value="' . ur_h((string) ($pair['sub'] ?? ''))
+        . '" placeholder="' . ur_h(ur_t('sub-directory name, e.g. appdata')) . '" spellcheck="false" aria-label="' . ur_h(ur_t('Snapshot sub-directory name')) . '"'
+        . ($snapOn ? ' required' : ' disabled style="display:none"') . '>';
+    echo '<label class="ur-snap-only"' . ur_snap_style($snapOn) . '> <input type="checkbox" class="ur-snap-field" name="' . ur_h($base . '[seed]') . '" value="1"'
+        . (!empty($pair['seed']) ? ' checked' : '') . ur_snap_disabled($snapOn) . '> ' . ur_h(ur_t('seed')) . '</label>';
     echo ' <button type="button" class="ur-pair-del">&minus;</button>';
     echo '</div>';
+}
+
+/** Inline style of a snapshot-only element: hidden in mirror mode. */
+function ur_snap_style(bool $snapOn): string
+{
+    return $snapOn ? '' : ' style="display:none"';
+}
+
+/** A snapshot-only control is disabled, so not posted, in mirror mode. */
+function ur_snap_disabled(bool $snapOn): string
+{
+    return $snapOn ? '' : ' disabled';
 }
 
 /**
@@ -602,6 +675,8 @@ function ur_ago(int $deltaSec): string
    attribute on the mandatory inputs. text-decoration:none drops the dotted
    <abbr> underline so it reads as a clean asterisk. */
 .ur-required { color: var(--red-800, #b71c1c); font-weight: bold; text-decoration: none; cursor: help; }
+
+.ur-snap-status { font-size: 0.85em; color: var(--color-text-secondary, #888); }
 
 /* Live cron reading + field-order legend under the schedule input. */
 .ur-cron-human { margin-top: 4px; font-size: 0.9em; font-weight: bold; color: var(--blue-800, #1565c0); min-height: 1.1em; }
@@ -875,6 +950,7 @@ ur_emit_time_helpers();
         $running = ($jid !== '') ? RunState::isRunning($jid) : false;
         $summary = ($jid !== '') ? Runner::readSummary($jid) : null;
         $state   = ur_job_state($running, $summary);
+        $snapLast = Config::normalizeSnapshot($job['snapshot'] ?? null) !== null ? Snapshot::lastSnapshot($summary) : null;
     ?>
       <tr data-jobid="<?=htmlspecialchars($jid, ENT_QUOTES, 'UTF-8')?>">
         <td><?=htmlspecialchars((string)($job['name'] ?? ''), ENT_QUOTES, 'UTF-8')?></td>
@@ -888,7 +964,7 @@ ur_emit_time_helpers();
         <td><?=!empty($job['enabled']) ? _('Yes') : _('No')?></td>
         <td><?=htmlspecialchars((string)($job['transport'] ?? ''), ENT_QUOTES, 'UTF-8')?></td>
         <td><?=!empty($job['manualOnly']) ? _('Manual') : htmlspecialchars((string)($job['schedule'] ?? ''), ENT_QUOTES, 'UTF-8')?></td>
-        <td class="ur-last-run-cell"><?=htmlspecialchars(ur_last_run_label($summary, $urNow), ENT_QUOTES, 'UTF-8')?></td>
+        <td class="ur-last-run-cell"><?=htmlspecialchars(ur_last_run_label($summary, $urNow), ENT_QUOTES, 'UTF-8')?><?php if ($snapLast !== null): ?><div class="ur-snap-status" title="<?=htmlspecialchars($snapLast['stamp'], ENT_QUOTES, 'UTF-8')?>"><?=htmlspecialchars($snapLast['label'], ENT_QUOTES, 'UTF-8')?></div><?php endif; ?></td>
         <td class="ur-next-run-cell"><?=htmlspecialchars(ur_next_run_label($job, $urNow), ENT_QUOTES, 'UTF-8')?></td>
       </tr>
     <?php endforeach; endif; ?>
@@ -961,7 +1037,7 @@ ur_emit_time_helpers();
 ?>
 </script>
 <script type="text/html" id="ur-pair-template">
-<?php ur_render_pair_row('jobs[__IDX__]', '__PIDX__', '', ''); ?>
+<?php ur_render_pair_row('jobs[__IDX__]', '__PIDX__', [], false); ?>
 </script>
 
 <script type="text/javascript">
@@ -1015,6 +1091,7 @@ ur_emit_time_helpers();
     syncAllManualOnly();
     syncAllCronHuman();
     syncAllHookGutters();
+    syncSnapshot(card);
     /* Filter reorder arrows + the "implied by -a" group in the cloned card
      * (owned by the shared options partial; its listeners are delegated, only
      * this initial state needs a nudge). */
@@ -1039,6 +1116,8 @@ ur_emit_time_helpers();
     wrap.innerHTML = html.trim();
     var row = wrap.firstElementChild;
     rowsEl.appendChild(row);
+    /* The template row is a mirror row; match the card's mode. */
+    syncSnapshot(rowsEl.closest('.ur-job-card'));
   }
 
   /* Filter rows (add / remove / reorder) are handled by the shared options
@@ -1256,8 +1335,31 @@ ur_emit_time_helpers();
       syncConnRequired(t);
     } else if (t.classList.contains('ur-manual-only')) {
       syncManualOnly(t);
+    } else if (t.classList.contains('ur-snap-toggle')) {
+      syncSnapshot(t.closest('.ur-job-card'));
     }
   });
+
+  /* Snapshot mode switch: show + enable the snapshot fields and each pair's sub
+   * name and seed, and hide + disable the remote path, or the reverse. A
+   * disabled control is neither validated nor posted, so `required` only bites
+   * on the visible one. Mirrors ur_render_job_card()'s server-seeded state. */
+  function syncSnapshot(card) {
+    if (!card) { return; }
+    var toggle = card.querySelector('.ur-snap-toggle');
+    var on = !!(toggle && toggle.checked);
+    Array.prototype.forEach.call(card.querySelectorAll('.ur-snap-only'), function (el) { el.style.display = on ? '' : 'none'; });
+    Array.prototype.forEach.call(card.querySelectorAll('.ur-snap-field'), function (el) { el.disabled = !on; });
+    Array.prototype.forEach.call(card.querySelectorAll('.ur-pair-sub'), function (el) { el.required = on; });
+    Array.prototype.forEach.call(card.querySelectorAll('.ur-pair-remote'), function (el) {
+      el.style.display = on ? 'none' : '';
+      el.disabled = on;
+      el.required = !on;
+    });
+  }
+  function syncAllSnapshot() {
+    Array.prototype.forEach.call(document.querySelectorAll('#ur-jobs-container .ur-job-card'), syncSnapshot);
+  }
 
   /* Manual-only toggle: hide the schedule row and drop its `required` when ON (a
    * hidden required field is "not focusable" and would block Apply), restore when
@@ -1583,6 +1685,15 @@ ur_emit_time_helpers();
           } else {
             cell.textContent = '—';
           }
+          /* Snapshot jobs only: the label is built server-side in the system
+           * timezone, with the UTC stamp on hover. */
+          if (s.snapshot) {
+            var snapLine = document.createElement('div');
+            snapLine.className = 'ur-snap-status';
+            snapLine.title = s.snapshot.stamp;
+            snapLine.textContent = s.snapshot.label;
+            cell.appendChild(snapLine);
+          }
         }
         /* Keep the Next-run cell live too (it would otherwise go stale after a
          * run); mirrors the server-rendered ur_next_run_label vocabulary. */
@@ -1790,6 +1901,7 @@ ur_emit_time_helpers();
   syncAllManualOnly();
   syncAllCronHuman();
   syncAllHookGutters();
+  syncAllSnapshot();
 
   /* Kick off polling on load only when something is already running (the
    * server-rendered badges tell us, but a cheap initial poll is simplest and

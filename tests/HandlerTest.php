@@ -1751,8 +1751,8 @@ final class HandlerTest extends TestCase
     }
 
     /**
-     * The stored snapshot job as today's Jobs form posts it: no snapshot block,
-     * pairs with only local/remote.
+     * The stored snapshot job as a Jobs tab opened before snapshot mode posts
+     * it: no snapshot block, pairs with only local/remote.
      *
      * @return array<string,mixed>
      */
@@ -1795,7 +1795,7 @@ final class HandlerTest extends TestCase
     {
         $this->seedSnapshotJob();
         $before = file_get_contents(Config::path());
-        $msg = 'Job "Snap": snapshot pairs cannot be changed from this form yet.';
+        $msg = 'Job "Snap": this Jobs page is out of date; reload it before changing the pairs of a snapshot job.';
 
         $form  = $this->snapshotJobAsTheFormPostsIt();
         [$a, $b] = $form['pairs'];

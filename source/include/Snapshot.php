@@ -167,6 +167,30 @@ class Snapshot
     }
 
     /**
+     * The snapshot a run summary names, for display: the UTC stamp, whether it
+     * was committed, and a label in the system's timezone. Null when the run
+     * took none (a dry run, or a failure before the stamp was created).
+     *
+     * @param array<string,mixed>|null $summary Runner::readSummary()
+     * @return array{stamp:string,committed:bool,label:string}|null
+     */
+    public static function lastSnapshot(?array $summary): ?array
+    {
+        $stamp = is_string($summary['snapshot'] ?? null) ? $summary['snapshot'] : '';
+        if (!self::isStamp($stamp)) {
+            return null;
+        }
+        $t         = DateTimeImmutable::createFromFormat('!' . self::STAMP_FORMAT, $stamp, new DateTimeZone('UTC'));
+        $committed = !empty($summary['committed']);
+        return [
+            'stamp'     => $stamp,
+            'committed' => $committed,
+            'label'     => 'last snapshot ' . date('Y-m-d H:i:s', $t === false ? 0 : $t->getTimestamp())
+                . ($committed ? ' (committed)' : ' (not committed)'),
+        ];
+    }
+
+    /**
      * 'complete', 'inprogress', 'deleting', 'rolledback', or 'foreign' for
      * every other name (including an impossible date with a valid shape).
      */

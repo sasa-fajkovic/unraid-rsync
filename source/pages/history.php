@@ -53,6 +53,7 @@ ur_emit_badge_assets(); /* the ONE badge palette + window.urBadge */
 .ur-hist-pager { margin: 10px 0; display: flex; gap: 12px; align-items: center; }
 .ur-hist-pager button[disabled] { opacity: 0.5; cursor: default; }
 .ur-trigger-icon { opacity: 0.8; margin-right: 4px; }
+.ur-hist-snap { margin-top: 3px; font-size: 0.85em; color: var(--color-text-secondary, #888); }
 .ur-empty-state {
   margin: 10px 0; padding: 10px 12px; border-radius: 4px;
   background: var(--blue-100, #d9edf7); border: 1px solid var(--blue-200, #bce8f1);
@@ -203,6 +204,21 @@ ur_emit_ajax_helpers();  /* window.urAjax.show, for the inline download error */
     return h + 'h ' + m + 'm';
   }
 
+  /* A snapshot record's line under the status badge: its stamp in the SERVER's
+   * timezone (the UTC stamp on hover), committed, suspect and pruned count. */
+  function snapLine(r) {
+    var d = document.createElement('div');
+    d.className = 'ur-hist-snap';
+    var m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2})(\d{2})(\d{2})Z$/.exec(r.snapshot || '');
+    var bits = [m ? 'Snapshot ' + window.urFmtLocal(Date.UTC(+m[1], m[2] - 1, +m[3], +m[4], +m[5], +m[6]) / 1000, true) : 'No snapshot'];
+    if (m) { d.title = r.snapshot; }
+    bits.push('committed: ' + (r.committed ? 'yes' : 'no'));
+    if (r.suspect) { bits.push('SUSPECT'); }
+    bits.push('pruned: ' + (parseInt(r.pruned, 10) || 0));
+    d.textContent = bits.join(' · ');
+    return d;
+  }
+
   /* Build one table cell with plain text (textContent => no XSS). */
   function td(text) { var c = document.createElement('td'); c.textContent = text; return c; }
 
@@ -245,6 +261,8 @@ ur_emit_ajax_helpers();  /* window.urAjax.show, for the inline download error */
       window.urBadge.apply(b, r.state);
       if (r.reason) { b.title = r.reason; }
       stTd.appendChild(b);
+      /* Snapshot jobs only: their records carry `snapshot`, mirror ones do not. */
+      if ('snapshot' in r) { stTd.appendChild(snapLine(r)); }
       tr.appendChild(stTd);
 
       // A still-running row has no final exit code or duration yet.

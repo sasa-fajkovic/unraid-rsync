@@ -729,6 +729,83 @@ final class RunnerNotifyTest extends TestCase
         $this->assertSame('crashed', History::list($id)['runs'][0]['reason']);
     }
 
+    /** @return array<string,array{0:array<string,mixed>,1:bool}> */
+    public static function crashSnapshotProvider(): array
+    {
+        return [
+            'real run with a stamp' => [['snapshot' => '2026-10-20T030000Z'], true],
+            'dry run'               => [['snapshot' => '2026-10-20T030000Z', 'dryRun' => true], false],
+            'no stamp (mirror)'     => [[], false],
+            'not a stamp'           => [['snapshot' => '2026-10-20T03:00:00Z'], false],
+        ];
+    }
+
+    /** @param array<string,mixed> $extra */
+    #[DataProvider('crashSnapshotProvider')]
+    public function testCrashAlertNamesTheInprogressALeftBehindRealSnapshotRun(array $extra, bool $named): void
+    {
+        $id = $this->saveJob('always');
+        Runner::reportCrashed(['jobId' => $id, 'pid' => 999999, 'startedAt' => '2026-10-20T03:00:00Z', 'trigger' => 'schedule'] + $extra);
+        $this->assertCount(1, $this->captured);
+        $text = 'If it was created, 2026-10-20T030000Z.inprogress was left on the receiver and will be reused as a link-dest by the next run.';
+        $named
+            ? $this->assertStringContainsString($text, $this->captured[0])
+            : $this->assertStringNotContainsString('.inprogress', $this->captured[0]);
+        $this->assertStringContainsString('services stopped by the pre-hook may still be down', $this->captured[0]);
+    }
+
+    public function testDeadRunnerCrashAlertTakesTheStampFromTheInflightRecord(): void
+    {
+        // The tmpfs state has no snapshot field; the in-flight record of the same run has.
+        $id = $this->saveJob('always');
+        $log = Logger::openRun($id, strtotime('2026-10-20T03:00:00Z'));
+        $state = ['pid' => 999999, 'running' => true, 'trigger' => 'schedule', 'startedAt' => '2026-10-20T03:00:00Z', 'currentLog' => $log];
+        RunState::write($id, $state + ['snapshot' => '2026-10-20T030000Z']);
+        RunState::writeInflight($id, $state + ['snapshot' => '2026-10-20T030000Z']);
+        $this->assertArrayNotHasKey('snapshot', RunState::read($id));
+
+        $this->assertFalse(RunState::isRunning($id));
+        $this->assertCount(1, $this->captured);
+        $this->assertStringContainsString('2026-10-20T030000Z.inprogress was left on the receiver', $this->captured[0]);
+    }
+
+    public function testRebootedSnapshotRunCrashAlertNamesTheInprogress(): void
+    {
+        $id = $this->saveJob('always');
+        RunState::writeInflight($id, ['pid' => 4242, 'trigger' => 'schedule', 'startedAt' => '2026-10-20T03:00:00Z', 'snapshot' => '2026-10-20T030000Z']);
+        RunState::reapCrashed([]);
+        $this->assertCount(1, $this->captured);
+        $this->assertStringContainsString('2026-10-20T030000Z.inprogress was left on the receiver', $this->captured[0]);
+    }
+
+    // --- snapshot: "has not committed a snapshot for N runs" ------------------
+
+    /** @param array<string,mixed> $r */
+    private function snapRun(string $id, array $r): void
+    {
+        History::append($id, $r + ['startedAt' => '2026-10-21T03:00:00Z', 'state' => Rsync::STATE_PARTIAL, 'snapshot' => '2026-10-21T030000Z', 'committed' => false]);
+    }
+
+    public function testNotCommittedRunsCountsConsecutiveRealUncommittedRuns(): void
+    {
+        $id = 'j-streak-' . bin2hex(random_bytes(3));
+        $this->assertSame(0, Runner::notCommittedRuns($id), 'no history');
+
+        History::append($id, ['startedAt' => '2026-10-01T03:00:00Z', 'state' => Rsync::STATE_SUCCESS]); // mirror era
+        $this->snapRun($id, []);
+        $this->assertSame(1, Runner::notCommittedRuns($id), 'a mirror record ends the count');
+
+        $this->snapRun($id, ['committed' => true, 'state' => Rsync::STATE_SUCCESS]);
+        $this->assertSame(0, Runner::notCommittedRuns($id), 'a commit resets it');
+
+        $this->snapRun($id, ['state' => Rsync::STATE_FAILED, 'snapshot' => '']);   // failed before the stamp
+        $this->snapRun($id, ['dryRun' => true, 'state' => Rsync::STATE_SUCCESS, 'snapshot' => '']);
+        $this->snapRun($id, ['state' => Rsync::STATE_ABORTED]);
+        $this->snapRun($id, []);
+        $this->assertSame(2, Runner::notCommittedRuns($id), 'dry runs and aborts neither count nor reset');
+        @unlink(History::path($id));
+    }
+
     // --- never-throws contract -----------------------------------------------
 
     public function testNotifyHookNeverThrowsWhenDispatchThrows(): void

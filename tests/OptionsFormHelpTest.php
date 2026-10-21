@@ -1356,6 +1356,239 @@ final class OptionsFormHelpTest extends TestCase
         $this->assertStringNotContainsString('Used for SSH transport.', $card);
     }
 
+    // --- snapshot mode in the Jobs and Connections forms ---------------------
+
+    /** @return array<string,mixed> a stored snapshot job */
+    private function snapshotJob(): array
+    {
+        return Job::normalize([
+            'id' => 'j-snap', 'name' => 'Snap', 'transport' => 'SSH', 'connectionId' => 'c-legacy',
+            'targetMarker' => '/mnt/backup/.unraid-rsync-target', 'targetMarkerContent' => 'uuid-1',
+            'pairs' => [
+                ['local' => '/mnt/user/appdata/', 'remote' => '', 'sub' => 'appdata', 'seed' => true],
+                ['local' => '/mnt/user/docs/', 'remote' => '', 'sub' => 'docs'],
+            ],
+            'snapshot' => ['enabled' => true, 'root' => '/mnt/backup/snapshots/snap', 'keepDaily' => 9, 'pruneDryRun' => false],
+        ]);
+    }
+
+    /** @return array<string,mixed> a stored mirror job */
+    private function mirrorJob(): array
+    {
+        return Job::normalize([
+            'id' => 'j-mirror', 'name' => 'Mirror', 'transport' => 'SSH', 'connectionId' => 'c-legacy',
+            'pairs' => [['local' => '/mnt/user/appdata/', 'remote' => '/mnt/backup/mirror/']],
+        ]);
+    }
+
+    /** Render one job card (the page body must have been rendered once). */
+    private function card(array $job, int|string $index): Dom\HTMLDocument
+    {
+        ob_start();
+        ur_render_job_card($job, $index);
+        return Dom\HTMLDocument::createFromString('<!doctype html><body>' . ob_get_clean(), LIBXML_NOERROR);
+    }
+
+    /**
+     * Every control name in document order, with the placeholders replaced the
+     * way addJob() / addPair() replace them.
+     *
+     * @return array<int,string>
+     */
+    private function names(Dom\ParentNode $doc): array
+    {
+        $out = [];
+        foreach ($doc->querySelectorAll('[name]') as $el) {
+            $out[] = str_replace(['__IDX__', '__PIDX__'], '0', (string) $el->getAttribute('name'));
+        }
+        return $out;
+    }
+
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testSnapshotBlockRendersOnAndOff(): void
+    {
+        $this->renderPageBody(__DIR__ . '/../source/pages/jobs.php');
+
+        $on = $this->card($this->snapshotJob(), 0);
+        $this->assertTrue($on->querySelector('.ur-snap-toggle')->hasAttribute('checked'));
+        $this->assertSame('/mnt/backup/snapshots/snap', $on->querySelector('[name="jobs[0][snapshot][root]"]')->getAttribute('value'));
+        $this->assertSame('9', $on->querySelector('[name="jobs[0][snapshot][keepDaily]"]')->getAttribute('value'));
+        $this->assertSame('4', $on->querySelector('[name="jobs[0][snapshot][keepWeekly]"]')->getAttribute('value'));
+        $this->assertSame('0', $on->querySelector('[name="jobs[0][snapshot][keepMonthly]"]')->getAttribute('value'));
+        $this->assertSame('3', $on->querySelector('[name="jobs[0][snapshot][maxPrunePerRun]"]')->getAttribute('value'));
+        $this->assertFalse($on->querySelector('input[type="checkbox"][name="jobs[0][snapshot][pruneDryRun]"]')->hasAttribute('checked'));
+        foreach ($on->querySelectorAll('.ur-snap-field') as $el) {
+            $this->assertFalse($el->hasAttribute('disabled'), (string) $el->getAttribute('name'));
+        }
+        foreach ($on->querySelectorAll('.ur-snap-only') as $el) {
+            $this->assertStringNotContainsString('display:none', (string) $el->getAttribute('style'));
+        }
+
+        $off = $this->card($this->mirrorJob(), 0);
+        $this->assertFalse($off->querySelector('.ur-snap-toggle')->hasAttribute('checked'));
+        // The defaults, with prune dry run on, ready for when the switch is turned on.
+        $this->assertSame('7', $off->querySelector('[name="jobs[0][snapshot][keepDaily]"]')->getAttribute('value'));
+        $this->assertTrue($off->querySelector('input[type="checkbox"][name="jobs[0][snapshot][pruneDryRun]"]')->hasAttribute('checked'));
+        $this->assertSame(9, $off->querySelectorAll('.ur-snap-field')->length, 'seven settings plus one pair\'s sub and seed');
+        foreach ($off->querySelectorAll('.ur-snap-field') as $el) {
+            $this->assertTrue($el->hasAttribute('disabled'), (string) $el->getAttribute('name'));
+        }
+        foreach ($off->querySelectorAll('.ur-snap-only') as $el) {
+            $this->assertStringContainsString('display:none', (string) $el->getAttribute('style'));
+        }
+        // The switch itself always posts: a hidden 0, then the box.
+        $this->assertSame(2, $off->querySelectorAll('[name="jobs[0][snapshot][enabled]"]:not([disabled])')->length);
+    }
+
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testJobCardAndPairRowTemplatesMatchTheRenderedOnes(): void
+    {
+        $this->seedConnections();
+        $cfg = Config::defaults();
+        $cfg['jobs'] = [array_merge($this->snapshotJob(), ['pairs' => [$this->snapshotJob()['pairs'][0]]])];
+        Config::save($cfg);
+        $html = $this->renderPageBody(__DIR__ . '/../source/pages/jobs.php');
+        $page = Dom\HTMLDocument::createFromString('<!doctype html><body>' . $html, LIBXML_NOERROR);
+
+        $template = Dom\HTMLDocument::createFromString('<!doctype html><body>' . $page->getElementById('ur-job-template')->textContent, LIBXML_NOERROR);
+        $rendered = $page->querySelector('#ur-jobs-container .ur-job-card');
+        $this->assertSame($this->names($rendered), $this->names($template), 'a cloned card posts the same fields, in the same order');
+        $this->assertContains('jobs[0][snapshot][root]', $this->names($template));
+
+        $pairTpl = Dom\HTMLDocument::createFromString('<!doctype html><body>' . $page->getElementById('ur-pair-template')->textContent, LIBXML_NOERROR);
+        $pairRow = $page->querySelector('#ur-jobs-container .ur-pair-row');
+        $this->assertSame(
+            ['jobs[0][pairs][0][local]', 'jobs[0][pairs][0][remote]', 'jobs[0][pairs][0][sub]', 'jobs[0][pairs][0][seed]'],
+            $this->names($pairTpl)
+        );
+        $this->assertSame($this->names($pairRow), $this->names($pairTpl));
+    }
+
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testPairRowsSwitchBetweenRemoteAndSubAndSeed(): void
+    {
+        $this->renderPageBody(__DIR__ . '/../source/pages/jobs.php');
+
+        $snap   = $this->card($this->snapshotJob(), 0);
+        $remote = $snap->querySelector('[name="jobs[0][pairs][0][remote]"]');
+        $this->assertTrue($remote->hasAttribute('disabled'));
+        $this->assertFalse($remote->hasAttribute('required'));
+        $this->assertStringContainsString('display:none', (string) $remote->getAttribute('style'));
+        $sub = $snap->querySelector('[name="jobs[0][pairs][0][sub]"]');
+        $this->assertSame('appdata', $sub->getAttribute('value'));
+        $this->assertTrue($sub->hasAttribute('required'));
+        $this->assertFalse($sub->hasAttribute('disabled'));
+        $this->assertTrue($snap->querySelector('[name="jobs[0][pairs][0][seed]"]')->hasAttribute('checked'));
+        $this->assertFalse($snap->querySelector('[name="jobs[0][pairs][1][seed]"]')->hasAttribute('checked'));
+
+        $mirror = $this->card($this->mirrorJob(), 0);
+        $remote = $mirror->querySelector('[name="jobs[0][pairs][0][remote]"]');
+        $this->assertSame('/mnt/backup/mirror/', $remote->getAttribute('value'));
+        $this->assertTrue($remote->hasAttribute('required'));
+        $this->assertFalse($remote->hasAttribute('disabled'));
+        $this->assertFalse($remote->hasAttribute('style'));
+        foreach (['sub', 'seed'] as $field) {
+            $el = $mirror->querySelector("[name=\"jobs[0][pairs][0][$field]\"]");
+            $this->assertTrue($el->hasAttribute('disabled'), $field);
+            $this->assertFalse($el->hasAttribute('required'), $field);
+        }
+        // A pair added to a snapshot card is switched to the card's mode.
+        $this->assertStringContainsString("syncSnapshot(rowsEl.closest('.ur-job-card'));", (string) file_get_contents(__DIR__ . '/../source/pages/jobs.php'));
+    }
+
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testSnapshotHelpTextIsPresent(): void
+    {
+        $this->renderPageBody(__DIR__ . '/../source/pages/jobs.php');
+        ob_start();
+        ur_render_job_card($this->snapshotJob(), 0);
+        $html = (string) ob_get_clean();
+        foreach ([
+            'A snapshot is a complete, dated copy of every pair under &lt;root&gt;/&lt;stamp&gt;/ on the receiver.',
+            'hard links to it (rsync --link-dest)',
+            'The target marker and its expected content above become mandatory, and the snapshot root must be the marker&#039;s directory or lie inside it.',
+            'Pruning starts as a dry run',
+            'The transfer&#039;s SSH login must be able to read the root as root',
+            '&quot;Use sudo on the receiver&quot; on the connection',
+            'Use 1 to 64 letters, digits, &quot;_&quot; or &quot;-&quot;, starting with a letter or digit; &quot;latest&quot; is reserved, and each pair of the job needs its own name',
+            'Seed: allow this pair&#039;s first copy without a previous snapshot to link against: a full copy.',
+        ] as $needle) {
+            $this->assertStringContainsString($needle, $html);
+        }
+    }
+
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testJobsListShowsTheLastSnapshotOnlyForSnapshotJobs(): void
+    {
+        $this->seedConnections();
+        $cfg = Config::defaults();
+        $cfg['jobs'] = [$this->snapshotJob(), $this->mirrorJob()];
+        Config::save($cfg);
+        foreach (['j-snap', 'j-mirror'] as $id) {
+            Runner::writeSummary($id, ['state' => 'SUCCESS', 'startedAt' => '2026-10-21T03:00:00Z', 'finishedAt' => '2026-10-21T03:10:00Z',
+                'snapshot' => '2026-10-21T030005Z', 'committed' => true]);
+        }
+        $page = Dom\HTMLDocument::createFromString('<!doctype html><body>' . $this->renderPageBody(__DIR__ . '/../source/pages/jobs.php'), LIBXML_NOERROR);
+
+        $line = $page->querySelector('tr[data-jobid="j-snap"] .ur-last-run-cell .ur-snap-status');
+        $this->assertNotNull($line);
+        $this->assertSame('last snapshot 2026-10-21 03:00:05 (committed)', $line->textContent);
+        $this->assertSame('2026-10-21T030005Z', $line->getAttribute('title'));
+        $this->assertNull($page->querySelector('tr[data-jobid="j-mirror"] .ur-snap-status'), 'a mirror row looks as before');
+    }
+
+    public function testStatusPollersRenderTheSnapshotLineOnlyWhenGetStatusCarriesOne(): void
+    {
+        $base = __DIR__ . '/../source/';
+        foreach (['pages/jobs.php', 'pages/overview.php', 'UR.Dashboard.page'] as $file) {
+            $src = (string) file_get_contents($base . $file);
+            $this->assertStringContainsString('.snapshot.label', $src, $file);
+            $this->assertStringContainsString('.snapshot.stamp', $src, $file);
+            $this->assertMatchesRegularExpression('/(if \(s\.snapshot\)|j\.snapshot \?)/', $src, "$file: mirror entries have no snapshot key");
+            $this->assertStringNotContainsString('innerHTML = s.snapshot', $src, $file);
+        }
+        $hist = (string) file_get_contents($base . 'pages/history.php');
+        $this->assertStringContainsString("if ('snapshot' in r) { stTd.appendChild(snapLine(r)); }", $hist);
+        $this->assertStringContainsString("'committed: ' + (r.committed ? 'yes' : 'no')", $hist);
+        $this->assertStringContainsString("'pruned: ' + (parseInt(r.pruned, 10) || 0)", $hist);
+        $this->assertStringContainsString("if (r.suspect) { bits.push('SUSPECT'); }", $hist);
+        $this->assertStringContainsString('window.urFmtLocal(Date.UTC(', $hist, 'system-local, never the browser zone');
+        $this->assertStringContainsString('d.title = r.snapshot;', $hist, 'the UTC stamp on hover');
+    }
+
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testConnectionsUseSudoCheckboxIsSshOnly(): void
+    {
+        $this->seedConnections();
+        $creds = Credentials::load();
+        $creds['connections'][0]['useSudo'] = true;
+        Credentials::save($creds);
+        $html = $this->renderPageBody(__DIR__ . '/../source/pages/connections.php');
+        $page = Dom\HTMLDocument::createFromString('<!doctype html><body>' . $html, LIBXML_NOERROR);
+
+        $ssh = $page->querySelector('.ur-conn-card[data-conn-id="c-legacy"]');
+        $box = $ssh->querySelector('input[type="checkbox"][name="connections[0][useSudo]"]');
+        $this->assertTrue($box->hasAttribute('checked'));
+        $this->assertSame('0', $ssh->querySelector('input[type="hidden"][name="connections[0][useSudo]"]')->getAttribute('value'));
+        $dd = $box->closest('dd');
+        $this->assertStringContainsString('ur-ssh-only', (string) $dd->getAttribute('class'));
+        $this->assertFalse($dd->hasAttribute('style'));
+        $this->assertStringContainsString('needs passwordless sudo for sh on the receiver', $dd->textContent);
+        $this->assertStringContainsString('Only the snapshot helper uses it', $dd->textContent);
+
+        $daemon = $page->querySelector('.ur-conn-card[data-conn-id="c-daemon"]');
+        $box = $daemon->querySelector('input[type="checkbox"][name="connections[1][useSudo]"]');
+        $this->assertFalse($box->hasAttribute('checked'));
+        $this->assertSame('display:none', $box->closest('dd')->getAttribute('style'));
+        $this->assertSame('display:none', $box->closest('dd')->previousElementSibling->getAttribute('style'));
+    }
+
     /**
      * Seed one PRE-DAEMON connection record (no 'transport' key at all, exactly
      * as an existing install has it on disk) and one daemon record.
