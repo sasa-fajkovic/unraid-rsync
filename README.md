@@ -197,13 +197,16 @@ The plugin never removes either file.
 List the snapshots on the receiver with `ls /mnt/backup/snapshots/appdata/`. Then,
 on the Unraid server, preview with `-n -i` first and run the same command without
 `-n` once the preview is right. With a non-root login add the job's
-`--rsync-path=/usr/local/bin/rsync-sudo`.
+`--rsync-path=/usr/local/bin/rsync-sudo`. Use the same ownership options as the
+job (the examples assume `-a` with `--numeric-ids`): without `--numeric-ids`
+rsync matches owners by name, so files owned by uid 99 (nobody) or by container
+users can come back with the wrong owner.
 
 ```sh
 # one file
-rsync -n -i -a backup@backup.example:/mnt/backup/snapshots/appdata/2026-10-20T030000Z/appdata/app/config.yml /mnt/user/appdata/app/
+rsync -n -i -a --numeric-ids backup@backup.example:/mnt/backup/snapshots/appdata/2026-10-20T030000Z/appdata/app/config.yml /mnt/user/appdata/app/
 # a directory (trailing slashes: copy the CONTENTS of the snapshot dir into the target dir)
-rsync -n -i -a backup@backup.example:/mnt/backup/snapshots/appdata/2026-10-20T030000Z/appdata/app/ /mnt/user/appdata/app/
+rsync -n -i -a --numeric-ids backup@backup.example:/mnt/backup/snapshots/appdata/2026-10-20T030000Z/appdata/app/ /mnt/user/appdata/app/
 ```
 
 Without `--delete` a restore only adds and overwrites; nothing else in the target

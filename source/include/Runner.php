@@ -1866,7 +1866,6 @@ class Runner
     public static function notCommittedRuns(string $jobId): int
     {
         $n = 0;
-        // ponytail: each page re-reads the whole file; only a long streak pages.
         for ($offset = 0; ; $offset += 100) {
             $page = History::list($jobId, $offset, 100);
             foreach ($page['runs'] as $r) {
