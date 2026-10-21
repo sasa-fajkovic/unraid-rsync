@@ -785,6 +785,90 @@ final class SnapshotRunnerTest extends TestCase
         $this->assertStringContainsString("SUSPECT: a: rsync reported that the previous snapshot's copy does not exist.", $this->log($res));
     }
 
+    public function testAMissingBasisReportedEarlyInLongOutputIsStillSuspect(): void
+    {
+        $this->saveJob();
+        $prev = $this->stamp(1);
+        $this->seedSnapshot($prev, meta: ['subs' => []]);
+        $out = Rsync::$runner;
+        Rsync::$runner = function (array $argv, callable $o) use ($out, $prev): int {
+            if (!in_array('--max-size=4K', $argv, true) && !in_array('--list-only', $argv, true)) {
+                $o('--link-dest arg does not exist: ' . self::ROOT . "/$prev/a\n");
+                for ($i = 0; $i < 300; $i++) {
+                    $o(str_repeat('x', 999) . "\n");
+                }
+            }
+            return $out($argv, $o);
+        };
+        $res = $this->runJob();
+        $this->assertSame('snapshot-suspect', $res['reason'], 'the warning is 300 KB before the end of the output');
+        $meta = json_decode((string) $this->rx['dirs'][$this->stamp()]['meta'], true);
+        $this->assertSame(10, $meta['subs']['a']['files'], 'the stats still come from the tail');
+    }
+
+    /** @return array<string,array{0:string}> */
+    public static function protectProvider(): array
+    {
+        return ['hold fails' => ['hold'], 'pin fails' => ['pin']];
+    }
+
+    #[DataProvider('protectProvider')]
+    public function testASuspectRunThatCannotBeProtectedIsNotCommitted(string $op): void
+    {
+        $this->saveJob();
+        $this->seedSnapshot($this->stamp(1), meta: ['subs' => ['a' => ['files' => 1000, 'bytes' => 1]]]);
+        $this->srcStats = ['a' => [1, 1]];
+        $this->failOp[$op] = 18;
+        $stamp = $this->stamp();
+        $res = $this->runJob();
+        $this->assertSame(Rsync::STATE_FAILED, $res['state']);
+        $this->assertSame('snapshot-commit-failed', $res['reason']);
+        $this->assertNotContains('helper:commit', $this->trace);
+        $this->assertArrayHasKey("$stamp.inprogress", $this->rx['dirs']);
+        $this->assertStringContainsString('was not committed because it could not be protected', $this->log($res));
+        $this->assertSame('alert', $this->importance());
+    }
+
+    public function testAnAbortAfterTheLastPairIsHonouredBeforeTheCommit(): void
+    {
+        $this->saveJob();
+        $this->seedSnapshot($this->stamp(1));
+        $orig = Snapshot::$remoteRunner;
+        $checks = 0;
+        Snapshot::$remoteRunner = function (array $argv, ?array $env, int $t, ?callable $s) use ($orig, &$checks): array {
+            if (str_contains((string) end($argv), "'check'") && ++$checks === 2) {
+                RunState::requestAbort(self::JOB);
+            }
+            return $orig($argv, $env, $t, $s);
+        };
+        $res = $this->runJob();
+        $this->assertSame(Rsync::STATE_ABORTED, $res['state']);
+        $this->assertSame(143, $res['exitCode']);
+        $this->assertArrayNotHasKey('reason', $res);
+        $this->assertNotContains('helper:commit', $this->trace);
+        $this->assertSame('not-committed', $this->hookEnv['POST']['UR_SNAPSHOT_STATUS']);
+        $this->assertSame('normal', $this->importance());
+    }
+
+    /** @return array<string,array{0:int}> */
+    public static function rsyncAbortProvider(): array
+    {
+        return ['rsync saw the signal (20)' => [20], 'rsync was killed (143)' => [143]];
+    }
+
+    #[DataProvider('rsyncAbortProvider')]
+    public function testAnAbortExitWithoutTheFlagKeepsTheAbortImportance(int $exit): void
+    {
+        $this->saveJob();
+        $this->seedSnapshot($this->stamp(1));
+        $this->pairExit = ['b' => $exit];
+        $res = $this->runJob();
+        $this->assertSame(Rsync::STATE_ABORTED, $res['state']);
+        $this->assertArrayNotHasKey('reason', $res);
+        $this->assertNotContains('helper:commit', $this->trace);
+        $this->assertSame('normal', $this->importance());
+    }
+
     public function testRunawayGrowthIsSuspectOnceThreeValuesExist(): void
     {
         $this->saveJob();

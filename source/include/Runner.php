@@ -521,9 +521,16 @@ class Runner
                     // Snapshot mode also keeps the tail for the stats it records.
                     $sink     = Logger::sink($runLog);
                     $captured = '';
-                    $onOutput = $sn === null ? $sink : static function (string $chunk) use ($sink, &$captured): void {
+                    $partial  = '';
+                    $missing  = [];
+                    $onOutput = $sn === null ? $sink : static function (string $chunk) use ($sink, &$captured, &$partial, &$missing): void {
                         $sink($chunk);
                         $captured = substr($captured . $chunk, -self::SNAPSHOT_CAPTURE_BYTES);
+                        // rsync names a missing --link-dest once, early; it must
+                        // not scroll out of the tail kept for the statistics.
+                        $lines   = explode("\n", $partial . $chunk);
+                        $partial = substr((string) array_pop($lines), -self::SNAPSHOT_CAPTURE_BYTES);
+                        $missing = array_merge($missing, Snapshot::linkDestMissing(implode("\n", $lines)));
                     };
                     $pairExit = Rsync::run(
                         $argv,
@@ -547,7 +554,8 @@ class Runner
                     $exitCodes[] = $pairExit;
                     Logger::event($runLog, $jobId, "Pair #$n rsync exited with code $pairExit (" . Rsync::exitToState($pairExit) . ').');
                     if ($sn !== null) {
-                        $pairResults[] = self::snapshotPairResult($sn, $i, $sub, $pairExit, $captured, $runLog, $jobId);
+                        $missing       = array_merge($missing, Snapshot::linkDestMissing($partial));
+                        $pairResults[] = self::snapshotPairResult($sn, $i, $sub, $pairExit, $captured, $missing, $runLog, $jobId);
                     }
 
                     // Abort can land DURING a pair (the SIGTERM that killed rsync
@@ -577,12 +585,15 @@ class Runner
                         && array_diff($exitCodes, [0, 24]) === [];
                     if (!$gate) {
                         Logger::event($runLog, $jobId, "Snapshot $stamp was not committed; $stamp.inprogress is kept for the next run.");
-                        if (!$aborted) {
+                        if (!$aborted && $state !== Rsync::STATE_ABORTED) {
                             self::setReason($reason, 'snapshot-not-committed');
                         }
                     } else {
                         $commit = self::snapshotCommit($sn, $pairResults, $runLog, $jobId);
-                        if ($commit !== '') {
+                        if ($commit === 'aborted') {
+                            $state    = Rsync::STATE_ABORTED;
+                            $exitCode = 143;
+                        } elseif ($commit !== '') {
                             $state    = Rsync::STATE_FAILED;
                             $exitCode = 1;
                             self::setReason($reason, $commit);
@@ -1784,9 +1795,10 @@ class Runner
 
     /**
      * @param array<string,mixed> $sn
+     * @param array<int,string>   $missing paths rsync reported as a missing --link-dest
      * @return array{sub:string,exit:int,files:?int,bytes:?int,basisMissing:bool}
      */
-    private static function snapshotPairResult(array $sn, int|string $i, string $sub, int $exit, string $captured, string $runLog, string $jobId): array
+    private static function snapshotPairResult(array $sn, int|string $i, string $sub, int $exit, string $captured, array $missing, string $runLog, string $jobId): array
     {
         $stats = Snapshot::parseStats($captured);
         $basis = "{$sn['root']}/{$sn['prev']}/$sub";
@@ -1795,7 +1807,7 @@ class Runner
             'exit'         => $exit,
             'files'        => $stats['regFiles'],
             'bytes'        => $stats['totalSize'],
-            'basisMissing' => !empty($sn['basis'][$i]) && in_array($basis, Snapshot::linkDestMissing($captured), true),
+            'basisMissing' => !empty($sn['basis'][$i]) && in_array($basis, $missing, true),
         ];
         Logger::event($runLog, $jobId, sprintf(
             'Pair #%d (%s): %s regular files, %s bytes.',
@@ -1855,11 +1867,20 @@ class Runner
             foreach ($a['suspect'] as $s) {
                 Logger::event($runLog, $jobId, "SUSPECT: $s.");
             }
-            Logger::event($runLog, $jobId, 'This run is suspect: it is committed, deletions are put on hold and the previous snapshot is pinned.');
-            self::snapshotCall($sn, 'hold', [$stamp], $runLog, $jobId, Snapshot::HELPER_TIMEOUT_SEC);
-            if ($sn['prev'] !== '') {
-                self::snapshotCall($sn, 'pin', [$sn['prev']], $runLog, $jobId, Snapshot::HELPER_TIMEOUT_SEC);
+            Logger::event($runLog, $jobId, 'This run is suspect: deletions are put on hold, the previous snapshot is pinned, then it is committed.');
+            // Unprotected, the suspect copy would become the next run's baseline
+            // and a later prune could remove the good snapshots.
+            if (self::snapshotCall($sn, 'hold', [$stamp], $runLog, $jobId, Snapshot::HELPER_TIMEOUT_SEC) === null
+                || ($sn['prev'] !== '' && self::snapshotCall($sn, 'pin', [$sn['prev']], $runLog, $jobId, Snapshot::HELPER_TIMEOUT_SEC) === null)) {
+                Logger::event($runLog, $jobId, "Snapshot $stamp was not committed because it could not be protected; $stamp.inprogress is kept for the next run.");
+                return 'snapshot-commit-failed';
             }
+        }
+        // Commit is not stoppable, so an Abort that arrived after the last pair
+        // is honoured here, before anything is renamed.
+        if (RunState::abortRequested($jobId)) {
+            Logger::event($runLog, $jobId, "Abort requested; snapshot $stamp was not committed.");
+            return 'aborted';
         }
 
         $subs = [];
