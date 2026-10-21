@@ -1767,7 +1767,12 @@ final class JobTest extends TestCase
         $errors = Job::ancestryErrors($job, $job['rsyncOptions'], Job::protectedTargets([$job, $other], 'j-mirror'));
         $this->assertSame($ok, $errors === [], implode(' | ', $errors));
         if (!$ok) {
-            $this->assertStringContainsString('job "other"', $errors[0]);
+            // The mirror-vs-mirror wording is unchanged.
+            $this->assertSame(
+                'Pair #1: a delete option is enabled, so the destination must not be, contain, or lie inside '
+                . 'the destination of job "other" (\'/srv/backup/a\').',
+                $errors[0]
+            );
         }
     }
 
@@ -1813,5 +1818,360 @@ final class JobTest extends TestCase
         $pull = $this->sshDeleteJob('/srv/backup', ['direction' => 'PULL', 'pairs' => [['local' => '/mnt/disks/usb/backup', 'remote' => '/srv/a']]]);
         $this->assertTrue(Job::validate(array_merge($pull, ['targetMarker' => '/mnt/disks/usb/.unraid-rsync-target']))['valid']);
         $this->assertFalse(Job::validate(array_merge($pull, ['targetMarker' => '/srv/.unraid-rsync-target']))['valid']);
+    }
+
+    // --- snapshot mode -------------------------------------------------------
+
+    /**
+     * A valid snapshot job: SSH push, marker at the drive root, root under it,
+     * and its own options with nothing forced or rejected.
+     *
+     * @param array<string,mixed> $overrides
+     * @param array<string,mixed> $snapshot  merged into the snapshot block
+     * @return array<string,mixed>
+     */
+    private function snapJob(array $overrides = [], array $snapshot = []): array
+    {
+        return Job::normalize(array_merge([
+            'id'                  => 'j-snap',
+            'name'                => 'snap',
+            'schedule'            => '0 3 * * *',
+            'transport'           => 'SSH',
+            'direction'           => 'PUSH',
+            'connectionId'        => 'c-1',
+            'targetMarker'        => '/srv/backup/.unraid-rsync-target',
+            'targetMarkerContent' => '3f2b1c9e-0000-4000-8000-000000000000',
+            'pairs'               => [['local' => '/mnt/user/appdata/', 'remote' => '', 'sub' => 'appdata']],
+            'rsyncOptions'        => ['recursive' => '1', 'times' => '1'],
+            'snapshot'            => array_merge(['enabled' => '1', 'root' => '/srv/backup/snapshots/a'], $snapshot),
+        ], $overrides));
+    }
+
+    /** @return array<int,string> */
+    private function snapErrors(array $job, ?array $global = null): array
+    {
+        return Job::validate($job, null, $global)['errors'];
+    }
+
+    public function testAValidSnapshotJobSavesWithNoErrorsOrWarnings(): void
+    {
+        $job = $this->snapJob();
+        $res = Job::validate($job);
+        $this->assertSame([], $res['errors']);
+        $this->assertSame([], $res['warnings']);
+        $this->assertSame([['local' => '/mnt/user/appdata/', 'remote' => '', 'sub' => 'appdata']], $job['pairs']);
+        $this->assertSame([
+            'enabled' => true, 'root' => '/srv/backup/snapshots/a', 'keepDaily' => 7, 'keepWeekly' => 4,
+            'keepMonthly' => 0, 'maxPrunePerRun' => 3, 'pruneDryRun' => true,
+        ], $job['snapshot']);
+    }
+
+    public function testBootIsAValidSnapshotSourceButNotForAMirrorJob(): void
+    {
+        $pairs = [['local' => '/boot/', 'remote' => '', 'sub' => 'boot', 'seed' => true]];
+        $this->assertSame(['valid' => true, 'errors' => [], 'warnings' => []], Job::validate($this->snapJob(['pairs' => $pairs])));
+        foreach (['/boot', '/boot/'] as $boot) {
+            $this->assertSame(
+                ["Pair #1 source (local) '$boot' is a protected system or array root and cannot be used."],
+                Job::validate($this->snapJob(['pairs' => [['local' => $boot, 'remote' => '/srv/backup/boot']], 'snapshot' => ['enabled' => '0']]))['errors']
+            );
+        }
+    }
+
+    public function testNormalizeReadsTheFormShapeAndCarriesSubAndSeed(): void
+    {
+        $job = $this->snapJob(
+            ['pairs' => [['local' => ' /mnt/user/a/ ', 'remote' => '', 'sub' => ' a ', 'seed' => 'on'], ['local' => '', 'remote' => '', 'sub' => '']]],
+            ['pruneDryRun' => '0', 'keepDaily' => '14']
+        );
+        $this->assertSame([['local' => '/mnt/user/a/', 'remote' => '', 'sub' => 'a', 'seed' => true]], $job['pairs']);
+        $this->assertFalse($job['snapshot']['pruneDryRun']);
+        $this->assertSame(14, $job['snapshot']['keepDaily']);
+
+        $off = $this->snapJob([], ['enabled' => '0']);
+        $this->assertArrayNotHasKey('snapshot', $off);
+        // A row with only a sub is kept, so validation can name what is missing.
+        $this->assertCount(1, Job::normalizePairs([['local' => '', 'remote' => '', 'sub' => 'x']]));
+    }
+
+    /** @return array<string,array{0:array<string,mixed>,1:string}> */
+    public static function rejectedSnapshotOptionProvider(): array
+    {
+        return [
+            'inplace'         => [['inplace' => true], '--inplace'],
+            'backupDir'       => [['backupDir' => '/srv/old'], '--backup-dir'],
+            'checksum'        => [['checksum' => true], '--checksum'],
+            'sizeOnly'        => [['sizeOnly' => true], '--size-only'],
+            'ignoreExisting'  => [['ignoreExisting' => true], '--ignore-existing'],
+            'update'          => [['update' => true], '--update'],
+            'times off'       => [['times' => false], 'Preserve times (-t)'],
+            'archive, -t off' => [['archive' => true, 'times' => false], 'Preserve times (-t)'],
+        ];
+    }
+
+    /** @param array<string,mixed> $opts */
+    #[DataProvider('rejectedSnapshotOptionProvider')]
+    public function testSnapshotModeRejectsAnOptionOnTheEffectiveOptions(array $opts, string $needle): void
+    {
+        $base = ['recursive' => true, 'times' => true];
+        $hit  = static fn(array $errors): bool => array_filter($errors, static fn($e) => str_contains($e, 'Snapshot mode') && str_contains($e, $needle)) !== [];
+
+        // The job's own options.
+        $own = $this->snapJob(['rsyncOptions' => array_merge($base, $opts)]);
+        $this->assertTrue($hit($this->snapErrors($own)), implode(' | ', $this->snapErrors($own)));
+
+        // The same option arriving through global defaults: judged on the
+        // EFFECTIVE options, so a job on "use global config" is caught too.
+        $global  = ['defaultRsyncOptions' => Config::mergeRsyncOptions(array_merge($base, $opts))];
+        $viaGlob = $this->snapJob(['useGlobalDefaults' => '1']);
+        $this->assertTrue($hit($this->snapErrors($viaGlob, $global)));
+        $this->assertFalse($hit($this->snapErrors($viaGlob, ['defaultRsyncOptions' => Config::mergeRsyncOptions($base)])));
+    }
+
+    /** --append / --append-verify are not in the whitelist, so no input can emit them. */
+    public function testAppendCannotBeEmitted(): void
+    {
+        $opts = Job::normalizeRsyncOptions(['append' => '1', 'appendVerify' => '1', 'append-verify' => '1', 'recursive' => '1']);
+        $this->assertArrayNotHasKey('append', $opts);
+        foreach (Rsync::optionTokens(Config::mergeRsyncOptions($opts), 'SSH') as $token) {
+            $this->assertStringNotContainsString('append', $token);
+        }
+        $this->assertSame([], preg_grep('/append/i', array_merge(array_keys(Rsync::BOOL_FLAGS), array_values(Rsync::BOOL_FLAGS))));
+    }
+
+    /** @return array<string,array{0:array<string,mixed>,1:string}> */
+    public static function forcedSnapshotOptionProvider(): array
+    {
+        return [
+            'mkpath'         => [['mkpath' => true], '--mkpath is forced off'],
+            'delete'         => [['delete' => true], '--delete is forced off'],
+            'deleteExcluded' => [['deleteExcluded' => true], '--delete-excluded is forced off'],
+            'maxDelete'      => [['maxDelete' => '10'], '--max-delete is forced off'],
+            'hardlinks'      => [['hardlinks' => true], 'Preserve hard links (-H) is forced off'],
+        ];
+    }
+
+    /** @param array<string,mixed> $opts */
+    #[DataProvider('forcedSnapshotOptionProvider')]
+    public function testSnapshotModeWarnsAboutForcedOffOptions(array $opts, string $needle): void
+    {
+        $base = ['recursive' => true, 'times' => true];
+        $res  = Job::validate($this->snapJob(['rsyncOptions' => array_merge($base, $opts)]));
+        $this->assertSame([], $res['errors'], 'forced, not rejected');
+        $this->assertSame(["$needle in snapshot mode."], $res['warnings'], 'and no "no max-delete cap" warning');
+
+        $global = ['defaultRsyncOptions' => Config::mergeRsyncOptions(array_merge($base, $opts))];
+        $res    = Job::validate($this->snapJob(['useGlobalDefaults' => '1']), null, $global);
+        $this->assertContains("$needle in snapshot mode.", $res['warnings']);
+    }
+
+    public function testShippedGlobalDefaultsOnlyWarnAboutMkpath(): void
+    {
+        $res = Job::validate($this->snapJob(['useGlobalDefaults' => '1']), null, Config::defaults()['global']);
+        $this->assertSame([], $res['errors']);
+        $this->assertSame(['--mkpath is forced off in snapshot mode.'], $res['warnings']);
+    }
+
+    /** @return array<string,array{0:array<int,array<string,string>>,1:string}> */
+    public static function badSubProvider(): array
+    {
+        $p = static fn(string ...$subs): array => array_map(
+            static fn($i, $s) => ['local' => "/mnt/user/s$i/", 'remote' => '', 'sub' => $s],
+            array_keys($subs),
+            $subs
+        );
+        return [
+            'dot'         => [$p('.'), "'.' must be 1 to 64"],
+            'dotdot'      => [$p('..'), "'..' must be 1 to 64"],
+            'leading dash' => [$p('-x'), "'-x' must be 1 to 64"],
+            'inner dot'   => [$p('a.b'), "'a.b' must be 1 to 64"],
+            '65 chars'    => [$p(str_repeat('a', 65)), 'must be 1 to 64'],
+            'latest'      => [$p('latest'), "'latest' is reserved"],
+            'LATEST'      => [$p('LATEST'), "'LATEST' is reserved"],
+            'duplicate'   => [$p('Data', 'data'), "Pair #2: snapshot sub-directory name 'data' is already used by pair #1"],
+            'missing'     => [[['local' => '/mnt/user/a/', 'remote' => '']], 'Pair #1: a snapshot sub-directory name is required.'],
+        ];
+    }
+
+    /** @param array<int,array<string,string>> $pairs */
+    #[DataProvider('badSubProvider')]
+    public function testSnapshotSubNamesAreChecked(array $pairs, string $needle): void
+    {
+        $errors = $this->snapErrors($this->snapJob(['pairs' => $pairs]));
+        $this->assertNotEmpty(array_filter($errors, static fn($e) => str_contains($e, $needle)), implode(' | ', $errors));
+        $this->assertSame([], $this->snapErrors($this->snapJob(['pairs' => [['local' => '/mnt/user/a/', 'sub' => str_repeat('a', 64)]]])));
+    }
+
+    public function testSnapshotPairRemoteMustBeEmpty(): void
+    {
+        $errors = $this->snapErrors($this->snapJob(['pairs' => [['local' => '/mnt/user/a/', 'remote' => '/srv/backup/a', 'sub' => 'a']]]));
+        $this->assertSame(
+            ['Pair #1: in snapshot mode the destination is <root>/<stamp>/<sub>; leave the remote path empty.'],
+            $errors
+        );
+    }
+
+    /** @return array<string,array{0:array<string,string>}> */
+    public static function wrongTransportProvider(): array
+    {
+        return [
+            'LOCAL'    => [['transport' => 'LOCAL', 'connectionId' => '']],
+            'DAEMON'   => [['transport' => 'DAEMON']],
+            'SSH PULL' => [['direction' => 'PULL']],
+        ];
+    }
+
+    /** @param array<string,string> $overrides */
+    #[DataProvider('wrongTransportProvider')]
+    public function testSnapshotModeNeedsSshPush(array $overrides): void
+    {
+        $this->assertContains(
+            'Snapshot mode needs SSH transport and the PUSH direction.',
+            $this->snapErrors($this->snapJob($overrides))
+        );
+    }
+
+    /** @return array<string,array{0:string,1:string}> */
+    public static function badRootProvider(): array
+    {
+        return [
+            'empty'          => ['', 'Snapshot root is required.'],
+            'relative'       => ['srv/backup/s', 'must be an absolute path'],
+            'dotdot'         => ['/srv/backup/s/../../etc', 'must not contain a ".." segment'],
+            'control char'   => ["/srv/backup/s\x01", 'control characters'],
+            'one segment'    => ['/srv', 'at least two directories deep'],
+            'mnt disk root'  => ['/mnt/disk1', 'at least two directories deep'],
+            'trailing slash' => ['/srv/backup/s/', "must be written as '/srv/backup/s'"],
+            'double slash'   => ['/srv//backup/s', "must be written as '/srv/backup/s'"],
+            'outside marker' => ['/srv/other/s', "must be the target marker's directory ('/srv/backup')"],
+        ];
+    }
+
+    #[DataProvider('badRootProvider')]
+    public function testSnapshotRootIsChecked(string $root, string $needle): void
+    {
+        $errors = $this->snapErrors($this->snapJob([], ['root' => $root]));
+        $this->assertNotEmpty(array_filter($errors, static fn($e) => str_contains($e, $needle)), implode(' | ', $errors));
+    }
+
+    public function testSnapshotRootMayBeTheMarkerDirectoryItselfOrUnderMnt(): void
+    {
+        $this->assertSame([], $this->snapErrors($this->snapJob([], ['root' => '/srv/backup'])));
+        $this->assertSame([], $this->snapErrors($this->snapJob(
+            ['targetMarker' => '/mnt/disk1/.unraid-rsync-target'],
+            ['root' => '/mnt/disk1/snapshots']
+        )));
+    }
+
+    public function testSnapshotModeNeedsMarkerAndContent(): void
+    {
+        $msg = 'Snapshot mode needs a target marker and its expected content (a UUID is recommended).';
+        $job = $this->snapJob();
+        unset($job['targetMarkerContent']);
+        $this->assertContains($msg, $this->snapErrors($job));
+        unset($job['targetMarker']);
+        $this->assertContains($msg, $this->snapErrors($job));
+    }
+
+    /** @return array<string,array{0:array<string,mixed>,1:string}> */
+    public static function badRetentionProvider(): array
+    {
+        return [
+            'daily high'    => [['keepDaily' => 367], 'keepDaily must be a whole number from 0 to 366'],
+            'daily neg'     => [['keepDaily' => -1], 'keepDaily must be a whole number from 0 to 366'],
+            'weekly high'   => [['keepWeekly' => 261], 'keepWeekly must be a whole number from 0 to 260'],
+            'monthly high'  => [['keepMonthly' => 121], 'keepMonthly must be a whole number from 0 to 120'],
+            'prune zero'    => [['maxPrunePerRun' => 0], 'maxPrunePerRun must be a whole number from 1 to 20'],
+            'prune high'    => [['maxPrunePerRun' => 21], 'maxPrunePerRun must be a whole number from 1 to 20'],
+            'not a number'  => [['keepWeekly' => 'four'], 'keepWeekly must be a whole number from 0 to 260'],
+            'keeps nothing' => [['keepDaily' => 0, 'keepWeekly' => 0, 'keepMonthly' => 0], 'must keep at least one snapshot'],
+        ];
+    }
+
+    /** @param array<string,mixed> $snapshot */
+    #[DataProvider('badRetentionProvider')]
+    public function testSnapshotRetentionIsRangeChecked(array $snapshot, string $needle): void
+    {
+        $errors = $this->snapErrors($this->snapJob([], $snapshot));
+        $this->assertNotEmpty(array_filter($errors, static fn($e) => str_contains($e, $needle)), implode(' | ', $errors));
+        $this->assertSame([], $this->snapErrors($this->snapJob([], ['keepDaily' => 0, 'keepWeekly' => 0, 'keepMonthly' => 1])));
+    }
+
+    public function testSnapshotRootErrorsBetweenSnapshotJobs(): void
+    {
+        $a = $this->snapJob();
+        $other = fn(string $root, string $conn = 'c-1') => $this->snapJob(['id' => 'j-b', 'name' => 'b', 'connectionId' => $conn], ['root' => $root]);
+
+        foreach (['equal' => '/srv/backup/snapshots/a', 'parent' => '/srv/backup/snapshots', 'child' => '/srv/backup/snapshots/a/x'] as $case => $root) {
+            $errors = Job::snapshotRootErrors($a, [$a, $other($root)]);
+            $this->assertSame(
+                ["Snapshot root '/srv/backup/snapshots/a' must not be, contain, or lie inside the snapshot root of job \"b\" ('$root')."],
+                $errors,
+                $case
+            );
+        }
+        $this->assertSame([], Job::snapshotRootErrors($a, [$a, $other('/srv/backup/snapshots/b')]), 'sibling');
+        $this->assertSame([], Job::snapshotRootErrors($a, [$a, $other('/srv/backup/snapshots/a', 'c-2')]), 'other connection');
+        // A prefix that is not a path component is not containment.
+        $this->assertSame([], Job::snapshotRootErrors($a, [$a, $other('/srv/backup/snapshots/ab')]));
+    }
+
+    public function testAMirrorWithoutDeleteInsideASnapshotRootIsRefused(): void
+    {
+        $snap   = $this->snapJob();
+        $mirror = $this->sshDeleteJob('/srv/backup/snapshots/a/stray', ['rsyncOptions' => []]);
+
+        $this->assertSame(
+            ["Pair #1: the destination must not be or lie inside the snapshot root of job \"snap\" ('/srv/backup/snapshots/a')."],
+            Job::snapshotRootErrors($mirror, [$snap, $mirror])
+        );
+        $this->assertSame(
+            ["Snapshot root '/srv/backup/snapshots/a' contains the destination of job \"mirror\" ('/srv/backup/snapshots/a/stray')."],
+            Job::snapshotRootErrors($snap, [$snap, $mirror])
+        );
+        // Beside the root, or on another connection: fine.
+        foreach ([$this->sshDeleteJob('/srv/backup/mirror', ['rsyncOptions' => []]), $this->sshDeleteJob('/srv/backup/snapshots/a', ['rsyncOptions' => [], 'connectionId' => 'c-2'])] as $ok) {
+            $this->assertSame([], Job::snapshotRootErrors($ok, [$snap, $ok]));
+            $this->assertSame([], Job::snapshotRootErrors($snap, [$snap, $ok]));
+        }
+    }
+
+    public function testADeleteMirrorOverASnapshotRootsParentIsAnAncestryError(): void
+    {
+        $snap   = $this->snapJob();
+        $mirror = $this->sshDeleteJob('/srv/backup/snapshots');
+
+        $this->assertContains(
+            ['scope' => 'SSH:c-1', 'path' => '/srv/backup/snapshots/a', 'label' => 'the snapshot root of job "snap"'],
+            Job::protectedTargets([$snap, $mirror], 'j-mirror')
+        );
+        $errors = Job::ancestryErrors($mirror, $mirror['rsyncOptions'], Job::protectedTargets([$snap, $mirror], 'j-mirror'));
+        $this->assertSame([
+            'Pair #1: a delete option is enabled, so the destination must not be, contain, or lie inside '
+            . 'the snapshot root of job "snap" (\'/srv/backup/snapshots/a\').',
+        ], $errors);
+        // The snapshot job does not protect its own root against itself.
+        $this->assertSame([], array_filter(Job::protectedTargets([$snap], 'j-snap')));
+    }
+
+    public function testMirrorOnlyJobSetsAreUnaffected(): void
+    {
+        $a = $this->sshDeleteJob('/srv/backup/a');
+        $b = $this->sshDeleteJob('/srv/backup/b', ['id' => 'j-b', 'name' => 'b']);
+        $local = $this->validLocalJob(['id' => 'j-local']);
+        $jobs = [$a, $b, $local];
+
+        // protectedTargets is exactly the destination list it always was.
+        $this->assertSame([
+            ['scope' => 'SSH:c-1', 'path' => '/srv/backup/b', 'label' => 'job "b"'],
+            ['scope' => 'local', 'path' => '/mnt/disk1/backup/media/', 'label' => 'job "backup"'],
+        ], Job::protectedTargets($jobs, 'j-mirror'));
+        foreach ($jobs as $job) {
+            $this->assertSame([], Job::snapshotRootErrors($job, $jobs));
+            // A disabled block changes nothing, and is not stored.
+            $off = Job::normalize(array_merge($job, ['snapshot' => ['enabled' => '0', 'root' => '/x']]));
+            $this->assertSame($job, $off);
+            $this->assertSame(Job::validate($job), Job::validate(array_merge($job, ['snapshot' => ['enabled' => false]])));
+        }
     }
 }

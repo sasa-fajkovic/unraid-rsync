@@ -529,7 +529,7 @@ function ur_validate_jobs(array $jobs, array $global, ?array $creds): array
             Rsync::effectiveOptions($job, $global),
             Job::protectedTargets($jobs, (string) ($job['id'] ?? ''))
         );
-        foreach (array_merge($result['errors'], $ancestry) as $e) {
+        foreach (array_merge($result['errors'], $ancestry, Job::snapshotRootErrors($job, $jobs)) as $e) {
             $errors[] = "Job \"$label\": $e";
         }
         foreach ($result['warnings'] as $w) {
@@ -750,9 +750,41 @@ function ur_action_save_config(): void
         $credsForValidation = null;
     }
 
+    $storedById = [];
+    foreach ($config['jobs'] as $stored) {
+        if (is_array($stored)) {
+            $storedById[(string) ($stored['id'] ?? '')] = $stored;
+        }
+    }
+
     foreach ($rawJobs as $rawJob) {
         if (!is_array($rawJob)) {
             continue;
+        }
+        // The Jobs form always posts `snapshot`; a post without it comes from a
+        // tab opened before snapshot mode existed, and must not silently turn a
+        // stored snapshot job into a mirror. A posted key, even with enabled
+        // off, is the user's intent.
+        $rawId  = is_scalar($rawJob['id'] ?? null) ? trim((string) $rawJob['id']) : '';
+        $stored = $storedById[$rawId] ?? null;
+        if ($stored !== null && !array_key_exists('snapshot', $rawJob) && isset($stored['snapshot'])) {
+            $rawJob['snapshot'] = $stored['snapshot'];
+            $rawPairs = is_array($rawJob['pairs'] ?? null) ? $rawJob['pairs'] : [];
+            if (array_filter($rawPairs, static fn($p) => is_array($p) && array_key_exists('sub', $p)) === []) {
+                $posted = Job::normalizePairs($rawPairs);
+                if (array_column($posted, 'local') !== array_column($stored['pairs'], 'local')) {
+                    $name = is_scalar($rawJob['name'] ?? null) && trim((string) $rawJob['name']) !== ''
+                        ? trim((string) $rawJob['name'])
+                        : (string) $stored['name'];
+                    $msg = "Job \"$name\": this Jobs page is out of date; reload it before changing the pairs of a snapshot job.";
+                    sendError($msg, 422, ['errors' => [$msg], 'warnings' => $allWarnings]);
+                    return;
+                }
+                foreach ($stored['pairs'] as $k => $p) {
+                    $posted[$k] += array_intersect_key($p, ['sub' => true, 'seed' => true]);
+                }
+                $rawJob['pairs'] = $posted;
+            }
         }
         $job = Job::normalize($rawJob);
 
@@ -902,6 +934,9 @@ function ur_normalize_connection_for_save(array $raw, array $existing): array
         'remoteHostKey'  => isset($raw['remoteHostKey'])  ? (string) $raw['remoteHostKey']  : '',
         'strictHostKey'  => isset($raw['strictHostKey'])  ? (string) $raw['strictHostKey']  : 'accept-new',
         'connectTimeout' => isset($raw['connectTimeout']) ? (string) $raw['connectTimeout'] : 10,
+        // Absent means unchanged, like transport: a tab opened before the
+        // checkbox existed does not post it.
+        'useSudo'        => isset($raw['useSudo'])        ? Job::toBool($raw['useSudo'])    : (($prev['useSudo'] ?? null) === true),
         // password handled below
     ]);
 
@@ -1972,6 +2007,8 @@ function ur_last_run_shape(?array $summary): ?array
 /**
  * GET getStatus: a per-job status map for ALL configured jobs. Each entry:
  *   { name, enabled, manualOnly, running, state, lastRun: {...}|null, nextRun: epoch|null }
+ * plus, for a snapshot job only, snapshot: {stamp, committed, label}|null
+ * (Snapshot::lastSnapshot of the last run's summary).
  * running  <- RunState::isRunning (PID-reuse-safe, self-heals stale state)
  * lastRun  <- Runner::readSummary (the /boot durable summary)
  * state    <- ur_derive_state (RUNNING overrides summary; PENDING when none)
@@ -2040,6 +2077,10 @@ function ur_action_get_status(): void
                 'lastRun'    => ur_last_run_shape($summary),
                 'nextRun'    => $nextRun,
             ];
+            // Snapshot jobs only, so a mirror's entry keeps its shape.
+            if (Config::normalizeSnapshot($job['snapshot'] ?? null) !== null) {
+                $out[$id]['snapshot'] = Snapshot::lastSnapshot($summary);
+            }
         } catch (Throwable $e) {
             // Log the detail server-side (webGui PHP log) only - never leak
             // exception text/paths to the browser by default.

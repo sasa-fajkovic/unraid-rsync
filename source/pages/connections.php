@@ -269,6 +269,15 @@ function ur_render_connection_card($conn, $index, array $keys): void
     echo '<dt class="ur-ssh-only"' . $sshOnlyStyle . '><label for="' . ur_h($idb . '_timeout') . '">' . ur_h(ur_t('Connect timeout (s)')) . '</label>:</dt>';
     echo '<dd class="ur-ssh-only"' . $sshOnlyStyle . '><input type="text" id="' . ur_h($idb . '_timeout') . '" name="' . ur_h($p . '[connectTimeout]') . '" value="' . ur_h($timeout) . '" placeholder="10"></dd>';
 
+    // sudo for the snapshot helper. SSH-only: Credentials forces it off on a
+    // daemon connection, so the hidden 0 a daemon card still posts is harmless.
+    echo '<dt class="ur-ssh-only"' . $sshOnlyStyle . '><label for="' . ur_h($idb . '_sudo') . '">' . ur_h(ur_t('Use sudo on the receiver')) . '</label>:</dt>';
+    echo '<dd class="ur-ssh-only"' . $sshOnlyStyle . '>';
+    echo '<input type="hidden" name="' . ur_h($p . '[useSudo]') . '" value="0">';
+    echo '<input type="checkbox" id="' . ur_h($idb . '_sudo') . '" name="' . ur_h($p . '[useSudo]') . '" value="1"' . (($conn['useSudo'] ?? false) === true ? ' checked' : '') . '>';
+    echo '<blockquote class="inline_help"><p>' . ur_h(ur_t('For snapshot-mode jobs whose SSH login is not root: the snapshot helper then runs through sudo -n sh, so that user needs passwordless sudo for sh on the receiver. Only the snapshot helper uses it; transfers and mirror jobs are unaffected. Leave OFF when the login is root.')) . '</p></blockquote>';
+    echo '</dd>';
+
     // host key (discover) - textarea holds the pinned key; button fills it
     echo '<dt class="ur-ssh-only"' . $sshOnlyStyle . '><label for="' . ur_h($idb . '_hostkey') . '">' . ur_h(ur_t('Pinned host key')) . '</label>:</dt>';
     echo '<dd class="ur-ssh-only"' . $sshOnlyStyle . '>';

@@ -18,6 +18,8 @@ declare(strict_types=1);
  *   - Rsync::$runner            the rsync process spawn (fake in tests)
  *   - Runner::$hookRunner       the bash -c hook spawn (fake in tests)
  *   - Runner::$pidProvider      getmypid() seam (fixed pid in tests)
+ *   - Runner::$scanDir          scandir() of a snapshot job's sources (tests)
+ *   - Snapshot::$remoteRunner / Snapshot::$nowProvider  the snapshot helper and clock
  *
  * SECURITY:
  *   - rsync is built as an argv array via Rsync::buildArgv and run without a
@@ -48,6 +50,7 @@ require_once __DIR__ . '/RunState.php';
 require_once __DIR__ . '/Logger.php';
 require_once __DIR__ . '/Notify.php';
 require_once __DIR__ . '/History.php';
+require_once __DIR__ . '/Snapshot.php';
 require_once __DIR__ . '/Util.php';
 
 class Runner
@@ -67,6 +70,14 @@ class Runner
      * @var callable|null
      */
     public static $pidProvider = null;
+
+    /**
+     * Injectable scandir for a snapshot job's local sources: fn(string $path): array|false.
+     * null => scandir().
+     *
+     * @var callable|null
+     */
+    public static $scanDir = null;
 
     /** Resolve our own pid (overridable for tests). */
     private static function pid(): int
@@ -166,7 +177,14 @@ class Runner
         // STORAGE timestamp: UTC, always. Display is system-local (see AGENTS.md
         // "Timezone: store UTC, display system-local") - do NOT switch this to date().
         $startedAt   = gmdate('Y-m-d\TH:i:s\Z', $startedAtTs);
+        $snap        = Config::normalizeSnapshot($job['snapshot'] ?? null);
+        $stamp       = '';
         try {
+            // Taken under the per-job lock (§3), before the in-flight record so a
+            // crash report can name the .inprogress it left.
+            if ($snap !== null) {
+                $stamp = Snapshot::stamp(Snapshot::now());
+            }
             // We hold the lock, so a state still claiming running=true is a
             // runner that died.
             $stale = RunState::takeStale($jobId);
@@ -190,6 +208,9 @@ class Runner
                 'startedAt'  => $startedAt,
                 'currentLog' => $runLog,
             ];
+            if ($stamp !== '') {
+                $runState['snapshot'] = $stamp;
+            }
             RunState::write($jobId, $runState);
             RunState::writeInflight($jobId, $runState);
         } catch (Throwable $e) {
@@ -210,6 +231,9 @@ class Runner
         // in the same file as the rsync lines to compare against, is what makes
         // that case reportable instead of invisible.
         Logger::event($runLog, $jobId, 'Timestamps in timezone: ' . Config::systemTimezone() . '.');
+        if ($stamp !== '') {
+            Logger::event($runLog, $jobId, "Snapshot mode: this run's snapshot is $stamp (UTC).");
+        }
 
         // Survive the abort SIGTERM so we can record an ABORTED outcome.
         //
@@ -252,6 +276,8 @@ class Runner
         // Declared out here so the finally can harvest this run's host key
         // before cleanup; only ever set on the SSH arm.
         $sshMat   = null;
+        // Snapshot mode's per-run context (snapshotContext()); null for a mirror.
+        $sn       = null;
 
         try {
             // 4. Remote transport: materialise secrets (LOCAL skips this).
@@ -337,6 +363,9 @@ class Runner
             // operands. DAEMON uses the SAME prefix as SSH - the only
             // difference is the '::' separator resolvePair() appends.
             $userHost = in_array($transport, ['SSH', 'DAEMON'], true) ? self::userHost($mat['conn'] ?? []) : '';
+            if ($snap !== null && is_array($sshMat)) {
+                $sn = self::snapshotContext($job, $snap, $stamp, $jobId, $sshMat, $userHost);
+            }
 
             // 5. Defensive rsync presence check. rsync ships in Unraid's base OS
             //    at /usr/bin/rsync, so it should ALWAYS be present; the plugin
@@ -356,16 +385,43 @@ class Runner
             //     rejected.
             if ($state !== Rsync::STATE_FAILED) {
                 $preflight = self::preflight($job, $config, $transport, $opts, $sshPieces, $userHost, $runLog, $jobId);
-                if ($preflight !== '') {
+                if ($preflight === '' && $sn !== null) {
+                    $preflight = self::abortedOr(self::snapshotPreflight($sn, $job, $opts, $sshPieces, $runLog, $jobId), $jobId);
+                }
+                if ($preflight === 'aborted') {
+                    $state    = Rsync::STATE_ABORTED;
+                    $exitCode = 143;
+                } elseif ($preflight !== '') {
                     $state    = Rsync::STATE_FAILED;
                     $exitCode = 1;
                     $reason   = $preflight;
                 }
             }
 
-            // 5c. preHook (only if nothing above failed).
-            $hookEnvBase = self::hookEnv($job, $jobId, $dryRun, null, null, $trigger);
-            if ($state !== Rsync::STATE_FAILED) {
+            // 5b'. Snapshot cleanup, before the pre-hook so it stays out of the
+            //      service-downtime window. Never fails the run.
+            if ($state === Rsync::STATE_SUCCESS && $sn !== null && !$dryRun) {
+                self::snapshotCleanup($sn, $reason, $runLog, $jobId);
+            }
+            // An Abort before the pre-hook stops the run there: a hook started
+            // with the flag set would be killed and reported as prehook-failed.
+            if ($state === Rsync::STATE_SUCCESS && $sn !== null && RunState::abortRequested($jobId)) {
+                Logger::event($runLog, $jobId, 'Abort requested; stopping before the pre-run hook.');
+                $state    = Rsync::STATE_ABORTED;
+                $exitCode = 143;
+            }
+
+            // 5c. preHook (only if nothing above failed or was aborted).
+            $hookEnvBase = self::hookEnv(
+                $job,
+                $jobId,
+                $dryRun,
+                null,
+                null,
+                $trigger,
+                $snap !== null ? ['UR_SNAPSHOT' => $stamp, 'UR_SNAPSHOT_STATUS' => ''] : []
+            );
+            if ($state !== Rsync::STATE_FAILED && $state !== Rsync::STATE_ABORTED) {
                 $preHook = (string) ($job['preHook'] ?? '');
                 if (trim($preHook) !== '') {
                     $preMin = Config::hookTimeoutMinutes($global, 'preHookTimeout');
@@ -395,9 +451,38 @@ class Runner
                 }
             }
 
+            // 5d. Snapshot: create <stamp>.inprogress (real runs only).
+            if ($state === Rsync::STATE_SUCCESS && $sn !== null && !$dryRun) {
+                if (self::snapshotCall($sn, 'mkstamp', [$stamp], $runLog, $jobId, Snapshot::HELPER_TIMEOUT_SEC) === null) {
+                    if (self::abortedOr('snapshot-mkstamp-failed', $jobId) === 'aborted') {
+                        $state    = Rsync::STATE_ABORTED;
+                        $exitCode = 143;
+                    } else {
+                        $state    = Rsync::STATE_FAILED;
+                        $exitCode = 1;
+                        $reason   = 'snapshot-mkstamp-failed';
+                    }
+                } else {
+                    $sn['mkstamped'] = true;
+                    Logger::event($runLog, $jobId, "Created $stamp.inprogress.");
+                }
+            }
+
             // 6. Pairs: check abort, build argv, run rsync.
-            if ($state !== Rsync::STATE_FAILED) {
+            if ($state !== Rsync::STATE_FAILED && $state !== Rsync::STATE_ABORTED) {
                 $logLevel = (string) ($job['logLevel'] ?? 'normal');
+                $pairResults = [];
+                if ($sn !== null) {
+                    // --info=stats2 feeds the completion metadata, so it may not
+                    // depend on the level (§11.2): lift quiet like a dry run is.
+                    if ($logLevel === 'quiet') {
+                        $logLevel = 'summary';
+                        Logger::event($runLog, $jobId, 'Snapshot mode runs the quiet log level as summary.');
+                    }
+                    foreach (Job::snapshotOptionWarnings($opts) as $w) {
+                        Logger::event($runLog, $jobId, $w);
+                    }
+                }
 
                 if (count($pairs) === 0) {
                     $state    = Rsync::STATE_FAILED;
@@ -418,7 +503,14 @@ class Runner
                     }
 
                     // Resolve src/dest by direction (guardrails ran in pre-flight).
-                    $resolved = self::resolvePair($job, $pair, $transport, $userHost);
+                    $extraTokens = [];
+                    if ($sn !== null) {
+                        $sub         = trim((string) ($pair['sub'] ?? ''));
+                        $resolved    = ['src' => trim((string) ($pair['local'] ?? '')), 'dest' => "$userHost:{$sn['root']}/$stamp.inprogress/$sub/"];
+                        $extraTokens = self::snapshotLinkDests($sn, $i, $sub);
+                    } else {
+                        $resolved = self::resolvePair($job, $pair, $transport, $userHost);
+                    }
 
                     Logger::event($runLog, $jobId, sprintf(
                         'Pair #%d: %s -> %s',
@@ -428,21 +520,36 @@ class Runner
                     ));
 
                     $argv = Rsync::buildArgv(
-                        $opts,
+                        $sn !== null ? Snapshot::runOptions($opts) : $opts,
                         $logLevel,
                         $runLog,
                         $resolved['src'],
                         $resolved['dest'],
                         $sshPieces,
-                        $dryRun
+                        $dryRun,
+                        $extraTokens
                     );
 
                     // Stream rsync's captured stdout/stderr through Logger::sink,
                     // which REDACTS armed per-run secret paths (F1) and enforces
                     // the per-run-log byte cap (F3) before bytes hit the log.
+                    // Snapshot mode also keeps the tail for the stats it records.
+                    $sink     = Logger::sink($runLog);
+                    $captured = '';
+                    $partial  = '';
+                    $missing  = [];
+                    $onOutput = $sn === null ? $sink : static function (string $chunk) use ($sink, &$captured, &$partial, &$missing): void {
+                        $sink($chunk);
+                        $captured = substr($captured . $chunk, -self::SNAPSHOT_CAPTURE_BYTES);
+                        // rsync names a missing --link-dest once, early; it must
+                        // not scroll out of the tail kept for the statistics.
+                        $lines   = explode("\n", $partial . $chunk);
+                        $partial = substr((string) array_pop($lines), -self::SNAPSHOT_CAPTURE_BYTES);
+                        $missing = array_merge($missing, Snapshot::linkDestMissing(implode("\n", $lines)));
+                    };
                     $pairExit = Rsync::run(
                         $argv,
-                        Logger::sink($runLog),
+                        $onOutput,
                         Ssh::childEnv(is_array($sshPieces) ? $sshPieces['sshEnv'] : [])
                     );
                     // The sink holds back progress redraws (5%/30s throttle) and
@@ -461,6 +568,10 @@ class Runner
                     Logger::redactRunLog($runLog);
                     $exitCodes[] = $pairExit;
                     Logger::event($runLog, $jobId, "Pair #$n rsync exited with code $pairExit (" . Rsync::exitToState($pairExit) . ').');
+                    if ($sn !== null) {
+                        $missing       = array_merge($missing, Snapshot::linkDestMissing($partial));
+                        $pairResults[] = self::snapshotPairResult($sn, $i, $sub, $pairExit, $captured, $missing, $runLog, $jobId);
+                    }
 
                     // Abort can land DURING a pair (the SIGTERM that killed rsync
                     // also set the abort flag). Re-poll AFTER each rsync so an
@@ -482,6 +593,31 @@ class Runner
                     $state    = $worst['state'];
                     $exitCode = $worst['exitCode'];
                 }
+
+                // 6b. Snapshot completion gate (§4.1), then commit.
+                if ($sn !== null && $sn['mkstamped']) {
+                    $gate = !$aborted && $state !== Rsync::STATE_FAILED && count($exitCodes) === count($pairs)
+                        && array_diff($exitCodes, [0, 24]) === [];
+                    if (!$gate) {
+                        Logger::event($runLog, $jobId, "Snapshot $stamp was not committed; $stamp.inprogress is kept for the next run.");
+                        if (!$aborted && $state !== Rsync::STATE_ABORTED) {
+                            self::setReason($reason, 'snapshot-not-committed');
+                        }
+                    } else {
+                        $commit = self::snapshotCommit($sn, $pairResults, $runLog, $jobId);
+                        if ($commit === 'aborted') {
+                            $state    = Rsync::STATE_ABORTED;
+                            $exitCode = 143;
+                        } elseif ($commit !== '') {
+                            $state    = Rsync::STATE_FAILED;
+                            $exitCode = 1;
+                            self::setReason($reason, $commit);
+                        } elseif ($sn['suspect']) {
+                            $state = Rsync::STATE_WARNING;
+                            self::setReason($reason, 'snapshot-suspect');
+                        }
+                    }
+                }
             }
         } catch (Throwable $e) {
             $state    = Rsync::STATE_FAILED;
@@ -496,12 +632,17 @@ class Runner
             // abort path's safety net - a SIGTERM'd rsync leaves its last
             // redraw unterminated, and the trap lets this finally run.
             Logger::flushSink($runLog);
+            $state = self::snapshotWarnState($state, $reason);
 
             // 7. postHook ALWAYS runs (even on failure/abort), with the outcome
             //    in its environment.
             $postHook = (string) ($job['postHook'] ?? '');
             if (trim($postHook) !== '') {
-                $postEnv = self::hookEnv($job, $jobId, $dryRun, $state, $exitCode, $trigger);
+                $postEnv = self::hookEnv($job, $jobId, $dryRun, $state, $exitCode, $trigger, $snap === null ? [] : [
+                    'UR_SNAPSHOT'        => !empty($sn['mkstamped']) ? $stamp : '',
+                    'UR_SNAPSHOT_STATUS' => $dryRun ? 'dry-run'
+                        : (!empty($sn['committed']) ? 'committed' : (!empty($sn['mkstamped']) ? 'not-committed' : 'none')),
+                ]);
                 $postMin = Config::hookTimeoutMinutes(
                     (isset($config['global']) && is_array($config['global'])) ? $config['global'] : [],
                     'postHookTimeout'
@@ -540,6 +681,14 @@ class Runner
                 }
             }
 
+            // 7a. Snapshot prune (§6): after the post-hook, so it holds no
+            //     services, and before cleanup, which removes the ssh pieces it
+            //     needs. Never throws.
+            if ($sn !== null) {
+                self::snapshotPrune($sn, $dryRun, $reason, $runLog, $jobId);
+                $state = self::snapshotWarnState($state, $reason);
+            }
+
             // 7b. Trust on first use: with accept-new and nothing pinned yet, ssh
             //     appended the key it accepted to this run's known_hosts. Pin it
             //     into the connection BEFORE cleanup unlinks that file, so a
@@ -572,6 +721,11 @@ class Runner
             // STORAGE timestamp: UTC, always (see the startedAt note above).
             $finishedAt  = gmdate('Y-m-d\TH:i:s\Z', $finishedAtTs);
             $durationSec = max(0, $finishedAtTs - $startedAtTs);
+            // Snapshot jobs only, so a mirror's summary and History keep their shape.
+            $snapFields  = $snap === null ? [] : [
+                'snapshot'  => !empty($sn['mkstamped']) ? $stamp : '',
+                'committed' => !empty($sn['committed']),
+            ];
             self::writeSummary($jobId, [
                 'state'       => $state,
                 'startedAt'   => $startedAt,
@@ -580,7 +734,13 @@ class Runner
                 'durationSec' => $durationSec,
                 'dryRun'      => $dryRun,
                 'trigger'     => $trigger,
-            ]);
+            ] + $snapFields);
+            if ($snap !== null) {
+                $snapFields += ['suspect' => !empty($sn['suspect']), 'pruned' => (int) ($sn['pruned'] ?? 0)];
+                if (isset($sn['growthKB'])) {
+                    $snapFields['growthKB'] = $sn['growthKB'];
+                }
+            }
 
             // Append a persistent history record (one small /boot write, same
             // cadence as the summary), then lazily prune to the retention cap.
@@ -598,7 +758,7 @@ class Runner
                 'durationSec' => $durationSec,
                 'logRef'      => Logger::runIdFromPath($runLog),
                 'reason'      => $reason,
-            ]);
+            ] + $snapFields);
             RunState::clearInflight($jobId);
             History::prune($jobId, $retention);
 
@@ -609,7 +769,7 @@ class Runner
             // Dispatch the per-job notification (Phase 7). Best-effort: it is
             // gated on the job's notifyMode and NEVER throws (see notifyHook),
             // so a notification failure can't break the run's finally/unwind.
-            self::notifyHook($job, [
+            $notify = [
                 'state'       => $state,
                 'exitCode'    => $exitCode,
                 'exitCodes'   => $exitCodes,
@@ -617,7 +777,14 @@ class Runner
                 'trigger'     => $trigger,
                 'dryRun'      => $dryRun,
                 'durationSec' => $durationSec,
-            ]);
+            ];
+            if ($snap !== null && !$dryRun && $state !== Rsync::STATE_ABORTED && empty($sn['committed'])) {
+                $runs = self::notCommittedRuns($jobId);
+                if ($runs > 1) {
+                    $notify['message'] = sprintf('Job "%s" has not committed a snapshot for %d runs.', (string) ($job['name'] ?? $jobId), $runs);
+                }
+            }
+            self::notifyHook($job, $notify);
 
             // Release the per-job run lock last, so a queued launch only proceeds
             // once this run has fully wound down (state cleared, summary written).
@@ -743,6 +910,8 @@ class Runner
      *   WARNING: only exit 24 (files vanished mid-transfer) => normal; exit 25
      *            (max-delete cap) or a post-hook failure/timeout => warning
      *   SUCCESS => normal
+     * Snapshot reasons (§4.4) come first: SNAPSHOT_ALERT_REASONS => alert,
+     * SNAPSHOT_WARNING_REASONS on any non-FAILED run => warning.
      *
      * @param array<string,mixed> $run
      */
@@ -750,6 +919,12 @@ class Runner
     {
         $state  = (string) ($run['state'] ?? '');
         $reason = (string) ($run['reason'] ?? '');
+        if (in_array($reason, self::SNAPSHOT_ALERT_REASONS, true)) {
+            return Notify::IMPORTANCE_ALERT;
+        }
+        if ($state !== Rsync::STATE_FAILED && in_array($reason, self::SNAPSHOT_WARNING_REASONS, true)) {
+            return Notify::IMPORTANCE_WARNING;
+        }
         if ($reason === 'already-running'
             || ($state !== Rsync::STATE_FAILED && in_array($reason, ['posthook-failed', 'posthook-timeout'], true))) {
             return Notify::IMPORTANCE_WARNING;
@@ -1066,19 +1241,23 @@ class Runner
         $local  = trim((string) ($pair['local'] ?? ''));
         $remote = trim((string) ($pair['remote'] ?? ''));
         $direction = strtoupper(trim((string) ($job['direction'] ?? 'PUSH')));
+        $snapshotOn = Config::normalizeSnapshot($job['snapshot'] ?? null) !== null;
 
         // local field: always a local path on this box.
         if ($local === '') {
             $errors[] = 'local path is required.';
         } else {
-            foreach (Job::checkLocalPath($local, 'local path') as $e) {
+            foreach (Job::pairLocalErrors($job, $transport, $local, 'local path') as $e) {
                 $errors[] = $e;
             }
         }
 
         // remote field: local guardrails under LOCAL, a module reference under
         // DAEMON, otherwise a non-root remote sub-path.
-        if ($remote === '') {
+        if ($snapshotOn) {
+            // Snapshot mode writes to <root>/<stamp>/<sub>; Job::snapshotErrors()
+            // checks `remote` and `sub`, as Job::validate does.
+        } elseif ($remote === '') {
             if ($transport === 'LOCAL') {
                 $errors[] = 'second local path is required.';
             } elseif ($transport === 'DAEMON') {
@@ -1146,6 +1325,7 @@ class Runner
      */
     private static function preflight(array $job, array $config, string $transport, array $opts, ?array $sshPieces, string $userHost, string $runLog, string $jobId): string
     {
+        $snapshotOn = Config::normalizeSnapshot($job['snapshot'] ?? null) !== null;
         $direction = strtoupper(trim((string) ($job['direction'] ?? 'PUSH')));
         $pairs     = (isset($job['pairs']) && is_array($job['pairs'])) ? $job['pairs'] : [];
 
@@ -1160,20 +1340,31 @@ class Runner
             $errors,
             Job::optionErrors($opts, $transport, $direction),
             Job::markerErrors($job, $transport, $direction),
-            Job::ancestryErrors($job, $opts, Job::protectedTargets($jobs, $jobId))
+            Job::ancestryErrors($job, $opts, Job::protectedTargets($jobs, $jobId)),
+            Job::snapshotRootErrors($job, $jobs)
         );
-        if ($errors !== []) {
+        // A rejected option is snapshot-preflight (§2.6); every other snapshot
+        // rule (transport, root, marker, retention, subs) is a guardrail.
+        $rejected = $snapshotOn ? Job::snapshotOptionErrors($opts) : [];
+        if ($snapshotOn) {
+            $errors = array_merge($errors, array_values(array_diff(Job::snapshotErrors($job, $opts, $transport, $direction), $rejected)));
+        }
+        if ($errors !== [] || $rejected !== []) {
             foreach ($errors as $e) {
                 Logger::event($runLog, $jobId, 'Rejected by path guardrails: ' . $e);
             }
-            return 'guardrail';
+            foreach ($rejected as $e) {
+                Logger::event($runLog, $jobId, $e);
+            }
+            return $errors !== [] ? 'guardrail' : 'snapshot-preflight';
         }
 
         if (!self::checkTargetMarker($job, $transport, $direction, $opts, $sshPieces, $userHost, $runLog, $jobId)) {
             return 'dest-not-mounted';
         }
 
-        if ($transport === 'SSH' && $direction !== 'PULL' && (!empty($opts['delete']) || !empty($opts['deleteExcluded']))) {
+        // Snapshot mode forces delete off, whatever $opts says.
+        if (!$snapshotOn && $transport === 'SSH' && $direction !== 'PULL' && (!empty($opts['delete']) || !empty($opts['deleteExcluded']))) {
             return self::probeDeleteDestinations($pairs, $opts, $sshPieces, $userHost, $runLog, $jobId);
         }
         return '';
@@ -1311,16 +1502,567 @@ class Runner
         return $name;
     }
 
+    // --- snapshot mode (docs/design/snapshot-mode.md §4, §6) -----------------
+
+    /** Reasons that always alert (§4.4). */
+    const SNAPSHOT_ALERT_REASONS = [
+        'snapshot-preflight', 'snapshot-clock', 'snapshot-mkstamp-failed', 'snapshot-not-committed',
+        'snapshot-commit-failed', 'snapshot-suspect', 'prune-sanity',
+    ];
+
+    /** Reasons that warn on any non-FAILED run (§4.4). */
+    const SNAPSHOT_WARNING_REASONS = ['snapshot-held', 'prune-backlog', 'prune-failed'];
+
+    /** Tail of each pair's rsync output kept for parseStats / linkDestMissing. */
+    const SNAPSHOT_CAPTURE_BYTES = 65536;
+
+    /**
+     * $reason stays first-set-wins, except that an alert-class snapshot reason
+     * replaces a warning-class one.
+     */
+    private static function setReason(string &$reason, string $new): void
+    {
+        $warning = array_merge(self::SNAPSHOT_WARNING_REASONS, ['posthook-failed', 'posthook-timeout']);
+        if ($reason === '' || (in_array($new, self::SNAPSHOT_ALERT_REASONS, true) && in_array($reason, $warning, true))) {
+            $reason = $new;
+        }
+    }
+
+    /**
+     * Abort SIGTERMs the runner's process group, ssh included, so a helper
+     * call it interrupts fails: that is the abort, not $failure.
+     */
+    private static function abortedOr(string $failure, string $jobId): string
+    {
+        return ($failure !== '' && RunState::abortRequested($jobId)) ? 'aborted' : $failure;
+    }
+
+    /** A clean run that set a non-failing snapshot reason ends as WARNING. */
+    private static function snapshotWarnState(string $state, string $reason): string
+    {
+        $warn = array_merge(self::SNAPSHOT_WARNING_REASONS, ['snapshot-suspect', 'prune-sanity']);
+        return ($state === Rsync::STATE_SUCCESS && in_array($reason, $warn, true)) ? Rsync::STATE_WARNING : $state;
+    }
+
+    /**
+     * The per-run snapshot context: the job's settings, the helper's common
+     * arguments and the transport, plus what preflight, commit and prune learn.
+     *
+     * @param array<string,mixed> $job
+     * @param array<string,mixed> $snap Config::normalizeSnapshot() block
+     * @param array<string,mixed> $mat  Ssh::materialize() result
+     * @return array<string,mixed>
+     */
+    private static function snapshotContext(array $job, array $snap, string $stamp, string $jobId, array $mat, string $userHost): array
+    {
+        $root = (string) $snap['root'];
+        return [
+            'snap'      => $snap,
+            'stamp'     => $stamp,
+            'root'      => $root,
+            'args'      => [$root, trim((string) ($job['targetMarker'] ?? '')), trim((string) ($job['targetMarkerContent'] ?? '')), $jobId],
+            'mat'       => $mat,
+            'userHost'  => $userHost,
+            'useSudo'   => ($mat['conn']['useSudo'] ?? null) === true,
+            'listing'   => null,
+            'prev'      => '',
+            'prevMeta'  => null,
+            'basis'     => [],
+            'stale'     => '',
+            'cleanup'   => [],
+            'dfBefore'  => null,
+            'mkstamped' => false,
+            'committed' => false,
+            'suspect'   => false,
+            'pruned'    => 0,
+            'growthKB'  => null,
+        ];
+    }
+
+    /**
+     * One helper call on the receiver. Its stderr goes to the run log; a
+     * failure is logged with the exit code's meaning and the first stderr line.
+     * Returns the parsed reply, or null on any failure. Never throws.
+     *
+     * @param array<string,mixed>    $sn
+     * @param array<int,string>      $extra    op arguments after the common four
+     * @param (callable():bool)|null $stopWhen
+     * @return array<string,mixed>|null
+     */
+    private static function snapshotCall(array $sn, string $op, array $extra, string $runLog, string $jobId, int $timeoutSec, ?callable $stopWhen = null): ?array
+    {
+        try {
+            $args = $op === 'probe' ? [] : array_merge($sn['args'], $extra);
+            $r    = Snapshot::runRemote($sn['mat'], $sn['userHost'], $op, $args, $sn['useSudo'], $timeoutSec, $stopWhen);
+        } catch (Throwable $e) {
+            Logger::event($runLog, $jobId, "Snapshot helper $op could not be started: " . $e->getMessage());
+            return null;
+        }
+        if ($r['stderr'] !== '') {
+            $sink = Logger::sink($runLog);
+            $sink($r['stderr']);
+            Logger::flushSink($runLog);
+        }
+        if ($r['exit'] !== 0) {
+            $why = $r['exit'] === Snapshot::REMOTE_TIMED_OUT ? 'timed out after ' . $timeoutSec . ' s'
+                : 'exit ' . $r['exit'] . (isset(Snapshot::HELPER_EXITS[$r['exit']]) ? ': ' . Snapshot::HELPER_EXITS[$r['exit']] : ': transport failure');
+            $line = Util::firstLine($r['stderr']);
+            Logger::event($runLog, $jobId, "Snapshot helper $op failed ($why)." . ($line !== '' ? " $line" : ''));
+            return null;
+        }
+        $parsed = Snapshot::parseHelper($r['stdout'], $op);
+        if (empty($parsed['ok'])) {
+            Logger::event($runLog, $jobId, (string) ($parsed['error'] ?? "Helper $op output rejected."));
+            return null;
+        }
+        return $parsed;
+    }
+
+    /**
+     * §4 step 5: the receiver-side checks before the pre-hook. Fills $sn with
+     * the listing, the basis per pair and the cleanup list. Returns '' or the
+     * failure reason (already logged).
+     *
+     * @param array<string,mixed>      $sn
+     * @param array<string,mixed>      $job
+     * @param array<string,mixed>      $opts EFFECTIVE rsync options
+     * @param array<string,mixed>|null $sshPieces
+     */
+    private static function snapshotPreflight(array &$sn, array $job, array $opts, ?array $sshPieces, string $runLog, string $jobId): string
+    {
+        try {
+            Snapshot::helperScript();
+        } catch (Throwable $e) {
+            Logger::event($runLog, $jobId, $e->getMessage());
+            return 'snapshot-preflight';
+        }
+
+        $t     = Snapshot::HELPER_TIMEOUT_SEC;
+        $probe = self::snapshotCall($sn, 'probe', [], $runLog, $jobId, $t);
+        if ($probe === null) {
+            return 'snapshot-preflight';
+        }
+        Logger::event($runLog, $jobId, 'Receiver: clock synchronised by NTP: ' . $probe['ntp'] . '; ionice: ' . ($probe['ionice'] ? 'yes' : 'no') . '.');
+        $skew = Snapshot::checkSkew((int) $probe['now'], Snapshot::now()->getTimestamp());
+        if ($skew !== null) {
+            Logger::event($runLog, $jobId, $skew);
+            return 'snapshot-clock';
+        }
+        if (self::snapshotCall($sn, 'check', [], $runLog, $jobId, $t) === null) {
+            return 'snapshot-preflight';
+        }
+        $list = self::snapshotCall($sn, 'list', [], $runLog, $jobId, $t);
+        if ($list === null) {
+            return 'snapshot-preflight';
+        }
+        $free = Snapshot::freeSpaceError($list['df']);
+        if ($free !== null) {
+            Logger::event($runLog, $jobId, $free);
+            return 'snapshot-preflight';
+        }
+        $names = array_merge(array_column($list['entries'], 'name'), $list['stampish']);
+        foreach (Snapshot::futureNames($names, Snapshot::now()) as $name) {
+            Logger::event($runLog, $jobId, "'$name' in the snapshot root is dated more than a day in the future.");
+        }
+        $mono = Snapshot::checkMonotonic($sn['stamp'], $names);
+        if ($mono !== null) {
+            Logger::event($runLog, $jobId, $mono);
+            return 'snapshot-clock';
+        }
+
+        // The transfer runs as the SSH login (plus --rsync-path), not as the
+        // helper's root: a non-root login without a root wrapper cannot read
+        // the 0700 root and would fail mid-run instead.
+        $head = '';
+        $exit = Rsync::run(
+            Rsync::auxArgv(['--list-only', '--dirs', '--timeout=' . self::PROBE_TIMEOUT], $opts, $sshPieces, [$sn['userHost'] . ':' . $sn['root'] . '/']),
+            static function (string $chunk) use (&$head): void {
+                $head = substr($head . $chunk, 0, 4096);
+            },
+            Ssh::childEnv(is_array($sshPieces) ? (array) ($sshPieces['sshEnv'] ?? []) : [])
+        );
+        if ($exit !== 0) {
+            Logger::event($runLog, $jobId, "The transfer's SSH login cannot read the snapshot root {$sn['root']} (rsync exit $exit); "
+                . 'a non-root login needs a --rsync-path that runs rsync as root.' . ($head !== '' ? ' ' . Util::firstLine($head) : ''));
+            return 'snapshot-preflight';
+        }
+
+        $complete = [];
+        $inprogress = [];
+        $deleting = [];
+        foreach ($list['entries'] as $e) {
+            if ($e['type'] === 'd') {
+                $kind = Snapshot::classify($e['name']);
+                if ($kind === 'complete') {
+                    $complete[] = $e['name'];
+                } elseif ($kind === 'inprogress') {
+                    $inprogress[] = $e['name'];
+                } elseif ($kind === 'deleting') {
+                    $deleting[] = $e['name'];
+                }
+            }
+        }
+        sort($complete, SORT_STRING);
+        sort($inprogress, SORT_STRING);
+        sort($deleting, SORT_STRING);
+        $prev = (string) end($complete);
+        $subs = $prev !== '' ? $list['subs'] : [];
+
+        $errors = [];
+        $pairs  = (isset($job['pairs']) && is_array($job['pairs'])) ? $job['pairs'] : [];
+        foreach ($pairs as $i => $pair) {
+            $n     = (int) $i + 1;
+            $local = trim((string) ($pair['local'] ?? ''));
+            $sub   = trim((string) ($pair['sub'] ?? ''));
+            // Before the pre-hook, so a source the pre-hook fills cannot be
+            // emptied by the post-hook without this run noticing.
+            $entries = self::$scanDir !== null ? (self::$scanDir)($local) : @scandir($local);
+            if (!is_array($entries)) {
+                $errors[] = "Pair #$n: the source $local does not exist or is not a directory.";
+            } elseif (array_diff($entries, ['.', '..']) === []) {
+                $errors[] = "Pair #$n: the source $local is empty; refusing to take an empty snapshot of it.";
+            }
+            $sn['basis'][$i] = in_array($sub, $subs, true);
+            $seed = ($pair['seed'] ?? null) === true;
+            if ($sn['basis'][$i] && $seed) {
+                Logger::event($runLog, $jobId, "Pair #$n ($sub): $prev/$sub exists, so its seed flag has no effect and can be cleared.");
+            } elseif (!$sn['basis'][$i] && $seed) {
+                Logger::event($runLog, $jobId, "Pair #$n ($sub): new pair: full copy expected.");
+            } elseif (!$sn['basis'][$i]) {
+                $errors[] = "Pair #$n ($sub): there is no previous copy to link against ("
+                    . ($prev === '' ? 'no complete snapshot yet' : "$prev has no $sub")
+                    . '); set its seed flag to allow a full copy.';
+            }
+        }
+        if ($errors !== []) {
+            foreach ($errors as $e) {
+                Logger::event($runLog, $jobId, $e);
+            }
+            return 'snapshot-preflight';
+        }
+
+        $meta            = $list['meta'];
+        $sn['listing']   = $list;
+        $sn['prev']      = $prev;
+        $sn['prevMeta']  = (is_array($meta) && $meta['stamp'] === $prev && is_array($meta['data'])) ? $meta['data'] : null;
+        $sn['dfBefore']  = $list['df'];
+        // The lock is held and the sentinel ties the root to this job, so
+        // every .inprogress is stale; the newest is kept as a link-dest.
+        $sn['stale']     = (string) end($inprogress);
+        $sn['cleanup']   = array_merge($deleting, array_slice($inprogress, 0, -1));
+        Logger::event($runLog, $jobId, 'Snapshot root checked: previous snapshot ' . ($prev !== '' ? $prev : 'none')
+            . ($sn['stale'] !== '' ? ", unfinished {$sn['stale']} reused as a link-dest" : '') . '.');
+        return '';
+    }
+
+    /**
+     * §4 step 6: remove leftover .deleting and every stale .inprogress but
+     * the newest. A failure never fails the run.
+     *
+     * @param array<string,mixed> $sn
+     */
+    private static function snapshotCleanup(array &$sn, string &$reason, string $runLog, string $jobId): void
+    {
+        if (!empty($sn['listing']['hold'])) {
+            Logger::event($runLog, $jobId, "Deletions are on hold ({$sn['root']}/.ur-hold exists), so cleanup and prune are skipped "
+                . 'until the admin removes it.');
+            self::setReason($reason, 'snapshot-held');
+            return;
+        }
+        if ($sn['cleanup'] !== []) {
+            self::snapshotDelete($sn, $sn['cleanup'], 'Cleanup', $reason, $runLog, $jobId);
+            // The space cleanup freed (even by a deletion that then failed)
+            // would hide the transfer's growth.
+            $check          = self::snapshotCall($sn, 'check', [], $runLog, $jobId, Snapshot::HELPER_TIMEOUT_SEC);
+            $sn['dfBefore'] = $check['df'] ?? null;
+            if ($check === null) {
+                Logger::event($runLog, $jobId, 'Growth will not be measured: the free space could not be read again after cleanup.');
+            }
+        }
+    }
+
+    /**
+     * Helper `delete` for each name in order, polling Abort between and during
+     * deletions. The first failure stops the batch with prune-failed; a
+     * deletion stopped by Abort does not (its .deleting is removed next run).
+     * Returns how many were deleted.
+     *
+     * @param array<string,mixed> $sn
+     * @param array<int,string>   $names
+     */
+    private static function snapshotDelete(array $sn, array $names, string $what, string &$reason, string $runLog, string $jobId): int
+    {
+        $stop = static fn(): bool => RunState::abortRequested($jobId);
+        $done = 0;
+        foreach ($names as $name) {
+            if ($stop()) {
+                Logger::event($runLog, $jobId, "Abort requested; $what stopped.");
+                break;
+            }
+            Logger::event($runLog, $jobId, "$what: deleting $name.");
+            if (self::snapshotCall($sn, 'delete', [$name], $runLog, $jobId, 0, $stop) === null) {
+                if ($stop()) {
+                    Logger::event($runLog, $jobId, "Abort requested; $what stopped.");
+                } else {
+                    self::setReason($reason, 'prune-failed');
+                }
+                break;
+            }
+            $done++;
+        }
+        return $done;
+    }
+
+    /**
+     * --info=stats2 and the pair's link-dests: the previous snapshot's copy,
+     * then the kept unfinished run's.
+     *
+     * @param array<string,mixed> $sn
+     * @return array<int,string>
+     */
+    private static function snapshotLinkDests(array $sn, int|string $i, string $sub): array
+    {
+        $tokens = ['--info=stats2'];
+        if (!empty($sn['basis'][$i])) {
+            $tokens[] = "--link-dest={$sn['root']}/{$sn['prev']}/$sub";
+        }
+        if ($sn['stale'] !== '') {
+            $tokens[] = "--link-dest={$sn['root']}/{$sn['stale']}/$sub";
+        }
+        return $tokens;
+    }
+
+    /**
+     * @param array<string,mixed> $sn
+     * @param array<int,string>   $missing paths rsync reported as a missing --link-dest
+     * @return array{sub:string,exit:int,files:?int,bytes:?int,basisMissing:bool}
+     */
+    private static function snapshotPairResult(array $sn, int|string $i, string $sub, int $exit, string $captured, array $missing, string $runLog, string $jobId): array
+    {
+        $stats = Snapshot::parseStats($captured);
+        $basis = "{$sn['root']}/{$sn['prev']}/$sub";
+        $result = [
+            'sub'          => $sub,
+            'exit'         => $exit,
+            'files'        => $stats['regFiles'],
+            'bytes'        => $stats['totalSize'],
+            'basisMissing' => !empty($sn['basis'][$i]) && in_array($basis, $missing, true),
+        ];
+        Logger::event($runLog, $jobId, sprintf(
+            'Pair #%d (%s): %s regular files, %s bytes.',
+            (int) $i + 1,
+            $sub,
+            $result['files'] ?? 'unknown',
+            $result['bytes'] ?? 'unknown'
+        ));
+        return $result;
+    }
+
+    /**
+     * Consecutive real runs, newest first in History, that did not commit a
+     * snapshot. Dry runs and aborts are skipped; a commit, or a record with no
+     * snapshot fields (a mirror run, a crash, a hard failure), ends the count.
+     */
+    public static function notCommittedRuns(string $jobId): int
+    {
+        $n = 0;
+        for ($offset = 0; ; $offset += 100) {
+            $page = History::list($jobId, $offset, 100);
+            foreach ($page['runs'] as $r) {
+                if (!empty($r['dryRun']) || ($r['state'] ?? '') === Rsync::STATE_ABORTED) {
+                    continue;
+                }
+                if (!array_key_exists('snapshot', $r) || !empty($r['committed'])) {
+                    return $n;
+                }
+                $n++;
+            }
+            if ($offset + 100 >= $page['total']) {
+                return $n;
+            }
+        }
+    }
+
+    /**
+     * Growth of this job's earlier committed runs, newest first (History).
+     *
+     * @return array<int,int>
+     */
+    private static function pastGrowthKB(string $jobId): array
+    {
+        $out = [];
+        foreach (History::list($jobId, 0, 100)['runs'] as $r) {
+            if (!empty($r['committed']) && isset($r['growthKB'])) {
+                $out[] = (int) $r['growthKB'];
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * §4 step 10 once the gate passed: re-check the root, the anomaly check
+     * (hold + pin when suspect), then commit with the metadata. Returns '' or
+     * the failure reason.
+     *
+     * @param array<string,mixed>            $sn
+     * @param array<int,array<string,mixed>> $pairResults
+     */
+    private static function snapshotCommit(array &$sn, array $pairResults, string $runLog, string $jobId): string
+    {
+        $stamp = $sn['stamp'];
+        $check = self::snapshotCall($sn, 'check', [], $runLog, $jobId, Snapshot::HELPER_TIMEOUT_SEC);
+        if ($check === null) {
+            Logger::event($runLog, $jobId, "Snapshot $stamp was not committed; $stamp.inprogress is kept for the next run.");
+            return self::abortedOr('snapshot-commit-failed', $jobId);
+        }
+
+        $growth = is_array($sn['dfBefore']) ? $check['df']['used'] - $sn['dfBefore']['used'] : null;
+        $a = Snapshot::anomalies($pairResults, $sn['prevMeta'], $growth, self::pastGrowthKB($jobId));
+        foreach ($a['skipped'] as $s) {
+            Logger::event($runLog, $jobId, "Anomaly check: $s.");
+        }
+        if ($a['suspect'] !== []) {
+            $sn['suspect'] = true;
+            foreach ($a['suspect'] as $s) {
+                Logger::event($runLog, $jobId, "SUSPECT: $s.");
+            }
+            Logger::event($runLog, $jobId, 'This run is suspect: deletions are put on hold, the previous snapshot is pinned, then it is committed.');
+            // Unprotected, the suspect copy would become the next run's baseline
+            // and a later prune could remove the good snapshots.
+            if (self::snapshotCall($sn, 'hold', [$stamp], $runLog, $jobId, Snapshot::HELPER_TIMEOUT_SEC) === null
+                || ($sn['prev'] !== '' && self::snapshotCall($sn, 'pin', [$sn['prev']], $runLog, $jobId, Snapshot::HELPER_TIMEOUT_SEC) === null)) {
+                Logger::event($runLog, $jobId, "Snapshot $stamp was not committed because it could not be protected; $stamp.inprogress is kept for the next run.");
+                return self::abortedOr('snapshot-commit-failed', $jobId);
+            }
+        }
+        // Commit is not stoppable, so an Abort that arrived after the last pair
+        // is honoured here, before anything is renamed.
+        if (RunState::abortRequested($jobId)) {
+            Logger::event($runLog, $jobId, "Abort requested; snapshot $stamp was not committed.");
+            return 'aborted';
+        }
+
+        $subs = [];
+        foreach ($pairResults as $p) {
+            $subs[$p['sub']] = ['exit' => $p['exit'], 'files' => $p['files'], 'bytes' => $p['bytes']];
+        }
+        $meta = json_encode([
+            'stamp'   => $stamp,
+            'jobId'   => $sn['args'][3],
+            'suspect' => $sn['suspect'],
+            'df'      => ['before' => $sn['dfBefore'], 'after' => $check['df']],
+            'subs'    => $subs,
+        ], JSON_UNESCAPED_SLASHES);
+        if (!is_string($meta)
+            || self::snapshotCall($sn, 'commit', [$stamp, base64_encode($meta)], $runLog, $jobId, Snapshot::COMMIT_TIMEOUT_SEC) === null) {
+            Logger::event($runLog, $jobId, "Snapshot $stamp was not committed; $stamp.inprogress is kept for the next run.");
+            return self::abortedOr('snapshot-commit-failed', $jobId);
+        }
+        $sn['committed'] = true;
+        $sn['growthKB']  = $growth;
+        Logger::event($runLog, $jobId, "Committed snapshot $stamp." . ($growth !== null ? " The filesystem grew by $growth KB." : ''));
+        return '';
+    }
+
+    /**
+     * §6. A real run prunes only after a commit, unaborted and unsuspected;
+     * a dry run logs the plan for the current listing. Never throws.
+     *
+     * @param array<string,mixed> $sn
+     */
+    private static function snapshotPrune(array &$sn, bool $dryRun, string &$reason, string $runLog, string $jobId): void
+    {
+        try {
+            $now = Snapshot::now();
+            if ($dryRun) {
+                if (is_array($sn['listing']) && $sn['prev'] !== '') {
+                    Logger::event($runLog, $jobId, 'Dry run: the prune plan for the current listing (nothing is deleted):');
+                    self::logPrunePlan(Snapshot::planPrune($sn['listing'], $sn['snap'], $now, $sn['prev']), $runLog, $jobId);
+                }
+                return;
+            }
+            if (!$sn['committed']) {
+                return;
+            }
+            if (RunState::abortRequested($jobId)) {
+                Logger::event($runLog, $jobId, 'Abort requested; prune skipped.');
+                return;
+            }
+            if ($sn['suspect']) {
+                Logger::event($runLog, $jobId, 'Prune skipped: this run is suspect.');
+                return;
+            }
+            $list = self::snapshotCall($sn, 'list', [], $runLog, $jobId, Snapshot::HELPER_TIMEOUT_SEC);
+            if ($list === null && self::abortedOr('prune-sanity', $jobId) === 'aborted') {
+                Logger::event($runLog, $jobId, 'Abort requested; prune skipped.');
+                return;
+            }
+            if ($list === null) {
+                Logger::event($runLog, $jobId, 'Prune aborted: the snapshot root could not be listed after the commit.');
+                self::setReason($reason, 'prune-sanity');
+                return;
+            }
+            $plan = Snapshot::planPrune($list, $sn['snap'], $now, $sn['stamp']);
+            self::logPrunePlan($plan, $runLog, $jobId);
+            if ($plan['abort'] !== null) {
+                self::setReason($reason, 'prune-sanity');
+                return;
+            }
+            if ($plan['held']) {
+                Logger::event($runLog, $jobId, "Prune skipped: deletions are on hold ({$sn['root']}/.ur-hold exists).");
+                self::setReason($reason, 'snapshot-held');
+                return;
+            }
+            if ($sn['snap']['pruneDryRun']) {
+                Logger::event($runLog, $jobId, 'Prune dry run is on (pruneDryRun), so nothing was deleted.');
+                return;
+            }
+            $sn['pruned'] = self::snapshotDelete($sn, $plan['delete'], 'Prune', $reason, $runLog, $jobId);
+            if ($sn['pruned'] < count($plan['delete'])) {
+                return;
+            }
+            if ($plan['backlog'] > 0) {
+                Logger::event($runLog, $jobId, "{$plan['backlog']} deletion(s) carried over to later runs (maxPrunePerRun is {$sn['snap']['maxPrunePerRun']}).");
+                self::setReason($reason, 'prune-backlog');
+            }
+        } catch (Throwable $e) {
+            Logger::event($runLog, $jobId, 'Prune failed with an internal error: ' . $e->getMessage());
+            self::setReason($reason, 'prune-failed');
+        }
+    }
+
+    /** @param array<string,mixed> $plan Snapshot::planPrune() result */
+    private static function logPrunePlan(array $plan, string $runLog, string $jobId): void
+    {
+        foreach ($plan['keep'] as $name => $why) {
+            Logger::event($runLog, $jobId, "Prune plan: KEEP $name (" . implode(', ', array_unique($why)) . ').');
+        }
+        foreach ($plan['delete'] as $name) {
+            Logger::event($runLog, $jobId, "Prune plan: DELETE $name.");
+        }
+        foreach ($plan['future'] as $name) {
+            Logger::event($runLog, $jobId, "Prune plan: $name is dated in the future; neither kept nor deleted.");
+        }
+        if ($plan['backlog'] > 0) {
+            Logger::event($runLog, $jobId, "Prune plan: {$plan['backlog']} more deletion(s) wait for later runs.");
+        }
+        if ($plan['abort'] !== null) {
+            Logger::event($runLog, $jobId, 'Prune aborted, nothing is deleted: ' . $plan['abort']);
+        }
+    }
+
     /**
      * Build the environment array passed to a hook. The post-run hook also gets
      * the outcome (UR_JOB_STATUS, UR_EXIT_CODE); the pre-run hook gets the same
      * keys with empty/0 values so a hook can rely on them existing. UR_TRIGGER
      * is 'manual' or 'schedule' so a hook can branch on how the run was started.
+     * $extra carries a snapshot job's UR_SNAPSHOT / UR_SNAPSHOT_STATUS.
      *
-     * @param array<string,mixed> $job
+     * @param array<string,mixed>  $job
+     * @param array<string,string> $extra
      * @return array<string,string>
      */
-    public static function hookEnv(array $job, string $jobId, bool $dryRun, ?string $status = null, ?int $exitCode = null, string $trigger = 'manual'): array
+    public static function hookEnv(array $job, string $jobId, bool $dryRun, ?string $status = null, ?int $exitCode = null, string $trigger = 'manual', array $extra = []): array
     {
         return [
             'UR_JOB_ID'     => $jobId,
@@ -1329,7 +2071,7 @@ class Runner
             'UR_TRIGGER'    => ($trigger === 'schedule') ? 'schedule' : 'manual',
             'UR_JOB_STATUS' => $status === null ? '' : $status,
             'UR_EXIT_CODE'  => $exitCode === null ? '' : (string) $exitCode,
-        ];
+        ] + $extra;
     }
 
     /**
@@ -1423,7 +2165,9 @@ class Runner
         );
 
         // EOF on both pipes is not proof bash has exited, so the deadline and
-        // the stop request are polled until it has.
+        // the stop request are polled until it has. The status that first
+        // shows the exit is the only one that reports a signal; a later
+        // proc_get_status() call no longer does.
         $kill = '';
         while (true) {
             $status = @proc_get_status($proc);
@@ -1442,22 +2186,18 @@ class Runner
             usleep(100000);
         }
 
-        // Capture signal status before proc_close (see Rsync::defaultRun).
-        $status = @proc_get_status($proc);
-        $code   = proc_close($proc);
+        $code = proc_close($proc);
         if ($kill === 'timeout') {
             return self::HOOK_TIMED_OUT;
         }
         if ($kill === 'stop') {
             return 143;
         }
-        if (is_array($status)) {
-            if (!empty($status['signaled']) && isset($status['termsig'])) {
-                return 128 + (int) $status['termsig'];
-            }
-            if (array_key_exists('exitcode', $status) && (int) $status['exitcode'] >= 0) {
-                return (int) $status['exitcode'];
-            }
+        if ($status['signaled']) {
+            return 128 + $status['termsig'];
+        }
+        if ($status['exitcode'] >= 0) {
+            return $status['exitcode'];
         }
         return $code < 0 ? 1 : $code;
     }
@@ -1537,6 +2277,10 @@ class Runner
             'dryRun'      => !empty($summary['dryRun']),
             'trigger'     => $trigger,
         ];
+        if (array_key_exists('snapshot', $summary)) {
+            $out['snapshot']  = (string) $summary['snapshot'];
+            $out['committed'] = !empty($summary['committed']);
+        }
         $json = json_encode($out, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
         if ($json === false) {
             return;
@@ -1685,6 +2429,11 @@ class Runner
                 (int) ($state['pid'] ?? 0),
                 $started === false ? 'unknown' : date('Y-m-d H:i:sP', $started)
             );
+            $stamp = is_string($state['snapshot'] ?? null) ? $state['snapshot'] : '';
+            if (!$dryRun && Snapshot::isStamp($stamp)) {
+                // The run may have died before mkstamp or after the commit.
+                $message .= " Snapshot $stamp may be unfinished: if $stamp.inprogress was left on the receiver, it will be reused as a link-dest by the next run.";
+            }
             try {
                 Logger::event('', $jobId, $message);
             } catch (Throwable $e) {

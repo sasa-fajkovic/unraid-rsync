@@ -341,6 +341,10 @@ class RunState
         self::clearInflight($jobId);
         if ($state !== null && !empty($state['running'])) {
             self::markStopped($jobId);
+            // Only the in-flight record carries the snapshot stamp.
+            if (is_array($inflight) && isset($inflight['snapshot']) && ($inflight['startedAt'] ?? null) === $state['startedAt']) {
+                $state['snapshot'] = $inflight['snapshot'];
+            }
             return $state;
         }
         return $inflight;
@@ -394,14 +398,18 @@ class RunState
         if (!is_dir($dir) && !@mkdir($dir, 0755, true) && !is_dir($dir)) {
             return;
         }
-        $json = json_encode([
+        $record = [
             'jobId'      => $jobId,
             'pid'        => (int) ($state['pid'] ?? 0),
             'startedAt'  => (string) ($state['startedAt'] ?? ''),
             'trigger'    => (($state['trigger'] ?? '') === 'schedule') ? 'schedule' : 'manual',
             'dryRun'     => !empty($state['dryRun']),
             'currentLog' => (string) ($state['currentLog'] ?? ''),
-        ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+        ];
+        if (is_string($state['snapshot'] ?? null) && $state['snapshot'] !== '') {
+            $record['snapshot'] = $state['snapshot'];
+        }
+        $json = json_encode($record, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
         $tmp = @tempnam($dir, '.inflight.');
         if ($json === false || $tmp === false) {
             return;
@@ -464,7 +472,11 @@ class RunState
         return preg_match($pattern, $normalized) === 1;
     }
 
-    /** Has an abort been requested for this job? (the flag file exists) */
+    /**
+     * Has an abort been requested for this job? (the flag file exists)
+     *
+     * @phpstan-impure
+     */
     public static function abortRequested(string $jobId): bool
     {
         return is_file(self::abortPath($jobId));

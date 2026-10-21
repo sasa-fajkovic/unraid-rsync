@@ -1272,4 +1272,33 @@ final class CredentialsTest extends TestCase
         ]);
         $this->assertSame([], Credentials::usedBy($creds, 'key', 'k-1')['connections']);
     }
+
+    public function testUseSudoIsStoredOnlyWhenTrueAndOnlyOnSsh(): void
+    {
+        $base = ['id' => 'c-1', 'name' => 'n', 'host' => 'h.example', 'username' => 'backup'];
+
+        $on = Credentials::mergeConnection($base + ['useSudo' => true]);
+        $this->assertTrue($on['useSudo']);
+        $this->assertSame('useSudo', array_key_last($on));
+        $this->assertSame(self::MERGED_KEY_ORDER, array_slice(array_keys($on), 0, -1), 'existing keys keep their order');
+
+        foreach (['false' => false, 'string' => 'true', 'int' => 1, 'absent' => null] as $case => $value) {
+            $conn = $value === null ? $base : $base + ['useSudo' => $value];
+            $this->assertArrayNotHasKey('useSudo', Credentials::mergeConnection($conn), $case);
+        }
+        $this->assertArrayNotHasKey('useSudo', Credentials::mergeConnection($base + ['useSudo' => true, 'transport' => 'DAEMON']));
+
+        $creds = Credentials::defaults();
+        $creds['connections'] = [$base + ['useSudo' => true], ['id' => 'c-2'] + $base, ['id' => 'c-3', 'useSudo' => false] + $base];
+        Credentials::save($creds);
+        $raw = json_decode((string) file_get_contents(Credentials::path()), true);
+        $this->assertTrue($raw['connections'][0]['useSudo']);
+        $this->assertArrayNotHasKey('useSudo', $raw['connections'][1]);
+        $this->assertArrayNotHasKey('useSudo', $raw['connections'][2]);
+        $this->assertSame(1, $raw['schemaVersion']);
+
+        $before = file_get_contents(Credentials::path());
+        Credentials::save(Credentials::load());
+        $this->assertSame($before, file_get_contents(Credentials::path()));
+    }
 }

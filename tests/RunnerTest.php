@@ -1413,6 +1413,151 @@ final class RunnerTest extends TestCase
         ];
     }
 
+    /** @return array<string,array{0:string,1:string,2:bool,3:string,4:string}> */
+    public static function bootMatrixProvider(): array
+    {
+        $cases = [];
+        foreach (['SSH', 'DAEMON', 'LOCAL'] as $t) {
+            foreach (['PUSH', 'PULL'] as $d) {
+                foreach ([true, false] as $snap) {
+                    foreach (['/boot', '/boot/', '/boot/config', '/bootx', '/mnt/user/x'] as $p) {
+                        foreach (['local', 'remote'] as $side) {
+                            $cases["$t $d snapshot-" . ($snap ? 'on' : 'off') . " $side=$p"] = [$t, $d, $snap, $side, $p];
+                        }
+                    }
+                }
+            }
+        }
+        return $cases;
+    }
+
+    /**
+     * Spec §8: /boot is a valid `local` only as the source of an SSH PUSH
+     * snapshot job, never a subdirectory, never this server's destination, and
+     * save time (Job::validate) agrees with run time (preflight's
+     * guardrailErrors + snapshotErrors) in every cell. A path counts as accepted
+     * when the errors equal those of the same job with a known-good path there.
+     */
+    #[DataProvider('bootMatrixProvider')]
+    public function testBootIsOnlyEverAnSshPushSnapshotSource(string $transport, string $direction, bool $snap, string $side, string $path): void
+    {
+        $remoteOk = ['SSH' => '/srv/backup/x', 'DAEMON' => 'mod/x', 'LOCAL' => '/mnt/user/dst'][$transport];
+        $build = static function (string $value) use ($transport, $direction, $snap, $side, $remoteOk): array {
+            $job = array_merge(Config::defaultJob(), [
+                'name' => 'boot', 'transport' => $transport, 'direction' => $direction, 'connectionId' => 'c-1',
+                'targetMarker' => '/srv/backup/.unraid-rsync-target', 'targetMarkerContent' => 'uuid-1',
+                'rsyncOptions' => Config::mergeRsyncOptions(['archive' => true, 'times' => true]),
+                'pairs' => [$side === 'local'
+                    ? ['local' => $value, 'remote' => $snap ? '' : $remoteOk, 'sub' => 'boot']
+                    : ['local' => '/mnt/user/src/', 'remote' => $value, 'sub' => 'boot']],
+            ]);
+            if ($snap) {
+                $job['snapshot'] = ['enabled' => true, 'root' => '/srv/backup/snapshots/boot'];
+            }
+            return $job;
+        };
+        $saveTime = static fn(array $job): array => Job::validate($job)['errors'];
+        $runTime  = static fn(array $job): array => array_merge(
+            Runner::guardrailErrors($job, $job['pairs'][0], $transport, $job['rsyncOptions']),
+            $snap ? Job::snapshotErrors($job, $job['rsyncOptions'], $transport, $direction) : []
+        );
+        $good = $side === 'local' ? '/mnt/user/x' : ($snap ? '' : $remoteOk);
+
+        $savedOk = $saveTime($build($path)) === $saveTime($build($good));
+        $runOk   = $runTime($build($path)) === $runTime($build($good));
+
+        $isBoot = $path === '/boot/';
+        if ($side === 'local') {
+            $expected = $path === '/mnt/user/x' || ($isBoot && $transport === 'SSH' && $direction === 'PUSH' && $snap);
+        } elseif ($snap || $transport === 'DAEMON') {
+            $expected = false;
+        } else {
+            // SSH `remote` is a path on the receiver, not this server's /boot.
+            $expected = $transport === 'SSH' || $path === '/mnt/user/x';
+        }
+        $this->assertSame($expected, $savedOk, 'save time');
+        $this->assertSame($savedOk, $runOk, 'save time and run time disagree');
+    }
+
+    /** @return array<string,array{0:array<string,mixed>,1:string,2:bool}> */
+    public static function bootHandEditProvider(): array
+    {
+        $on = ['snapshot' => ['enabled' => true, 'root' => '/srv/backup/snapshots/boot']];
+        $cases = [
+            'whitespace is trimmed' => [$on, " /boot/\t", true],
+            'lower-case enums'      => [['transport' => 'ssh', 'direction' => 'push'] + $on, '/boot/', true],
+            'missing direction'     => [['direction' => null] + $on, '/boot/', true],
+            'lower-case pull'       => [['direction' => 'pull'] + $on, '/boot/', false],
+        ];
+        foreach (['/boot', ' /boot ', '/boot//', '/boot/.', '/./boot', '/mnt/../boot', '/BOOT'] as $p) {
+            $cases["path $p"] = [$on, $p, false];
+        }
+        foreach (['int 1' => 1, 'string 1' => '1', 'string true' => 'true', 'null' => null] as $name => $v) {
+            $cases["enabled $name"] = [['snapshot' => ['enabled' => $v, 'root' => '/srv/backup/snapshots/boot']], '/boot/', false];
+        }
+        return $cases;
+    }
+
+    /**
+     * Hand-edited config.json shapes that never pass through the form's
+     * normalisation: only a JSON true enables snapshot mode, only the exact
+     * strings open /boot, and save time and run time agree on each.
+     *
+     * @param array<string,mixed> $overrides
+     */
+    #[DataProvider('bootHandEditProvider')]
+    public function testHandEditedBootJobsAgreeAtSaveAndRunTime(array $overrides, string $path, bool $expected): void
+    {
+        $build = static function (string $local) use ($overrides): array {
+            $job = array_merge(Config::defaultJob(), [
+                'name' => 'boot', 'transport' => 'SSH', 'direction' => 'PUSH', 'connectionId' => 'c-1',
+                'targetMarker' => '/srv/backup/.unraid-rsync-target', 'targetMarkerContent' => 'uuid-1',
+                'rsyncOptions' => Config::mergeRsyncOptions(['archive' => true, 'times' => true]),
+                'pairs' => [['local' => $local, 'remote' => '', 'sub' => 'boot']],
+            ], $overrides);
+            return array_filter($job, static fn($v): bool => $v !== null);
+        };
+        $runTime = static function (array $job): array {
+            $transport = strtoupper(trim((string) ($job['transport'] ?? 'SSH')));
+            $direction = strtoupper(trim((string) ($job['direction'] ?? 'PUSH')));
+            return array_merge(
+                Runner::guardrailErrors($job, $job['pairs'][0], $transport, $job['rsyncOptions']),
+                Job::snapshotErrors($job, $job['rsyncOptions'], $transport, $direction)
+            );
+        };
+
+        $savedOk = Job::validate($build($path))['errors'] === Job::validate($build('/mnt/user/x'))['errors'];
+        $runOk   = $runTime($build($path)) === $runTime($build('/mnt/user/x'));
+        $this->assertSame($expected, $savedOk, 'save time');
+        $this->assertSame($savedOk, $runOk, 'save time and run time disagree');
+    }
+
+    /**
+     * "/boot" without the slash would land in <sub>/boot/ where the anchored
+     * excludes miss, so it is refused with the same dedicated hint at save time
+     * and run time - but only where "/boot/" would be accepted; anywhere else
+     * the hint would point at a path that is refused too.
+     */
+    public function testBootWithoutTheSlashGetsTheSameHintAtSaveAndRunTime(): void
+    {
+        $hint = "'/boot': Use \"/boot/\" (with the trailing slash) so the copy lands in <sub>/ and the excludes match.";
+        $job = array_merge(Config::defaultJob(), [
+            'name' => 'boot', 'transport' => 'SSH', 'direction' => 'PUSH', 'connectionId' => 'c-1',
+            'targetMarker' => '/srv/backup/.unraid-rsync-target', 'targetMarkerContent' => 'uuid-1',
+            'rsyncOptions' => Config::mergeRsyncOptions(['archive' => true, 'times' => true]),
+            'pairs' => [['local' => '/boot', 'remote' => '', 'sub' => 'boot']],
+            'snapshot' => ['enabled' => true, 'root' => '/srv/backup/snapshots/boot'],
+        ]);
+        $this->assertSame(["Pair #1 source (local) $hint"], Job::validate($job)['errors']);
+        $this->assertSame(["local path $hint"], Runner::guardrailErrors($job, $job['pairs'][0], 'SSH', $job['rsyncOptions']));
+
+        $generic = "local path '/boot' is a protected system or array root and cannot be used.";
+        foreach ([[['direction' => 'PULL'], 'SSH'], [['snapshot' => null], 'SSH'], [[], 'LOCAL']] as [$other, $transport]) {
+            $errors = Runner::guardrailErrors(array_merge($job, $other), $job['pairs'][0], $transport, $job['rsyncOptions']);
+            $this->assertSame($generic, $errors[0] ?? null, "$transport " . json_encode($other));
+        }
+    }
+
     /**
      * The --delete destination side, pinned WHOLE-ARRAY per transport.
      *
@@ -2143,6 +2288,150 @@ final class RunnerTest extends TestCase
         $this->assertStringContainsString('job "j-inner"', (string) file_get_contents($res['runLog']));
     }
 
+    /** @return array<string,mixed> a stored, enabled snapshot job's own fields */
+    private function snapshotFields(): array
+    {
+        return [
+            'targetMarker' => '/srv/backup/.unraid-rsync-target', 'targetMarkerContent' => 'uuid-1',
+            'pairs'        => [['local' => '/mnt/user/src/', 'remote' => '', 'sub' => 'src', 'seed' => true]],
+            'rsyncOptions' => Config::mergeRsyncOptions(['recursive' => true, 'times' => true, 'mkpath' => false]),
+            'snapshot'     => ['enabled' => true, 'root' => '/srv/backup/snapshots/snap'] + Config::defaultSnapshot(),
+        ];
+    }
+
+    /**
+     * Golden: snapshot mode must leave a mirror run byte-for-byte as it was -
+     * the transfer argv, both hook environments, the History record, the
+     * summary and the notification. Every expected value below was produced
+     * by the code before snapshot runs existed.
+     */
+    public function testAMirrorRunIsUnchangedBySnapshotMode(): void
+    {
+        $this->fakeRsync("uuid-1\n", "drwxr-xr-x          4,096 2026/10/20 12:00:00 .\n");
+        $fakeBin = sys_get_temp_dir() . '/ur-rnotify-golden-' . getmypid() . '-' . bin2hex(random_bytes(4));
+        file_put_contents($fakeBin, "#!/bin/sh\nexit 0\n");
+        chmod($fakeBin, 0755);
+        $origPath = Notify::$notifyPath;
+        $captured = [];
+        Notify::$notifyPath = $fakeBin;
+        Notify::$runner = function (string $command) use (&$captured): int {
+            $captured[] = $command;
+            return 0;
+        };
+        $envs = [];
+        Runner::$hookRunner = function (string $hook, array $env) use (&$envs): int {
+            $envs[$hook] = $env;
+            return 0;
+        };
+
+        try {
+            $rt = $this->seedSshJob('j-golden', [
+                'name' => 'golden', 'preHook' => 'PRE', 'postHook' => 'POST', 'notifyMode' => 'always',
+                'targetMarker' => '/srv/.unraid-rsync-target', 'targetMarkerContent' => 'uuid-1',
+            ]);
+            Ssh::$runtimeBase = $rt;
+            $res = Runner::run('j-golden', false, 'schedule');
+            $log = $res['runLog'];
+            Ssh::$runtimeBase = '/tmp/unraid.rsync';
+            Credentials::save(Credentials::defaults());
+            $this->rmTree($rt);
+
+            $this->assertSame(['state' => 'SUCCESS', 'exitCode' => 0, 'runLog' => $log], $res);
+            $argv = $this->argvs[2];
+            $e    = $argv[array_search('-e', $argv, true) + 1];
+            $this->assertMatchesRegularExpression("#^'ssh' '-i' '[^']+' .* '-p' '22'\$#", $e);
+            $this->assertSame([
+                PHP_BINARY, '-r', '-h', '-t', '--partial', '--delete', '--mkpath', '--max-delete=50', '--rsync-path=/usr/bin/rsync',
+                '--info=progress2', '--log-file-format=', '--log-file=' . $log, '-e', $e, '--', '/mnt/user/src/', 'root@h.example:/srv/backup/a',
+            ], $argv);
+            $base = ['UR_JOB_ID' => 'j-golden', 'UR_JOB_NAME' => 'golden', 'UR_DRY_RUN' => '0', 'UR_TRIGGER' => 'schedule'];
+            $this->assertSame($base + ['UR_JOB_STATUS' => '', 'UR_EXIT_CODE' => ''], $envs['PRE']);
+            $this->assertSame($base + ['UR_JOB_STATUS' => 'SUCCESS', 'UR_EXIT_CODE' => '0'], $envs['POST']);
+
+            $row = History::list('j-golden', 0, 1)['runs'][0];
+            $this->assertSame(
+                ['startedAt', 'finishedAt', 'jobName', 'dryRun', 'trigger', 'state', 'exitCode', 'durationSec', 'logRef', 'reason'],
+                array_keys($row)
+            );
+            $this->assertSame(['golden', false, 'schedule', 'SUCCESS', 0, basename($log), ''], [
+                $row['jobName'], $row['dryRun'], $row['trigger'], $row['state'], $row['exitCode'], $row['logRef'], $row['reason'],
+            ]);
+            $line = (string) file_get_contents(History::path('j-golden'));
+            $this->assertSame(1, preg_match('/^\{"startedAt":"[^"]+","finishedAt":"[^"]+","jobName":"golden","dryRun":false,"trigger":"schedule","state":"SUCCESS","exitCode":0,"durationSec":\d+,"logRef":"run-[^"]+\.log","reason":""\}\n$/D', $line), $line);
+            $this->assertSame(
+                ['state', 'startedAt', 'finishedAt', 'exitCode', 'durationSec', 'dryRun', 'trigger'],
+                array_keys((array) Runner::readSummary('j-golden'))
+            );
+
+            $this->assertCount(1, $captured);
+            $this->assertSame(
+                "'$fakeBin' '-e' 'Unraid Rsync' '-s' 'Unraid Rsync: golden SUCCESS' '-d' 'Job \"golden\" finished. State: SUCCESS. "
+                . "Exit code: 0 = success. Duration: Ns. Trigger: schedule. Dry-run: no.' '-i' 'normal' '-l' '/Settings/UnraidRsync'",
+                preg_replace('/Duration: \d+s\./', 'Duration: Ns.', $captured[0])
+            );
+        } finally {
+            Notify::$notifyPath = $origPath;
+            Notify::$runner = null;
+            @unlink($fakeBin);
+            @unlink(History::path('j-golden'));
+        }
+    }
+
+    public function testTheInflightRecordOfAMirrorHasNoSnapshotKey(): void
+    {
+        $this->fakeRsync();
+        $seen = null;
+        Runner::$hookRunner = function (string $hook) use (&$seen): int {
+            $seen = RunState::readInflight('j-inflight');
+            return 0;
+        };
+        $rt = $this->seedSshJob('j-inflight', ['preHook' => 'PRE', 'notifyMode' => 'off', 'rsyncOptions' => Config::mergeRsyncOptions([])]);
+        $this->runInTempRuntime($rt, 'j-inflight');
+        $this->assertSame(['jobId', 'pid', 'startedAt', 'trigger', 'dryRun', 'currentLog'], array_keys((array) $seen));
+    }
+
+    public function testAMirrorInsideASnapshotRootIsRefusedAtRunTime(): void
+    {
+        $this->fakeRsync();
+        $config = Config::load();
+        $config['jobs'][] = array_merge(Config::defaultJob(), ['id' => 'j-snap', 'name' => 'snap', 'connectionId' => 'c-key'], $this->snapshotFields());
+        Config::save($config);
+        $rt  = $this->seedSshJob('j-stray', [
+            'notifyMode'   => 'off',
+            'pairs'        => [['local' => '/mnt/user/src/', 'remote' => '/srv/backup/snapshots/snap/stray']],
+            'rsyncOptions' => Config::mergeRsyncOptions([]),
+        ]);
+        $res = $this->runInTempRuntime($rt, 'j-stray');
+
+        $this->assertSame('guardrail', $res['reason'] ?? '');
+        $this->assertSame([], $this->argvs);
+        $this->assertStringContainsString(
+            'Pair #1: the destination must not be or lie inside the snapshot root of job "snap"',
+            (string) file_get_contents($res['runLog'])
+        );
+    }
+
+    public function testADeleteMirrorOverASnapshotRootsParentIsRefusedAtRunTime(): void
+    {
+        $this->fakeRsync();
+        $config = Config::load();
+        $config['jobs'][] = array_merge(Config::defaultJob(), ['id' => 'j-snap', 'name' => 'snap', 'connectionId' => 'c-key'], $this->snapshotFields());
+        Config::save($config);
+        // seedSshJob's mirror has --delete on.
+        $rt  = $this->seedSshJob('j-over', [
+            'notifyMode' => 'off',
+            'pairs'      => [['local' => '/mnt/user/src/', 'remote' => '/srv/backup/snapshots']],
+        ]);
+        $res = $this->runInTempRuntime($rt, 'j-over');
+
+        $this->assertSame('guardrail', $res['reason'] ?? '');
+        $this->assertSame([], $this->argvs, 'refused before the marker fetch and the --delete probe');
+        $this->assertStringContainsString(
+            "must not be, contain, or lie inside the snapshot root of job \"snap\" ('/srv/backup/snapshots/snap')",
+            (string) file_get_contents($res['runLog'])
+        );
+    }
+
     /** @return array<string,array{0:?string,1:string,2:bool}> */
     public static function markerProvider(): array
     {
@@ -2342,6 +2631,14 @@ final class RunnerTest extends TestCase
         $this->assertSame(143, Runner::runHookProcess('sleep 30', [], $noop, 0, static fn(): bool => true));
         $this->assertSame(3, Runner::runHookProcess('exit 3', [], $noop, 60));
         $this->assertSame(0, Runner::runHookProcess('[ "$UR_X" = y ]', ['UR_X' => 'y'], $noop));
+    }
+
+    public function testAHookKilledByASignalReportsTheSignalNotExit1(): void
+    {
+        $noop = static function (string $c): void {
+        };
+        $this->assertSame(137, Runner::runHookProcess('kill -KILL $$', [], $noop, 60));
+        $this->assertSame(143, Runner::runHookProcess('kill -TERM $$', [], $noop));
     }
 
     public function testRunnerBecomesASessionLeaderOnlyWhenItIsNotOne(): void

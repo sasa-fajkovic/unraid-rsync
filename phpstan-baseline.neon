@@ -55,30 +55,6 @@ parameters:
 			path: source/include/RunState.php
 
 		-
-			message: '#^Call to function array_key_exists\(\) with ''exitcode'' and array\{command\: string, pid\: int, running\: bool, signaled\: false, stopped\: bool, exitcode\: int, termsig\: int, stopsig\: int\} will always evaluate to true\.$#'
-			identifier: function.alreadyNarrowedType
-			count: 1
-			path: source/include/Runner.php
-
-		-
-			message: '#^Call to function is_array\(\) with array\{command\: string, pid\: int, running\: bool, signaled\: bool, stopped\: bool, exitcode\: int, termsig\: int, stopsig\: int\} will always evaluate to true\.$#'
-			identifier: function.alreadyNarrowedType
-			count: 1
-			path: source/include/Runner.php
-
-		-
-			message: '#^If condition is always false\.$#'
-			identifier: if.alwaysFalse
-			count: 1
-			path: source/include/Runner.php
-
-		-
-			message: '#^Offset ''termsig'' on array\{command\: string, pid\: int, running\: bool, signaled\: bool, stopped\: bool, exitcode\: int, termsig\: int, stopsig\: int\} in isset\(\) always exists and is not nullable\.$#'
-			identifier: isset.offset
-			count: 1
-			path: source/include/Runner.php
-
-		-
 			message: '#^If condition is always false\.$#'
 			identifier: if.alwaysFalse
 			count: 1

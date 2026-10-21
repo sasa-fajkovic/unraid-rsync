@@ -64,7 +64,7 @@ class History
      */
     private static function normalizeRecord(array $r): array
     {
-        return [
+        $out = [
             'startedAt'   => (string) ($r['startedAt'] ?? ''),
             'finishedAt'  => (string) ($r['finishedAt'] ?? ''),
             'jobName'     => (string) ($r['jobName'] ?? ''),
@@ -76,6 +76,18 @@ class History
             'logRef'      => basename((string) ($r['logRef'] ?? '')),
             'reason'      => (string) ($r['reason'] ?? ''),
         ];
+        // Snapshot jobs only (docs/design/snapshot-mode.md §4.3); a mirror
+        // record keeps exactly the keys above.
+        if (array_key_exists('snapshot', $r)) {
+            $out['snapshot']  = (string) $r['snapshot'];
+            $out['committed'] = !empty($r['committed']);
+            $out['suspect']   = !empty($r['suspect']);
+            $out['pruned']    = (int) ($r['pruned'] ?? 0);
+            if (isset($r['growthKB'])) {
+                $out['growthKB'] = (int) $r['growthKB'];
+            }
+        }
+        return $out;
     }
 
     /**

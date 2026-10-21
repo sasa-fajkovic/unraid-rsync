@@ -238,6 +238,82 @@ final class HandlerStatusTest extends TestCase
         $this->assertFalse($entry['lastRun']['dryRun']);
     }
 
+    /** A stored snapshot job (SSH; getStatus does not validate it). */
+    private function seedSnapshotJob(string $name): string
+    {
+        return $this->seedJob($name, [
+            'transport' => 'SSH', 'connectionId' => 'c-1',
+            'pairs'     => [['local' => '/mnt/user/a/', 'remote' => '', 'sub' => 'a']],
+            'snapshot'  => ['enabled' => true, 'root' => '/mnt/backup/snapshots/a'],
+        ]);
+    }
+
+    public function testGetStatusCarriesTheLastSnapshotOnlyForSnapshotJobs(): void
+    {
+        $snap   = $this->seedSnapshotJob('Snap');
+        $mirror = $this->seedJob('Mirror');
+        $never  = $this->seedSnapshotJob('Never');
+        foreach ([$snap, $mirror] as $id) {
+            Runner::writeSummary($id, ['state' => 'SUCCESS', 'startedAt' => '2026-10-21T03:00:00Z', 'finishedAt' => '2026-10-21T03:10:00Z',
+                'snapshot' => '2026-10-21T030005Z', 'committed' => true]);
+        }
+        $prevTz = date_default_timezone_get();
+        date_default_timezone_set('Europe/Berlin');
+        try {
+            [$body] = $this->runCapture('ur_action_get_status');
+        } finally {
+            date_default_timezone_set($prevTz);
+        }
+
+        $this->assertSame(
+            ['stamp' => '2026-10-21T030005Z', 'committed' => true, 'label' => 'last snapshot 2026-10-21 05:00:05 (committed)'],
+            $body['jobs'][$snap]['snapshot'],
+            'the label is system-local, the stamp UTC'
+        );
+        $this->assertNull($body['jobs'][$never]['snapshot'], 'a snapshot job with no summary yet');
+        $this->assertSame(
+            ['name', 'enabled', 'manualOnly', 'running', 'state', 'lastRun', 'nextRun'],
+            array_keys($body['jobs'][$mirror]),
+            'a mirror entry keeps its shape, whatever its summary holds'
+        );
+        $this->assertSame(['state', 'startedAt', 'finishedAt', 'exitCode', 'durationSec', 'dryRun'], array_keys($body['jobs'][$snap]['lastRun']));
+    }
+
+    public function testGetStatusSaysNotCommittedAndNothingForARunWithoutAStamp(): void
+    {
+        $id = $this->seedSnapshotJob('Snap');
+        Runner::writeSummary($id, ['state' => 'PARTIAL', 'snapshot' => '2026-10-21T030005Z', 'committed' => false]);
+        [$body] = $this->runCapture('ur_action_get_status');
+        $this->assertSame('last snapshot 2026-10-21 03:00:05 (not committed)', $body['jobs'][$id]['snapshot']['label']);
+        $this->assertFalse($body['jobs'][$id]['snapshot']['committed']);
+
+        // A dry run, or a failure before the stamp was created, records ''.
+        foreach (['', '2026-02-30T030005Z', 'x'] as $none) {
+            Runner::writeSummary($id, ['state' => 'SUCCESS', 'dryRun' => true, 'snapshot' => $none, 'committed' => false]);
+            [$body] = $this->runCapture('ur_action_get_status');
+            $this->assertNull($body['jobs'][$id]['snapshot'], var_export($none, true));
+        }
+    }
+
+    public function testListHistoryPassesSnapshotFieldsForSnapshotRecordsOnly(): void
+    {
+        $id = $this->seedSnapshotJob('Snap');
+        @unlink(History::path($id));
+        History::append($id, ['startedAt' => '2026-10-20T03:00:00Z', 'state' => 'SUCCESS', 'logRef' => 'run-a.log']);
+        History::append($id, ['startedAt' => '2026-10-21T03:00:00Z', 'state' => 'WARNING', 'logRef' => 'run-b.log', 'reason' => 'snapshot-suspect',
+            'snapshot' => '2026-10-21T030005Z', 'committed' => true, 'suspect' => true, 'pruned' => 2]);
+
+        $_GET = ['id' => $id, 'offset' => 0, 'limit' => 25];
+        [$body] = $this->runCapture('ur_action_list_history');
+        [$snapRow, $mirrorRow] = $body['runs'];
+        $this->assertSame(['snapshot' => '2026-10-21T030005Z', 'committed' => true, 'suspect' => true, 'pruned' => 2], array_slice($snapRow, 10, 4));
+        $this->assertSame('snapshot-suspect', $snapRow['reason']);
+        foreach (['snapshot', 'committed', 'suspect', 'pruned', 'growthKB'] as $key) {
+            $this->assertArrayNotHasKey($key, $mirrorRow, "a mirror record has no $key");
+        }
+        @unlink(History::path($id));
+    }
+
     public function testGetStatusNextRunNullForDisabledJob(): void
     {
         $id = $this->seedJob('Off', ['enabled' => false]);

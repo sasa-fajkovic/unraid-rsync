@@ -2017,4 +2017,38 @@ final class HandlerCredentialsTest extends TestCase
         $this->assertStringNotContainsString(self::DAEMON_SECRET, (string) json_encode($body));
         $this->assertFalse(is_file(Credentials::path()));
     }
+
+    /**
+     * No form posts useSudo yet, so an absent field must keep the stored value:
+     * a stale Connections tab must not silently turn sudo off.
+     */
+    public function testUseSudoAbsentKeepsTheStoredValueAndAPostedValueWins(): void
+    {
+        $creds = Credentials::defaults();
+        $creds['connections'][] = [
+            'id' => 'c-1', 'name' => 'nas', 'host' => 'nas.local', 'username' => 'backup',
+            'authMethod' => 'KEYFILE', 'keyFilePath' => '/root/.ssh/id_ed25519', 'useSudo' => true,
+        ];
+        $this->seedCreds($creds);
+
+        $post = function (array $extra): array {
+            $_POST = [
+                'action' => 'saveCredentials', 'csrf_token' => 'test-token', 'connections_present' => '1',
+                'connections' => [array_merge([
+                    'id' => 'c-1', 'name' => 'nas', 'host' => 'nas.local', 'port' => '22', 'username' => 'backup',
+                    'authMethod' => 'KEYFILE', 'keyFilePath' => '/root/.ssh/id_ed25519',
+                    'strictHostKey' => 'accept-new', 'connectTimeout' => '10',
+                ], $extra)],
+            ];
+            [$body, $code] = $this->runCapture(fn() => ur_action_save_credentials());
+            $this->assertSame(200, $code, json_encode($body));
+            return json_decode((string) file_get_contents(Credentials::path()), true)['connections'][0];
+        };
+
+        $this->assertTrue($post([])['useSudo'], 'absent means unchanged');
+        $this->assertArrayNotHasKey('useSudo', $post(['useSudo' => '0']));
+        $this->assertArrayNotHasKey('useSudo', $post([]), 'and stays off');
+        $this->assertTrue($post(['useSudo' => '1'])['useSudo']);
+        $this->assertArrayNotHasKey('useSudo', $post(['transport' => 'DAEMON', 'port' => '873']), 'dropped on DAEMON');
+    }
 }
