@@ -467,7 +467,7 @@ class Job
             // `local` field: always a local path on this box -> local guardrails.
             if ($local === '') {
                 $errors[] = "Pair #$n: $localRole (local) path is required.";
-            } else {
+            } elseif (!self::isAllowedBootSource($job, $transport, $local)) {
                 foreach (self::checkLocalPath($local, "Pair #$n $localRole (local)") as $e) {
                     $errors[] = $e;
                 }
@@ -1052,6 +1052,23 @@ class Job
             }
         }
         return array_merge($errors, $checks);
+    }
+
+    /**
+     * The one exception to checkLocalPath (spec §8): a pair's `local` may be
+     * exactly /boot or /boot/ in a snapshot job that pushes over SSH, where
+     * `local` can only be the source. Job::validate and Runner::guardrailErrors
+     * both ask this, so save time and run time cannot disagree. LOCAL ignores
+     * direction, so it is excluded by the transport test, not the direction.
+     *
+     * @param array<string,mixed> $job
+     */
+    public static function isAllowedBootSource(array $job, string $transport, string $local): bool
+    {
+        return in_array($local, ['/boot', '/boot/'], true)
+            && $transport === 'SSH'
+            && strtoupper(trim((string) ($job['direction'] ?? 'PUSH'))) === 'PUSH'
+            && Config::normalizeSnapshot($job['snapshot'] ?? null) !== null;
     }
 
     /**

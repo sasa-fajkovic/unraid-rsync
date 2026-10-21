@@ -1413,6 +1413,72 @@ final class RunnerTest extends TestCase
         ];
     }
 
+    /** @return array<string,array{0:string,1:string,2:bool,3:string,4:string}> */
+    public static function bootMatrixProvider(): array
+    {
+        $cases = [];
+        foreach (['SSH', 'DAEMON', 'LOCAL'] as $t) {
+            foreach (['PUSH', 'PULL'] as $d) {
+                foreach ([true, false] as $snap) {
+                    foreach (['/boot', '/boot/', '/boot/config', '/bootx', '/mnt/user/x'] as $p) {
+                        foreach (['local', 'remote'] as $side) {
+                            $cases["$t $d snapshot-" . ($snap ? 'on' : 'off') . " $side=$p"] = [$t, $d, $snap, $side, $p];
+                        }
+                    }
+                }
+            }
+        }
+        return $cases;
+    }
+
+    /**
+     * Spec §8: /boot is a valid `local` only as the source of an SSH PUSH
+     * snapshot job, never a subdirectory, never this server's destination, and
+     * save time (Job::validate) agrees with run time (preflight's
+     * guardrailErrors + snapshotErrors) in every cell. A path counts as accepted
+     * when the errors equal those of the same job with a known-good path there.
+     */
+    #[DataProvider('bootMatrixProvider')]
+    public function testBootIsOnlyEverAnSshPushSnapshotSource(string $transport, string $direction, bool $snap, string $side, string $path): void
+    {
+        $remoteOk = ['SSH' => '/srv/backup/x', 'DAEMON' => 'mod/x', 'LOCAL' => '/mnt/user/dst'][$transport];
+        $build = static function (string $value) use ($transport, $direction, $snap, $side, $remoteOk): array {
+            $job = array_merge(Config::defaultJob(), [
+                'name' => 'boot', 'transport' => $transport, 'direction' => $direction, 'connectionId' => 'c-1',
+                'targetMarker' => '/srv/backup/.unraid-rsync-target', 'targetMarkerContent' => 'uuid-1',
+                'rsyncOptions' => Config::mergeRsyncOptions(['archive' => true, 'times' => true]),
+                'pairs' => [$side === 'local'
+                    ? ['local' => $value, 'remote' => $snap ? '' : $remoteOk, 'sub' => 'boot']
+                    : ['local' => '/mnt/user/src/', 'remote' => $value, 'sub' => 'boot']],
+            ]);
+            if ($snap) {
+                $job['snapshot'] = ['enabled' => true, 'root' => '/srv/backup/snapshots/boot'];
+            }
+            return $job;
+        };
+        $saveTime = static fn(array $job): array => Job::validate($job)['errors'];
+        $runTime  = static fn(array $job): array => array_merge(
+            Runner::guardrailErrors($job, $job['pairs'][0], $transport, $job['rsyncOptions']),
+            $snap ? Job::snapshotErrors($job, $job['rsyncOptions'], $transport, $direction) : []
+        );
+        $good = $side === 'local' ? '/mnt/user/x' : ($snap ? '' : $remoteOk);
+
+        $savedOk = $saveTime($build($path)) === $saveTime($build($good));
+        $runOk   = $runTime($build($path)) === $runTime($build($good));
+
+        $isBoot = in_array($path, ['/boot', '/boot/'], true);
+        if ($side === 'local') {
+            $expected = $path === '/mnt/user/x' || ($isBoot && $transport === 'SSH' && $direction === 'PUSH' && $snap);
+        } elseif ($snap || $transport === 'DAEMON') {
+            $expected = false;
+        } else {
+            // SSH `remote` is a path on the receiver, not this server's /boot.
+            $expected = $transport === 'SSH' || $path === '/mnt/user/x';
+        }
+        $this->assertSame($expected, $savedOk, 'save time');
+        $this->assertSame($savedOk, $runOk, 'save time and run time disagree');
+    }
+
     /**
      * The --delete destination side, pinned WHOLE-ARRAY per transport.
      *

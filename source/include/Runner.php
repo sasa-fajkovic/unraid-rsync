@@ -1246,7 +1246,7 @@ class Runner
         // local field: always a local path on this box.
         if ($local === '') {
             $errors[] = 'local path is required.';
-        } else {
+        } elseif (!Job::isAllowedBootSource($job, $transport, $local)) {
             foreach (Job::checkLocalPath($local, 'local path') as $e) {
                 $errors[] = $e;
             }

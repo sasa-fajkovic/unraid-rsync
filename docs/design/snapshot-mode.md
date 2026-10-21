@@ -394,6 +394,8 @@ Two new lists sit beside the existing reason rules. An alert reason always wins.
 
 ## 8. `/boot` as a push source (PR-J)
 
+**Status: implemented** (PR-J): `Job::isAllowedBootSource`, asked by both `Job::validate` and `Runner::guardrailErrors`; the matrix and parity test is `RunnerTest::testBootIsOnlyEverAnSshPushSnapshotSource`.
+
 - `Job::checkLocalPath` rejects `/boot` (`FORBIDDEN_LOCAL_EXACT`, outside `/mnt`). PR-J adds one exception, in both `Job::validate` and `Runner::guardrailErrors` (parity test). Exactly `/boot` or `/boot/` is allowed as a pair's **`local` side** only when all of these hold:
   - transport SSH;
   - direction PUSH;
@@ -507,7 +509,7 @@ The operational detail (backups first, verification commands, restore drills) li
 - Scope: `writeSummary`, `getStatus`/Overview/Jobs/History columns (stamp, committed, suspect, pruned); the stamp in the in-flight record and crash alert; the "not committed for N runs" text.
 - Tests: HistoryTest, HandlerStatusTest, RunnerNotifyTest.
 
-**PR-J `feat: allow /boot as a snapshot push source`**
+**PR-J `feat: allow /boot as a snapshot push source`** (implemented)
 - Scope: §8. It is in the branch because it requires snapshot mode.
 - Tests: JobTest/RunnerTest parity, and the transport × direction × snapshot matrix.
 
