@@ -2143,6 +2143,103 @@ final class RunnerTest extends TestCase
         $this->assertStringContainsString('job "j-inner"', (string) file_get_contents($res['runLog']));
     }
 
+    /** @return array<string,mixed> a stored, enabled snapshot job's own fields */
+    private function snapshotFields(): array
+    {
+        return [
+            'targetMarker' => '/srv/backup/.unraid-rsync-target', 'targetMarkerContent' => 'uuid-1',
+            'pairs'        => [['local' => '/mnt/user/src/', 'remote' => '', 'sub' => 'src', 'seed' => true]],
+            'rsyncOptions' => Config::mergeRsyncOptions(['recursive' => true, 'times' => true, 'mkpath' => false]),
+            'snapshot'     => ['enabled' => true, 'root' => '/srv/backup/snapshots/snap'] + Config::defaultSnapshot(),
+        ];
+    }
+
+    public function testASnapshotJobIsRefusedBeforeThePreHookUntilSnapshotRunsLand(): void
+    {
+        $this->fakeRsync("uuid-1\n");
+        $fakeBin = sys_get_temp_dir() . '/ur-rnotify-snap-' . getmypid() . '-' . bin2hex(random_bytes(4));
+        file_put_contents($fakeBin, "#!/bin/sh\nexit 0\n");
+        chmod($fakeBin, 0755);
+        $origPath = Notify::$notifyPath;
+        $captured = [];
+        Notify::$notifyPath = $fakeBin;
+        Notify::$runner = function (string $command) use (&$captured): int {
+            $captured[] = $command;
+            return 0;
+        };
+
+        try {
+            $rt = $this->seedSshJob('j-snap', ['preHook' => 'PRE', 'postHook' => 'POST', 'notifyMode' => 'failure-only'] + $this->snapshotFields());
+            $this->assertSame(3, Config::load()['schemaVersion'], 'precondition: stored as an enabled snapshot job');
+            $res = $this->runInTempRuntime($rt, 'j-snap');
+
+            $this->assertSame(Rsync::STATE_FAILED, $res['state']);
+            $this->assertSame(1, $res['exitCode']);
+            $this->assertSame('snapshot-not-implemented', $res['reason'] ?? '');
+            $this->assertSame([], $this->argvs, 'no rsync at all, not even the marker fetch');
+            $this->assertSame(['hook:POST:FAILED'], $this->trace, 'no pre-hook; the post-hook still runs');
+            $this->assertStringContainsString(
+                'Snapshot mode is not available in this build yet; the job was not run.',
+                (string) file_get_contents($res['runLog'])
+            );
+
+            $rows = History::list('j-snap', 0, 25)['runs'];
+            $this->assertCount(1, $rows);
+            $this->assertSame(Rsync::STATE_FAILED, $rows[0]['state']);
+            $this->assertSame('snapshot-not-implemented', $rows[0]['reason']);
+
+            $this->assertCount(1, $captured);
+            $this->assertStringContainsString("'-i' 'alert'", $captured[0]);
+        } finally {
+            Notify::$notifyPath = $origPath;
+            Notify::$runner = null;
+            @unlink($fakeBin);
+            @unlink(History::path('j-snap'));
+        }
+    }
+
+    public function testAMirrorInsideASnapshotRootIsRefusedAtRunTime(): void
+    {
+        $this->fakeRsync();
+        $config = Config::load();
+        $config['jobs'][] = array_merge(Config::defaultJob(), ['id' => 'j-snap', 'name' => 'snap', 'connectionId' => 'c-key'], $this->snapshotFields());
+        Config::save($config);
+        $rt  = $this->seedSshJob('j-stray', [
+            'notifyMode'   => 'off',
+            'pairs'        => [['local' => '/mnt/user/src/', 'remote' => '/srv/backup/snapshots/snap/stray']],
+            'rsyncOptions' => Config::mergeRsyncOptions([]),
+        ]);
+        $res = $this->runInTempRuntime($rt, 'j-stray');
+
+        $this->assertSame('guardrail', $res['reason'] ?? '');
+        $this->assertSame([], $this->argvs);
+        $this->assertStringContainsString(
+            'Pair #1: the destination must not be or lie inside the snapshot root of job "snap"',
+            (string) file_get_contents($res['runLog'])
+        );
+    }
+
+    public function testADeleteMirrorOverASnapshotRootsParentIsRefusedAtRunTime(): void
+    {
+        $this->fakeRsync();
+        $config = Config::load();
+        $config['jobs'][] = array_merge(Config::defaultJob(), ['id' => 'j-snap', 'name' => 'snap', 'connectionId' => 'c-key'], $this->snapshotFields());
+        Config::save($config);
+        // seedSshJob's mirror has --delete on.
+        $rt  = $this->seedSshJob('j-over', [
+            'notifyMode' => 'off',
+            'pairs'      => [['local' => '/mnt/user/src/', 'remote' => '/srv/backup/snapshots']],
+        ]);
+        $res = $this->runInTempRuntime($rt, 'j-over');
+
+        $this->assertSame('guardrail', $res['reason'] ?? '');
+        $this->assertSame([], $this->argvs, 'refused before the marker fetch and the --delete probe');
+        $this->assertStringContainsString(
+            "inside the destination of the snapshot root of job \"snap\" ('/srv/backup/snapshots/snap')",
+            (string) file_get_contents($res['runLog'])
+        );
+    }
+
     /** @return array<string,array{0:?string,1:string,2:bool}> */
     public static function markerProvider(): array
     {
