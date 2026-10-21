@@ -826,6 +826,77 @@ final class RsyncTest extends TestCase
     }
 
     /**
+     * The golden tests above and below pin these fixtures byte-for-byte; an
+     * explicit empty extraTokens must produce exactly the same argv.
+     */
+    public static function argvFixtures(): array
+    {
+        $ssh = ['dashE' => "'ssh' '-i' '/tmp/k'", 'sshEnv' => []];
+        $daemon = ['daemon' => true, 'daemonPort' => 873, 'passwordFile' => '/rt/pass/tok', 'sshEnv' => []];
+        return [
+            'ssh'          => ['verbose', '/mnt/user/src/', 'bob@nas:/data/', $ssh, false],
+            'local'        => ['normal', '/mnt/user/a/', '/mnt/disk1/b/', null, false],
+            'daemon'       => ['verbose', 'bob@nas::rsync_bkp/photos/', '/mnt/user/dst/', $daemon, false],
+            'daemon anon'  => ['normal', 'bob@nas::pub', '/mnt/user/dst/', ['passwordFile' => ''] + $daemon, true],
+            'daemon dashE' => ['quiet', 'bob@nas::mod', '/mnt/user/dst/', ['dashE' => "'ssh'"] + $daemon, false],
+        ];
+    }
+
+    #[DataProvider('argvFixtures')]
+    public function testEmptyExtraTokensLeaveTheArgvUnchanged(string $lvl, string $src, string $dest, ?array $ssh, bool $dry): void
+    {
+        $this->assertSame(
+            Rsync::buildArgv($this->busyOpts(), $lvl, '/rt/r.log', $src, $dest, $ssh, $dry),
+            Rsync::buildArgv($this->busyOpts(), $lvl, '/rt/r.log', $src, $dest, $ssh, $dry, [])
+        );
+    }
+
+    public function testExtraTokensLandAfterTheOptionTokensInOrder(): void
+    {
+        $opts = $this->busyOpts();
+        $extra = ['--link-dest=/mnt/user/snap/a', '--info=stats2', '--link-dest=/mnt/user/snap/b'];
+        $ssh = ['dashE' => "'ssh'", 'sshEnv' => []];
+        $argv = Rsync::buildArgv($opts, 'normal', '/rt/r.log', '/a/', 'u@h:/b/', $ssh, false, $extra);
+        $at = 1 + count(Rsync::optionTokens($opts, 'SSH'));
+        $this->assertSame($extra, array_slice($argv, $at, count($extra)));
+        $this->assertLessThan(array_search('--', $argv, true), $at + count($extra) - 1);
+
+        $twenty = array_map(fn($i) => "--link-dest=/mnt/user/snap/$i", range(1, 20));
+        $this->assertSame($twenty, Rsync::extraTokens($twenty), 'rsync allows 20 --link-dest');
+    }
+
+    public static function rejectedExtraTokens(): array
+    {
+        return [
+            'other option'       => [['--delete']],
+            'dash e'             => [['-e', 'ssh']],
+            'stats2 combined'    => [['--info=stats2,progress2']],
+            'non-string'         => [[42]],
+            'empty path'         => [['--link-dest=']],
+            'relative path'      => [['--link-dest=snap/a']],
+            'dotdot segment'     => [['--link-dest=/mnt/user/../etc']],
+            'trailing dotdot'    => [['--link-dest=/mnt/user/..']],
+            'newline'            => [["--link-dest=/mnt/a\n--delete"]],
+            'nul'                => [["--link-dest=/mnt/a\0b"]],
+            'duplicate --info'   => [['--info=stats2', '--info=stats2']],
+            '21 link-dests'      => [array_map(fn($i) => "--link-dest=/s/$i", range(1, 21))],
+        ];
+    }
+
+    #[DataProvider('rejectedExtraTokens')]
+    public function testExtraTokensRejectEverythingElse(array $tokens): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        Rsync::extraTokens($tokens);
+    }
+
+    public function testBuildArgvRejectsABadExtraToken(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        Rsync::buildArgv($this->emptyOpts(), 'normal', '/rt/r.log', '/a/', '/b/', null, false, ['--delete']);
+    }
+
+    /**
      * The whole DAEMON argv, asserted as one array rather than by substring:
      * the filters keep their stored order, the -a negations still sit
      * immediately after the -a they negate, --log-file is still emitted (D18),
