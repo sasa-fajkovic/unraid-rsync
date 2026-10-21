@@ -394,12 +394,14 @@ Two new lists sit beside the existing reason rules. An alert reason always wins.
 
 ## 8. `/boot` as a push source (PR-J)
 
-- `Job::checkLocalPath` rejects `/boot` (`FORBIDDEN_LOCAL_EXACT`, outside `/mnt`). PR-J adds one exception, in both `Job::validate` and `Runner::guardrailErrors` (parity test). Exactly `/boot` or `/boot/` is allowed as a pair's **`local` side** only when all of these hold:
+**Status: implemented** (PR-J): `Job::isAllowedBootSource` inside `Job::pairLocalErrors`, which both `Job::validate` and `Runner::guardrailErrors` call; the matrix and parity test is `RunnerTest::testBootIsOnlyEverAnSshPushSnapshotSource`.
+
+- `Job::checkLocalPath` rejects `/boot` (`FORBIDDEN_LOCAL_EXACT`, outside `/mnt`). PR-J adds one exception, in both `Job::validate` and `Runner::guardrailErrors` (parity test). Exactly `/boot/` is allowed as a pair's **`local` side** only when all of these hold:
   - transport SSH;
   - direction PUSH;
   - `snapshot.enabled`.
   
-  Subdirectories of `/boot` stay forbidden.
+  Subdirectories of `/boot` stay forbidden. `/boot` without the slash is refused with a dedicated hint: rsync would copy into `<sub>/boot/`, where the anchored excludes silently stop matching and the VPN identity would reach the receiver.
 - LOCAL transport ignores direction, so `/boot` must never be accepted there. A test enumerates every transport × direction × snapshot combination and asserts `/boot` can never be a destination.
 - **Recommended setup** (user docs; the plugin does not hard-code these):
   - a dedicated job, local `/boot/` → sub `boot`, with its own root;
@@ -507,7 +509,7 @@ The operational detail (backups first, verification commands, restore drills) li
 - Scope: `writeSummary`, `getStatus`/Overview/Jobs/History columns (stamp, committed, suspect, pruned); the stamp in the in-flight record and crash alert; the "not committed for N runs" text.
 - Tests: HistoryTest, HandlerStatusTest, RunnerNotifyTest.
 
-**PR-J `feat: allow /boot as a snapshot push source`**
+**PR-J `feat: allow /boot as a snapshot push source`** (implemented)
 - Scope: §8. It is in the branch because it requires snapshot mode.
 - Tests: JobTest/RunnerTest parity, and the transport × direction × snapshot matrix.
 

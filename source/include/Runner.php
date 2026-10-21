@@ -1247,7 +1247,7 @@ class Runner
         if ($local === '') {
             $errors[] = 'local path is required.';
         } else {
-            foreach (Job::checkLocalPath($local, 'local path') as $e) {
+            foreach (Job::pairLocalErrors($job, $transport, $local, 'local path') as $e) {
                 $errors[] = $e;
             }
         }

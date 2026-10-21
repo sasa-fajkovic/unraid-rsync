@@ -468,7 +468,7 @@ class Job
             if ($local === '') {
                 $errors[] = "Pair #$n: $localRole (local) path is required.";
             } else {
-                foreach (self::checkLocalPath($local, "Pair #$n $localRole (local)") as $e) {
+                foreach (self::pairLocalErrors($job, $transport, $local, "Pair #$n $localRole (local)") as $e) {
                     $errors[] = $e;
                 }
             }
@@ -1052,6 +1052,42 @@ class Job
             }
         }
         return array_merge($errors, $checks);
+    }
+
+    /**
+     * The one exception to checkLocalPath (spec §8): a pair's `local` may be
+     * exactly /boot/ in a snapshot job that pushes over SSH, where `local` can
+     * only be the source. LOCAL ignores direction, so it is excluded by the
+     * transport test, not the direction.
+     *
+     * @param array<string,mixed> $job
+     */
+    public static function isAllowedBootSource(array $job, string $transport, string $local): bool
+    {
+        return $local === '/boot/'
+            && $transport === 'SSH'
+            && strtoupper(trim((string) ($job['direction'] ?? 'PUSH'))) === 'PUSH'
+            && Config::normalizeSnapshot($job['snapshot'] ?? null) !== null;
+    }
+
+    /**
+     * Guardrails for a pair's `local` field, shared by Job::validate and
+     * Runner::guardrailErrors so save time and run time cannot disagree.
+     * "/boot" without the slash would copy into <sub>/boot/, where the anchored
+     * excludes (/previous/, the VPN state) silently stop matching.
+     *
+     * @param array<string,mixed> $job
+     * @return array<int,string>
+     */
+    public static function pairLocalErrors(array $job, string $transport, string $local, string $label): array
+    {
+        if (self::isAllowedBootSource($job, $transport, $local)) {
+            return [];
+        }
+        if ($local === '/boot' && self::isAllowedBootSource($job, $transport, '/boot/')) {
+            return ["$label '/boot': Use \"/boot/\" (with the trailing slash) so the copy lands in <sub>/ and the excludes match."];
+        }
+        return self::checkLocalPath($local, $label);
     }
 
     /**

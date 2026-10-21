@@ -545,9 +545,35 @@ final class SnapshotRunnerTest extends TestCase
         $this->assertSame([], Runner::guardrailErrors($snap, $pair, 'SSH', ['delete' => true]));
         $this->assertSame(['remote path is required.'], Runner::guardrailErrors([], $pair, 'SSH', []));
         $this->assertSame(
-            ["local path '/boot' is a protected system or array root and cannot be used."],
-            Runner::guardrailErrors($snap, ['local' => '/boot'] + $pair, 'SSH', [])
+            ["local path '/boot/config' must be a sub-directory of /mnt (for example /mnt/user/share/...)."],
+            Runner::guardrailErrors($snap, ['local' => '/boot/config'] + $pair, 'SSH', [])
         );
+    }
+
+    public function testBootAsTheSourcePassesThePreflightAndIsCopiedIntoItsSub(): void
+    {
+        $this->saveJob(['pairs' => [['local' => '/boot/', 'remote' => '', 'sub' => 'boot', 'seed' => true]]]);
+        $scanned = [];
+        Runner::$scanDir = function (string $p) use (&$scanned): array|false {
+            $scanned[] = $p;
+            return $this->sources[$p] ?? false;
+        };
+        $this->sources['/boot/'] = ['.', '..', 'bzimage', 'config', 'previous'];
+        $stamp = $this->stamp();
+
+        $res = $this->runJob();
+
+        $this->assertSame(Rsync::STATE_SUCCESS, $res['state'], $this->log($res));
+        $this->assertSame(['/boot/'], $scanned);
+        $this->assertCount(1, $this->transfers);
+        $this->assertSame(['--', '/boot/', 'backup@h.example:' . self::ROOT . "/$stamp.inprogress/boot/"], array_slice($this->transfers[0], -3));
+        $this->assertSame([], preg_grep('/^--link-dest=/', $this->transfers[0]), 'the first snapshot is a seeded full copy');
+
+        $this->clock += self::DAY;
+        $this->sources['/boot/'] = ['.', '..'];
+        $res = $this->runJob();
+        $this->assertSame('snapshot-preflight', $res['reason']);
+        $this->assertStringContainsString('Pair #1: the source /boot/ is empty; refusing to take an empty snapshot of it.', $this->log($res));
     }
 
     public function testTheMarkerIsMandatoryAndCheckedFromTheHost(): void

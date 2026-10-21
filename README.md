@@ -340,10 +340,37 @@ older plugin release can read (schema 2); install an older release only after
 that. With a snapshot job enabled, an older release refuses the configuration and
 runs nothing.
 
+### Backing up the flash drive (/boot)
+
+A snapshot job may use `/boot` as a pair's source; no other job can. It must be
+exactly `/boot/`, with the trailing slash, never a folder inside it, in an SSH
+Push job with snapshot mode on. `/boot` without the slash is refused: rsync would
+copy into `boot/boot/`, where the excludes below would silently stop matching.
+This server's `/boot` can never be a destination.
+
+- **Use a dedicated job**: one pair, local `/boot/` → sub `boot`, with its own
+  snapshot root (for example `/mnt/backup/snapshots/flash`).
+- **Options**: plain archive (`-a`) with **times** on; no `--modify-window`.
+- **Excludes** (Filters, in this order):
+  - `exclude /previous/`: the previous Unraid release kept after an upgrade.
+  - `exclude /config/plugins/tailscale/state/`: Tailscale's node identity. Any
+    VPN identity copied to the receiver would let the receiver impersonate this
+    server, so leave it out and re-authenticate after a restore.
+- **FAT32**: its 2-second mtime granularity is harmless, since the receiver keeps
+  the source's mtimes as they are. If `/boot` is not mounted with a fixed
+  timezone, a daylight-saving change can shift every mtime by an hour, and the
+  next run then copies everything once in full (about 1–2 GB) before linking
+  again.
+- **Security**: this snapshot holds the license key, password hashes, SSH keys and
+  this plugin's `credentials.json`. Keep the root 0700 root, and never copy it
+  offsite unencrypted.
+- **Restore** onto a new stick, from another machine, before that stick first
+  boots. Never restore into a running server's `/boot`.
+
 ### Security note
 
-A snapshot holds whatever the job copies. Snapshots of `/boot` (coming in a later
-release) hold the license key, password hashes, SSH keys and this plugin's
+A snapshot holds whatever the job copies. Snapshots of `/boot` (see above) hold
+the license key, password hashes, SSH keys and this plugin's
 `credentials.json`: keep the root 0700 root, and never copy it offsite
 unencrypted. **Use sudo on the receiver** means the Unraid host can run any
 command as root there; snapshot mode needs that, and protects nothing against a
