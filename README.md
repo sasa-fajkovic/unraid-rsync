@@ -111,7 +111,10 @@ deleted by a retention policy.
 ```
 
 Names are UTC stamps (`YYYY-MM-DDTHHMMSSZ`). Only a name that is exactly a stamp
-is a complete snapshot; the plugin never deletes anything else in the root.
+is a complete snapshot. Besides pruning old snapshots, the plugin only deletes
+its own leftovers: older `<stamp>.inprogress` copies of runs that did not
+commit (the newest one is kept as a link basis) and `.deleting` directories of
+an interrupted deletion. Nothing else in the root is ever deleted.
 
 ### Setup, step by step
 
@@ -168,9 +171,12 @@ every run log of the job (`Run started for job "Appdata" (j-appdata)`) and in
 
 6. **Pruning starts as a dry run.** With **Prune dry run** on (the default) every
    run logs its plan (`Prune plan: KEEP …` / `Prune plan: DELETE …`) and deletes
-   nothing. Review those plans for a couple of weeks, then turn **Prune dry run**
-   off and Apply. At most **Max deletions per run** snapshots are deleted per run;
-   the rest wait for later runs.
+   no snapshot. Review those plans for a couple of weeks, then turn **Prune dry
+   run** off and Apply. At most **Max deletions per run** snapshots are deleted
+   per run; the rest wait for later runs. Prune dry run does not cover the
+   cleanup of leftovers: older unfinished `<stamp>.inprogress` copies and
+   `.deleting` directories are still removed by every real run (unless
+   `.ur-hold` exists).
 
 ### Holds and pins
 
@@ -309,6 +315,10 @@ case "$LATEST" in
 esac
 [ -d "$ROOT/$LATEST/$SUB1" ] || die "no $SUB1 in $ROOT/$LATEST"
 [ -d "$ROOT/$LATEST/$SUB2" ] || die "no $SUB2 in $ROOT/$LATEST"
+[ ! -e "$ROOT/$LATEST.rolledback" ] || die "$ROOT/$LATEST.rolledback already exists"
+# Each old mirror path must be the empty tombstone the migration left.
+[ -d "$MIRROR1" ] && [ ! -L "$MIRROR1" ] && [ -z "$(ls -A -- "$MIRROR1")" ] || die "$MIRROR1 is not an empty directory"
+[ -d "$MIRROR2" ] && [ ! -L "$MIRROR2" ] && [ -z "$(ls -A -- "$MIRROR2")" ] || die "$MIRROR2 is not an empty directory"
 chattr -i -- "$MIRROR1"
 rmdir -- "$MIRROR1"
 mv -T -- "$ROOT/$LATEST/$SUB1" "$MIRROR1"

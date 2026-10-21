@@ -340,7 +340,7 @@ function ur_render_job_card($job, $index): void
         . '</p><p>'
         . ur_h(ur_t('The transfer\'s SSH login must be able to read the root as root: either log in as root, or point Remote rsync path at a wrapper on the receiver that runs rsync through sudo, and turn on "Use sudo on the receiver" on the connection.'))
         . '</p><p>'
-        . ur_h(ur_t('Pruning starts as a dry run: it logs what it would delete and deletes nothing until you turn "Prune dry run" off.'))
+        . ur_h(ur_t('Pruning starts as a dry run: it logs which snapshots it would delete and deletes none until you turn "Prune dry run" off. Unfinished copies left by failed runs are still cleaned up.'))
         . '</p></blockquote></div>';
     echo '</dd>';
 
@@ -366,7 +366,7 @@ function ur_render_job_card($job, $index): void
     echo '<dd class="ur-snap-only"' . ur_snap_style($snapOn) . '>';
     echo '<input type="hidden" class="ur-snap-field" name="' . ur_h($sp . '[pruneDryRun]') . '" value="0"' . ur_snap_disabled($snapOn) . '>';
     echo '<input type="checkbox" class="ur-switch ur-snap-field" name="' . ur_h($sp . '[pruneDryRun]') . '" value="1"' . ($snapshot['pruneDryRun'] ? ' checked' : '') . ur_snap_disabled($snapOn) . '>';
-    echo '<blockquote class="inline_help"><p>' . ur_h(ur_t('When ON, each run only logs which snapshots it would delete. Review those plans for a while, then turn it OFF to let pruning delete.')) . '</p></blockquote></dd>';
+    echo '<blockquote class="inline_help"><p>' . ur_h(ur_t('When ON, each run only logs which snapshots it would delete. Review those plans for a while, then turn it OFF to let pruning delete. Older unfinished .inprogress copies are cleaned up either way.')) . '</p></blockquote></dd>';
 
     // pre/post hooks. Both run as ROOT via a SINGLE `bash -c "$hook"` call
     // (Runner::runHook) — the whole textarea value is one bash script, so

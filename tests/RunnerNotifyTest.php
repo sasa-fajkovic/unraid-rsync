@@ -747,7 +747,7 @@ final class RunnerNotifyTest extends TestCase
         $id = $this->saveJob('always');
         Runner::reportCrashed(['jobId' => $id, 'pid' => 999999, 'startedAt' => '2026-10-20T03:00:00Z', 'trigger' => 'schedule'] + $extra);
         $this->assertCount(1, $this->captured);
-        $text = 'If it was created, 2026-10-20T030000Z.inprogress was left on the receiver and will be reused as a link-dest by the next run.';
+        $text = 'Snapshot 2026-10-20T030000Z may be unfinished: if 2026-10-20T030000Z.inprogress was left on the receiver, it will be reused as a link-dest by the next run.';
         $named
             ? $this->assertStringContainsString($text, $this->captured[0])
             : $this->assertStringNotContainsString('.inprogress', $this->captured[0]);
@@ -766,7 +766,7 @@ final class RunnerNotifyTest extends TestCase
 
         $this->assertFalse(RunState::isRunning($id));
         $this->assertCount(1, $this->captured);
-        $this->assertStringContainsString('2026-10-20T030000Z.inprogress was left on the receiver', $this->captured[0]);
+        $this->assertStringContainsString('if 2026-10-20T030000Z.inprogress was left on the receiver', $this->captured[0]);
     }
 
     public function testRebootedSnapshotRunCrashAlertNamesTheInprogress(): void
@@ -775,7 +775,7 @@ final class RunnerNotifyTest extends TestCase
         RunState::writeInflight($id, ['pid' => 4242, 'trigger' => 'schedule', 'startedAt' => '2026-10-20T03:00:00Z', 'snapshot' => '2026-10-20T030000Z']);
         RunState::reapCrashed([]);
         $this->assertCount(1, $this->captured);
-        $this->assertStringContainsString('2026-10-20T030000Z.inprogress was left on the receiver', $this->captured[0]);
+        $this->assertStringContainsString('if 2026-10-20T030000Z.inprogress was left on the receiver', $this->captured[0]);
     }
 
     // --- snapshot: "has not committed a snapshot for N runs" ------------------
@@ -803,6 +803,22 @@ final class RunnerNotifyTest extends TestCase
         $this->snapRun($id, ['state' => Rsync::STATE_ABORTED]);
         $this->snapRun($id, []);
         $this->assertSame(2, Runner::notCommittedRuns($id), 'dry runs and aborts neither count nor reset');
+        @unlink(History::path($id));
+    }
+
+    public function testNotCommittedRunsReadsPastTheFirstHundredRecords(): void
+    {
+        $id = 'j-streak-' . bin2hex(random_bytes(3));
+        $this->snapRun($id, []);
+        for ($i = 0; $i < 150; $i++) {
+            $this->snapRun($id, ['dryRun' => true, 'snapshot' => '']);
+        }
+        $this->snapRun($id, []);
+        $this->assertSame(2, Runner::notCommittedRuns($id), 'two failures 150 dry runs apart');
+        for ($i = 0; $i < 99; $i++) {
+            $this->snapRun($id, []);
+        }
+        $this->assertSame(101, Runner::notCommittedRuns($id));
         @unlink(History::path($id));
     }
 

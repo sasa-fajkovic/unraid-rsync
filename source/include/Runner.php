@@ -1866,16 +1866,22 @@ class Runner
     public static function notCommittedRuns(string $jobId): int
     {
         $n = 0;
-        foreach (History::list($jobId, 0, 100)['runs'] as $r) {
-            if (!empty($r['dryRun']) || ($r['state'] ?? '') === Rsync::STATE_ABORTED) {
-                continue;
+        // ponytail: each page re-reads the whole file; only a long streak pages.
+        for ($offset = 0; ; $offset += 100) {
+            $page = History::list($jobId, $offset, 100);
+            foreach ($page['runs'] as $r) {
+                if (!empty($r['dryRun']) || ($r['state'] ?? '') === Rsync::STATE_ABORTED) {
+                    continue;
+                }
+                if (!array_key_exists('snapshot', $r) || !empty($r['committed'])) {
+                    return $n;
+                }
+                $n++;
             }
-            if (!array_key_exists('snapshot', $r) || !empty($r['committed'])) {
-                break;
+            if ($offset + 100 >= $page['total']) {
+                return $n;
             }
-            $n++;
         }
-        return $n;
     }
 
     /**
@@ -2426,8 +2432,8 @@ class Runner
             );
             $stamp = is_string($state['snapshot'] ?? null) ? $state['snapshot'] : '';
             if (!$dryRun && Snapshot::isStamp($stamp)) {
-                // mkstamp may not have run yet, hence "if it was created".
-                $message .= " If it was created, $stamp.inprogress was left on the receiver and will be reused as a link-dest by the next run.";
+                // The run may have died before mkstamp or after the commit.
+                $message .= " Snapshot $stamp may be unfinished: if $stamp.inprogress was left on the receiver, it will be reused as a link-dest by the next run.";
             }
             try {
                 Logger::event('', $jobId, $message);
