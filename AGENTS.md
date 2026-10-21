@@ -65,7 +65,12 @@ on, forked from, or derived from any other plugin.
 - **Build rsync/ssh invocations as argv ARRAYS, never shell strings**, and
   run them through `proc_open` without a shell. The ONLY intentional shell uses
   are: `Notify` exec (every arg `escapeshellarg`'d, incl. `-i`), user pre/post
-  **hooks** (`bash -c "$hook"`), and the detached runner launcher.
+  **hooks** (`bash -c "$hook"`), the detached runner launcher, and the
+  **snapshot remote helper**: `Snapshot::remoteCommand()` builds the one command
+  string ssh hands the receiver's shell from the shipped
+  `source/scripts/ur-snapshot.sh` (sha256-pinned by `Snapshot::HELPER_SHA256`),
+  every element of `[sudo -n] sh -c <script> ur-snapshot <op> <args>` passed
+  through `escapeshellarg`. The ssh itself is still an argv array.
 - **Password auth uses OpenSSH's `SSH_ASKPASS`, NOT `sshpass`** — the old
   dependency told users to install **NerdTools**, archived by its authors in
   March 2024 and gone from Unraid 7, so password auth was advertised in the UI

@@ -1,0 +1,18 @@
+--link-dest arg does not exist: /w/nope/sub
+
+Number of files: 2 (reg: 1, dir: 1)
+Number of created files: 2 (reg: 1, dir: 1)
+Number of deleted files: 0
+Number of regular files transferred: 1
+Total file size: 1,234,567 bytes
+Total transferred file size: 1,234,567 bytes
+Literal data: 1,234,567 bytes
+Matched data: 0 bytes
+File list size: 0
+File list generation time: 0.001 seconds
+File list transfer time: 0.000 seconds
+Total bytes sent: 1,234,978
+Total bytes received: 38
+
+sent 1,234,978 bytes  received 38 bytes  2,470,032.00 bytes/sec
+total size is 1,234,567  speedup is 1.00
