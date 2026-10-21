@@ -1,0 +1,17 @@
+
+Number of files: 1.237 (reg: 1.235, dir: 2)
+Number of created files: 1.237 (reg: 1.235, dir: 2)
+Number of deleted files: 0
+Number of regular files transferred: 1.235
+Total file size: 1,24M bytes
+Total transferred file size: 1,24M bytes
+Literal data: 1,24M bytes
+Matched data: 0 bytes
+File list size: 0
+File list generation time: 0,001 seconds
+File list transfer time: 0,000 seconds
+Total bytes sent: 1,31M
+Total bytes received: 23,50K
+
+sent 1,31M bytes  received 23,50K bytes  2,66M bytes/sec
+total size is 1,24M  speedup is 0,93

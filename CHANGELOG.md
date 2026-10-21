@@ -14,6 +14,8 @@ user-facing highlights.
 ### Added
 - Snapshot mode (in development on feat/snapshot-mode): per-job settings and
   validation.
+- Snapshot mode (in development on feat/snapshot-mode): snapshot planner and
+  remote helper.
 - **Notifications for runs that never did their job.** A run that could not
   start (configuration unreadable, job not found, lock or run-state error) sends
   an *alert* `<job>: run did not start`. A scheduled run skipped because the
