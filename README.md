@@ -343,13 +343,13 @@ runs nothing.
 ### Backing up the flash drive (/boot)
 
 A snapshot job may use `/boot` as a pair's source; no other job can. It must be
-exactly `/boot/` (or `/boot`), never a folder inside it, in an SSH Push job with
-snapshot mode on. This server's `/boot` can never be a destination.
+exactly `/boot/`, with the trailing slash, never a folder inside it, in an SSH
+Push job with snapshot mode on. `/boot` without the slash is refused: rsync would
+copy into `boot/boot/`, where the excludes below would silently stop matching.
+This server's `/boot` can never be a destination.
 
 - **Use a dedicated job**: one pair, local `/boot/` → sub `boot`, with its own
-  snapshot root (for example `/mnt/backup/snapshots/flash`). Keep the trailing
-  slash: without it the copy lands in `boot/boot/` and the excludes below do
-  not match.
+  snapshot root (for example `/mnt/backup/snapshots/flash`).
 - **Options**: plain archive (`-a`) with **times** on; no `--modify-window`.
 - **Excludes** (Filters, in this order):
   - `exclude /previous/`: the previous Unraid release kept after an upgrade.

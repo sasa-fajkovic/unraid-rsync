@@ -1868,9 +1868,9 @@ final class JobTest extends TestCase
 
     public function testBootIsAValidSnapshotSourceButNotForAMirrorJob(): void
     {
+        $pairs = [['local' => '/boot/', 'remote' => '', 'sub' => 'boot', 'seed' => true]];
+        $this->assertSame(['valid' => true, 'errors' => [], 'warnings' => []], Job::validate($this->snapJob(['pairs' => $pairs])));
         foreach (['/boot', '/boot/'] as $boot) {
-            $pairs = [['local' => $boot, 'remote' => '', 'sub' => 'boot', 'seed' => true]];
-            $this->assertSame(['valid' => true, 'errors' => [], 'warnings' => []], Job::validate($this->snapJob(['pairs' => $pairs])));
             $this->assertSame(
                 ["Pair #1 source (local) '$boot' is a protected system or array root and cannot be used."],
                 Job::validate($this->snapJob(['pairs' => [['local' => $boot, 'remote' => '/srv/backup/boot']], 'snapshot' => ['enabled' => '0']]))['errors']

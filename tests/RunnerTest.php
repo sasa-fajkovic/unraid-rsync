@@ -1466,7 +1466,7 @@ final class RunnerTest extends TestCase
         $savedOk = $saveTime($build($path)) === $saveTime($build($good));
         $runOk   = $runTime($build($path)) === $runTime($build($good));
 
-        $isBoot = in_array($path, ['/boot', '/boot/'], true);
+        $isBoot = $path === '/boot/';
         if ($side === 'local') {
             $expected = $path === '/mnt/user/x' || ($isBoot && $transport === 'SSH' && $direction === 'PUSH' && $snap);
         } elseif ($snap || $transport === 'DAEMON') {
@@ -1486,10 +1486,10 @@ final class RunnerTest extends TestCase
         $cases = [
             'whitespace is trimmed' => [$on, " /boot/\t", true],
             'lower-case enums'      => [['transport' => 'ssh', 'direction' => 'push'] + $on, '/boot/', true],
-            'missing direction'     => [['direction' => null] + $on, '/boot', true],
+            'missing direction'     => [['direction' => null] + $on, '/boot/', true],
             'lower-case pull'       => [['direction' => 'pull'] + $on, '/boot/', false],
         ];
-        foreach (['/boot//', '/boot/.', '/./boot', '/mnt/../boot', '/BOOT'] as $p) {
+        foreach (['/boot', ' /boot ', '/boot//', '/boot/.', '/./boot', '/mnt/../boot', '/BOOT'] as $p) {
             $cases["path $p"] = [$on, $p, false];
         }
         foreach (['int 1' => 1, 'string 1' => '1', 'string true' => 'true', 'null' => null] as $name => $v) {
@@ -1530,6 +1530,32 @@ final class RunnerTest extends TestCase
         $runOk   = $runTime($build($path)) === $runTime($build('/mnt/user/x'));
         $this->assertSame($expected, $savedOk, 'save time');
         $this->assertSame($savedOk, $runOk, 'save time and run time disagree');
+    }
+
+    /**
+     * "/boot" without the slash would land in <sub>/boot/ where the anchored
+     * excludes miss, so it is refused with the same dedicated hint at save time
+     * and run time - but only where "/boot/" would be accepted; anywhere else
+     * the hint would point at a path that is refused too.
+     */
+    public function testBootWithoutTheSlashGetsTheSameHintAtSaveAndRunTime(): void
+    {
+        $hint = "'/boot': Use \"/boot/\" (with the trailing slash) so the copy lands in <sub>/ and the excludes match.";
+        $job = array_merge(Config::defaultJob(), [
+            'name' => 'boot', 'transport' => 'SSH', 'direction' => 'PUSH', 'connectionId' => 'c-1',
+            'targetMarker' => '/srv/backup/.unraid-rsync-target', 'targetMarkerContent' => 'uuid-1',
+            'rsyncOptions' => Config::mergeRsyncOptions(['archive' => true, 'times' => true]),
+            'pairs' => [['local' => '/boot', 'remote' => '', 'sub' => 'boot']],
+            'snapshot' => ['enabled' => true, 'root' => '/srv/backup/snapshots/boot'],
+        ]);
+        $this->assertSame(["Pair #1 source (local) $hint"], Job::validate($job)['errors']);
+        $this->assertSame(["local path $hint"], Runner::guardrailErrors($job, $job['pairs'][0], 'SSH', $job['rsyncOptions']));
+
+        $generic = "local path '/boot' is a protected system or array root and cannot be used.";
+        foreach ([[['direction' => 'PULL'], 'SSH'], [['snapshot' => null], 'SSH'], [[], 'LOCAL']] as [$other, $transport]) {
+            $errors = Runner::guardrailErrors(array_merge($job, $other), $job['pairs'][0], $transport, $job['rsyncOptions']);
+            $this->assertSame($generic, $errors[0] ?? null, "$transport " . json_encode($other));
+        }
     }
 
     /**

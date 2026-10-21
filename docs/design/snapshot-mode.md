@@ -394,14 +394,14 @@ Two new lists sit beside the existing reason rules. An alert reason always wins.
 
 ## 8. `/boot` as a push source (PR-J)
 
-**Status: implemented** (PR-J): `Job::isAllowedBootSource`, asked by both `Job::validate` and `Runner::guardrailErrors`; the matrix and parity test is `RunnerTest::testBootIsOnlyEverAnSshPushSnapshotSource`.
+**Status: implemented** (PR-J): `Job::isAllowedBootSource` inside `Job::pairLocalErrors`, which both `Job::validate` and `Runner::guardrailErrors` call; the matrix and parity test is `RunnerTest::testBootIsOnlyEverAnSshPushSnapshotSource`.
 
-- `Job::checkLocalPath` rejects `/boot` (`FORBIDDEN_LOCAL_EXACT`, outside `/mnt`). PR-J adds one exception, in both `Job::validate` and `Runner::guardrailErrors` (parity test). Exactly `/boot` or `/boot/` is allowed as a pair's **`local` side** only when all of these hold:
+- `Job::checkLocalPath` rejects `/boot` (`FORBIDDEN_LOCAL_EXACT`, outside `/mnt`). PR-J adds one exception, in both `Job::validate` and `Runner::guardrailErrors` (parity test). Exactly `/boot/` is allowed as a pair's **`local` side** only when all of these hold:
   - transport SSH;
   - direction PUSH;
   - `snapshot.enabled`.
   
-  Subdirectories of `/boot` stay forbidden.
+  Subdirectories of `/boot` stay forbidden. `/boot` without the slash is refused with a dedicated hint: rsync would copy into `<sub>/boot/`, where the anchored excludes silently stop matching and the VPN identity would reach the receiver.
 - LOCAL transport ignores direction, so `/boot` must never be accepted there. A test enumerates every transport × direction × snapshot combination and asserts `/boot` can never be a destination.
 - **Recommended setup** (user docs; the plugin does not hard-code these):
   - a dedicated job, local `/boot/` → sub `boot`, with its own root;
