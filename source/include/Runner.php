@@ -403,6 +403,13 @@ class Runner
             if ($state === Rsync::STATE_SUCCESS && $sn !== null && !$dryRun) {
                 self::snapshotCleanup($sn, $reason, $runLog, $jobId);
             }
+            // An Abort before the pre-hook stops the run there: a hook started
+            // with the flag set would be killed and reported as prehook-failed.
+            if ($state === Rsync::STATE_SUCCESS && $sn !== null && RunState::abortRequested($jobId)) {
+                Logger::event($runLog, $jobId, 'Abort requested; stopping before the pre-run hook.');
+                $state    = Rsync::STATE_ABORTED;
+                $exitCode = 143;
+            }
 
             // 5c. preHook (only if nothing above failed or was aborted).
             $hookEnvBase = self::hookEnv(
@@ -1755,8 +1762,10 @@ class Runner
             self::setReason($reason, 'snapshot-held');
             return;
         }
-        if (self::snapshotDelete($sn, $sn['cleanup'], 'Cleanup', $reason, $runLog, $jobId) > 0) {
-            // The space cleanup freed would hide the transfer's growth.
+        if ($sn['cleanup'] !== []) {
+            self::snapshotDelete($sn, $sn['cleanup'], 'Cleanup', $reason, $runLog, $jobId);
+            // The space cleanup freed (even by a deletion that then failed)
+            // would hide the transfer's growth.
             $check          = self::snapshotCall($sn, 'check', [], $runLog, $jobId, Snapshot::HELPER_TIMEOUT_SEC);
             $sn['dfBefore'] = $check['df'] ?? null;
             if ($check === null) {
@@ -1952,6 +1961,10 @@ class Runner
                 return;
             }
             $list = self::snapshotCall($sn, 'list', [], $runLog, $jobId, Snapshot::HELPER_TIMEOUT_SEC);
+            if ($list === null && self::abortedOr('prune-sanity', $jobId) === 'aborted') {
+                Logger::event($runLog, $jobId, 'Abort requested; prune skipped.');
+                return;
+            }
             if ($list === null) {
                 Logger::event($runLog, $jobId, 'Prune aborted: the snapshot root could not be listed after the commit.');
                 self::setReason($reason, 'prune-sanity');

@@ -894,6 +894,72 @@ final class SnapshotRunnerTest extends TestCase
         $this->assertSame('normal', $this->importance());
     }
 
+    public function testACleanupDeletionThatFreedSpaceAndThenFailedStillRefreshesTheBaseline(): void
+    {
+        $this->saveJob();
+        $this->seedSnapshot($this->stamp(1), meta: ['subs' => []]);
+        $this->rx['dirs'][$this->stamp(3) . '.deleting'] = ['keep' => false, 'meta' => null, 'subs' => []];
+        foreach ([100, 200, 300] as $kb) {
+            History::append(self::JOB, ['startedAt' => '2026-10-01T00:00:00Z', 'state' => 'SUCCESS', 'snapshot' => 'x', 'committed' => true, 'growthKB' => $kb]);
+        }
+        $orig = Snapshot::$remoteRunner;
+        Snapshot::$remoteRunner = function (array $argv, ?array $env, int $t, ?callable $s) use ($orig): array {
+            if (str_contains((string) end($argv), "'delete'")) {
+                $this->trace[] = 'helper:delete:failed';
+                $this->rx['df'][1] -= 10000000;
+                return ['exit' => 18, 'stdout' => "ur-snapshot 1\n", 'stderr' => "ur-snapshot: rm failed half way\n"];
+            }
+            return $orig($argv, $env, $t, $s);
+        };
+        $this->transferKB = intdiv(Snapshot::GROWTH_MIN_KB + 2, 2);
+        $res = $this->runJob();
+        $this->assertSame('snapshot-suspect', $res['reason'], 'suspect (alert) replaces prune-failed (warning)');
+        $this->assertSame(Snapshot::GROWTH_MIN_KB + 2, $this->lastHistory()['growthKB']);
+    }
+
+    public function testAnAbortDuringCleanupSkipsThePreHook(): void
+    {
+        $this->saveJob();
+        $this->seedSnapshot($this->stamp(1));
+        $this->rx['dirs'][$this->stamp(3) . '.deleting'] = ['keep' => false, 'meta' => null, 'subs' => []];
+        $orig = Snapshot::$remoteRunner;
+        Snapshot::$remoteRunner = function (array $argv, ?array $env, int $t, ?callable $s) use ($orig): array {
+            if (str_contains((string) end($argv), "'delete'")) {
+                RunState::requestAbort(self::JOB);
+            }
+            return $orig($argv, $env, $t, $s);
+        };
+        $res = $this->runJob();
+        $this->assertSame(Rsync::STATE_ABORTED, $res['state']);
+        $this->assertArrayNotHasKey('reason', $res);
+        $this->assertNotContains('hook:PRE', $this->trace);
+        $this->assertNotContains('helper:mkstamp', $this->trace);
+        $this->assertContains('hook:POST', $this->trace);
+        $this->assertSame('none', $this->hookEnv['POST']['UR_SNAPSHOT_STATUS']);
+        $this->assertSame('normal', $this->importance());
+    }
+
+    public function testAnAbortThatKillsThePostCommitListingIsNotAPruneSanityAlert(): void
+    {
+        $this->saveJob(snap: ['pruneDryRun' => false]);
+        $this->seedSnapshot($this->stamp(1));
+        $orig = Snapshot::$remoteRunner;
+        $lists = 0;
+        Snapshot::$remoteRunner = function (array $argv, ?array $env, int $t, ?callable $s) use ($orig, &$lists): array {
+            if (str_contains((string) end($argv), "'list'") && ++$lists === 2) {
+                RunState::requestAbort(self::JOB);
+                return ['exit' => 143, 'stdout' => '', 'stderr' => ''];
+            }
+            return $orig($argv, $env, $t, $s);
+        };
+        $res = $this->runJob();
+        $this->assertSame(Rsync::STATE_SUCCESS, $res['state']);
+        $this->assertArrayNotHasKey('reason', $res);
+        $this->assertTrue($this->lastHistory()['committed']);
+        $this->assertStringContainsString('Abort requested; prune skipped.', $this->log($res));
+        $this->assertSame('normal', $this->importance());
+    }
+
     public function testGrowthIsNotMeasuredWhenTheFreeSpaceCannotBeReadAfterCleanup(): void
     {
         $this->saveJob();
