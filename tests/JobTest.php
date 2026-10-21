@@ -1767,7 +1767,12 @@ final class JobTest extends TestCase
         $errors = Job::ancestryErrors($job, $job['rsyncOptions'], Job::protectedTargets([$job, $other], 'j-mirror'));
         $this->assertSame($ok, $errors === [], implode(' | ', $errors));
         if (!$ok) {
-            $this->assertStringContainsString('job "other"', $errors[0]);
+            // The mirror-vs-mirror wording is unchanged.
+            $this->assertSame(
+                'Pair #1: a delete option is enabled, so the destination must not be, contain, or lie inside '
+                . 'the destination of job "other" (\'/srv/backup/a\').',
+                $errors[0]
+            );
         }
     }
 
@@ -2129,8 +2134,10 @@ final class JobTest extends TestCase
             Job::protectedTargets([$snap, $mirror], 'j-mirror')
         );
         $errors = Job::ancestryErrors($mirror, $mirror['rsyncOptions'], Job::protectedTargets([$snap, $mirror], 'j-mirror'));
-        $this->assertCount(1, $errors);
-        $this->assertStringContainsString('the snapshot root of job "snap"', $errors[0]);
+        $this->assertSame([
+            'Pair #1: a delete option is enabled, so the destination must not be, contain, or lie inside '
+            . 'the snapshot root of job "snap" (\'/srv/backup/snapshots/a\').',
+        ], $errors);
         // The snapshot job does not protect its own root against itself.
         $this->assertSame([], array_filter(Job::protectedTargets([$snap], 'j-snap')));
     }

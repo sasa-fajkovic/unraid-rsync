@@ -70,6 +70,285 @@ not send it there and warns when one is set.
 
 Managed keys live in their own **Credentials** keychain tab.
 
+## Snapshot mode
+
+A job normally keeps **one mirror** on the destination. In **snapshot mode** it
+keeps **dated, versioned copies** instead: every run writes a new directory on
+the receiver, and files that did not change since the previous snapshot are
+**hard links** to it (`rsync --link-dest`), so each snapshot costs only the space
+of what changed while still being a complete tree you can browse and restore
+from. A snapshot counts only once its run finished cleanly; old ones are
+deleted by a retention policy.
+
+### Requirements
+
+- **SSH transport, Push direction.** rsync daemon, Local and Pull jobs cannot use
+  snapshot mode.
+- A receiver with **GNU coreutils and util-linux** (a normal Linux distribution;
+  BusyBox, BSD and macOS receivers are not supported).
+- **Root on the receiver**: either the connection logs in as `root`, or its user
+  has **passwordless sudo for `sh`** (which is full root) and the connection has
+  **Use sudo on the receiver** on. The transfer itself must also read the
+  snapshot root as root: with a non-root login, point the job's **Remote rsync
+  path** at a small sudo wrapper (see step 3 below).
+- **rsync 3.2.4 or newer on both ends.**
+- A **target marker** with expected content (a UUID) on the backup drive. In
+  snapshot mode it is mandatory, and the snapshot root must be the marker's
+  directory or lie inside it.
+
+### Layout on the receiver
+
+```
+/mnt/backup/.unraid-rsync-target                 the target marker (holds a UUID)
+/mnt/backup/snapshots/appdata/                   the job's snapshot root, 0700 root:root
+/mnt/backup/snapshots/appdata/.ur-snapshot-root  sentinel: first line = the job id
+/mnt/backup/snapshots/appdata/2026-10-20T030000Z/appdata/...   one snapshot, one dir per pair ("sub")
+/mnt/backup/snapshots/appdata/2026-10-21T030000Z/appdata/...
+/mnt/backup/snapshots/appdata/2026-10-21T030000Z.inprogress/  a run that did not commit (reused next run)
+/mnt/backup/snapshots/appdata/latest -> 2026-10-21T030000Z     for humans; the plugin never reads it
+/mnt/backup/snapshots/appdata/.ur-hold           deletions on hold (see below)
+/mnt/backup/snapshots/appdata/<stamp>/.ur-keep   this snapshot is pinned, never pruned
+```
+
+Names are UTC stamps (`YYYY-MM-DDTHHMMSSZ`). Only a name that is exactly a stamp
+is a complete snapshot. Besides pruning old snapshots, the plugin only deletes
+its own leftovers: older `<stamp>.inprogress` copies of runs that did not
+commit (the newest one is kept as a link basis) and `.deleting` directories of
+an interrupted deletion. Nothing else in the root is ever deleted.
+
+### Setup, step by step
+
+The paths below are examples; use your own. The job id is in the first line of
+every run log of the job (`Run started for job "Appdata" (j-appdata)`) and in
+`/boot/config/plugins/unraid.rsync/config.json`.
+
+1. **On the receiver, as root, create the target marker** (skip if the job
+   already has one) and note its content:
+
+   ```sh
+   cat /proc/sys/kernel/random/uuid > /mnt/backup/.unraid-rsync-target
+   cat /mnt/backup/.unraid-rsync-target
+   ```
+
+2. **Create the snapshot root (0700) and its sentinel** holding the job id. The
+   plugin never creates either, so a missing drive can never be mistaken for an
+   empty one:
+
+   ```sh
+   mkdir -p /mnt/backup/snapshots
+   mkdir -m 0700 /mnt/backup/snapshots/appdata
+   printf '%s\n' j-appdata > /mnt/backup/snapshots/appdata/.ur-snapshot-root
+   ```
+
+   The root must be on the same filesystem as the marker, and not on the
+   receiver's system disk.
+
+3. **Non-root login only.** Give the user passwordless sudo for `sh` and for
+   rsync through a wrapper, then set the job's **Remote rsync path** to
+   `/usr/local/bin/rsync-sudo` and tick **Use sudo on the receiver** on the
+   connection (Connections tab):
+
+   ```sh
+   printf '%s\n' 'backup ALL=(root) NOPASSWD: /bin/sh, /usr/bin/rsync' > /root/unraid-rsync.sudoers
+   visudo -cf /root/unraid-rsync.sudoers && install -m 0440 /root/unraid-rsync.sudoers /etc/sudoers.d/unraid-rsync
+   printf '%s\n' '#!/bin/sh' 'exec sudo -n /usr/bin/rsync "$@"' > /usr/local/bin/rsync-sudo
+   chmod 0755 /usr/local/bin/rsync-sudo
+   ```
+
+   Check the paths of `sh` and `rsync` on your receiver (`command -v sh rsync`).
+
+4. **In the job** (Jobs tab): Transport **SSH**, Direction **Push**, the target
+   marker path and its content, then turn **Snapshot mode** on and fill in the
+   **snapshot root** and the retention. In each pair the right box becomes a
+   **sub-directory name** (`appdata`, `docs`, ...). Tick **seed** on every pair
+   for the first snapshot. Apply.
+
+5. **Dry-run, then Run.** A dry run checks everything on the receiver and lists
+   what would be copied, and creates nothing. The first real run is a full copy;
+   every later run links unchanged files to the previous snapshot. Once a pair
+   is in a snapshot its **seed** flag has no effect (the log says so) and can be
+   cleared. A pair added later needs **seed** for its first run.
+
+6. **Pruning starts as a dry run.** With **Prune dry run** on (the default) every
+   run logs its plan (`Prune plan: KEEP …` / `Prune plan: DELETE …`) and deletes
+   no snapshot. Review those plans for a couple of weeks, then turn **Prune dry
+   run** off and Apply. At most **Max deletions per run** snapshots are deleted
+   per run; the rest wait for later runs. Prune dry run does not cover the
+   cleanup of leftovers: older unfinished `<stamp>.inprogress` copies and
+   `.deleting` directories are still removed by every real run (unless
+   `.ur-hold` exists).
+
+### Holds and pins
+
+- **`<root>/.ur-hold`** puts every deletion for this job on hold. The plugin
+  creates it when a run looks **suspect** (far fewer files or bytes than the
+  previous snapshot, runaway growth, a missing link basis): the snapshot is still
+  committed, the previous one is pinned, and you get an alert. Look at the run
+  log and the data first; once you are satisfied, clear it on the receiver with
+  `rm /mnt/backup/snapshots/appdata/.ur-hold`.
+- **`<root>/<stamp>/.ur-keep`** pins that snapshot: it is never pruned. The plugin
+  sets it on the snapshot before a suspect one; you can set your own with
+  `touch`. Unpin with `rm /mnt/backup/snapshots/appdata/2026-10-20T030000Z/.ur-keep`.
+
+The plugin never removes either file.
+
+### Restoring
+
+List the snapshots on the receiver with `ls /mnt/backup/snapshots/appdata/`. Then,
+on the Unraid server, preview with `-n -i` first and run the same command without
+`-n` once the preview is right. With a non-root login add the job's
+`--rsync-path=/usr/local/bin/rsync-sudo`. Use the same ownership options as the
+job (the examples assume `-a` with `--numeric-ids`): without `--numeric-ids`
+rsync matches owners by name, so files owned by uid 99 (nobody) or by container
+users can come back with the wrong owner.
+
+```sh
+# one file
+rsync -n -i -a --numeric-ids backup@backup.example:/mnt/backup/snapshots/appdata/2026-10-20T030000Z/appdata/app/config.yml /mnt/user/appdata/app/
+# a directory (trailing slashes: copy the CONTENTS of the snapshot dir into the target dir)
+rsync -n -i -a --numeric-ids backup@backup.example:/mnt/backup/snapshots/appdata/2026-10-20T030000Z/appdata/app/ /mnt/user/appdata/app/
+```
+
+Without `--delete` a restore only adds and overwrites; nothing else in the target
+is removed.
+
+### Migrating an existing mirror
+
+> **Adapt the paths; read before running.** This moves your existing backup. It
+> runs on the receiver as root and stops at the first error.
+
+1. **Disable the job and Apply**, and do not press Run (a disabled job can still
+   be run by hand). Check that no rsync is running on the receiver
+   (`pgrep -a rsync`).
+2. **Take the stamp from the job's last successful real run** (UTC, as History
+   stores it). Do not type one by hand. On the Unraid server:
+
+   ```sh
+   grep '"state":"SUCCESS"' /boot/config/plugins/unraid.rsync/runs/j-appdata.history.jsonl \
+     | grep '"dryRun":false' | tail -n 1 \
+     | sed -E 's/.*"startedAt":"([0-9-]+)T([0-9]{2}):([0-9]{2}):([0-9]{2})Z".*/\1T\2\3\4Z/'
+   ```
+
+3. **Run this on the receiver** with your values. It creates the root and
+   sentinel, moves each mirror into one snapshot named after that stamp, leaves
+   an empty, immutable directory at each old mirror path (so a stale mirror job
+   cannot quietly fill it again), and pins that snapshot:
+
+   ```sh
+   #!/bin/sh
+   # Adapt the paths; read before running.
+   set -eu
+   JOB=j-appdata
+   STAMP=2026-10-20T030000Z
+   MARKER=/mnt/backup/.unraid-rsync-target
+   ROOT=/mnt/backup/snapshots/appdata
+   MIRROR1=/mnt/backup/mirror/appdata
+   SUB1=appdata
+   MIRROR2=/mnt/backup/mirror/docs
+   SUB2=docs
+
+   die() { echo "migration: $*" >&2; exit 1; }
+   case "$STAMP" in
+     [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) ;;
+     *) die "not a stamp: $STAMP" ;;
+   esac
+   [ -f "$MARKER" ] || die "no target marker at $MARKER"
+   [ ! -e "$ROOT" ] || die "$ROOT already exists"
+   [ -d "$MIRROR1" ] && [ ! -L "$MIRROR1" ] || die "$MIRROR1 is not a directory"
+   [ -d "$MIRROR2" ] && [ ! -L "$MIRROR2" ] || die "$MIRROR2 is not a directory"
+
+   mkdir -p -- "${ROOT%/*}"
+   mkdir -m 0700 -- "$ROOT"
+   printf '%s\n' "$JOB" > "$ROOT/.ur-snapshot-root"
+   DEV=$(stat -c %d -- "$ROOT")
+   [ "$(stat -c %d -- "$MARKER")" = "$DEV" ] || die "$MARKER is not on the filesystem of $ROOT"
+   [ "$(stat -c %d -- "$MIRROR1")" = "$DEV" ] || die "$MIRROR1 is not on the filesystem of $ROOT"
+   [ "$(stat -c %d -- "$MIRROR2")" = "$DEV" ] || die "$MIRROR2 is not on the filesystem of $ROOT"
+   # chattr must work here before anything is moved.
+   mkdir -- "$ROOT/.chattr-test"
+   chattr +i -- "$ROOT/.chattr-test"
+   chattr -i -- "$ROOT/.chattr-test"
+   rmdir -- "$ROOT/.chattr-test"
+
+   mkdir -m 0700 -- "$ROOT/$STAMP.inprogress"
+   mv -T -- "$MIRROR1" "$ROOT/$STAMP.inprogress/$SUB1"
+   mkdir -- "$MIRROR1"
+   chattr +i -- "$MIRROR1"
+   mv -T -- "$MIRROR2" "$ROOT/$STAMP.inprogress/$SUB2"
+   mkdir -- "$MIRROR2"
+   chattr +i -- "$MIRROR2"
+   sync -f "$ROOT"
+   mv -T -- "$ROOT/$STAMP.inprogress" "$ROOT/$STAMP"
+   ln -s -- "$STAMP" "$ROOT/.latest.tmp"
+   mv -T -- "$ROOT/.latest.tmp" "$ROOT/latest"
+   touch -- "$ROOT/$STAMP/.ur-keep"
+   sync -f "$ROOT"
+   echo "migrated: $ROOT/$STAMP"
+   ```
+
+   One `MIRROR`/`SUB` pair per job pair; add or remove lines to match.
+4. **Switch the job to snapshot mode**: root, marker and content, retention,
+   **Prune dry run** on, each pair's sub name, and **no seed** (the snapshot you
+   just made is the basis). Apply.
+5. **Dry-run.** Each pair should link against the migrated snapshot (no "new pair"
+   and no `--link-dest arg does not exist` line), and only the changes since the
+   last mirror run should be listed. Then Run, and check on the receiver that
+   unchanged files are hard links (`stat -c %h` shows a link count above 1),
+   `latest` points at the new stamp, and `df` grew by about the size of the
+   changes. The first snapshot has no metadata, so the first run logs that the
+   anomaly check has no baseline.
+
+**Rollback (per job).** Disable the job and Apply. Then on the receiver, as root
+(adapt the paths; read before running):
+
+```sh
+#!/bin/sh
+set -eu
+ROOT=/mnt/backup/snapshots/appdata
+MIRROR1=/mnt/backup/mirror/appdata
+SUB1=appdata
+MIRROR2=/mnt/backup/mirror/docs
+SUB2=docs
+
+die() { echo "rollback: $*" >&2; exit 1; }
+LATEST=$(readlink -- "$ROOT/latest")
+case "$LATEST" in
+  [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) ;;
+  *) die "latest does not name a snapshot: $LATEST" ;;
+esac
+[ -d "$ROOT/$LATEST/$SUB1" ] || die "no $SUB1 in $ROOT/$LATEST"
+[ -d "$ROOT/$LATEST/$SUB2" ] || die "no $SUB2 in $ROOT/$LATEST"
+[ ! -e "$ROOT/$LATEST.rolledback" ] || die "$ROOT/$LATEST.rolledback already exists"
+# Each old mirror path must be the empty tombstone the migration left.
+[ -d "$MIRROR1" ] && [ ! -L "$MIRROR1" ] && [ -z "$(ls -A -- "$MIRROR1")" ] || die "$MIRROR1 is not an empty directory"
+[ -d "$MIRROR2" ] && [ ! -L "$MIRROR2" ] && [ -z "$(ls -A -- "$MIRROR2")" ] || die "$MIRROR2 is not an empty directory"
+chattr -i -- "$MIRROR1"
+rmdir -- "$MIRROR1"
+mv -T -- "$ROOT/$LATEST/$SUB1" "$MIRROR1"
+chattr -i -- "$MIRROR2"
+rmdir -- "$MIRROR2"
+mv -T -- "$ROOT/$LATEST/$SUB2" "$MIRROR2"
+mv -T -- "$ROOT/$LATEST" "$ROOT/$LATEST.rolledback"
+sync -f "$MIRROR1"
+echo "rolled back from $LATEST"
+```
+
+Then edit the job: **Snapshot mode** off and the absolute remote paths back in
+the pairs, and Apply. The plugin never touches a `.rolledback` directory. Only
+when **no** job has snapshot mode on does `config.json` go back to the format an
+older plugin release can read (schema 2); install an older release only after
+that. With a snapshot job enabled, an older release refuses the configuration and
+runs nothing.
+
+### Security note
+
+A snapshot holds whatever the job copies. Snapshots of `/boot` (coming in a later
+release) hold the license key, password hashes, SSH keys and this plugin's
+`credentials.json`: keep the root 0700 root, and never copy it offsite
+unencrypted. **Use sudo on the receiver** means the Unraid host can run any
+command as root there; snapshot mode needs that, and protects nothing against a
+compromised Unraid host.
+
 ## What ships today
 
 - An installable `.plg` packaged in the standard Unraid way (a Slackware `.txz`

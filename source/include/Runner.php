@@ -769,7 +769,7 @@ class Runner
             // Dispatch the per-job notification (Phase 7). Best-effort: it is
             // gated on the job's notifyMode and NEVER throws (see notifyHook),
             // so a notification failure can't break the run's finally/unwind.
-            self::notifyHook($job, [
+            $notify = [
                 'state'       => $state,
                 'exitCode'    => $exitCode,
                 'exitCodes'   => $exitCodes,
@@ -777,7 +777,14 @@ class Runner
                 'trigger'     => $trigger,
                 'dryRun'      => $dryRun,
                 'durationSec' => $durationSec,
-            ]);
+            ];
+            if ($snap !== null && !$dryRun && $state !== Rsync::STATE_ABORTED && empty($sn['committed'])) {
+                $runs = self::notCommittedRuns($jobId);
+                if ($runs > 1) {
+                    $notify['message'] = sprintf('Job "%s" has not committed a snapshot for %d runs.', (string) ($job['name'] ?? $jobId), $runs);
+                }
+            }
+            self::notifyHook($job, $notify);
 
             // Release the per-job run lock last, so a queued launch only proceeds
             // once this run has fully wound down (state cleared, summary written).
@@ -1852,6 +1859,31 @@ class Runner
     }
 
     /**
+     * Consecutive real runs, newest first in History, that did not commit a
+     * snapshot. Dry runs and aborts are skipped; a commit, or a record with no
+     * snapshot fields (a mirror run, a crash, a hard failure), ends the count.
+     */
+    public static function notCommittedRuns(string $jobId): int
+    {
+        $n = 0;
+        for ($offset = 0; ; $offset += 100) {
+            $page = History::list($jobId, $offset, 100);
+            foreach ($page['runs'] as $r) {
+                if (!empty($r['dryRun']) || ($r['state'] ?? '') === Rsync::STATE_ABORTED) {
+                    continue;
+                }
+                if (!array_key_exists('snapshot', $r) || !empty($r['committed'])) {
+                    return $n;
+                }
+                $n++;
+            }
+            if ($offset + 100 >= $page['total']) {
+                return $n;
+            }
+        }
+    }
+
+    /**
      * Growth of this job's earlier committed runs, newest first (History).
      *
      * @return array<int,int>
@@ -2397,6 +2429,11 @@ class Runner
                 (int) ($state['pid'] ?? 0),
                 $started === false ? 'unknown' : date('Y-m-d H:i:sP', $started)
             );
+            $stamp = is_string($state['snapshot'] ?? null) ? $state['snapshot'] : '';
+            if (!$dryRun && Snapshot::isStamp($stamp)) {
+                // The run may have died before mkstamp or after the commit.
+                $message .= " Snapshot $stamp may be unfinished: if $stamp.inprogress was left on the receiver, it will be reused as a link-dest by the next run.";
+            }
             try {
                 Logger::event('', $jobId, $message);
             } catch (Throwable $e) {

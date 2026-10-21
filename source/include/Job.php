@@ -1001,8 +1001,10 @@ class Job
                     continue;
                 }
                 if ($mine === $theirs || self::pathContains($mine, $theirs) || self::pathContains($theirs, $mine)) {
+                    // A snapshot root's label already names what it is.
+                    $what = str_starts_with($t['label'], 'the ') ? $t['label'] : "the destination of {$t['label']}";
                     $errors[] = 'Pair #' . ($i + 1) . ': a delete option is enabled, so the destination must not be, '
-                        . "contain, or lie inside the destination of {$t['label']} ('{$t['path']}').";
+                        . "contain, or lie inside $what ('{$t['path']}').";
                 }
             }
         }

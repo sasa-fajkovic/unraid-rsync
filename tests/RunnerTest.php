@@ -2282,7 +2282,7 @@ final class RunnerTest extends TestCase
         $this->assertSame('guardrail', $res['reason'] ?? '');
         $this->assertSame([], $this->argvs, 'refused before the marker fetch and the --delete probe');
         $this->assertStringContainsString(
-            "inside the destination of the snapshot root of job \"snap\" ('/srv/backup/snapshots/snap')",
+            "must not be, contain, or lie inside the snapshot root of job \"snap\" ('/srv/backup/snapshots/snap')",
             (string) file_get_contents($res['runLog'])
         );
     }

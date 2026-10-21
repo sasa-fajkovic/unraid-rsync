@@ -341,6 +341,10 @@ class RunState
         self::clearInflight($jobId);
         if ($state !== null && !empty($state['running'])) {
             self::markStopped($jobId);
+            // Only the in-flight record carries the snapshot stamp.
+            if (is_array($inflight) && isset($inflight['snapshot']) && ($inflight['startedAt'] ?? null) === $state['startedAt']) {
+                $state['snapshot'] = $inflight['snapshot'];
+            }
             return $state;
         }
         return $inflight;

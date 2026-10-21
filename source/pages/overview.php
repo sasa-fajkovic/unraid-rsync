@@ -128,6 +128,14 @@ ur_emit_badge_assets(); /* the ONE badge palette + window.urBadge */
         } else {
           lc.textContent = '—';
         }
+        /* Snapshot jobs only; label in the system timezone, UTC stamp on hover. */
+        if (s.snapshot) {
+          var sl = document.createElement('div');
+          sl.className = 'ur-ov-muted';
+          sl.title = s.snapshot.stamp;
+          sl.textContent = s.snapshot.label;
+          lc.appendChild(sl);
+        }
       }
       // next run
       var nc = tr.querySelector('.ur-ov-next');
