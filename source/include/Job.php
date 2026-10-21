@@ -124,6 +124,21 @@ class Job
         . '(for example /volume1/Backup/data). To address the module by name '
         . 'instead, set the job Transport to "rsync daemon (rsyncd)".';
 
+    /**
+     * A snapshot pair's directory name inside a stamp. No dots, so "." and ".."
+     * cannot match; RESERVED_SUBS are compared case-insensitively.
+     */
+    const SUB_REGEX     = '/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/D';
+    const RESERVED_SUBS = ['latest'];
+
+    /** Snapshot integer settings => [min, max]. */
+    const SNAPSHOT_BOUNDS = [
+        'keepDaily'      => [0, 366],
+        'keepWeekly'     => [0, 260],
+        'keepMonthly'    => [0, 120],
+        'maxPrunePerRun' => [1, 20],
+    ];
+
     /** Scalar key -> rsync flag, for human-readable validation messages. */
     const SCALAR_FLAG_LABELS = [
         'maxDelete'       => '--max-delete',
@@ -195,6 +210,17 @@ class Job
             }
         }
 
+        // Form and JSON post the same keys; only the two bools need coercing.
+        if (isset($raw['snapshot']) && is_array($raw['snapshot'])) {
+            $s = $raw['snapshot'];
+            $s['enabled']     = self::toBool($s['enabled'] ?? false);
+            $s['pruneDryRun'] = self::toBool($s['pruneDryRun'] ?? true);
+            $snapshot = Config::normalizeSnapshot($s);
+            if ($snapshot !== null) {
+                $job['snapshot'] = $snapshot;
+            }
+        }
+
         $notify = strtolower(trim((string) ($raw['notifyMode'] ?? 'failure-only')));
         $job['notifyMode'] = in_array($notify, self::NOTIFY, true) ? $notify : 'failure-only';
 
@@ -225,11 +251,11 @@ class Job
     }
 
     /**
-     * Clean a raw pairs structure into a list of {local,remote} string pairs,
-     * dropping any pair where BOTH sides are empty (a blank template row).
+     * Clean a raw pairs structure into a list of {local,remote} string pairs
+     * (plus a snapshot `sub`/`seed` when given), dropping a blank template row.
      *
      * @param mixed $rawPairs
-     * @return array<int,array{local:string,remote:string}>
+     * @return array<int,array{local:string,remote:string,sub?:string,seed?:true}>
      */
     public static function normalizePairs($rawPairs): array
     {
@@ -243,10 +269,18 @@ class Job
             }
             $local  = isset($pair['local'])  ? trim((string) $pair['local'])  : '';
             $remote = isset($pair['remote']) ? trim((string) $pair['remote']) : '';
-            if ($local === '' && $remote === '') {
+            $sub    = isset($pair['sub']) && is_scalar($pair['sub']) ? trim((string) $pair['sub']) : '';
+            if ($local === '' && $remote === '' && $sub === '') {
                 continue; // skip an entirely-empty template row
             }
-            $pairs[] = ['local' => $local, 'remote' => $remote];
+            $p = ['local' => $local, 'remote' => $remote];
+            if ($sub !== '') {
+                $p['sub'] = $sub;
+            }
+            if (self::toBool($pair['seed'] ?? false)) {
+                $p['seed'] = true;
+            }
+            $pairs[] = $p;
         }
         return $pairs;
     }
@@ -394,6 +428,10 @@ class Job
         }
         $deleteOn    = !empty($opts['delete']) || !empty($opts['deleteExcluded']);
         $maxDelete   = trim((string) ($opts['maxDelete'] ?? ''));
+        // Snapshot mode writes to <root>/<stamp>/<sub>, never to `remote`, and
+        // forces delete off, so snapshotErrors() replaces the remote-path and
+        // --delete destination rules.
+        $snapshotOn  = Config::normalizeSnapshot($job['snapshot'] ?? null) !== null;
 
         // The `local` field is ALWAYS a path on this Unraid box; the `remote`
         // field is on the other host (SSH, DAEMON) or also on this box (LOCAL).
@@ -438,6 +476,9 @@ class Job
             // `remote` field: local guardrails under LOCAL transport, otherwise
             // a non-root remote sub-path.
             $remoteLabel = "Pair #$n $remoteRole ($remoteQualifier)";
+            if ($snapshotOn) {
+                continue;
+            }
             if ($remote === '') {
                 $errors[] = "Pair #$n: $remoteRole ($remoteQualifier) path is required.";
             } else {
@@ -485,8 +526,13 @@ class Job
             $errors[] = $e;
         }
 
+        if ($snapshotOn) {
+            $errors   = array_merge($errors, self::snapshotErrors($job, $opts, $transport, $direction));
+            $warnings = array_merge($warnings, self::snapshotOptionWarnings($opts));
+        }
+
         // --delete safety: warn (do not block) when no max-delete cap is set.
-        if ($deleteOn && $maxDelete === '') {
+        if ($deleteOn && $maxDelete === '' && !$snapshotOn) {
             $warnings[] = 'A delete option is enabled without a "max delete" cap; consider setting one to limit accidental deletions.';
         }
 
@@ -506,6 +552,158 @@ class Job
             'errors'   => $errors,
             'warnings' => $warnings,
         ];
+    }
+
+    /**
+     * Snapshot-mode rules beyond the options: SSH + PUSH only, the root, the
+     * mandatory target marker, retention bounds and the pair `sub` names, plus
+     * snapshotOptionErrors(). [] when the job's snapshot block is off.
+     *
+     * @param array<string,mixed> $job
+     * @param array<string,mixed> $opts the job's EFFECTIVE rsync options
+     * @return array<int,string>
+     */
+    public static function snapshotErrors(array $job, array $opts, string $transport, string $direction): array
+    {
+        $snap = Config::normalizeSnapshot($job['snapshot'] ?? null);
+        if ($snap === null) {
+            return [];
+        }
+        $errors = [];
+        if ($transport !== 'SSH' || $direction !== 'PUSH') {
+            $errors[] = 'Snapshot mode needs SSH transport and the PUSH direction.';
+        }
+
+        $root   = $snap['root'];
+        $label  = 'Snapshot root';
+        $rootOk = false;
+        $raw    = $root === '' ? [] : self::rawPathErrors($root, $label);
+        if ($root === '') {
+            $errors[] = "$label is required.";
+        } elseif ($raw !== []) {
+            $errors = array_merge($errors, $raw);
+        } elseif ($root[0] !== '/') {
+            $errors[] = "$label must be an absolute path.";
+        } elseif (!self::isDeepRemoteDeleteTarget($root)) {
+            $errors[] = "$label '$root' must be at least two directories deep (for example /srv/snapshots) "
+                . 'and not a bare /mnt/<disk> root.';
+        } elseif ($root !== self::normalizePath($root)) {
+            $errors[] = "$label '$root' must be written as '" . self::normalizePath($root) . "'.";
+        } else {
+            $rootOk = true;
+        }
+
+        $marker  = trim((string) ($job['targetMarker'] ?? ''));
+        $content = trim((string) ($job['targetMarkerContent'] ?? ''));
+        if ($marker === '' || $content === '') {
+            $errors[] = 'Snapshot mode needs a target marker and its expected content (a UUID is recommended).';
+        } elseif ($rootOk) {
+            $markerDir = dirname(self::normalizePath($marker));
+            if (!self::atOrInside($root, $markerDir)) {
+                $errors[] = "$label '$root' must be the target marker's directory ('$markerDir') or lie inside it.";
+            }
+        }
+
+        $inRange = true;
+        foreach (self::SNAPSHOT_BOUNDS as $key => [$min, $max]) {
+            if ($snap[$key] < $min || $snap[$key] > $max) {
+                $inRange  = false;
+                $errors[] = "Snapshot setting $key must be a whole number from $min to $max.";
+            }
+        }
+        if ($inRange && $snap['keepDaily'] + $snap['keepWeekly'] + $snap['keepMonthly'] < 1) {
+            $errors[] = 'Snapshot retention must keep at least one snapshot (keepDaily + keepWeekly + keepMonthly).';
+        }
+
+        $seen = [];
+        foreach ((is_array($job['pairs'] ?? null) ? $job['pairs'] : []) as $i => $pair) {
+            $n      = (int) $i + 1;
+            $pair   = is_array($pair) ? $pair : [];
+            $remote = trim((string) ($pair['remote'] ?? ''));
+            $sub    = trim((string) ($pair['sub'] ?? ''));
+            if ($remote !== '') {
+                $errors[] = "Pair #$n: in snapshot mode the destination is <root>/<stamp>/<sub>; leave the remote path empty.";
+            }
+            if ($sub === '') {
+                $errors[] = "Pair #$n: a snapshot sub-directory name is required.";
+                continue;
+            }
+            if (!preg_match(self::SUB_REGEX, $sub)) {
+                $errors[] = "Pair #$n: snapshot sub-directory name '$sub' must be 1 to 64 letters, digits, '_' or '-', "
+                    . 'starting with a letter or digit.';
+                continue;
+            }
+            $lower = strtolower($sub);
+            if (in_array($lower, self::RESERVED_SUBS, true)) {
+                $errors[] = "Pair #$n: snapshot sub-directory name '$sub' is reserved.";
+            } elseif (isset($seen[$lower])) {
+                $errors[] = "Pair #$n: snapshot sub-directory name '$sub' is already used by pair #{$seen[$lower]} "
+                    . '(names are compared case-insensitively).';
+            } else {
+                $seen[$lower] = $n;
+            }
+        }
+
+        return array_merge($errors, self::snapshotOptionErrors($opts));
+    }
+
+    /**
+     * EFFECTIVE options snapshot mode rejects. Without -t, --link-dest never
+     * matches, so every run would be a full copy.
+     *
+     * @param array<string,mixed> $opts
+     * @return array<int,string>
+     */
+    public static function snapshotOptionErrors(array $opts): array
+    {
+        $rejected = [
+            'inplace'        => 'In-place (--inplace) rewrites files that older snapshots share',
+            'checksum'       => '--checksum reads every file of the previous snapshot in full',
+            'sizeOnly'       => '--size-only can keep stale content',
+            'ignoreExisting' => '--ignore-existing can keep stale content',
+            'update'         => '--update can keep stale content',
+        ];
+        $errors = [];
+        foreach ($rejected as $key => $why) {
+            if (!empty($opts[$key])) {
+                $errors[] = "Snapshot mode cannot be used with this option: $why.";
+            }
+        }
+        if (trim((string) ($opts['backupDir'] ?? '')) !== '') {
+            $errors[] = 'Snapshot mode cannot be used with --backup-dir: every snapshot is a fresh directory.';
+        }
+        if (empty($opts['times'])) {
+            $errors[] = 'Snapshot mode needs Preserve times (-t): without it unchanged files are never linked '
+                . 'to the previous snapshot, so every run is a full copy.';
+        }
+        return $errors;
+    }
+
+    /**
+     * EFFECTIVE options snapshot mode turns off for the run. Stored values are
+     * left alone, so these are warnings.
+     *
+     * @param array<string,mixed> $opts
+     * @return array<int,string>
+     */
+    public static function snapshotOptionWarnings(array $opts): array
+    {
+        $forced = [
+            'mkpath'         => '--mkpath',
+            'delete'         => '--delete',
+            'deleteExcluded' => '--delete-excluded',
+            'hardlinks'      => 'Preserve hard links (-H)',
+        ];
+        $warnings = [];
+        foreach ($forced as $key => $label) {
+            if (!empty($opts[$key])) {
+                $warnings[] = "$label is forced off in snapshot mode.";
+            }
+        }
+        if (trim((string) ($opts['maxDelete'] ?? '')) !== '') {
+            $warnings[] = '--max-delete is forced off in snapshot mode.';
+        }
+        return $warnings;
     }
 
     /**
@@ -701,8 +899,81 @@ class Job
             foreach ($d['paths'] as $p) {
                 $out[] = ['scope' => $d['scope'], 'path' => $p, 'label' => $label];
             }
+            $snap = Config::normalizeSnapshot($other['snapshot'] ?? null);
+            if ($snap !== null) {
+                $out[] = [
+                    'scope' => 'SSH:' . trim((string) ($other['connectionId'] ?? '')),
+                    'path'  => $snap['root'],
+                    'label' => 'the snapshot root of ' . $label,
+                ];
+            }
         }
         return $out;
+    }
+
+    /**
+     * Snapshot roots must not overlap each other, and no job may write into one,
+     * with or without --delete. Same scope (connection) only.
+     *
+     * @param array<string,mixed> $job
+     * @param array<int,mixed>    $jobs the whole job set ($job may be among them)
+     * @return array<int,string>
+     */
+    public static function snapshotRootErrors(array $job, array $jobs): array
+    {
+        $errors = [];
+        $id     = (string) ($job['id'] ?? '');
+        $mine   = self::snapshotRoot($job);
+        $myDest = self::destinations($job);
+        foreach ($jobs as $other) {
+            if (!is_array($other) || (string) ($other['id'] ?? '') === $id) {
+                continue;
+            }
+            $label  = 'job "' . (string) (($other['name'] ?? '') !== '' ? $other['name'] : ($other['id'] ?? '')) . '"';
+            $theirs = self::snapshotRoot($other);
+            if ($mine !== null && $theirs !== null && $mine['scope'] === $theirs['scope']
+                && (self::atOrInside($mine['path'], $theirs['path']) || self::pathContains($mine['path'], $theirs['path']))) {
+                $errors[] = "Snapshot root '{$mine['path']}' must not be, contain, or lie inside the snapshot root of "
+                    . "$label ('{$theirs['path']}').";
+            }
+            if ($theirs !== null && $myDest['scope'] === $theirs['scope']) {
+                foreach ($myDest['paths'] as $i => $p) {
+                    if (self::atOrInside(self::normalizePath($p), $theirs['path'])) {
+                        $errors[] = 'Pair #' . ($i + 1) . ': the destination must not be or lie inside the snapshot root of '
+                            . "$label ('{$theirs['path']}').";
+                    }
+                }
+            }
+            if ($mine !== null) {
+                $d = self::destinations($other);
+                if ($d['scope'] === $mine['scope']) {
+                    foreach ($d['paths'] as $p) {
+                        if (self::atOrInside(self::normalizePath($p), $mine['path'])) {
+                            $errors[] = "Snapshot root '{$mine['path']}' contains the destination of $label ('$p').";
+                        }
+                    }
+                }
+            }
+        }
+        return $errors;
+    }
+
+    /**
+     * A job's enabled snapshot root and its scope, or null.
+     *
+     * @param array<string,mixed> $job
+     * @return array{scope:string,path:string}|null
+     */
+    private static function snapshotRoot(array $job): ?array
+    {
+        $snap = Config::normalizeSnapshot($job['snapshot'] ?? null);
+        $root = $snap !== null ? self::normalizePath($snap['root']) : '';
+        return $root === '' ? null : ['scope' => 'SSH:' . trim((string) ($job['connectionId'] ?? '')), 'path' => $root];
+    }
+
+    private static function atOrInside(string $path, string $root): bool
+    {
+        return $path === $root || self::pathContains($root, $path);
     }
 
     /**

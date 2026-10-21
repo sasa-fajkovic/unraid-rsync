@@ -444,6 +444,12 @@ class Credentials
         $timeout = isset($conn['connectTimeout']) ? (int) $conn['connectTimeout'] : $defaults['connectTimeout'];
         $out['connectTimeout'] = ($timeout >= 1 && $timeout <= 600) ? $timeout : $defaults['connectTimeout'];
 
+        // Snapshot mode's sudo on the receiver: additive within schema 1 like
+        // transport, and written only when on so existing files round-trip.
+        if (($conn['useSudo'] ?? null) === true && $out['transport'] === 'SSH') {
+            $out['useSudo'] = true;
+        }
+
         return $out;
     }
 

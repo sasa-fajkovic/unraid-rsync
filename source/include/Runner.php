@@ -1146,6 +1146,10 @@ class Runner
      */
     private static function preflight(array $job, array $config, string $transport, array $opts, ?array $sshPieces, string $userHost, string $runLog, string $jobId): string
     {
+        if (Config::normalizeSnapshot($job['snapshot'] ?? null) !== null) {
+            Logger::event($runLog, $jobId, 'Snapshot mode is not available in this build yet; the job was not run.');
+            return 'snapshot-not-implemented';
+        }
         $direction = strtoupper(trim((string) ($job['direction'] ?? 'PUSH')));
         $pairs     = (isset($job['pairs']) && is_array($job['pairs'])) ? $job['pairs'] : [];
 
@@ -1160,7 +1164,8 @@ class Runner
             $errors,
             Job::optionErrors($opts, $transport, $direction),
             Job::markerErrors($job, $transport, $direction),
-            Job::ancestryErrors($job, $opts, Job::protectedTargets($jobs, $jobId))
+            Job::ancestryErrors($job, $opts, Job::protectedTargets($jobs, $jobId)),
+            Job::snapshotRootErrors($job, $jobs)
         );
         if ($errors !== []) {
             foreach ($errors as $e) {

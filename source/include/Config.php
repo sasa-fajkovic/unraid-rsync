@@ -42,6 +42,27 @@ class Config
     const SCHEMA_VERSION = 2;
 
     /**
+     * The newest schema migrate() accepts. v3 = v2 plus at least one job with an
+     * enabled `snapshot` block; the file carries 3 only while such a job exists
+     * (schemaVersionFor), so an older plugin refuses it rather than running a
+     * snapshot job as a mirror.
+     */
+    const MAX_SCHEMA_VERSION = 3;
+
+    /**
+     * @param array<string,mixed> $config
+     */
+    public static function schemaVersionFor(array $config): int
+    {
+        foreach ((is_array($config['jobs'] ?? null) ? $config['jobs'] : []) as $job) {
+            if (is_array($job) && is_array($job['snapshot'] ?? null) && ($job['snapshot']['enabled'] ?? null) === true) {
+                return 3;
+            }
+        }
+        return self::SCHEMA_VERSION;
+    }
+
+    /**
      * Absolute path to config.json under the (possibly overridden) base dir.
      */
     public static function path(): string
@@ -487,6 +508,55 @@ class Config
     }
 
     /**
+     * Snapshot-mode settings, in stored key order. Not part of defaultJob(): the
+     * block exists on a job only while enabled.
+     *
+     * @return array{enabled:bool,root:string,keepDaily:int,keepWeekly:int,keepMonthly:int,maxPrunePerRun:int,pruneDryRun:bool}
+     */
+    public static function defaultSnapshot(): array
+    {
+        return [
+            'enabled'        => false,
+            'root'           => '',
+            'keepDaily'      => 7,
+            'keepWeekly'     => 4,
+            'keepMonthly'    => 0,
+            'maxPrunePerRun' => 3,
+            'pruneDryRun'    => true,
+        ];
+    }
+
+    /** The integer keys of the snapshot block. */
+    const SNAPSHOT_INT_KEYS = ['keepDaily', 'keepWeekly', 'keepMonthly', 'maxPrunePerRun'];
+
+    /**
+     * The canonical snapshot block, or null unless `enabled` is a real true.
+     * Never clamps: an invalid integer becomes -1 so validation rejects it at
+     * save time and run time, instead of a keep count silently changing.
+     *
+     * @return array{enabled:bool,root:string,keepDaily:int,keepWeekly:int,keepMonthly:int,maxPrunePerRun:int,pruneDryRun:bool}|null
+     */
+    public static function normalizeSnapshot(mixed $raw): ?array
+    {
+        if (!is_array($raw) || ($raw['enabled'] ?? null) !== true) {
+            return null;
+        }
+        $out = self::defaultSnapshot();
+        $out['enabled'] = true;
+        $out['root'] = is_scalar($raw['root'] ?? null) ? trim((string) $raw['root']) : '';
+        foreach (self::SNAPSHOT_INT_KEYS as $key) {
+            if (array_key_exists($key, $raw)) {
+                $n = filter_var($raw[$key], FILTER_VALIDATE_INT);
+                $out[$key] = $n === false ? -1 : $n;
+            }
+        }
+        if (array_key_exists('pruneDryRun', $raw)) {
+            $out['pruneDryRun'] = is_bool($raw['pruneDryRun']) ? $raw['pruneDryRun'] : true;
+        }
+        return $out;
+    }
+
+    /**
      * Load config.json, returning a fully-populated structure. Missing keys are
      * filled from defaults so callers never have to null-check.
      *
@@ -538,7 +608,7 @@ class Config
     /**
      * Persist the given config structure atomically.
      *
-     * The schemaVersion is always stamped to the current version. The base
+     * The schemaVersion follows the content (schemaVersionFor). The base
      * directory is created if it does not exist. The write goes to a temp file
      * in the same directory and is renamed over the target (rename is atomic on
      * a POSIX filesystem within one directory), so readers never see a
@@ -549,7 +619,6 @@ class Config
      */
     public static function save(array $config): void
     {
-        $config['schemaVersion'] = self::SCHEMA_VERSION;
         // Persist the merged shape so on-disk config is always complete.
         $config = self::mergeDefaults($config);
 
@@ -607,12 +676,12 @@ class Config
             ? $data['schemaVersion']
             : 1;
 
-        if ($version > self::SCHEMA_VERSION) {
+        if ($version > self::MAX_SCHEMA_VERSION) {
             throw new RuntimeException(sprintf(
                 'config.json schemaVersion %d is newer than this plugin supports (%d); '
                 . 'refusing to load to avoid data loss. Update the plugin.',
                 $version,
-                self::SCHEMA_VERSION
+                self::MAX_SCHEMA_VERSION
             ));
         }
 
@@ -623,6 +692,7 @@ class Config
                 case 1:
                     $data = self::migrateV1ToV2($data);
                     $version = 2;
+                    $data['schemaVersion'] = 2;
                     break;
                 default:
                     // No migration path defined; stop to avoid an infinite loop.
@@ -631,7 +701,7 @@ class Config
             }
         }
 
-        $data['schemaVersion'] = self::SCHEMA_VERSION;
+        // v2 -> v3 needs no transform; mergeDefaults() sets the version.
         return $data;
     }
 
@@ -727,12 +797,8 @@ class Config
     {
         $defaults = self::defaults();
 
-        // schemaVersion: keep what we have (migrate() already normalised it),
-        // else default.
-        $out = [];
-        $out['schemaVersion'] = isset($data['schemaVersion']) && is_int($data['schemaVersion'])
-            ? $data['schemaVersion']
-            : $defaults['schemaVersion'];
+        // schemaVersion: set from the merged jobs below; first here for key order.
+        $out = ['schemaVersion' => $defaults['schemaVersion']];
 
         // global.defaultRsyncOptions: fill any missing option keys.
         $globalIn  = isset($data['global']) && is_array($data['global']) ? $data['global'] : [];
@@ -765,6 +831,7 @@ class Config
                 }
             }
         }
+        $out['schemaVersion'] = self::schemaVersionFor($out);
 
         return $out;
     }
@@ -889,15 +956,25 @@ class Config
         $out['rsyncOptions'] = self::mergeRsyncOptions(
             is_array($out['rsyncOptions']) ? $out['rsyncOptions'] : []
         );
-        // pairs must be a list of {local,remote}.
+        $snapshot = self::normalizeSnapshot($job['snapshot'] ?? null);
+        // pairs must be a list of {local,remote}, plus sub/seed in snapshot mode.
         $pairs = [];
         if (is_array($out['pairs'])) {
             foreach ($out['pairs'] as $pair) {
                 if (is_array($pair)) {
-                    $pairs[] = [
+                    $p = [
                         'local'  => isset($pair['local'])  ? (string) $pair['local']  : '',
                         'remote' => isset($pair['remote']) ? (string) $pair['remote'] : '',
                     ];
+                    if ($snapshot !== null) {
+                        if (array_key_exists('sub', $pair)) {
+                            $p['sub'] = is_scalar($pair['sub']) ? trim((string) $pair['sub']) : '';
+                        }
+                        if (($pair['seed'] ?? null) === true) {
+                            $p['seed'] = true;
+                        }
+                    }
+                    $pairs[] = $p;
                 }
             }
         }
@@ -906,6 +983,10 @@ class Config
             if (isset($job[$key]) && is_string($job[$key]) && trim($job[$key]) !== '') {
                 $out[$key] = $job[$key];
             }
+        }
+        // Stored only while enabled, so a mirror job saves exactly as before.
+        if ($snapshot !== null) {
+            $out['snapshot'] = $snapshot;
         }
         return $out;
     }

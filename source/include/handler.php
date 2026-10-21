@@ -529,7 +529,7 @@ function ur_validate_jobs(array $jobs, array $global, ?array $creds): array
             Rsync::effectiveOptions($job, $global),
             Job::protectedTargets($jobs, (string) ($job['id'] ?? ''))
         );
-        foreach (array_merge($result['errors'], $ancestry) as $e) {
+        foreach (array_merge($result['errors'], $ancestry, Job::snapshotRootErrors($job, $jobs)) as $e) {
             $errors[] = "Job \"$label\": $e";
         }
         foreach ($result['warnings'] as $w) {
@@ -750,9 +750,40 @@ function ur_action_save_config(): void
         $credsForValidation = null;
     }
 
+    $storedById = [];
+    foreach ($config['jobs'] as $stored) {
+        if (is_array($stored)) {
+            $storedById[(string) ($stored['id'] ?? '')] = $stored;
+        }
+    }
+
     foreach ($rawJobs as $rawJob) {
         if (!is_array($rawJob)) {
             continue;
+        }
+        // The Jobs form has no snapshot fields yet, so a post without a
+        // `snapshot` key must not silently turn a stored snapshot job into a
+        // mirror. A posted key, even with enabled off, is the user's intent.
+        $rawId  = is_scalar($rawJob['id'] ?? null) ? trim((string) $rawJob['id']) : '';
+        $stored = $storedById[$rawId] ?? null;
+        if ($stored !== null && !array_key_exists('snapshot', $rawJob) && isset($stored['snapshot'])) {
+            $rawJob['snapshot'] = $stored['snapshot'];
+            $rawPairs = is_array($rawJob['pairs'] ?? null) ? $rawJob['pairs'] : [];
+            if (array_filter($rawPairs, static fn($p) => is_array($p) && array_key_exists('sub', $p)) === []) {
+                $posted = Job::normalizePairs($rawPairs);
+                if (array_column($posted, 'local') !== array_column($stored['pairs'], 'local')) {
+                    $name = is_scalar($rawJob['name'] ?? null) && trim((string) $rawJob['name']) !== ''
+                        ? trim((string) $rawJob['name'])
+                        : (string) $stored['name'];
+                    $msg = "Job \"$name\": snapshot pairs cannot be changed from this form yet.";
+                    sendError($msg, 422, ['errors' => [$msg], 'warnings' => $allWarnings]);
+                    return;
+                }
+                foreach ($stored['pairs'] as $k => $p) {
+                    $posted[$k] += array_intersect_key($p, ['sub' => true, 'seed' => true]);
+                }
+                $rawJob['pairs'] = $posted;
+            }
         }
         $job = Job::normalize($rawJob);
 
@@ -902,6 +933,8 @@ function ur_normalize_connection_for_save(array $raw, array $existing): array
         'remoteHostKey'  => isset($raw['remoteHostKey'])  ? (string) $raw['remoteHostKey']  : '',
         'strictHostKey'  => isset($raw['strictHostKey'])  ? (string) $raw['strictHostKey']  : 'accept-new',
         'connectTimeout' => isset($raw['connectTimeout']) ? (string) $raw['connectTimeout'] : 10,
+        // Absent means unchanged, like transport: no form posts it yet.
+        'useSudo'        => isset($raw['useSudo'])        ? Job::toBool($raw['useSudo'])    : (($prev['useSudo'] ?? null) === true),
         // password handled below
     ]);
 

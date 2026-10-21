@@ -647,8 +647,10 @@ final class ConfigTest extends TestCase
     public function testMigrateThrowsOnNewerSchema(): void
     {
         // A config from a newer plugin build must NOT be silently downgraded.
+        // v3 (snapshot mode) is accepted; the first version past it is not.
+        $this->assertSame(4, Config::MAX_SCHEMA_VERSION + 1);
         $this->expectException(RuntimeException::class);
-        Config::migrate(['schemaVersion' => Config::SCHEMA_VERSION + 1, 'jobs' => []]);
+        Config::migrate(['schemaVersion' => Config::MAX_SCHEMA_VERSION + 1, 'jobs' => []]);
     }
 
     public function testLoadThrowsOnNewerSchema(): void
@@ -1080,5 +1082,152 @@ final class ConfigTest extends TestCase
 
         $this->assertSame(30, Config::clampHookTimeout('-1', 30));
         $this->assertSame(30, Config::clampHookTimeout('soon', 30));
+    }
+
+    // --- snapshot mode: schema v2/v3 and the stored block -------------------
+
+    /** @return array<string,mixed> */
+    private function snapshotBlock(array $overrides = []): array
+    {
+        return array_merge([
+            'enabled' => true, 'root' => '/srv/backup/snapshots/a', 'keepDaily' => 7, 'keepWeekly' => 4,
+            'keepMonthly' => 0, 'maxPrunePerRun' => 3, 'pruneDryRun' => true,
+        ], $overrides);
+    }
+
+    public function testEnablingOneSnapshotJobWritesV3WithTheCanonicalBlock(): void
+    {
+        $cfg = $this->canonicalV2Config();
+        // Scrambled key order and a stray key: the stored block is canonical.
+        $cfg['jobs'][0]['snapshot'] = [
+            'pruneDryRun' => false, 'junk' => 1, 'root' => ' /srv/backup/snapshots/a ', 'keepMonthly' => '2',
+            'enabled' => true,
+        ];
+        $cfg['jobs'][0]['pairs'] = [['seed' => true, 'sub' => ' data ', 'remote' => '', 'local' => '/mnt/user/a/']];
+        Config::save($cfg);
+
+        $raw = json_decode((string) file_get_contents(Config::path()), true);
+        $this->assertSame(3, $raw['schemaVersion']);
+        $this->assertSame([
+            'enabled' => true, 'root' => '/srv/backup/snapshots/a', 'keepDaily' => 7, 'keepWeekly' => 4,
+            'keepMonthly' => 2, 'maxPrunePerRun' => 3, 'pruneDryRun' => false,
+        ], $raw['jobs'][0]['snapshot']);
+        $this->assertSame('snapshot', array_key_last($raw['jobs'][0]), 'appended after every other key');
+        $this->assertSame(
+            [['local' => '/mnt/user/a/', 'remote' => '', 'sub' => 'data', 'seed' => true]],
+            $raw['jobs'][0]['pairs'],
+            'pair key order is local, remote, sub, seed'
+        );
+        // The other jobs are untouched.
+        $this->assertArrayNotHasKey('snapshot', $raw['jobs'][1]);
+
+        // A v3 file loads and re-saves byte-identical.
+        $before = file_get_contents(Config::path());
+        Config::save(Config::load());
+        $this->assertSame($before, file_get_contents(Config::path()));
+    }
+
+    public function testDisablingTheLastSnapshotJobWritesV2AndDropsBlockSubAndSeed(): void
+    {
+        $cfg = $this->canonicalV2Config();
+        $cfg['jobs'][0]['snapshot'] = $this->snapshotBlock();
+        $cfg['jobs'][0]['pairs'] = [['local' => '/mnt/user/a/', 'remote' => '', 'sub' => 'a', 'seed' => true]];
+        Config::save($cfg);
+        $this->assertSame(3, Config::load()['schemaVersion']);
+
+        $loaded = Config::load();
+        $loaded['jobs'][0]['snapshot']['enabled'] = false;
+        Config::save($loaded);
+
+        $raw = json_decode((string) file_get_contents(Config::path()), true);
+        $this->assertSame(2, $raw['schemaVersion']);
+        $this->assertArrayNotHasKey('snapshot', $raw['jobs'][0]);
+        $this->assertSame([['local' => '/mnt/user/a/', 'remote' => '']], $raw['jobs'][0]['pairs']);
+    }
+
+    public function testAV3FileWithOnlyDisabledBlocksLoadsAndSavesAsV2(): void
+    {
+        $disk = $this->canonicalV2Config();
+        $disk['schemaVersion'] = 3;
+        $disk['jobs'][0]['snapshot'] = $this->snapshotBlock(['enabled' => false]);
+        $disk['jobs'][0]['pairs'][0] += ['sub' => 'a', 'seed' => true];
+        file_put_contents(Config::path(), json_encode($disk));
+
+        $loaded = Config::load();
+        $this->assertSame(2, $loaded['schemaVersion']);
+        $this->assertSame($this->canonicalV2Config(), $loaded);
+        Config::save($loaded);
+        $this->assertSame(2, json_decode((string) file_get_contents(Config::path()), true)['schemaVersion']);
+    }
+
+    public function testAV4FileThrows(): void
+    {
+        file_put_contents(Config::path(), json_encode(['schemaVersion' => 4, 'jobs' => []]));
+        $this->expectException(RuntimeException::class);
+        Config::load();
+    }
+
+    public function testAV1FileStillMigratesToV2(): void
+    {
+        $migrated = Config::migrate(['schemaVersion' => 1, 'global' => ['defaultRsyncOptions' => $this->v1Options()]]);
+        $this->assertSame(2, $migrated['schemaVersion']);
+        $this->assertSame(2, Config::mergeDefaults($migrated)['schemaVersion']);
+    }
+
+    public function testSchemaVersionForNeedsAStrictTrue(): void
+    {
+        $this->assertSame(2, Config::schemaVersionFor(['jobs' => []]));
+        $this->assertSame(2, Config::schemaVersionFor(['jobs' => [['snapshot' => ['enabled' => 'true']]]]));
+        $this->assertSame(3, Config::schemaVersionFor(['jobs' => [[], ['snapshot' => ['enabled' => true]]]]));
+    }
+
+    /** @return array<string,array{0:mixed}> */
+    public static function nonTrueEnabledProvider(): array
+    {
+        return ['string "true"' => ['true'], 'int 1' => [1], 'string "1"' => ['1'], 'false' => [false], 'absent' => [null]];
+    }
+
+    #[DataProvider('nonTrueEnabledProvider')]
+    public function testANonBoolEnabledIsOffOnLoad(mixed $enabled): void
+    {
+        $block = $this->snapshotBlock(['enabled' => $enabled]);
+        $this->assertNull(Config::normalizeSnapshot($block));
+
+        $disk = $this->canonicalV2Config();
+        $disk['jobs'][0]['snapshot'] = $block;
+        file_put_contents(Config::path(), json_encode($disk));
+        $loaded = Config::load();
+        $this->assertSame(2, $loaded['schemaVersion']);
+        $this->assertArrayNotHasKey('snapshot', $loaded['jobs'][0]);
+    }
+
+    public function testNormalizeSnapshotNeverClampsABadInteger(): void
+    {
+        $snap = Config::normalizeSnapshot($this->snapshotBlock([
+            'keepDaily' => '7.5', 'keepWeekly' => 'many', 'keepMonthly' => 999, 'maxPrunePerRun' => [3],
+            'pruneDryRun' => 'no',
+        ]));
+        $this->assertSame(-1, $snap['keepDaily']);
+        $this->assertSame(-1, $snap['keepWeekly']);
+        $this->assertSame(999, $snap['keepMonthly'], 'out of range is kept for validation to reject');
+        $this->assertSame(-1, $snap['maxPrunePerRun']);
+        $this->assertTrue($snap['pruneDryRun'], 'a non-bool pruneDryRun stays on');
+        $this->assertSame(array_keys(Config::defaultSnapshot()), array_keys($snap));
+
+        $job = Job::normalize([
+            'name' => 's', 'connectionId' => 'c', 'targetMarker' => '/srv/backup/.m', 'targetMarkerContent' => 'u',
+            'pairs' => [['local' => '/mnt/user/a/', 'sub' => 'a']],
+            'snapshot' => ['enabled' => '1', 'root' => '/srv/backup/s', 'keepDaily' => 'x'],
+        ]);
+        $this->assertSame(-1, $job['snapshot']['keepDaily']);
+        $this->assertContains('Snapshot setting keepDaily must be a whole number from 0 to 366.', Job::validate($job)['errors']);
+    }
+
+    public function testDefaultSnapshotKeyOrder(): void
+    {
+        $this->assertSame([
+            'enabled' => false, 'root' => '', 'keepDaily' => 7, 'keepWeekly' => 4,
+            'keepMonthly' => 0, 'maxPrunePerRun' => 3, 'pruneDryRun' => true,
+        ], Config::defaultSnapshot());
     }
 }
