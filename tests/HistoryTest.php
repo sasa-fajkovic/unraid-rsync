@@ -131,6 +131,22 @@ final class HistoryTest extends TestCase
         );
     }
 
+    public function testSnapshotFieldsAreKeptOnlyForSnapshotRecords(): void
+    {
+        $id = $this->id('snap');
+        History::append($id, $this->rec(['snapshot' => '2026-10-21T030000Z', 'committed' => 1, 'suspect' => 0, 'pruned' => '2', 'growthKB' => '512']));
+        History::append($id, $this->rec(['snapshot' => '', 'committed' => false]));
+        History::append($id, $this->rec());
+        [$mirror, $failed, $committed] = History::list($id, 0, 25)['runs'];
+
+        $this->assertSame(
+            ['snapshot' => '2026-10-21T030000Z', 'committed' => true, 'suspect' => false, 'pruned' => 2, 'growthKB' => 512],
+            array_slice($committed, 10)
+        );
+        $this->assertSame(['snapshot' => '', 'committed' => false, 'suspect' => false, 'pruned' => 0], array_slice($failed, 10), 'growthKB stays absent');
+        $this->assertCount(10, $mirror, 'a mirror record keeps its shape');
+    }
+
     public function testPureDotsJobIdCollapsesToUnknown(): void
     {
         // SEC-01 parity: a pure-dots id can never address a file outside runs/.

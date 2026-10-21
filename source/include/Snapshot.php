@@ -15,8 +15,7 @@ declare(strict_types=1);
  * The exec seam lives here rather than in a SnapshotRemote class because it is
  * one method over remoteCommand(), and the spec names the seam
  * Snapshot::$remoteRunner (the same shape as Rsync::run / Rsync::$runner).
- *
- * Nothing in here is called by Runner::run yet; PR-G wires it in.
+ * Runner::run drives the run sequence (§4) with these pieces.
  */
 
 require_once __DIR__ . '/Job.php';
@@ -50,6 +49,39 @@ class Snapshot
 
     /** Seconds between SIGTERM and SIGKILL for a helper call being stopped. */
     const KILL_GRACE_SEC = 2;
+
+    /** Helper call deadlines (§4); delete has none and is stopped by Abort instead. */
+    const HELPER_TIMEOUT_SEC = 120;
+    const COMMIT_TIMEOUT_SEC = 600;
+
+    /** Free space before a run: avail >= max(FREE_MIN_PCT % of the filesystem, FREE_MIN_KB). [PROPOSAL; tune] */
+    const FREE_MIN_PCT = 5;
+    const FREE_MIN_KB  = 10485760;
+
+    /**
+     * §4.2 anomaly thresholds [PROPOSAL; tune]: a pair below half of the
+     * previous snapshot's files (when it had >= 100) or bytes (when >= 1 GiB),
+     * or growth above max(3 x the median of the last 7, 5 GiB) once 3 exist.
+     */
+    const SUSPECT_MIN_FILES    = 100;
+    const SUSPECT_MIN_BYTES    = 1073741824;
+    const GROWTH_FACTOR        = 3;
+    const GROWTH_MIN_KB        = 5242880;
+    const GROWTH_WINDOW        = 7;
+    const GROWTH_MIN_SAMPLES   = 3;
+
+    /** Helper exit codes (§5.3); anything else is a transport failure. */
+    const HELPER_EXITS = [
+        10 => 'usage or invalid argument',
+        11 => 'snapshot root missing, not a directory, or not canonical',
+        12 => 'target marker missing or content mismatch',
+        13 => 'marker or root on a different filesystem, or on the filesystem of /',
+        14 => 'sentinel missing or names another job',
+        15 => 'name exists or not monotonic',
+        16 => 'protected',
+        17 => 'not root, or a tool is missing',
+        18 => 'I/O failure',
+    ];
 
     const STAMP_REGEX  = '/^\d{4}-\d{2}-\d{2}T\d{6}Z$/D';
     const NAME_REGEX   = '/^(\d{4}-\d{2}-\d{2}T\d{6}Z)(\.inprogress|\.deleting|\.rolledback)?$/D';
@@ -383,6 +415,82 @@ class Snapshot
             }
         }
         return $out;
+    }
+
+    // --- run checks (§4) ----------------------------------------------------
+
+    /**
+     * null when the receiver has room for a run, else the reason.
+     *
+     * @param array{size:int,used:int,avail:int} $df in KB
+     */
+    public static function freeSpaceError(array $df): ?string
+    {
+        $need = max(intdiv($df['size'] * self::FREE_MIN_PCT, 100), self::FREE_MIN_KB);
+        if ($df['avail'] >= $need) {
+            return null;
+        }
+        return 'The receiver has ' . $df['avail'] . " KB free; snapshot mode needs at least $need KB ("
+            . self::FREE_MIN_PCT . ' % of the filesystem or ' . self::FREE_MIN_KB . ' KB, whichever is larger).';
+    }
+
+    /**
+     * §4.2: why a run that passed the completion gate is suspect ([] = it is
+     * not), and which checks were skipped.
+     *
+     * @param array<int,array{sub:string,files:?int,bytes:?int,basisMissing:bool}> $pairs
+     * @param array<string,mixed>|null $prevMeta     the previous snapshot's .ur-snapshot.json, null = none
+     * @param int|null                 $growthKB     df used after - before, null = not measured
+     * @param array<int,int>           $pastGrowthKB earlier committed runs' growth, newest first
+     * @return array{suspect:array<int,string>,skipped:array<int,string>}
+     */
+    public static function anomalies(array $pairs, ?array $prevMeta, ?int $growthKB, array $pastGrowthKB): array
+    {
+        $suspect = [];
+        $skipped = [];
+        foreach ($pairs as $p) {
+            if ($p['basisMissing']) {
+                $suspect[] = "{$p['sub']}: rsync reported that the previous snapshot's copy does not exist";
+            }
+        }
+        $subs = $prevMeta['subs'] ?? null;
+        if (!is_array($subs)) {
+            $skipped[] = 'no baseline (the previous snapshot has no metadata), so the file, size and growth checks were skipped';
+            return ['suspect' => $suspect, 'skipped' => $skipped];
+        }
+        foreach ($pairs as $p) {
+            $prev = $subs[$p['sub']] ?? null;
+            if (!is_array($prev)) {
+                $skipped[] = "{$p['sub']}: no baseline in the previous snapshot";
+                continue;
+            }
+            foreach (['files' => self::SUSPECT_MIN_FILES, 'bytes' => self::SUSPECT_MIN_BYTES] as $key => $min) {
+                $was = $prev[$key] ?? null;
+                if (!is_int($was) || $was < $min) {
+                    continue;
+                }
+                if ($p[$key] === null) {
+                    $skipped[] = "{$p['sub']}: the $key count could not be read from rsync's statistics";
+                } elseif ($p[$key] * 2 < $was) {
+                    $suspect[] = "{$p['sub']}: $key dropped from $was to {$p[$key]}";
+                }
+            }
+        }
+        $window = array_slice($pastGrowthKB, 0, self::GROWTH_WINDOW);
+        if ($growthKB === null) {
+            $skipped[] = 'growth was not measured';
+        } elseif (count($window) < self::GROWTH_MIN_SAMPLES) {
+            $skipped[] = 'fewer than ' . self::GROWTH_MIN_SAMPLES . ' earlier growth values, so the growth check was skipped';
+        } else {
+            sort($window);
+            $n      = count($window);
+            $median = intdiv($window[intdiv($n - 1, 2)] + $window[intdiv($n, 2)], 2);
+            $limit  = max(self::GROWTH_FACTOR * $median, self::GROWTH_MIN_KB);
+            if ($growthKB > $limit) {
+                $suspect[] = "the filesystem grew by $growthKB KB, more than the limit of $limit KB";
+            }
+        }
+        return ['suspect' => $suspect, 'skipped' => $skipped];
     }
 
     // --- rsync output -------------------------------------------------------

@@ -173,6 +173,21 @@ final class RunnerNotifyTest extends TestCase
             'did not start'           => [['state' => $F, 'exitCode' => 1, 'reason' => 'job-not-found'], 'alert', false],
             'scheduled run skipped'   => [['state' => $F, 'exitCode' => 0, 'reason' => 'already-running', 'trigger' => 'schedule'], 'warning', false],
             'crashed'                 => [['state' => $F, 'exitCode' => 1, 'reason' => 'crashed'], 'alert', false],
+            // Snapshot mode (§4.4): alert reasons always alert, warning reasons warn unless FAILED.
+            'snapshot preflight'      => [['state' => $F, 'exitCode' => 1, 'reason' => 'snapshot-preflight'], 'alert', false],
+            'snapshot clock'          => [['state' => $F, 'exitCode' => 1, 'reason' => 'snapshot-clock'], 'alert', false],
+            'snapshot mkstamp'        => [['state' => $F, 'exitCode' => 1, 'reason' => 'snapshot-mkstamp-failed'], 'alert', false],
+            'not committed, partial'  => [['state' => $P, 'exitCode' => 23, 'exitCodes' => [23], 'reason' => 'snapshot-not-committed'], 'alert', false],
+            'not committed, timeout'  => [['state' => $T, 'exitCode' => 30, 'exitCodes' => [30], 'reason' => 'snapshot-not-committed'], 'alert', false],
+            'commit failed'           => [['state' => $F, 'exitCode' => 1, 'exitCodes' => [0], 'reason' => 'snapshot-commit-failed'], 'alert', false],
+            'suspect'                 => [['state' => $W, 'exitCode' => 0, 'exitCodes' => [0], 'reason' => 'snapshot-suspect'], 'alert', false],
+            'prune sanity'            => [['state' => $W, 'exitCode' => 0, 'exitCodes' => [0], 'reason' => 'prune-sanity'], 'alert', false],
+            'held'                    => [['state' => $W, 'exitCode' => 0, 'exitCodes' => [0], 'reason' => 'snapshot-held'], 'warning', false],
+            'held, exit 24'           => [['state' => $W, 'exitCode' => 24, 'exitCodes' => [24], 'reason' => 'snapshot-held'], 'warning', false],
+            'prune backlog'           => [['state' => $W, 'exitCode' => 0, 'exitCodes' => [0], 'reason' => 'prune-backlog'], 'warning', false],
+            'prune failed'            => [['state' => $W, 'exitCode' => 0, 'exitCodes' => [0], 'reason' => 'prune-failed'], 'warning', false],
+            'prune failed, manual abort' => [['state' => $A, 'exitCode' => 143, 'exitCodes' => [143], 'trigger' => 'manual', 'reason' => 'prune-failed'], 'warning', false],
+            'warning reason on FAILED' => [['state' => $F, 'exitCode' => 12, 'exitCodes' => [12], 'reason' => 'prune-failed'], 'alert', false],
         ];
     }
 
