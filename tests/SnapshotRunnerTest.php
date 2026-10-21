@@ -362,7 +362,7 @@ final class SnapshotRunnerTest extends TestCase
         $this->assertArrayNotHasKey('reason', $res);
         $this->assertSame([
             'marker', 'helper:probe', 'helper:check', 'helper:list', 'readable',
-            "helper:delete:$old.deleting", "helper:delete:$old.inprogress",
+            "helper:delete:$old.deleting", "helper:delete:$old.inprogress", 'helper:check',
             'hook:PRE', 'helper:mkstamp', 'rsync:a', 'rsync:b', 'helper:check', 'helper:commit', 'hook:POST',
             'helper:list', 'helper:delete:' . $this->stamp(3), 'helper:delete:' . $this->stamp(2),
         ], $this->trace);
@@ -401,7 +401,7 @@ final class SnapshotRunnerTest extends TestCase
         $this->assertTrue($h['committed']);
         $this->assertFalse($h['suspect']);
         $this->assertSame(2, $h['pruned']);
-        $this->assertArrayNotHasKey('growthKB', $h, 'cleanup freed space, so growth was not measured');
+        $this->assertSame(1000, $h['growthKB'], 'measured from the free space read again after cleanup');
         $summary = Runner::readSummary(self::JOB);
         $this->assertSame($stamp, $summary['snapshot']);
         $this->assertTrue($summary['committed']);
@@ -850,6 +850,70 @@ final class SnapshotRunnerTest extends TestCase
         $this->assertSame('normal', $this->importance());
     }
 
+    /** @return array<string,array{0:string,1:int,2:array<int,string>}> op, which call of it, helper calls made */
+    public static function killedHelperProvider(): array
+    {
+        return [
+            'probe'               => ['probe', 1, ['helper:probe']],
+            'mkstamp'             => ['mkstamp', 1, ['helper:probe', 'helper:check', 'helper:list', 'helper:mkstamp']],
+            'check after pairs'   => ['check', 2, ['helper:probe', 'helper:check', 'helper:list', 'helper:mkstamp', 'helper:check']],
+            'hold'                => ['hold', 1, ['helper:probe', 'helper:check', 'helper:list', 'helper:mkstamp', 'helper:check', 'helper:hold']],
+            'commit'              => ['commit', 1, ['helper:probe', 'helper:check', 'helper:list', 'helper:mkstamp', 'helper:check', 'helper:commit']],
+        ];
+    }
+
+    /**
+     * Abort SIGTERMs the runner's process group, so the helper's ssh dies
+     * with it: the call fails with 143. That is an abort, not a failure.
+     *
+     * @param array<int,string> $calls
+     */
+    #[DataProvider('killedHelperProvider')]
+    public function testAHelperCallKilledByAbortIsAnAbortNotAFailure(string $op, int $nth, array $calls): void
+    {
+        $this->saveJob();
+        // Only the hold case is suspect (a halved file count).
+        $this->seedSnapshot($this->stamp(1), meta: ['subs' => $op === 'hold' ? ['a' => ['files' => 1000, 'bytes' => 1]] : []]);
+        $orig = Snapshot::$remoteRunner;
+        $seen = 0;
+        Snapshot::$remoteRunner = function (array $argv, ?array $env, int $t, ?callable $s) use ($orig, $op, $nth, &$seen): array {
+            if (str_contains((string) end($argv), "'ur-snapshot' '$op'") && ++$seen === $nth) {
+                $this->trace[] = "helper:$op";
+                RunState::requestAbort(self::JOB);
+                return ['exit' => 143, 'stdout' => '', 'stderr' => ''];
+            }
+            return $orig($argv, $env, $t, $s);
+        };
+        $res = $this->runJob();
+        $this->assertSame(Rsync::STATE_ABORTED, $res['state'], $this->log($res));
+        $this->assertSame(143, $res['exitCode']);
+        $this->assertArrayNotHasKey('reason', $res);
+        $this->assertSame($calls, $this->helperCalls());
+        $this->assertSame($op === 'probe', !in_array('hook:PRE', $this->trace, true), 'no pre-hook after an abort in preflight');
+        $this->assertContains('hook:POST', $this->trace);
+        $this->assertSame('normal', $this->importance());
+    }
+
+    public function testGrowthIsNotMeasuredWhenTheFreeSpaceCannotBeReadAfterCleanup(): void
+    {
+        $this->saveJob();
+        $this->seedSnapshot($this->stamp(1), meta: ['subs' => []]);
+        $this->rx['dirs'][$this->stamp(3) . '.deleting'] = ['keep' => false, 'meta' => null, 'subs' => []];
+        $orig = Snapshot::$remoteRunner;
+        $checks = 0;
+        Snapshot::$remoteRunner = function (array $argv, ?array $env, int $t, ?callable $s) use ($orig, &$checks): array {
+            if (str_contains((string) end($argv), "'check'") && ++$checks === 2) {
+                return ['exit' => 255, 'stdout' => '', 'stderr' => "ssh: connection reset\n"];
+            }
+            return $orig($argv, $env, $t, $s);
+        };
+        $res = $this->runJob();
+        $this->assertSame(Rsync::STATE_SUCCESS, $res['state']);
+        $this->assertArrayNotHasKey('growthKB', $this->lastHistory());
+        $this->assertStringContainsString('Growth will not be measured: the free space could not be read again after cleanup.', $this->log($res));
+        $this->assertStringContainsString('Anomaly check: growth was not measured.', $this->log($res));
+    }
+
     /** @return array<string,array{0:int}> */
     public static function rsyncAbortProvider(): array
     {
@@ -880,6 +944,28 @@ final class SnapshotRunnerTest extends TestCase
         $res = $this->runJob();
         $this->assertSame('snapshot-suspect', $res['reason']);
         $this->assertStringContainsString('the filesystem grew by ' . (Snapshot::GROWTH_MIN_KB + 2) . ' KB', $this->log($res));
+    }
+
+    public function testRunawayGrowthIsStillCaughtAfterCleanupFreedSpace(): void
+    {
+        $this->saveJob();
+        $this->seedSnapshot($this->stamp(1), meta: ['subs' => []]);
+        $this->rx['dirs'][$this->stamp(3) . '.deleting'] = ['keep' => false, 'meta' => null, 'subs' => []];
+        foreach ([100, 200, 300] as $kb) {
+            History::append(self::JOB, ['startedAt' => '2026-10-01T00:00:00Z', 'state' => 'SUCCESS', 'snapshot' => 'x', 'committed' => true, 'growthKB' => $kb]);
+        }
+        $orig = Snapshot::$remoteRunner;
+        Snapshot::$remoteRunner = function (array $argv, ?array $env, int $t, ?callable $s) use ($orig): array {
+            $r = $orig($argv, $env, $t, $s);
+            if (str_contains((string) end($argv), "'delete'")) {
+                $this->rx['df'][1] -= 10000000;
+            }
+            return $r;
+        };
+        $this->transferKB = intdiv(Snapshot::GROWTH_MIN_KB + 2, 2);
+        $res = $this->runJob();
+        $this->assertSame('snapshot-suspect', $res['reason'], 'the 10 GB cleanup freed does not hide the growth');
+        $this->assertSame(Snapshot::GROWTH_MIN_KB + 2, $this->lastHistory()['growthKB']);
     }
 
     // --- dry run ------------------------------------------------------------------------

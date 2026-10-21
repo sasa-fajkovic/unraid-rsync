@@ -386,9 +386,12 @@ class Runner
             if ($state !== Rsync::STATE_FAILED) {
                 $preflight = self::preflight($job, $config, $transport, $opts, $sshPieces, $userHost, $runLog, $jobId);
                 if ($preflight === '' && $sn !== null) {
-                    $preflight = self::snapshotPreflight($sn, $job, $opts, $sshPieces, $runLog, $jobId);
+                    $preflight = self::abortedOr(self::snapshotPreflight($sn, $job, $opts, $sshPieces, $runLog, $jobId), $jobId);
                 }
-                if ($preflight !== '') {
+                if ($preflight === 'aborted') {
+                    $state    = Rsync::STATE_ABORTED;
+                    $exitCode = 143;
+                } elseif ($preflight !== '') {
                     $state    = Rsync::STATE_FAILED;
                     $exitCode = 1;
                     $reason   = $preflight;
@@ -397,11 +400,11 @@ class Runner
 
             // 5b'. Snapshot cleanup, before the pre-hook so it stays out of the
             //      service-downtime window. Never fails the run.
-            if ($state !== Rsync::STATE_FAILED && $sn !== null && !$dryRun) {
+            if ($state === Rsync::STATE_SUCCESS && $sn !== null && !$dryRun) {
                 self::snapshotCleanup($sn, $reason, $runLog, $jobId);
             }
 
-            // 5c. preHook (only if nothing above failed).
+            // 5c. preHook (only if nothing above failed or was aborted).
             $hookEnvBase = self::hookEnv(
                 $job,
                 $jobId,
@@ -411,7 +414,7 @@ class Runner
                 $trigger,
                 $snap !== null ? ['UR_SNAPSHOT' => $stamp, 'UR_SNAPSHOT_STATUS' => ''] : []
             );
-            if ($state !== Rsync::STATE_FAILED) {
+            if ($state !== Rsync::STATE_FAILED && $state !== Rsync::STATE_ABORTED) {
                 $preHook = (string) ($job['preHook'] ?? '');
                 if (trim($preHook) !== '') {
                     $preMin = Config::hookTimeoutMinutes($global, 'preHookTimeout');
@@ -442,11 +445,16 @@ class Runner
             }
 
             // 5d. Snapshot: create <stamp>.inprogress (real runs only).
-            if ($state !== Rsync::STATE_FAILED && $sn !== null && !$dryRun) {
+            if ($state === Rsync::STATE_SUCCESS && $sn !== null && !$dryRun) {
                 if (self::snapshotCall($sn, 'mkstamp', [$stamp], $runLog, $jobId, Snapshot::HELPER_TIMEOUT_SEC) === null) {
-                    $state    = Rsync::STATE_FAILED;
-                    $exitCode = 1;
-                    $reason   = 'snapshot-mkstamp-failed';
+                    if (self::abortedOr('snapshot-mkstamp-failed', $jobId) === 'aborted') {
+                        $state    = Rsync::STATE_ABORTED;
+                        $exitCode = 143;
+                    } else {
+                        $state    = Rsync::STATE_FAILED;
+                        $exitCode = 1;
+                        $reason   = 'snapshot-mkstamp-failed';
+                    }
                 } else {
                     $sn['mkstamped'] = true;
                     Logger::event($runLog, $jobId, "Created $stamp.inprogress.");
@@ -454,7 +462,7 @@ class Runner
             }
 
             // 6. Pairs: check abort, build argv, run rsync.
-            if ($state !== Rsync::STATE_FAILED) {
+            if ($state !== Rsync::STATE_FAILED && $state !== Rsync::STATE_ABORTED) {
                 $logLevel = (string) ($job['logLevel'] ?? 'normal');
                 $pairResults = [];
                 if ($sn !== null) {
@@ -1506,6 +1514,15 @@ class Runner
         }
     }
 
+    /**
+     * Abort SIGTERMs the runner's process group, ssh included, so a helper
+     * call it interrupts fails: that is the abort, not $failure.
+     */
+    private static function abortedOr(string $failure, string $jobId): string
+    {
+        return ($failure !== '' && RunState::abortRequested($jobId)) ? 'aborted' : $failure;
+    }
+
     /** A clean run that set a non-failing snapshot reason ends as WARNING. */
     private static function snapshotWarnState(string $state, string $reason): string
     {
@@ -1540,7 +1557,6 @@ class Runner
             'stale'     => '',
             'cleanup'   => [],
             'dfBefore'  => null,
-            'cleaned'   => 0,
             'mkstamped' => false,
             'committed' => false,
             'suspect'   => false,
@@ -1739,7 +1755,14 @@ class Runner
             self::setReason($reason, 'snapshot-held');
             return;
         }
-        $sn['cleaned'] = self::snapshotDelete($sn, $sn['cleanup'], 'Cleanup', $reason, $runLog, $jobId);
+        if (self::snapshotDelete($sn, $sn['cleanup'], 'Cleanup', $reason, $runLog, $jobId) > 0) {
+            // The space cleanup freed would hide the transfer's growth.
+            $check          = self::snapshotCall($sn, 'check', [], $runLog, $jobId, Snapshot::HELPER_TIMEOUT_SEC);
+            $sn['dfBefore'] = $check['df'] ?? null;
+            if ($check === null) {
+                Logger::event($runLog, $jobId, 'Growth will not be measured: the free space could not be read again after cleanup.');
+            }
+        }
     }
 
     /**
@@ -1849,15 +1872,10 @@ class Runner
         $check = self::snapshotCall($sn, 'check', [], $runLog, $jobId, Snapshot::HELPER_TIMEOUT_SEC);
         if ($check === null) {
             Logger::event($runLog, $jobId, "Snapshot $stamp was not committed; $stamp.inprogress is kept for the next run.");
-            return 'snapshot-commit-failed';
+            return self::abortedOr('snapshot-commit-failed', $jobId);
         }
 
-        $growth = null;
-        if ($sn['cleaned'] > 0) {
-            Logger::event($runLog, $jobId, 'Growth was not measured: cleanup freed space before the transfer.');
-        } else {
-            $growth = $check['df']['used'] - $sn['dfBefore']['used'];
-        }
+        $growth = is_array($sn['dfBefore']) ? $check['df']['used'] - $sn['dfBefore']['used'] : null;
         $a = Snapshot::anomalies($pairResults, $sn['prevMeta'], $growth, self::pastGrowthKB($jobId));
         foreach ($a['skipped'] as $s) {
             Logger::event($runLog, $jobId, "Anomaly check: $s.");
@@ -1873,7 +1891,7 @@ class Runner
             if (self::snapshotCall($sn, 'hold', [$stamp], $runLog, $jobId, Snapshot::HELPER_TIMEOUT_SEC) === null
                 || ($sn['prev'] !== '' && self::snapshotCall($sn, 'pin', [$sn['prev']], $runLog, $jobId, Snapshot::HELPER_TIMEOUT_SEC) === null)) {
                 Logger::event($runLog, $jobId, "Snapshot $stamp was not committed because it could not be protected; $stamp.inprogress is kept for the next run.");
-                return 'snapshot-commit-failed';
+                return self::abortedOr('snapshot-commit-failed', $jobId);
             }
         }
         // Commit is not stoppable, so an Abort that arrived after the last pair
@@ -1897,7 +1915,7 @@ class Runner
         if (!is_string($meta)
             || self::snapshotCall($sn, 'commit', [$stamp, base64_encode($meta)], $runLog, $jobId, Snapshot::COMMIT_TIMEOUT_SEC) === null) {
             Logger::event($runLog, $jobId, "Snapshot $stamp was not committed; $stamp.inprogress is kept for the next run.");
-            return 'snapshot-commit-failed';
+            return self::abortedOr('snapshot-commit-failed', $jobId);
         }
         $sn['committed'] = true;
         $sn['growthKB']  = $growth;
