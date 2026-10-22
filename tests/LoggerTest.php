@@ -962,14 +962,151 @@ final class LoggerTest extends TestCase
         $this->assertStringContainsString('2%', $lines[1], "a new pair's first redraw must land");
     }
 
-    public function testPluginLogIsNotSizeCapped(): void
+    public function testPluginLogRotatesToOneGenerationPastOneMiB(): void
     {
-        // The cap applies only to per-run logs; plugin.log is the rolling
-        // cross-job log (bounded on READ by tail()), so appendCapped must pass it
-        // through. append() creates the dir itself. A 1 MiB line must land in
-        // full (the run-log cap must NOT bound plugin.log).
-        $big = str_repeat('p', 1024 * 1024); // 1 MiB
-        Logger::append(Logger::pluginLogPath(), $big);
-        $this->assertGreaterThanOrEqual(1024 * 1024, filesize(Logger::pluginLogPath()));
+        $plugin = Logger::pluginLogPath();
+        // The run-log cap does not truncate plugin.log; rotation bounds it.
+        Logger::append($plugin, str_repeat('p', Logger::PLUGIN_LOG_MAX_BYTES));
+        $this->assertGreaterThan(Logger::PLUGIN_LOG_MAX_BYTES, filesize($plugin));
+
+        $this->assertTrue(Logger::event('', 'j-a', 'after the first rotation'));
+        $this->assertFileExists($plugin . '.1');
+        $this->assertGreaterThan(Logger::PLUGIN_LOG_MAX_BYTES, filesize($plugin . '.1'));
+        $this->assertStringContainsString('[j-a] after the first rotation', (string) file_get_contents($plugin));
+        $this->assertLessThan(200, filesize($plugin));
+
+        // One generation only: the next rotation replaces plugin.log.1.
+        Logger::append($plugin, str_repeat('q', Logger::PLUGIN_LOG_MAX_BYTES));
+        Logger::event('', 'j-b', 'after the second rotation');
+        $old = (string) file_get_contents($plugin . '.1');
+        $this->assertStringContainsString('after the first rotation', $old);
+        $this->assertStringNotContainsString('ppp', $old);
+        $this->assertSame([], glob($plugin . '.2*') ?: []);
+        $this->assertStringContainsString('[j-b] after the second rotation', (string) file_get_contents($plugin));
+    }
+
+    public function testPluginLogIsNotRotatedUnderOneMiB(): void
+    {
+        Logger::event('', 'j-a', 'one');
+        Logger::event('', 'j-a', 'two');
+        $this->assertFileDoesNotExist(Logger::pluginLogPath() . '.1');
+        $this->assertSame(2, substr_count((string) file_get_contents(Logger::pluginLogPath()), '[j-a]'));
+    }
+
+    public function testEventReportsAnUnwritablePluginLog(): void
+    {
+        Logger::event('', 'j-a', 'creates the dir');
+        $plugin = Logger::pluginLogPath();
+        unlink($plugin);
+        mkdir($plugin); // a directory where the file should be: every append fails
+        try {
+            $this->assertFalse(Logger::event('', 'j-a', 'lost'));
+        } finally {
+            rmdir($plugin);
+        }
+    }
+
+    public function testSameSecondRunGetsASuffixInsteadOfTruncatingTheFirst(): void
+    {
+        $first = Logger::openRun('j-same', 1750000000);
+        Logger::append($first, 'first run');
+        $second = Logger::openRun('j-same', 1750000000);
+        $third  = Logger::openRun('j-same', 1750000000);
+
+        $this->assertSame('run-20250615T150640Z.log', basename($first));
+        $this->assertSame('run-20250615T150640Z-2.log', basename($second));
+        $this->assertSame('run-20250615T150640Z-3.log', basename($third));
+        $this->assertSame("first run\n", file_get_contents($first), 'the first run log is not truncated');
+        $this->assertSame(0600, fileperms($second) & 0777);
+
+        $ids = array_column(Logger::listRuns('j-same', 0, fn() => null), 'id');
+        $this->assertSame([basename($third), basename($second), basename($first)], $ids);
+        $this->assertSame(basename($third), basename(Logger::latestRunLogPath('j-same')));
+        $this->assertSame(realpath($second), Logger::runLogPathById('j-same', 'run-20250615T150640Z-2'));
+    }
+
+    public function testSuffixContinuesPastAPrunedPlainLog(): void
+    {
+        $first  = Logger::openRun('j-same', 1750000000);
+        $second = Logger::openRun('j-same', 1750000000);
+        unlink($first);
+        $this->assertSame('run-20250615T150640Z-3.log', basename(Logger::openRun('j-same', 1750000000)));
+        $this->assertFileExists($second);
+    }
+
+    public function testExternalAppendsPastTheCapStopOurWrites(): void
+    {
+        Logger::$maxRunLogBytesOverride = 1024;
+        $path = Logger::openRun('j-cap', 1750000000);
+        // rsync's --log-file fd, not Logger, pushed the file over the cap.
+        file_put_contents($path, str_repeat('r', 2000), FILE_APPEND);
+        Logger::append($path, 'ours');
+        $body = (string) file_get_contents($path);
+        $this->assertStringNotContainsString('ours', $body);
+        $this->assertSame(1, substr_count($body, Logger::TRUNCATE_MARKER_PREFIX));
+    }
+
+    public function testEventAndAppendReturnFalseWhenThePluginLogLockIsUnusable(): void
+    {
+        Logger::event('', 'j-a', 'creates the dir');
+        $lock = Logger::pluginLogPath() . '.lock';
+        @unlink($lock);
+        mkdir($lock);
+        try {
+            $this->assertFalse(Logger::event('', 'j-a', 'no lock'));
+        } finally {
+            rmdir($lock);
+        }
+        Logger::$logsDirOverride = '/dev/null/not-a-dir';
+        $this->assertFalse(Logger::append(Logger::pluginLogPath(), 'no dir'));
+    }
+
+    public function testEnforceRunLogCapReportsWhetherTheTrimFailed(): void
+    {
+        Logger::$maxRunLogBytesOverride = 1024;
+        $path = Logger::openRun('j-trimfail', 1750000000);
+        Logger::enforceRunLogCap($path, $failed);
+        $this->assertFalse($failed, 'nothing to trim is not a failure');
+
+        file_put_contents($path, str_repeat('x', 3000));
+        $this->assertTrue(Logger::enforceRunLogCap($path, $failed));
+        $this->assertFalse($failed);
+
+        file_put_contents($path, str_repeat('x', 3000), FILE_APPEND);
+        chmod($path, 0400);
+        try {
+            if (is_writable($path)) {
+                $this->markTestSkipped('cannot make a file read-only as the current user');
+            }
+            $this->assertFalse(Logger::enforceRunLogCap($path, $failed));
+            $this->assertTrue($failed);
+        } finally {
+            chmod($path, 0600);
+        }
+    }
+
+    public function testTrimWhileAnAppendWriterHoldsTheLogOpen(): void
+    {
+        Logger::$maxRunLogBytesOverride = 1024;
+        $path = Logger::openRun('j-live', 1750000000);
+        // rsync opens --log-file with fopen("a"): O_APPEND.
+        $rsync = fopen($path, 'ab');
+        fwrite($rsync, str_repeat("line\n", 600)); // 3000 bytes
+        fflush($rsync);
+        $this->assertTrue(Logger::enforceRunLogCap($path));
+        clearstatcache(true, $path);
+        $trimmed = filesize($path);
+        $this->assertLessThanOrEqual(1024 + 64, $trimmed);
+
+        fwrite($rsync, "after the trim\n");
+        fflush($rsync);
+        clearstatcache(true, $path);
+        $body = (string) file_get_contents($path);
+        $this->assertSame($trimmed + strlen("after the trim\n"), filesize($path), 'no hole: the next line lands at the new end');
+        $this->assertStringEndsWith("]\nafter the trim\n", $body);
+
+        Logger::enforceRunLogCap($path);
+        fclose($rsync);
+        $this->assertSame($trimmed, filesize($path), 'later lines past the marker are cut again');
     }
 }

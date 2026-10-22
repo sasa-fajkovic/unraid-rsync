@@ -255,6 +255,7 @@ class Rsync
     const STATE_ABORTED = 'ABORTED';
     const STATE_FAILED  = 'FAILED';
     const STATE_PENDING = 'PENDING';   // never run; represented by NO summary.
+    const STATE_SKIPPED = 'SKIPPED';   // a scheduled run that found the job still running; History only.
 
     /**
      * Resolve the EFFECTIVE rsync options for a job: when useGlobalDefaults is
@@ -745,23 +746,26 @@ class Rsync
      *        hands them to the ssh it spawns.
      * @param int|null $timeoutSec wall-clock deadline; past it the child is
      *        killed and 35 (RERR_CONTIMEOUT) returned. null = none (transfers).
+     * @param (callable():bool)|null $stopWhen polled at least once a second
+     *        while the child runs; true stops it (SIGTERM, SIGKILL 5 s later)
+     *        and returns its exit code.
      * @return int the process exit code (128+signal when terminated by a signal)
      */
-    public static function run(array $argv, ?callable $onOutput = null, ?array $env = null, ?int $timeoutSec = null): int
+    public static function run(array $argv, ?callable $onOutput = null, ?array $env = null, ?int $timeoutSec = null, ?callable $stopWhen = null): int
     {
         $sink = $onOutput ?? static function (string $_chunk): void {
             // default: discard (the run log is fed by rsync's own --log-file).
         };
 
         if (self::$runner !== null) {
-            return (self::$runner)($argv, $sink, $env, $timeoutSec);
+            return (self::$runner)($argv, $sink, $env, $timeoutSec, $stopWhen);
         }
-        return self::defaultRun($argv, $sink, $env, $timeoutSec);
+        return self::defaultRun($argv, $sink, $env, $timeoutSec, $stopWhen);
     }
 
     /**
      * Injectable process runner. null => use defaultRun (real proc_open).
-     * Signature: fn(array $argv, callable(string):void $onOutput, ?array $env, ?int $timeoutSec): int
+     * Signature: fn(array $argv, callable(string):void $onOutput, ?array $env, ?int $timeoutSec, ?callable $stopWhen): int
      *
      * @var callable|null
      */
@@ -777,7 +781,7 @@ class Rsync
      * @param callable(string):void     $onOutput
      * @param array<string,string>|null $env full child environment, or null to inherit
      */
-    private static function defaultRun(array $argv, callable $onOutput, ?array $env = null, ?int $timeoutSec = null): int
+    private static function defaultRun(array $argv, callable $onOutput, ?array $env = null, ?int $timeoutSec = null, ?callable $stopWhen = null): int
     {
         $descriptors = [
             0 => ['file', '/dev/null', 'r'],
@@ -795,14 +799,31 @@ class Rsync
         // than buffering until exit. The shared drain loop selects across stdout
         // and stderr (reading one to EOF first could deadlock). [ROB-01]
         $deadline = $timeoutSec !== null ? microtime(true) + $timeoutSec : null;
+        $stopped  = false;
         ProcIO::drainPipes(
             [1 => $pipes[1], 2 => $pipes[2]],
             static function (int $fd, string $chunk) use ($onOutput): void {
                 $onOutput($chunk);
             },
-            $deadline
+            $deadline,
+            $stopWhen === null ? null : static function () use ($stopWhen, &$stopped): bool {
+                return $stopped = (bool) $stopWhen();
+            }
         );
 
+        if ($stopped) {
+            @proc_terminate($proc);
+            $until = microtime(true) + 5;
+            // Keep the status that saw the exit: a later proc_get_status no
+            // longer reports the signal, and 143 would read as a plain 1.
+            while (!empty(($status = @proc_get_status($proc))['running'])) {
+                if (microtime(true) >= $until) {
+                    @proc_terminate($proc, 9);
+                }
+                usleep(20000);
+            }
+            return self::reapExitCode($proc, $status);
+        }
         if ($deadline !== null && self::waitOrKill($proc, $deadline)) {
             self::reapExitCode($proc);
             $onOutput("rsync did not finish within $timeoutSec seconds and was stopped.\n");
@@ -846,10 +867,12 @@ class Rsync
      * `signaled` + `termsig`.
      *
      * @param resource $proc
+     * @param array{signaled:bool,termsig:int,exitcode:int}|null $status the
+     *        status that already saw the exit, when the caller polled for it
      */
-    private static function reapExitCode($proc): int
+    private static function reapExitCode($proc, ?array $status = null): int
     {
-        $status = @proc_get_status($proc);
+        $status = $status ?? @proc_get_status($proc);
         $code   = proc_close($proc);
 
         if ($status['signaled']) {

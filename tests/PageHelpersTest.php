@@ -101,6 +101,7 @@ final class PageHelpersTest extends TestCase
     {
         $this->assertSame(['cls' => 'warning', 'label' => 'Timeout'], PageHelpers::state('timeout'));
         $this->assertSame(['cls' => 'pending', 'label' => 'Never run'], PageHelpers::state('PENDING'));
+        $this->assertSame(['cls' => 'pending', 'label' => 'Skipped'], PageHelpers::state('SKIPPED'));
         $this->assertSame(['cls' => 'pending', 'label' => 'Never run'], PageHelpers::state('SOMETHING-NEW'));
         $rsyncStates = array_filter(
             (new ReflectionClass(Rsync::class))->getConstants(),

@@ -1591,6 +1591,20 @@ PHPSTUB);
         // No deadline: the child's own exit code, as before.
         $this->assertSame(3, Rsync::run([$this->fakeRsync('exit(3);')]));
     }
+
+    public function testStopWhenIsPolledWhileASilentChildRunsAndStopsIt(): void
+    {
+        $polls   = 0;
+        $started = microtime(true);
+        $exit    = Rsync::run([$this->fakeRsync('sleep(45); exit(0);')], null, null, null, static function () use (&$polls): bool {
+            return ++$polls >= 2;
+        });
+        $this->assertSame(143, $exit, 'SIGTERM');
+        $this->assertSame(2, $polls);
+        $this->assertLessThan(10.0, microtime(true) - $started);
+
+        $this->assertSame(3, Rsync::run([$this->fakeRsync('exit(3);')], null, null, null, static fn(): bool => false));
+    }
 }
 
 /**

@@ -89,6 +89,27 @@ class Runner
      */
     public static $localLister = null;
 
+    /**
+     * How often, in seconds, a running pair trims its run log back to the cap
+     * (Logger::enforceRunLogCap) and checks the hard ceiling.
+     */
+    public static float $logCapCheckSec = 2.0;
+
+    /**
+     * Hard ceiling, as a multiple of the run-log cap: a pair is stopped with
+     * reason log-cap-exceeded only when a trim FAILED and the log is over it.
+     * A log that grew again after a successful trim is never stopped.
+     */
+    const LOG_CEILING_FACTOR = 4;
+
+    /**
+     * Injectable mid-pair trim: fn(string $runLog): bool, true when the trim
+     * failed. null => Logger::enforceRunLogCap.
+     *
+     * @var (callable(string):bool)|null
+     */
+    public static $logTrimmer = null;
+
     /** Resolve our own pid (overridable for tests). */
     private static function pid(): int
     {
@@ -220,7 +241,7 @@ class Runner
             // tmpfs use stays bounded. Best-effort - a prune failure must never
             // fail the run.
             Logger::$retention = $retention;
-            Logger::pruneRuns($jobId);
+            Logger::pruneRuns($jobId, null, $runLog);
             RunState::clearAbort($jobId);
             $runState = [
                 'pid'        => self::pid(),
@@ -524,7 +545,9 @@ class Runner
                     Logger::event($runLog, $jobId, 'No source -> destination pairs configured; nothing to do.');
                 }
 
-                $aborted   = false;
+                $aborted     = false;
+                $cappedPairs = [];
+                $ceiling     = self::LOG_CEILING_FACTOR * Logger::maxRunLogBytes();
                 foreach ($pairs as $i => $pair) {
                     $n = (int) $i + 1;
 
@@ -580,10 +603,32 @@ class Runner
                         $partial = substr((string) array_pop($lines), -self::SNAPSHOT_CAPTURE_BYTES);
                         $missing = array_merge($missing, Snapshot::linkDestMissing(implode("\n", $lines)));
                     };
+                    // rsync's --log-file bypasses the sink's cap, so trim the
+                    // file while the pair runs, not only after it.
+                    $capHit   = false;
+                    $lastTrim = microtime(true);
+                    $stopWhen = static function () use ($runLog, $ceiling, &$capHit, &$lastTrim): bool {
+                        if (microtime(true) - $lastTrim < self::$logCapCheckSec) {
+                            return false;
+                        }
+                        $lastTrim = microtime(true);
+                        if (self::$logTrimmer !== null) {
+                            $failed = (bool) (self::$logTrimmer)($runLog);
+                        } else {
+                            Logger::enforceRunLogCap($runLog, $failed);
+                        }
+                        if (!$failed) {
+                            return false;
+                        }
+                        clearstatcache(true, $runLog);
+                        return $capHit = ((int) @filesize($runLog) > $ceiling);
+                    };
                     $pairExit = Rsync::run(
                         $argv,
                         $onOutput,
-                        Ssh::childEnv(is_array($sshPieces) ? $sshPieces['sshEnv'] : [])
+                        Ssh::childEnv(is_array($sshPieces) ? $sshPieces['sshEnv'] : []),
+                        null,
+                        $stopWhen
                     );
                     // The sink holds back progress redraws (5%/30s throttle) and
                     // any unterminated tail; rsync has exited, so land them.
@@ -600,6 +645,15 @@ class Runner
                     // exited and closed that fd.
                     Logger::redactRunLog($runLog);
                     $exitCodes[] = $pairExit;
+                    if ($capHit) {
+                        $cappedPairs[count($exitCodes) - 1] = true;
+                        self::setReason($reason, 'log-cap-exceeded');
+                        Logger::event($runLog, $jobId, sprintf(
+                            'Pair #%d stopped: its run log stayed over the %d MiB hard ceiling after trimming.',
+                            $n,
+                            intdiv($ceiling, 1024 * 1024)
+                        ));
+                    }
                     Logger::event($runLog, $jobId, "Pair #$n rsync exited with code $pairExit (" . Rsync::exitToState($pairExit) . ').');
                     if ($sn !== null) {
                         $missing       = array_merge($missing, Snapshot::linkDestMissing($partial));
@@ -622,9 +676,14 @@ class Runner
                     $state    = Rsync::STATE_ABORTED;
                     $exitCode = 143; // 128 + SIGTERM
                 } elseif ($state !== Rsync::STATE_FAILED) {
-                    $worst    = Rsync::worstOutcome($exitCodes);
+                    // A pair stopped at the log ceiling exits 143, which would
+                    // read as ABORTED; it is a WARNING (reason log-cap-exceeded).
+                    $worst    = Rsync::worstOutcome(array_values(array_diff_key($exitCodes, $cappedPairs)));
                     $state    = $worst['state'];
                     $exitCode = $worst['exitCode'];
+                    if ($cappedPairs !== [] && $state === Rsync::STATE_SUCCESS) {
+                        $state = Rsync::STATE_WARNING;
+                    }
                 }
 
                 // 6b. Snapshot completion gate (§4.1), then commit.
@@ -759,7 +818,7 @@ class Runner
                 'snapshot'  => !empty($sn['mkstamped']) ? $stamp : '',
                 'committed' => !empty($sn['committed']),
             ];
-            self::writeSummary($jobId, [
+            $summaryOk = self::writeSummary($jobId, [
                 'state'       => $state,
                 'startedAt'   => $startedAt,
                 'finishedAt'  => $finishedAt,
@@ -780,7 +839,7 @@ class Runner
             // jobName is snapshotted so the record survives a later rename/delete;
             // logRef is the run-log BASENAME only (resolves via getJobLog?run=).
             // Both calls are best-effort and never crash the run.
-            History::append($jobId, [
+            $historyOk = History::append($jobId, [
                 'startedAt'   => $startedAt,
                 'finishedAt'  => $finishedAt,
                 'jobName'     => (string) ($job['name'] ?? $jobId),
@@ -792,6 +851,10 @@ class Runner
                 'logRef'      => Logger::runIdFromPath($runLog),
                 'reason'      => $reason,
             ] + $snapFields);
+            self::reportPersistFailure($jobId, array_keys(array_filter([
+                'last-run summary' => !$summaryOk,
+                'History record'   => !$historyOk,
+            ])));
             RunState::clearInflight($jobId);
             History::prune($jobId, $retention);
 
@@ -865,7 +928,7 @@ class Runner
      * subject and "finished." lead (hard failures, crashed runs).
      *
      * notifyMode: off = never; always = every outcome; failure-only = every
-     * non-normal importance; success-only = normal importance except ABORTED.
+     * non-normal importance; success-only = normal importance except ABORTED and SKIPPED.
      * A dry run is gated the same way and marked "[Dry-run]".
      *
      * @param array<string,mixed> $job
@@ -923,7 +986,7 @@ class Runner
             case self::NOTIFY_ALWAYS:
                 return true;
             case self::NOTIFY_SUCCESS_ONLY:
-                return $normal && ($run['state'] ?? '') !== Rsync::STATE_ABORTED;
+                return $normal && !in_array($run['state'] ?? '', [Rsync::STATE_ABORTED, Rsync::STATE_SKIPPED], true);
             case self::NOTIFY_FAILURE_ONLY:
                 return !$normal;
             case self::NOTIFY_OFF:
@@ -936,7 +999,7 @@ class Runner
      * Importance by cause. Admins route these levels to agents, so they mean
      * alert = act now, warning = look today, normal = FYI:
      *   FAILED (incl. pre-hook failure/timeout, hard failures, crashes) => alert
-     *   a scheduled run skipped because the previous one still runs   => warning
+     *   SKIPPED (a scheduled run found the previous one still running) => normal
      *   PARTIAL, TIMEOUT                                                => warning
      *   a post-hook failure/timeout on any non-FAILED run               => warning
      *   ABORTED: scheduled => warning, manual => normal
@@ -958,8 +1021,10 @@ class Runner
         if ($state !== Rsync::STATE_FAILED && in_array($reason, self::SNAPSHOT_WARNING_REASONS, true)) {
             return Notify::IMPORTANCE_WARNING;
         }
-        if ($reason === 'already-running'
-            || ($state !== Rsync::STATE_FAILED && in_array($reason, ['posthook-failed', 'posthook-timeout'], true))) {
+        if ($state === Rsync::STATE_SKIPPED) {
+            return Notify::IMPORTANCE_NORMAL;
+        }
+        if ($state !== Rsync::STATE_FAILED && in_array($reason, ['posthook-failed', 'posthook-timeout'], true)) {
             return Notify::IMPORTANCE_WARNING;
         }
         switch ($state) {
@@ -1000,7 +1065,9 @@ class Runner
         if ($reason !== '') {
             $parts[] = 'Reason: ' . $reason . '.';
         }
-        $parts[] = 'Exit code: ' . self::exitCodeText($run) . '.';
+        if (($run['state'] ?? '') !== Rsync::STATE_SKIPPED) {
+            $parts[] = 'Exit code: ' . self::exitCodeText($run) . '.';
+        }
         $parts[] = 'Duration: ' . ($duration === null ? 'unknown' : self::formatDuration((int) $duration)) . '.';
         $parts[] = 'Trigger: ' . ((($run['trigger'] ?? '') === 'schedule') ? 'schedule' : 'manual') . '.';
         $parts[] = 'Dry-run: ' . ($dryRun ? 'yes' : 'no') . '.';
@@ -1644,7 +1711,7 @@ class Runner
      */
     private static function setReason(string &$reason, string $new): void
     {
-        $warning = array_merge(self::SNAPSHOT_WARNING_REASONS, ['posthook-failed', 'posthook-timeout']);
+        $warning = array_merge(self::SNAPSHOT_WARNING_REASONS, ['posthook-failed', 'posthook-timeout', 'log-cap-exceeded']);
         if ($reason === '' || (in_array($new, self::SNAPSHOT_ALERT_REASONS, true) && in_array($reason, $warning, true))) {
             $reason = $new;
         }
@@ -2378,16 +2445,17 @@ class Runner
 
     /**
      * Persist the compact last-run summary to /boot (durable across reboot) at
-     * <UR_CONFIG_BASE>/runs/<jobid>.summary.json. Atomic (temp + rename).
+     * <UR_CONFIG_BASE>/runs/<jobid>.summary.json via Util::writeAtomic. Never
+     * throws: a summary failure must not crash the run.
      *
      * @param array<string,mixed> $summary
+     * @return bool false when the summary could not be written
      */
-    public static function writeSummary(string $jobId, array $summary): void
+    public static function writeSummary(string $jobId, array $summary): bool
     {
         $dir = rtrim(UR_CONFIG_BASE, '/') . '/runs';
         if (!is_dir($dir) && !@mkdir($dir, 0755, true) && !is_dir($dir)) {
-            // A summary failure must not crash the run; log-best-effort + return.
-            return;
+            return false;
         }
         $clean = Util::safeFileId($jobId);
         $path  = $dir . '/' . $clean . '.summary.json';
@@ -2408,20 +2476,38 @@ class Runner
         }
         $json = json_encode($out, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
         if ($json === false) {
+            return false;
+        }
+        try {
+            Util::writeAtomic($path, $json . "\n", 0644);
+        } catch (Throwable $e) {
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * Log ONE plugin.log line naming what of a run's outcome could not be
+     * persisted ($what empty = nothing failed). Never throws: the log dir may be
+     * the thing that is broken, so error_log is the last resort.
+     *
+     * @param array<int,string> $what
+     */
+    private static function reportPersistFailure(string $jobId, array $what): void
+    {
+        if ($what === []) {
             return;
         }
-        $tmp = @tempnam($dir, '.summary.');
-        if ($tmp === false) {
-            return;
+        $msg = 'Could not write the ' . implode(' and ', $what) . ' to '
+            . rtrim(UR_CONFIG_BASE, '/') . "/runs; this run's outcome may be missing from the UI.";
+        try {
+            if (Logger::event('', $jobId, $msg)) {
+                return;
+            }
+        } catch (Throwable $e) {
+            // fall through to error_log
         }
-        if (@file_put_contents($tmp, $json . "\n") === false) {
-            @unlink($tmp);
-            return;
-        }
-        @chmod($tmp, 0644);
-        if (!@rename($tmp, $path)) {
-            @unlink($tmp);
-        }
+        error_log('unraid.rsync [' . $jobId . '] ' . $msg);
     }
 
     /**
@@ -2448,10 +2534,11 @@ class Runner
      * A hard, pre-run failure: nothing was started (no state/log to keep). Logs
      * to the plugin log, records a scheduled run in History (so the UI shows
      * the run that never happened), notifies, and returns a FAILED result.
-     * 'already-running' keeps its own reason so the handler can 409; started by
-     * hand it does not notify (the UI already said so), by the schedule it is a
-     * warning. A job that could not be read has no notifyMode to honour, so it
-     * always notifies - that is the case most worth hearing about.
+     * 'already-running' is SKIPPED instead, not a failure: it keeps its own
+     * reason so the handler can 409; started by hand it does not notify (the UI
+     * already said so), by the schedule it notifies at normal importance. A job
+     * that could not be read has no notifyMode to honour, so it always notifies
+     * - that is the case most worth hearing about.
      *
      * @param array<string,mixed>|null $job null = config/job unreadable
      * @return array{state:string,exitCode:int,runLog:string,reason:string}
@@ -2466,6 +2553,7 @@ class Runner
         int $retention = Config::DEFAULT_RETENTION
     ): array {
         $skipped  = $reason === 'already-running';
+        $state    = $skipped ? Rsync::STATE_SKIPPED : Rsync::STATE_FAILED;
         $exitCode = $skipped ? 0 : 1;
         $name     = (string) ($job['name'] ?? $jobId);
         try {
@@ -2476,24 +2564,25 @@ class Runner
 
         if ($trigger === 'schedule') {
             $now = gmdate('Y-m-d\TH:i:s\Z');
-            History::append($jobId, [
+            $ok  = History::append($jobId, [
                 'startedAt'   => $now,
                 'finishedAt'  => $now,
                 'jobName'     => $name,
                 'dryRun'      => $dryRun,
                 'trigger'     => $trigger,
-                'state'       => Rsync::STATE_FAILED,
+                'state'       => $state,
                 'exitCode'    => $exitCode,
                 'durationSec' => 0,
                 'logRef'      => '',
                 'reason'      => $reason,
             ]);
+            self::reportPersistFailure($jobId, $ok ? [] : ['History record']);
             History::prune($jobId, $retention);
         }
 
         if (!($skipped && $trigger === 'manual')) {
             self::notifyHook($job ?? ['id' => $jobId, 'name' => $jobId, 'notifyMode' => self::NOTIFY_ALWAYS], [
-                'state'       => Rsync::STATE_FAILED,
+                'state'       => $state,
                 'exitCode'    => $exitCode,
                 'reason'      => $reason,
                 'trigger'     => $trigger,
@@ -2507,7 +2596,7 @@ class Runner
         }
 
         return [
-            'state'    => Rsync::STATE_FAILED,
+            'state'    => $state,
             'exitCode' => $exitCode,
             'runLog'   => '',
             'reason'   => $reason,
@@ -2565,7 +2654,7 @@ class Runner
                 // An unwritable log must not swallow the record and the alert.
             }
 
-            History::append($jobId, [
+            $ok = History::append($jobId, [
                 'startedAt'   => $startedAt,
                 'finishedAt'  => gmdate('Y-m-d\TH:i:s\Z'),
                 'jobName'     => $name,
@@ -2577,6 +2666,7 @@ class Runner
                 'logRef'      => is_file($log) ? Logger::runIdFromPath($log) : '',
                 'reason'      => 'crashed',
             ]);
+            self::reportPersistFailure($jobId, $ok ? [] : ['History record']);
             History::prune($jobId, Config::clampRetention($config['global']['retention'] ?? Config::DEFAULT_RETENTION));
 
             self::notifyHook($job ?? ['id' => $jobId, 'name' => $jobId, 'notifyMode' => self::NOTIFY_ALWAYS], [

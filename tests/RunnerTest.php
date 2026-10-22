@@ -711,6 +711,7 @@ final class RunnerTest extends TestCase
         $this->assertSame(143, ur_runner_exit_code(Rsync::STATE_ABORTED));
         $this->assertSame(1, ur_runner_exit_code(Rsync::STATE_FAILED));
         $this->assertSame(1, ur_runner_exit_code(Rsync::STATE_TIMEOUT));
+        $this->assertSame(0, ur_runner_exit_code(Rsync::STATE_SKIPPED));
     }
 
     // =====================================================================
@@ -3084,5 +3085,212 @@ final class RunnerTest extends TestCase
         $log = (string) file_get_contents($res['runLog']);
         $this->assertLessThanOrEqual($cap + 40, strlen($log), 'pairs 2 and 3 must not grow the log past the cap');
         $this->assertSame(1, substr_count($log, Logger::TRUNCATE_MARKER_PREFIX));
+    }
+
+    /** The --log-file path a stub rsync was handed. */
+    private static function logFileArg(array $argv): string
+    {
+        foreach ($argv as $a) {
+            if (str_starts_with($a, '--log-file=')) {
+                return substr($a, 11);
+            }
+        }
+        return '';
+    }
+
+    public function testOneLongPairIsTrimmedWhileItRunsAndNotStopped(): void
+    {
+        $cap = 4096;
+        Logger::$maxRunLogBytesOverride = $cap;
+        Runner::$logCapCheckSec         = 0.0;
+        $maxSeen = 0;
+        // rsync appends to --log-file through an O_APPEND fd for the whole pair.
+        Rsync::$runner = static function (array $argv, $onOutput, $env = null, $timeout = null, ?callable $stopWhen = null) use (&$maxSeen): int {
+            $log = self::logFileArg($argv);
+            $fh  = fopen($log, 'ab');
+            for ($i = 0; $i < 200; $i++) {
+                fwrite($fh, str_repeat("a per-file line\n", 64)); // 1 KiB
+                fflush($fh);
+                if ($stopWhen !== null && $stopWhen()) {
+                    fclose($fh);
+                    return 143;
+                }
+                clearstatcache(true, $log);
+                $maxSeen = max($maxSeen, (int) filesize($log));
+            }
+            fclose($fh);
+            return 0;
+        };
+        try {
+            $res = Runner::run($this->saveLocalJob('j-longpair'), false);
+        } finally {
+            Logger::$maxRunLogBytesOverride = null;
+            Runner::$logCapCheckSec         = 2.0;
+        }
+
+        $this->assertSame(Rsync::STATE_SUCCESS, $res['state'], 'a healthy pair is never stopped');
+        $this->assertArrayNotHasKey('reason', $res);
+        // 200 KiB written; the file never held more than the cap, the marker and one 1 KiB write.
+        $this->assertLessThanOrEqual($cap + 1024 + 64, $maxSeen);
+        $this->assertSame(1, substr_count((string) file_get_contents($res['runLog']), Logger::TRUNCATE_MARKER_PREFIX));
+    }
+
+    public function testAPairWhoseLogCannotBeTrimmedStopsAtTheHardCeiling(): void
+    {
+        $probe = tempnam(sys_get_temp_dir(), 'ur-ro-');
+        chmod($probe, 0400);
+        $writable = is_writable($probe);
+        unlink($probe);
+        if ($writable) {
+            $this->markTestSkipped('cannot make a file read-only as the current user');
+        }
+
+        $cap = 1024;
+        Logger::$maxRunLogBytesOverride = $cap;
+        Runner::$logCapCheckSec         = 0.0;
+        $log   = '';
+        $calls = 0;
+        Rsync::$runner = static function (array $argv, $onOutput, $env = null, $timeout = null, ?callable $stopWhen = null) use (&$log, &$calls): int {
+            $calls++;
+            $log = self::logFileArg($argv);
+            chmod($log, 0600);
+            file_put_contents($log, str_repeat('x', 5 * 1024), FILE_APPEND);
+            chmod($log, 0400); // the trim cannot open it for writing
+            return ($stopWhen !== null && $stopWhen()) ? 143 : 0;
+        };
+        $plugin = Logger::pluginLogPath();
+        $before = is_file($plugin) ? (int) filesize($plugin) : 0;
+        try {
+            $id  = $this->saveLocalJob('j-ceiling', ['pairs' => [
+                ['local' => '/mnt/user/a/', 'remote' => '/mnt/disk1/a/'],
+                ['local' => '/mnt/user/b/', 'remote' => '/mnt/disk1/b/'],
+            ]]);
+            $res = Runner::run($id, false);
+        } finally {
+            Logger::$maxRunLogBytesOverride = null;
+            Runner::$logCapCheckSec         = 2.0;
+            if ($log !== '') {
+                chmod($log, 0600);
+            }
+        }
+
+        $this->assertSame(2, $calls, 'the next pair still runs');
+        $this->assertSame([Rsync::STATE_WARNING, 'log-cap-exceeded'], [$res['state'], $res['reason'] ?? '']);
+        $this->assertSame(['WARNING', 'log-cap-exceeded'], [History::list($id)['runs'][0]['state'], History::list($id)['runs'][0]['reason']]);
+        $tail = (string) file_get_contents($plugin, false, null, $before);
+        $this->assertStringContainsString('Pair #1 stopped: its run log stayed over the', $tail);
+        $this->assertStringContainsString('hard ceiling after trimming.', $tail);
+    }
+
+    public function testGrowthRightAfterASuccessfulTrimNeverStopsThePair(): void
+    {
+        $cap = 1024;
+        Logger::$maxRunLogBytesOverride = $cap;
+        Runner::$logCapCheckSec         = 0.0;
+        // The trim succeeds, then rsync appends far past the ceiling before
+        // PHP gets to look at the size again (descheduled after the truncate).
+        Runner::$logTrimmer = static function (string $path): bool {
+            Logger::enforceRunLogCap($path, $failed);
+            file_put_contents($path, str_repeat('y', 8 * 1024), FILE_APPEND);
+            return (bool) $failed;
+        };
+        $polls = 0;
+        Rsync::$runner = static function (array $argv, $onOutput, $env = null, $timeout = null, ?callable $stopWhen = null) use (&$polls): int {
+            file_put_contents(self::logFileArg($argv), str_repeat('x', 2048), FILE_APPEND);
+            for ($i = 0; $i < 3; $i++) {
+                $polls++;
+                if ($stopWhen !== null && $stopWhen()) {
+                    return 143;
+                }
+            }
+            return 0;
+        };
+        try {
+            $res = Runner::run($this->saveLocalJob('j-growth'), false);
+        } finally {
+            Logger::$maxRunLogBytesOverride = null;
+            Runner::$logCapCheckSec         = 2.0;
+            Runner::$logTrimmer             = null;
+        }
+        $this->assertSame(3, $polls);
+        $this->assertSame(Rsync::STATE_SUCCESS, $res['state'], 'a log that can still be trimmed is never stopped');
+        $this->assertArrayNotHasKey('reason', $res);
+    }
+
+    public function testAnUnusablePluginLogLockNeitherSkipsThePostHookNorTheRecord(): void
+    {
+        Rsync::$runner = fn(array $a, $o): int => 0;
+        $id = $this->saveLocalJob('j-nolock', ['postHook' => 'POST']);
+        Logger::event('', $id, 'make sure the logs dir exists');
+        $lock = Logger::pluginLogPath() . '.lock';
+        @unlink($lock);
+        mkdir($lock); // a directory: the lock file cannot be opened
+        try {
+            $res = Runner::run($id, false);
+        } finally {
+            rmdir($lock);
+        }
+        $this->assertSame(Rsync::STATE_SUCCESS, $res['state']);
+        $this->assertContains('hook:POST:SUCCESS', $this->trace, 'the post-hook still ran');
+        $this->assertSame('SUCCESS', Runner::readSummary($id)['state'] ?? null);
+        $this->assertSame('SUCCESS', History::list($id)['runs'][0]['state'] ?? null);
+    }
+
+    public function testASummaryOrHistoryWriteFailureIsLoggedOnce(): void
+    {
+        Rsync::$runner = fn(array $a, $o): int => 0;
+        $id      = $this->saveLocalJob('j-persistfail');
+        $runs    = rtrim(UR_CONFIG_BASE, '/') . '/runs';
+        $summary = $runs . '/' . $id . '.summary.json';
+        @mkdir($runs, 0755, true);
+        @unlink($summary);
+        mkdir($summary); // a directory where the summary file goes: the rename fails
+        mkdir(History::path($id));
+        $plugin = Logger::pluginLogPath();
+        $before = is_file($plugin) ? (int) filesize($plugin) : 0;
+        try {
+            Runner::run($id, false);
+        } finally {
+            rmdir($summary);
+            rmdir(History::path($id));
+        }
+        $tail = (string) file_get_contents($plugin, false, null, $before);
+        $this->assertSame(1, substr_count($tail, 'Could not write the last-run summary and History record to ' . $runs), $tail);
+    }
+
+    public function testAPersistFailureFallsBackToErrorLogWhenThePluginLogIsUnusable(): void
+    {
+        $id   = $this->saveLocalJob('j-persistfail2');
+        $held = RunState::acquireLock($id);
+        $errLog = tempnam(sys_get_temp_dir(), 'ur-errlog-');
+        $prev   = ini_set('error_log', $errLog);
+        Logger::event('', $id, 'make sure the logs dir exists');
+        $plugin = Logger::pluginLogPath();
+        rename($plugin, $plugin . '.keep');
+        mkdir($plugin);
+        mkdir(History::path($id));
+        try {
+            Runner::run($id, false, 'schedule');
+        } finally {
+            RunState::releaseLock($held);
+            rmdir($plugin);
+            rename($plugin . '.keep', $plugin);
+            rmdir(History::path($id));
+            ini_set('error_log', (string) $prev);
+        }
+        $err = (string) file_get_contents($errLog);
+        unlink($errLog);
+        $this->assertStringContainsString('unraid.rsync [' . $id . '] Could not write the History record to', $err);
+    }
+
+    public function testWriteSummaryIsAtomicAndByteIdentical(): void
+    {
+        $sum = ['state' => 'SUCCESS', 'startedAt' => '2026-01-01T00:00:00Z', 'finishedAt' => '2026-01-01T00:00:05Z',
+            'exitCode' => 0, 'durationSec' => 5, 'dryRun' => false, 'trigger' => 'manual'];
+        $this->assertTrue(Runner::writeSummary('j-sumfmt', $sum));
+        $path = rtrim(UR_CONFIG_BASE, '/') . '/runs/j-sumfmt.summary.json';
+        $this->assertSame(json_encode($sum, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n", file_get_contents($path));
+        $this->assertSame([], glob(dirname($path) . '/.j-sumfmt.summary.json.*') ?: [], 'no temp file left behind');
+        unlink($path);
     }
 }

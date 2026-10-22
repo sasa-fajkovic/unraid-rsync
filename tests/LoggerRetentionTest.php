@@ -210,7 +210,86 @@ final class LoggerRetentionTest extends TestCase
             'malformed stamp'      => ['run-2025-01-01.log'],
             'empty'                => [''],
             'subdir'               => ['sub/run-20250101T000000Z.log'],
+            'suffix 1'             => ['run-20250101T000000Z-1.log'],
+            'suffix 0'             => ['run-20250101T000000Z-0.log'],
+            'zero-padded suffix'   => ['run-20250101T000000Z-02.log'],
+            'suffix too long'      => ['run-20250101T000000Z-10000.log'],
+            'non-digit suffix'     => ['run-20250101T000000Z-a.log'],
+            'suffix traversal'     => ['run-20250101T000000Z-2/../../x.log'],
+            'suffix dotdot'        => ['run-20250101T000000Z-..log'],
+            'double suffix'        => ['run-20250101T000000Z-2-3.log'],
         ];
+    }
+
+    public function testRunLogPathByIdAcceptsASameSecondSuffix(): void
+    {
+        $this->assertSame(
+            $this->rtBase . '/logs/j-x/run-20250101T000000Z-12.log',
+            Logger::runLogPathById('j-x', 'run-20250101T000000Z-12')
+        );
+    }
+
+    public function testListAndPruneOrderSuffixesNumerically(): void
+    {
+        $jobId = 'j-suffix';
+        $dir   = $this->rtBase . '/logs/' . $jobId;
+        $this->seedRuns($jobId, 1, 1750000000);
+        foreach (['-2', '-10', '-9'] as $s) {
+            touch($dir . '/run-20250615T150640Z' . $s . '.log');
+        }
+        $this->seedRuns($jobId, 1, 1750000060);
+        $this->assertSame(
+            ['run-20250615T150740Z.log', 'run-20250615T150640Z-10.log', 'run-20250615T150640Z-9.log',
+             'run-20250615T150640Z-2.log', 'run-20250615T150640Z.log'],
+            array_column(Logger::listRuns($jobId, 0, fn() => null), 'id')
+        );
+
+        $this->assertSame(2, Logger::pruneRuns($jobId, 3));
+        $left = array_map('basename', glob($dir . '/run-*.log') ?: []);
+        sort($left);
+        $this->assertSame(['run-20250615T150640Z-10.log', 'run-20250615T150640Z-9.log', 'run-20250615T150740Z.log'], $left);
+    }
+
+    public function testPruneEnforcesThePerJobByteBudgetOldestFirst(): void
+    {
+        $jobId = 'j-bytes';
+        $paths = $this->seedRuns($jobId, 5, 1750000000);
+        foreach ($paths as $p) {
+            file_put_contents($p, str_repeat('x', 100));
+        }
+        Logger::$maxJobLogBytesOverride = 250;
+        try {
+            $this->assertSame(3, Logger::pruneRuns($jobId, 100));
+        } finally {
+            Logger::$maxJobLogBytesOverride = null;
+        }
+        foreach ($paths as $i => $p) {
+            $this->assertSame($i >= 3, is_file($p), basename($p));
+        }
+    }
+
+    public function testByteBudgetNeverDeletesTheNewestOrCurrentLog(): void
+    {
+        $jobId = 'j-huge';
+        $paths = $this->seedRuns($jobId, 3, 1750000000);
+        foreach ($paths as $p) {
+            file_put_contents($p, str_repeat('x', 1000));
+        }
+        Logger::$maxJobLogBytesOverride = 10;
+        try {
+            // $paths[0] is the run that just opened, under a clock stepped back.
+            Logger::pruneRuns($jobId, 1, $paths[0]);
+        } finally {
+            Logger::$maxJobLogBytesOverride = null;
+        }
+        $this->assertFileExists($paths[0], 'the current run log');
+        $this->assertFileExists($paths[2], 'the newest log');
+        $this->assertFileDoesNotExist($paths[1]);
+    }
+
+    public function testDefaultJobByteBudget(): void
+    {
+        $this->assertSame(256 * 1024 * 1024, Logger::maxJobLogBytes());
     }
 
     public function testLatestRunLogPath(): void

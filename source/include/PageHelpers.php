@@ -36,6 +36,7 @@ final class PageHelpers
         'TIMEOUT' => ['cls' => 'warning', 'label' => 'Timeout'],
         'FAILED'  => ['cls' => 'failed',  'label' => 'Failed'],
         'ABORTED' => ['cls' => 'aborted', 'label' => 'Aborted'],
+        'SKIPPED' => ['cls' => 'pending', 'label' => 'Skipped'],
         'PENDING' => ['cls' => 'pending', 'label' => 'Never run'],
     ];
 

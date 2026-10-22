@@ -20,6 +20,7 @@ final class HistoryTest extends TestCase
     {
         foreach ($this->ids as $id) {
             @unlink(History::path($id));
+            @unlink(dirname(History::path($id)) . '/' . $id . '.history.lock');
         }
         $this->ids = [];
     }
@@ -145,6 +146,100 @@ final class HistoryTest extends TestCase
         );
         $this->assertSame(['snapshot' => '', 'committed' => false, 'suspect' => false, 'pruned' => 0], array_slice($failed, 10), 'growthKB stays absent');
         $this->assertCount(10, $mirror, 'a mirror record keeps its shape');
+    }
+
+    public function testAppendAfterAPartialLastLineStillParses(): void
+    {
+        $id = $this->id('partial');
+        History::append($id, $this->rec(['exitCode' => 1]));
+        // Power loss mid-append: a record cut short, no trailing newline.
+        file_put_contents(History::path($id), '{"startedAt":"2026-06-14T12:', FILE_APPEND);
+        $this->assertTrue(History::append($id, $this->rec(['exitCode' => 2])));
+
+        $this->assertSame([2, 1], array_column(History::list($id, 0, 25)['runs'], 'exitCode'));
+        $this->assertStringEndsWith("12:\n" . json_encode(History::list($id, 0, 1)['runs'][0], JSON_UNESCAPED_SLASHES) . "\n", (string) file_get_contents(History::path($id)));
+    }
+
+    public function testAppendReportsFailure(): void
+    {
+        $id = $this->id('fail');
+        mkdir(History::path($id)); // a directory where the file should be
+        try {
+            $this->assertFalse(History::append($id, $this->rec()));
+        } finally {
+            rmdir(History::path($id));
+        }
+        $this->assertTrue(History::append($id, $this->rec()));
+    }
+
+    /**
+     * Start a child PHP process that runs $call against History and wait until
+     * it is about to call it.
+     *
+     * @param array<int,resource> $pipes
+     * @return resource
+     */
+    private function startChild(string $call, array &$pipes)
+    {
+        $child = sprintf(
+            'define("UR_CONFIG_BASE", %s); require %s; echo "ready\n"; %s; exit(0);',
+            var_export(UR_CONFIG_BASE, true),
+            var_export(realpath(__DIR__ . '/../source/include/History.php'), true),
+            $call
+        );
+        $proc = proc_open([PHP_BINARY, '-r', $child], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+        $this->assertIsResource($proc);
+        $this->assertSame("ready\n", fgets($pipes[1]));
+        usleep(300000); // time for the child to reach the lock (or, unlocked, to finish)
+        return $proc;
+    }
+
+    /** @param resource $proc @param array<int,resource> $pipes */
+    private function finishChild($proc, array $pipes): void
+    {
+        $err = stream_get_contents($pipes[2]);
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        $this->assertSame(0, proc_close($proc), (string) $err);
+    }
+
+    private function lockPath(string $id): string
+    {
+        return dirname(History::path($id)) . '/' . $id . '.history.lock';
+    }
+
+    public function testAppendWaitsForAPruneHoldingTheLockAndBothLand(): void
+    {
+        $id = $this->id('race-a');
+        for ($i = 1; $i <= 5; $i++) {
+            History::append($id, $this->rec(['exitCode' => $i]));
+        }
+        $proc  = null;
+        $pipes = [];
+        Util::withLock($this->lockPath($id), function () use ($id, &$proc, &$pipes): void {
+            $proc = $this->startChild(sprintf('History::append(%s, ["state" => "SUCCESS", "exitCode" => 99])', var_export($id, true)), $pipes);
+            $this->assertSame(5, History::list($id, 0, 25)['total'], 'the append waits for the lock holder');
+            History::prune($id, 3);
+        });
+        $this->finishChild($proc, $pipes);
+        $this->assertSame([99, 5, 4, 3], array_column(History::list($id, 0, 25)['runs'], 'exitCode'));
+    }
+
+    public function testPruneWaitsForTheLockAndKeepsAnAppendMadeMeanwhile(): void
+    {
+        $id = $this->id('race-p');
+        for ($i = 1; $i <= 5; $i++) {
+            History::append($id, $this->rec(['exitCode' => $i]));
+        }
+        $proc  = null;
+        $pipes = [];
+        Util::withLock($this->lockPath($id), function () use ($id, &$proc, &$pipes): void {
+            $proc = $this->startChild(sprintf('History::prune(%s, 3)', var_export($id, true)), $pipes);
+            $this->assertSame(5, History::list($id, 0, 25)['total'], 'the prune waits for the lock holder');
+            History::append($id, $this->rec(['exitCode' => 6]));
+        });
+        $this->finishChild($proc, $pipes);
+        $this->assertSame([6, 5, 4], array_column(History::list($id, 0, 25)['runs'], 'exitCode'));
     }
 
     public function testPureDotsJobIdCollapsesToUnknown(): void

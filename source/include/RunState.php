@@ -387,7 +387,7 @@ class RunState
     }
 
     /**
-     * Record on /boot that a run is in flight (atomic temp + rename). One small
+     * Record on /boot that a run is in flight (Util::writeAtomic). One small
      * flash write per run, removed when the run records its outcome. Best-effort:
      * the run goes on without it, as it does without its summary.
      *
@@ -411,12 +411,13 @@ class RunState
             $record['snapshot'] = $state['snapshot'];
         }
         $json = json_encode($record, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
-        $tmp = @tempnam($dir, '.inflight.');
-        if ($json === false || $tmp === false) {
+        if ($json === false) {
             return;
         }
-        if (@file_put_contents($tmp, $json . "\n") === false || !@rename($tmp, self::inflightPath($jobId))) {
-            @unlink($tmp);
+        try {
+            Util::writeAtomic(self::inflightPath($jobId), $json . "\n", 0600);
+        } catch (Throwable $e) {
+            // best-effort, see above
         }
     }
 
