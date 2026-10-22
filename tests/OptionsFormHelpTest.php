@@ -1775,6 +1775,15 @@ final class OptionsFormHelpTest extends TestCase
         $this->assertStringContainsString('document.hidden', $js);
         $this->assertStringContainsString("addEventListener('visibilitychange'", $js);
         $this->assertStringContainsString('if (inflight) { again = true; return; }', $js);
+        // A page loaded in a background tab, and a refresh queued behind an
+        // in-flight request that lands after the tab was hidden, both go
+        // through poll(): it must bail out before marking a request in flight.
+        $this->assertSame(1, preg_match('/function poll\(\) \{(.*?)\n  \}/s', $js, $m));
+        $guard = strpos($m[1], 'if (document.hidden) { return; }');
+        $this->assertNotFalse($guard, 'poll() must not fetch while the document is hidden');
+        $this->assertLessThan(strpos($m[1], 'inflight = true'), $guard);
+        $this->assertLessThan(strpos($m[1], 'fetch('), $guard);
+        $this->assertStringContainsString('if (again) { again = false; poll(); }', $js);
         $this->assertMatchesRegularExpression('/FAST_MS = 2000, IDLE_MS = 15000/', $js);
     }
 

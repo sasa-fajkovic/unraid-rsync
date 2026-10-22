@@ -680,6 +680,27 @@ final class HandlerStatusTest extends TestCase
         $this->assertLessThanOrEqual(UR_GET_LOG_TAIL_BYTES + 64, strlen($body['text']));
     }
 
+    public function testGetPluginLogNeverReturnsAPartOfAnOversizedUnfinishedLine(): void
+    {
+        // One line longer than the window, written in two halves that split a
+        // two-byte character (é = C3 A9) between them.
+        $this->writePluginLog("a\n" . str_repeat('x', UR_GET_LOG_TAIL_BYTES + 5000) . "\xC3");
+        [$body] = $this->pluginLogSince(2);
+        $this->assertSame('', $body['text']);
+        $this->assertSame(2, $body['offset'], 'the offset must stay at the last completed line');
+
+        $this->writePluginLog("\xA9 end\n", true);
+        [$body] = $this->pluginLogSince($body['offset']);
+        $this->assertSame("[... earlier output truncated ...]\n", $body['text'], 'the oversized line is skipped whole');
+        $this->assertTrue($body['truncated']);
+        $this->assertSame($body['size'], $body['offset']);
+        $this->assertStringNotContainsString("\u{FFFD}", $body['text']);
+
+        $this->writePluginLog("next\n", true);
+        [$body] = $this->pluginLogSince($body['offset']);
+        $this->assertSame("next\n", $body['text']);
+    }
+
     public function testGetPluginLogNonNumericSinceFallsBackToTheTail(): void
     {
         $this->writePluginLog("x\n");

@@ -897,8 +897,10 @@ class Logger
      * across two escapes (ENT_SUBSTITUTE would turn both halves into U+FFFD).
      * A $since past the end means the file was cleared or replaced: `reset` is
      * set and the read starts again from 0. A gap larger than $maxBytes is
-     * skipped like tail() does, with `truncated` set. A file that is replaced
-     * and regrows past $since before the next call is not detected.
+     * skipped like tail() does, with `truncated` set and a marker line in place
+     * of the gap - which also covers a single line longer than $maxBytes. A
+     * file that is replaced and regrows past $since before the next call is
+     * not detected.
      *
      * @return array{size:int,offset:int,text:string,truncated:bool,reset:bool}
      */
@@ -934,12 +936,11 @@ class Logger
             return $out;
         }
 
+        // No newline yet: the offset stays at the last completed line. A line
+        // longer than the window is skipped whole once its newline lands (the
+        // partial first line dropped below), never handed out piecemeal.
         $end = strrpos($data, "\n");
         if ($end === false) {
-            // A truncated read with no newline in it would otherwise never advance.
-            if ($truncated) {
-                $out['offset'] = $start + strlen($data);
-            }
             return $out;
         }
         $data = substr($data, 0, $end + 1);

@@ -271,7 +271,9 @@ ur_emit_status_poller();
       .then(function (body) {
         if (!body || !body.ok || typeof body.offset !== 'number') { return; }
         var text = body.text || '';
-        if (wantReset || body.reset || body.truncated
+        /* A truncated chunk opens with a marker line standing in for the gap,
+         * so it is appended like any other unless a reset was asked for. */
+        if (wantReset || body.reset
             || (text !== '' && pending === null && pre.classList.contains('ur-log-empty'))) {
           pending = text;
           replaceNext = true;

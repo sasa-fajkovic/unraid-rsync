@@ -1764,6 +1764,9 @@ if (!function_exists('ur_emit_status_poller')) {
   }
 
   function poll() {
+    /* Covers a page loaded in a background tab and a refresh queued behind a
+     * request that lands after the tab was hidden; visibilitychange re-arms. */
+    if (document.hidden) { return; }
     if (inflight) { again = true; return; }
     inflight = true;
     fetch(window.urUtil.HANDLER_URL + '?action=getStatus', { credentials: 'same-origin', cache: 'no-store' })
