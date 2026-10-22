@@ -2131,6 +2131,7 @@ final class OptionsFormHelpTest extends TestCase
         $this->assertSame(1, preg_match('/([^{}]*)\{\s*opacity:\s*1;\s*\}/', $css, $m), 'the reveal rule');
         $this->assertStringContainsString('.ur-help:focus-visible', $m[1]);
         $this->assertDoesNotMatchRegularExpression('/\.ur-help:focus(?!-visible)/', $css);
+    }
 
     #[RunInSeparateProcess]
     #[PreserveGlobalState(false)]
