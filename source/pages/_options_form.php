@@ -69,7 +69,11 @@ if (!function_exists('ur_push_secrets_dir_override')) {
      */
     function ur_push_secrets_dir_override(): void
     {
-        $dir = Config::secretsDir();
+        try {
+            $dir = Config::sanitizeSecretsDir(PageHelpers::config()['global']['secretsDir'] ?? '');
+        } catch (Throwable $e) {
+            $dir = '';
+        }
         Credentials::$secretsDirOverride = ($dir !== '') ? $dir : null;
     }
 }

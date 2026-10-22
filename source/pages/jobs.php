@@ -48,7 +48,7 @@ $csrf = ur_render_csrf_token();
 // (409) anyway. We never persist on load.
 $loadError = '';
 try {
-    $config = Config::load();
+    $config = PageHelpers::config();
 } catch (Throwable $e) {
     $config = Config::defaults();
     $loadError = $e->getMessage();
@@ -418,7 +418,7 @@ function ur_render_job_card($job, $index): void
     // the user must save first. A job currently running has Run/Dry-run disabled
     // and Abort enabled (and vice versa); state comes from RunState::isRunning,
     // PID-reuse-safe; the getStatus poll keeps them current after load.
-    $running = $hasId && RunState::isRunning($id);
+    $running = $hasId && PageHelpers::running($id);
     $runDis  = (!$hasId || $running) ? ' disabled' : '';
     $abortDis = (!$hasId || !$running) ? ' disabled' : '';
     echo '<div class="ur-job-card-actions">';
@@ -775,7 +775,7 @@ ur_emit_status_poller();
     <?php else: foreach ($jobs as $job):
         $job     = is_array($job) ? $job : [];
         $jid     = (string) ($job['id'] ?? '');
-        $running = ($jid !== '') ? RunState::isRunning($jid) : false;
+        $running = ($jid !== '') ? PageHelpers::running($jid) : false;
         $summary = ($jid !== '') ? Runner::readSummary($jid) : null;
         $lastReal = Runner::lastRealFor($jid, $summary);
         $state   = PageHelpers::deriveState($running, $lastReal);

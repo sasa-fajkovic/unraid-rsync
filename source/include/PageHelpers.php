@@ -16,7 +16,8 @@ declare(strict_types=1);
  *
  * Deliberately loads nothing: the Dashboard tile reads STATES on a page that
  * must not pull in Config.php (which pins the process timezone at load).
- * nextRunLabel() needs Cron, which every caller has already loaded.
+ * nextRunLabel() needs Cron, config() Config and running() RunState, which
+ * every caller has already loaded.
  */
 
 final class PageHelpers
@@ -54,6 +55,47 @@ final class PageHelpers
         'KEY'      => 'Managed key',
         'PASSWORD' => 'Password',
     ];
+
+    /** @var array<string,mixed>|Throwable|null */
+    private static array|Throwable|null $config = null;
+
+    /** @var array<string,bool> */
+    private static array $running = [];
+
+    /**
+     * Config::load() once per request: all seven tabs render into one
+     * document. A load that threw throws again on every call, so each tab
+     * still shows its own load error.
+     *
+     * @return array<string,mixed>
+     */
+    public static function config(): array
+    {
+        if (self::$config === null) {
+            try {
+                self::$config = Config::load();
+            } catch (Throwable $e) {
+                self::$config = $e;
+            }
+        }
+        if (self::$config instanceof Throwable) {
+            throw self::$config;
+        }
+        return self::$config;
+    }
+
+    /** RunState::isRunning once per job per request (a first call may reap a dead runner). */
+    public static function running(string $jobId): bool
+    {
+        return self::$running[$jobId] ??= RunState::isRunning($jobId);
+    }
+
+    /** Forget the request-scoped config and running state (tests render several requests in one process). */
+    public static function resetRequest(): void
+    {
+        self::$config  = null;
+        self::$running = [];
+    }
 
     /** @return array{cls:string,label:string} */
     public static function state(string $state): array

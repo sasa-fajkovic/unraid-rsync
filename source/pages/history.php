@@ -31,7 +31,7 @@ $handlerUrl = PageHelpers::HANDLER_URL;
 // empty (the empty state then points the user at the Jobs tab).
 $jobs = [];
 try {
-    $config = Config::load();
+    $config = PageHelpers::config();
     foreach (($config['jobs'] ?? []) as $job) {
         if (!is_array($job)) {
             continue;

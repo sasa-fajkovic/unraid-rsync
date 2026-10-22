@@ -2687,6 +2687,7 @@ final class OptionsFormHelpTest extends TestCase
     private function renderPageBody(string $pageFile): string
     {
         require_once __DIR__ . '/../source/pages/_options_form.php';
+        PageHelpers::resetRequest();
 
         $src = file_get_contents($pageFile);
         $this->assertIsString($src, "could not read page body: $pageFile");

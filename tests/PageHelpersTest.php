@@ -27,6 +27,73 @@ final class PageHelpersTest extends TestCase
 
     private const NOW = 1767230640; // 2026-01-01 01:24:00 UTC
 
+    public function testConfigIsParsedOncePerRequestAndALoadErrorRepeats(): void
+    {
+        $cfg = Config::defaults();
+        $cfg['jobs'][] = array_merge(Config::defaultJob(), ['id' => 'j-once', 'name' => 'Once']);
+        Config::save($cfg);
+        PageHelpers::resetRequest();
+        try {
+            $this->assertSame('Once', PageHelpers::config()['jobs'][0]['name']);
+            file_put_contents(Config::path(), '{not json');
+            $this->assertSame('Once', PageHelpers::config()['jobs'][0]['name'], 'one parse per request');
+
+            PageHelpers::resetRequest();
+            $messages = [];
+            for ($i = 0; $i < 2; $i++) {
+                try {
+                    PageHelpers::config();
+                } catch (Throwable $e) {
+                    $messages[] = $e->getMessage();
+                }
+            }
+            $this->assertCount(2, $messages, 'every tab sees the load error');
+            $this->assertSame($messages[0], $messages[1]);
+        } finally {
+            @unlink(Config::path());
+            PageHelpers::resetRequest();
+        }
+    }
+
+    public function testRunningStateIsCheckedOncePerJobPerRequest(): void
+    {
+        $id  = 'j-memo';
+        $cfg = Config::defaults();
+        $cfg['jobs'][] = array_merge(Config::defaultJob(), ['id' => $id, 'name' => $id, 'notifyMode' => 'off']);
+        Config::save($cfg);
+        Notify::$runner = static fn(string $command): int => 0;
+        $dead = ['pid' => 4242, 'trigger' => 'schedule', 'startedAt' => '2026-10-20T03:00:00Z'];
+        PageHelpers::resetRequest();
+        try {
+            RunState::writeInflight($id, $dead);
+            $this->assertFalse(PageHelpers::running($id));
+            $this->assertFileDoesNotExist(RunState::inflightPath($id), 'the first check reaps the dead run');
+
+            RunState::writeInflight($id, $dead);
+            $this->assertFalse(PageHelpers::running($id));
+            $this->assertFileExists(RunState::inflightPath($id), 'a second check in the same request is not a second isRunning');
+
+            PageHelpers::resetRequest();
+            PageHelpers::running($id);
+            $this->assertFileDoesNotExist(RunState::inflightPath($id));
+        } finally {
+            Notify::$runner = null;
+            @unlink(RunState::inflightPath($id));
+            @unlink(Config::path());
+            PageHelpers::resetRequest();
+        }
+    }
+
+    public function testPageBodiesGoThroughTheRequestScopedAccessors(): void
+    {
+        foreach (glob(__DIR__ . '/../source/pages/*.php') ?: [] as $page) {
+            $src = (string) file_get_contents($page);
+            $this->assertStringNotContainsString('Config::load(', $src, basename($page));
+            $this->assertStringNotContainsString('Config::secretsDir(', $src, basename($page));
+            $this->assertDoesNotMatchRegularExpression('/RunState::isRunning\(\$/', $src, basename($page));
+        }
+    }
+
     public function testManualOnlyWinsOverDisabledAndSchedule(): void
     {
         $job = ['manualOnly' => true, 'enabled' => false, 'schedule' => '0 3 * * *'];

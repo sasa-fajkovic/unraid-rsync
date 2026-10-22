@@ -35,14 +35,14 @@ $initialRunning = [];
 // the empty-state hint — never a false "no jobs" when some exist).
 $jobCount = 0;
 try {
-    $config = Config::load();
+    $config = PageHelpers::config();
     foreach (($config['jobs'] ?? []) as $job) {
         if (!is_array($job)) {
             continue;
         }
         $jobCount++;
         $jid = (string) ($job['id'] ?? '');
-        if ($jid !== '' && RunState::isRunning($jid)) {
+        if ($jid !== '' && PageHelpers::running($jid)) {
             $initialRunning[$jid] = (string) ($job['name'] ?? $jid);
         }
     }

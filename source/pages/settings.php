@@ -22,7 +22,7 @@ $csrf = ur_render_csrf_token();
 // save (409) anyway. We never persist on load.
 $loadError = '';
 try {
-    $config = Config::load();
+    $config = PageHelpers::config();
 } catch (Throwable $e) {
     $config = Config::defaults();
     $loadError = $e->getMessage();
