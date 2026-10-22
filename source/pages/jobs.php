@@ -1,5 +1,3 @@
-          var progEl = document.getElementById('ur-log-progress');
-          if (progEl) { progEl.hidden = !/to-chk=\d+\/\d+/.test(body.log || ''); }
 <?php
 /**
  * jobs.php - the Jobs tab body.
@@ -1528,6 +1526,7 @@ ur_emit_status_poller();
   var modalSel   = document.getElementById('ur-log-run-select');
   var modalLive  = document.getElementById('ur-log-live');
   var modalClose = document.getElementById('ur-log-close');
+  var modalProg  = document.getElementById('ur-log-progress');
   /* Element focused before the dialog opened, so focus can be restored on close
    * (basic focus management for the role="dialog" log viewer). */
   var modalReturnFocus = null;
@@ -1538,6 +1537,7 @@ ur_emit_status_poller();
     viewer.run = '';
     if (modalTitle) { modalTitle.textContent = modalTitle.title = urI18n('jobs.logTitle', 'Run log — %s', jobName); }
     if (modalPre) { modalPre.textContent = urI18n('loading', 'Loading…'); }
+    if (modalProg) { modalProg.hidden = true; }
     /* Remember what to restore focus to, then move focus into the dialog (the
      * Close button) so keyboard users land inside it. */
     modalReturnFocus = (document.activeElement && document.activeElement.focus)
@@ -1622,6 +1622,9 @@ ur_emit_status_poller();
           modalPre.innerHTML = body.log || '';
           if (atBottom) { modalPre.scrollTop = modalPre.scrollHeight; }
         }
+        /* Only a whole progress2 tail "(xfr#N, to-chk=N/M)" counts, never a
+         * file name that happens to contain to-chk=. */
+        if (modalProg) { modalProg.hidden = !/\(xfr#\d+, (?:to|ir)-chk=\d+\/\d+\)/.test(body.log || ''); }
       })
       .catch(function () { /* transient */ });
   }

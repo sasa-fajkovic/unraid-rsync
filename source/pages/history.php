@@ -432,6 +432,7 @@ ur_emit_ajax_helpers();  /* window.urAjax.show, for the inline download error */
     modalTit.title = r.logRef;
     modalPre.textContent = urI18n('loading', 'Loading…');
     truncEl.hidden = true;
+    progEl.hidden = true;
     modal.classList.add('ur-open');
     modal.setAttribute('aria-hidden', 'false');
     /* Move focus into the dialog so keyboard/SR users don't stay on background
@@ -447,20 +448,22 @@ ur_emit_ajax_helpers();  /* window.urAjax.show, for the inline download error */
           modalPre.innerHTML = body.log;
           modalPre.scrollTop = modalPre.scrollHeight;
           truncEl.hidden = !body.truncated;
-          progEl.hidden = !/to-chk=\d+\/\d+/.test(body.log);
+          /* Only a whole progress2 tail "(xfr#N, to-chk=N/M)" counts, never a
+           * file name that happens to contain to-chk=. */
+          progEl.hidden = !/\(xfr#\d+, (?:to|ir)-chk=\d+\/\d+\)/.test(body.log);
         } else {
           /* The record persists across reboots but its tmpfs log does not. */
-          progEl.hidden = true;
           modalPre.textContent = urI18n('hist.logGone', 'Log not retained (run logs live in RAM and are cleared on reboot).');
         }
       })
-      .catch(function () { modalPre.textContent = urI18n('hist.logFailed', 'Could not load the log.'); });
+      .catch(function () { progEl.hidden = true; modalPre.textContent = urI18n('hist.logFailed', 'Could not load the log.'); });
   }
   function closeLog() {
     modal.classList.remove('ur-open');
     modal.setAttribute('aria-hidden', 'true');
     modalPre.textContent = '';
     truncEl.hidden = true;
+    progEl.hidden = true;
   }
 
   /* ---- events ---- */
