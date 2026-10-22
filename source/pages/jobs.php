@@ -1436,7 +1436,7 @@ ur_emit_status_poller();
 
   /* The Last-run / Next-run cells of one summary row, from a getStatus entry. */
   function renderTimes(jobId, s, now) {
-    var row = document.querySelector('tr[data-jobid="' + U.cssEsc(jobId) + '"]');
+    var row = document.querySelector('table.ur-job-list tr[data-jobid="' + U.cssEsc(jobId) + '"]');
     if (!row) { return; }
     var cell = row.querySelector('.ur-last-run-cell');
     if (cell) {
