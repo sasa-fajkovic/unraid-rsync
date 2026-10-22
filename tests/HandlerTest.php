@@ -537,6 +537,104 @@ final class HandlerTest extends TestCase
         $this->assertContains('j-dup-2', $ids);
     }
 
+    /** DI-20: a re-created job must not inherit a removed job's summary, History, in-flight record or logs. */
+    public function testSaveConfigGivesANewJobAFreshIdWhenARemovedJobLeftFilesBehind(): void
+    {
+        $runs = rtrim(UR_CONFIG_BASE, '/') . '/runs';
+        @mkdir($runs, 0700, true);
+        @mkdir(dirname(RunState::inflightPath('x')), 0700, true);
+        file_put_contents($runs . '/j-again.summary.json', '{"state":"FAILED"}');
+        @mkdir(Logger::jobLogDir('j-again-2'), 0700, true);
+        file_put_contents(History::path('j-again-3'), "{}\n");
+        file_put_contents(RunState::inflightPath('j-again-4'), '{}');
+        $cleanup = function () use ($runs): void {
+            @unlink($runs . '/j-again.summary.json');
+            @rmdir(Logger::jobLogDir('j-again-2'));
+            @unlink(History::path('j-again-3'));
+            @unlink(RunState::inflightPath('j-again-4'));
+            @unlink($runs . '/j-again-5.summary.json');
+        };
+
+        $job = ['name' => 'again', 'schedule' => '0 3 * * *', 'transport' => 'LOCAL',
+                'pairs' => [['local' => '/mnt/user/a/', 'remote' => '/mnt/disk1/a/']]];
+        $save = function (array $jobs): array {
+            $_POST = ['action' => 'saveConfig', 'csrf_token' => 'test-token', 'jobs' => $jobs];
+            [$body, $code] = $this->runCapture(function () {
+                ur_action_save_config();
+            });
+            $this->assertSame(200, $code, json_encode($body));
+            return array_column(Config::load()['jobs'], 'id');
+        };
+
+        try {
+            // Summary, log dir, History and in-flight record each reserve an id.
+            $this->assertSame(['j-again-5'], $save([0 => $job]));
+            // The removed job's evidence is untouched and still listed by History.
+            $this->assertFileExists($runs . '/j-again.summary.json');
+            $this->assertContains('j-again-3', History::jobIds());
+
+            // A stored job keeps its id although a summary now exists under it,
+            // whatever the posted order: a new "again" posted BEFORE it must
+            // not take j-again-5 and push the stored job to j-again-5-2.
+            file_put_contents($runs . '/j-again-5.summary.json', '{"state":"SUCCESS"}');
+            $ids = $save([0 => $job, 1 => ['id' => 'j-again-5', 'name' => 'renamed'] + $job]);
+            $this->assertSame(['j-again-6', 'j-again-5'], $ids);
+
+            // A tampered stored id ("j-again-5\n", " j-again-5 ") is not that
+            // stored job: it is a NEW row, allocated past every leftover and the
+            // stored id, even when posted first.
+            $ids = $save([0 => ['id' => 'j-again-5', 'name' => 'renamed'] + $job, 1 => ['id' => "j-again-5\n"] + $job]);
+            $this->assertSame(['j-again-5', 'j-again-7'], $ids);
+            $ids = $save([0 => ['id' => ' j-again-5 ', 'name' => 'renamed'] + $job, 1 => ['id' => 'j-again-5', 'name' => 'renamed'] + $job]);
+            $this->assertSame(['j-again-5-2', 'j-again-5'], $ids);
+
+            // A suffixed id never exceeds the 128 bytes ur_safe_job_id accepts.
+            $long = str_repeat('a', 130);
+            $ids  = $save([0 => ['name' => $long] + $job, 1 => ['name' => $long] + $job]);
+            $this->assertSame([128, 128], array_map('strlen', $ids));
+            $this->assertSame('-2', substr($ids[1], -2));
+            $this->assertNotSame('', ur_safe_job_id($ids[1]));
+        } finally {
+            $cleanup();
+        }
+    }
+
+    /** DI-20: leftover logs are looked for in the logDir THIS save stores, not the dispatch-time one. */
+    public function testSaveConfigLooksForLeftoverLogsInTheLogDirBeingSaved(): void
+    {
+        $mnt = realpath(sys_get_temp_dir()) . '/ur-di20-mnt-' . bin2hex(random_bytes(3));
+        $logDir = $mnt . '/user/ur/logs';
+        mkdir($logDir . '/j-fresh', 0700, true);
+        file_put_contents($logDir . '/j-fresh/run-20260101T000000Z.log', "old\n");
+        $prevRoot = Config::$mntRoot;
+        $prevOverride = Logger::$logsDirOverride;
+        Config::$mntRoot = $mnt;
+        Logger::$logsDirOverride = null;   // dispatch-time logs dir: tmpfs, no leftovers there
+        try {
+            $job = ['name' => 'fresh', 'schedule' => '0 3 * * *', 'transport' => 'LOCAL',
+                    'pairs' => [['local' => '/mnt/user/a/', 'remote' => '/mnt/disk1/a/']]];
+            $_POST = ['action' => 'saveConfig', 'csrf_token' => 'test-token',
+                      'global' => ['logDir' => $logDir], 'jobs' => [0 => $job]];
+            [$body, $code] = $this->runCapture(function () {
+                ur_action_save_config();
+            });
+            $this->assertSame(200, $code, json_encode($body));
+            $cfg = Config::load();
+            $this->assertSame($logDir, $cfg['global']['logDir']);
+            $this->assertSame(['j-fresh-2'], array_column($cfg['jobs'], 'id'));
+            $this->assertSame("old\n", file_get_contents($logDir . '/j-fresh/run-20260101T000000Z.log'));
+        } finally {
+            Config::$mntRoot = $prevRoot;
+            Logger::$logsDirOverride = $prevOverride;
+            unlink($logDir . '/j-fresh/run-20260101T000000Z.log');
+            rmdir($logDir . '/j-fresh');
+            rmdir($logDir);
+            rmdir($mnt . '/user/ur');
+            rmdir($mnt . '/user');
+            rmdir($mnt);
+        }
+    }
+
     public function testSettingsOnlySaveDoesNotWipeJobs(): void
     {
         // Seed a config with a job.
