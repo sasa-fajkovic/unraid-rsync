@@ -129,6 +129,8 @@ user-facing highlights.
   existing mirror and rolling back.
 
 ### Fixed
+- **Snapshot mode: an unfinished snapshot older than the last commit is now
+  removed** by the next real run instead of being kept forever as a link-dest.
 - **Two notifications in the same second no longer drop one.** Unraid's
   `notify` names each notification after its event and unix second and skips a
   send whose name is taken, so e.g. a "scheduled run skipped" warning was lost

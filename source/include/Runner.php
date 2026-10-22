@@ -1747,9 +1747,12 @@ class Runner
         $sn['prevMeta']  = (is_array($meta) && $meta['stamp'] === $prev && is_array($meta['data'])) ? $meta['data'] : null;
         $sn['dfBefore']  = $list['df'];
         // The lock is held and the sentinel ties the root to this job, so
-        // every .inprogress is stale; the newest is kept as a link-dest.
-        $sn['stale']     = (string) end($inprogress);
-        $sn['cleanup']   = array_merge($deleting, array_slice($inprogress, 0, -1));
+        // every .inprogress is stale. The newest is kept as a link-dest only
+        // if it started after the last commit: an older one would never be
+        // superseded, so it would be kept, and pin old versions, forever.
+        $newest          = (string) end($inprogress);
+        $sn['stale']     = ($newest !== '' && strcmp((string) Snapshot::stampPrefix($newest), $prev) > 0) ? $newest : '';
+        $sn['cleanup']   = array_merge($deleting, $sn['stale'] !== '' ? array_slice($inprogress, 0, -1) : $inprogress);
         Logger::event($runLog, $jobId, 'Snapshot root checked: previous snapshot ' . ($prev !== '' ? $prev : 'none')
             . ($sn['stale'] !== '' ? ", unfinished {$sn['stale']} reused as a link-dest" : '') . '.');
         return '';
@@ -1757,7 +1760,7 @@ class Runner
 
     /**
      * §4 step 6: remove leftover .deleting and every stale .inprogress but
-     * the newest. A failure never fails the run.
+     * the one kept as a link-dest. A failure never fails the run.
      *
      * @param array<string,mixed> $sn
      */
