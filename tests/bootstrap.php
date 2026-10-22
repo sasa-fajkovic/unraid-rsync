@@ -120,6 +120,6 @@ Notify::$sleep = static function (float $seconds): void {
 };
 
 // The test host has no Unraid /mnt, so every local path a test names would read
-// as "not mounted". Here everything but "/" is its own device; the mount-check
-// tests swap in their own and put this one back.
-Util::$devIdOf = static fn(string $p): int => $p === '/' ? 1 : 2;
+// as "not mounted". Here everything but "/" and "/mnt" is another device; the
+// mount-check tests swap in their own and put this one back.
+Util::$devIdOf = static fn(string $p): int => ($p === '/' || $p === '/mnt') ? 1 : 2;

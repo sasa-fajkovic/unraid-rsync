@@ -43,9 +43,9 @@ final class Util
 
     /**
      * True when $path, or the first existing ancestor of it, lives on the same
-     * device as "/". Unraid's root is RAM, so a local path there means the
-     * drive meant to hold it is not mounted: an empty mountpoint, or a path
-     * that --mkpath would happily create in memory.
+     * device as "/" or "/mnt". Both are RAM on Unraid (/mnt may be its own
+     * tmpfs), so a local path there means the drive meant to hold it is not
+     * mounted: an empty mountpoint, or a path --mkpath would create in memory.
      */
     public static function isOnRootFs(string $path): bool
     {
@@ -53,14 +53,11 @@ final class Util
             $st = @stat($p);
             return $st === false ? false : (int) $st['dev'];
         };
-        $root = $dev('/');
-        if ($root === false) {
-            return false;
-        }
-        $p = '/' . trim($path, '/');
+        $ram = array_filter([$dev('/'), $dev('/mnt')], static fn($d) => $d !== false);
+        $p   = '/' . trim($path, '/');
         while (($d = $dev($p)) === false && $p !== '/') {
             $p = dirname($p);
         }
-        return $d === $root;
+        return $d !== false && in_array($d, $ram, true);
     }
 }

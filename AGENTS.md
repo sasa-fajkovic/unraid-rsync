@@ -253,8 +253,8 @@ on, forked from, or derived from any other plugin.
   lists every remote `--delete` destination, SSH and DAEMON push, and any listing
   failure refuses the run; `Runner::localChecks()` runs **after** the pre-hook
   (which may mount the storage) and refuses a local source or destination whose
-  first existing ancestor is on the RAM root's device (`Util::isOnRootFs`,
-  seam `Util::$devIdOf`): `--mkpath` is on by default, so an unmounted
+  first existing ancestor is on the device of `/` or `/mnt` (both RAM; `/mnt`
+  may be its own tmpfs) (`Util::isOnRootFs`, seam `Util::$devIdOf`): `--mkpath` is on by default, so an unmounted
   `/mnt/disks/<x>` destination was being backed up into RAM as SUCCESS, and an
   empty mountpoint is a valid source a mirror empties the backup to match. With
   a delete option on it also refuses an empty local source (`source-empty`; a

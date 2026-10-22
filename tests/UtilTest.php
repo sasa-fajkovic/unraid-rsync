@@ -53,6 +53,27 @@ final class UtilTest extends TestCase
         }
     }
 
+    public function testIsOnRootFsTreatsASeparateMntTmpfsAsRam(): void
+    {
+        // /mnt is its own tmpfs (5); /mnt/personal is a zfs pool (13) unless the
+        // pool is not imported and only its empty mountpoint on /mnt is left.
+        $devs = ['/' => 1, '/mnt' => 5, '/mnt/personal' => 13, '/boot' => 7];
+        $prev = Util::$devIdOf;
+        Util::$devIdOf = static function (string $p) use (&$devs): int|false {
+            return $devs[$p] ?? false;
+        };
+        try {
+            $this->assertFalse(Util::isOnRootFs('/mnt/personal/nextcloud/'));
+            $this->assertFalse(Util::isOnRootFs('/boot/'));
+            $devs['/mnt/personal'] = 5;
+            $this->assertTrue(Util::isOnRootFs('/mnt/personal/nextcloud/'));
+            unset($devs['/mnt/personal']);
+            $this->assertTrue(Util::isOnRootFs('/mnt/personal/nextcloud/'), 'no mountpoint at all: /mnt itself');
+        } finally {
+            Util::$devIdOf = $prev;
+        }
+    }
+
     public function testIsOnRootFsUsesStatWithoutTheSeam(): void
     {
         $prev = Util::$devIdOf;
