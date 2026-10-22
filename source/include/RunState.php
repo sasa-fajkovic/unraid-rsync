@@ -185,24 +185,11 @@ class RunState
             $out['gen'] = $state['gen'];
         }
 
-        $path = self::statePath($jobId);
-        $dir  = dirname($path);
         $json = json_encode($out, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
         if ($json === false) {
             throw new RuntimeException('Failed to encode run state JSON: ' . json_last_error_msg());
         }
-        $tmp = @tempnam($dir, '.state.');
-        if ($tmp === false) {
-            throw new RuntimeException("Unable to create temp state file in: $dir");
-        }
-        if (@file_put_contents($tmp, $json . "\n") === false) {
-            @unlink($tmp);
-            throw new RuntimeException("Failed to write temp state file: $tmp");
-        }
-        if (!@rename($tmp, $path)) {
-            @unlink($tmp);
-            throw new RuntimeException("Failed to atomically replace state file: $path");
-        }
+        Util::writeAtomic(self::statePath($jobId), $json . "\n", 0600, false, 'state');
     }
 
     /**
@@ -508,7 +495,7 @@ class RunState
             return;
         }
         $json = json_encode(['by' => $by, 'at' => gmdate('Y-m-d\TH:i:s\Z'), 'gen' => $gen]);
-        Util::writeAtomic($path, $json === false ? '' : $json, 0600);
+        Util::writeAtomic($path, $json === false ? '' : $json, 0600, false);
     }
 
     /**

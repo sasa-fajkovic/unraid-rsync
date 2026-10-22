@@ -169,6 +169,27 @@ final class UtilTest extends TestCase
         $this->assertSame(['occupied'], array_values(array_diff((array) scandir($this->dir), ['.', '..'])));
     }
 
+    /** RunState::write keeps the messages it had before it moved onto writeAtomic. */
+    public function testWriteAtomicNamesTheFileAndCodesTheFailedStage(): void
+    {
+        $path = $this->dir . '/occupied';
+        mkdir($path);
+        try {
+            Util::writeAtomic($path, 'data', 0600, false, 'state');
+            $this->fail('a rename over a directory must throw');
+        } catch (RuntimeException $e) {
+            $this->assertSame("Failed to atomically replace state file: $path", $e->getMessage());
+            $this->assertSame(Util::WRITE_RENAME, $e->getCode());
+        }
+        try {
+            Util::writeAtomic($this->dir . '/missing/f', 'data', 0600, false, 'state');
+            $this->fail('a missing dir must throw');
+        } catch (RuntimeException $e) {
+            $this->assertSame('Unable to create temp state file in: ' . $this->dir . '/missing', $e->getMessage());
+            $this->assertSame(Util::WRITE_TEMP, $e->getCode());
+        }
+    }
+
     public function testWriteAtomicRefusesToStageOutsideAnUnwritableTargetDir(): void
     {
         if (posix_geteuid() === 0) {

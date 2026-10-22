@@ -123,14 +123,7 @@ function ur_resync_cron(?array $config = null): array
     try {
         return Cron::apply($config);
     } catch (Throwable $e) {
-        return [
-            'ok'             => false,
-            'enabledJobs'    => 0,
-            'wrote'          => false,
-            'removed'        => false,
-            'updateCronCode' => -1,
-            'error'          => 'Unexpected error applying schedule: ' . $e->getMessage(),
-        ];
+        return Cron::fail('Unexpected error applying schedule: ' . $e->getMessage());
     }
 }
 

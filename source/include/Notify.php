@@ -189,7 +189,7 @@ class Notify
                 // The second dispatch ENDED in: notify's own stamp is never later.
                 if ($dir !== null && !is_link($dir . '/notify.last')) {
                     try {
-                        Util::writeAtomic($dir . '/notify.last', (string) (int) floor(self::now()), 0600);
+                        Util::writeAtomic($dir . '/notify.last', (string) (int) floor(self::now()), 0600, false);
                     } catch (RuntimeException $e) {
                     }
                 }

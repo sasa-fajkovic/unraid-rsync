@@ -77,17 +77,27 @@ final class Util
         return $d !== false && in_array($d, $ram, true);
     }
 
+    /** writeAtomic() failure stages, as the exception code. */
+    public const WRITE_TEMP   = 1;
+    public const WRITE_DATA   = 2;
+    public const WRITE_RENAME = 3;
+
     /**
      * Replace $path with $data through a same-dir temp file and rename. The temp
      * file is fsynced first: /boot is FAT32 with delayed writes, and a rename that
      * reaches the disk before the data leaves a present-but-empty file behind.
+     * tmpfs callers pass $fsync = false. rename() replaces the name without
+     * following a symlink planted at $path.
      *
-     * @throws RuntimeException on any filesystem failure (the target is untouched).
+     * @param string $what names the file in the error ("state" -> "temp state file")
+     * @throws RuntimeException on any filesystem failure (the target is untouched),
+     *         its code one of WRITE_TEMP / WRITE_DATA / WRITE_RENAME.
      */
-    public static function writeAtomic(string $path, string $data, int $mode): void
+    public static function writeAtomic(string $path, string $data, int $mode, bool $fsync = true, string $what = ''): void
     {
-        $dir = dirname($path);
-        $tmp = @tempnam($dir, '.' . basename($path) . '.');
+        $file = $what === '' ? 'file' : "$what file";
+        $dir  = dirname($path);
+        $tmp  = @tempnam($dir, '.' . basename($path) . '.');
         // tempnam() falls back to the system temp dir when $dir is not writable,
         // and a rename from there is a non-atomic cross-device copy.
         if ($tmp !== false && dirname((string) realpath($tmp)) !== realpath($dir)) {
@@ -95,23 +105,25 @@ final class Util
             $tmp = false;
         }
         if ($tmp === false) {
-            throw new RuntimeException("Unable to create temp file in: $dir");
+            throw new RuntimeException("Unable to create temp $file in: $dir", self::WRITE_TEMP);
         }
         @chmod($tmp, $mode);
         $fh = @fopen($tmp, 'wb');
         $ok = $fh !== false && @fwrite($fh, $data) === strlen($data) && fflush($fh);
         if ($fh !== false) {
-            // FAT32 may refuse fsync; the write still stands.
-            @fsync($fh);
+            if ($fsync) {
+                // FAT32 may refuse fsync; the write still stands.
+                @fsync($fh);
+            }
             fclose($fh);
         }
         if (!$ok) {
             @unlink($tmp);
-            throw new RuntimeException("Failed to write temp file: $tmp");
+            throw new RuntimeException("Failed to write temp $file: $tmp", self::WRITE_DATA);
         }
         if (!@rename($tmp, $path)) {
             @unlink($tmp);
-            throw new RuntimeException("Failed to atomically replace: $path");
+            throw new RuntimeException('Failed to atomically replace' . ($what === '' ? '' : " $file") . ": $path", self::WRITE_RENAME);
         }
     }
 

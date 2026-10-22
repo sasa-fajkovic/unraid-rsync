@@ -233,14 +233,7 @@ class Cron
             } catch (Throwable $e) {
                 // A config we can't read must NOT clobber the live schedule: bail
                 // without touching the cron file or running update_cron.
-                return [
-                    'ok'             => false,
-                    'enabledJobs'    => 0,
-                    'wrote'          => false,
-                    'removed'        => false,
-                    'updateCronCode' => -1,
-                    'error'          => 'Could not read configuration: ' . $e->getMessage(),
-                ];
+                return self::fail('Could not read configuration: ' . $e->getMessage());
             }
         }
 
@@ -257,14 +250,7 @@ class Cron
         $removed = false;
 
         if (!is_dir($dir) && !@mkdir($dir, 0755, true) && !is_dir($dir)) {
-            return [
-                'ok'             => false,
-                'enabledJobs'    => $enabledLines,
-                'wrote'          => false,
-                'removed'        => false,
-                'updateCronCode' => -1,
-                'error'          => 'Unable to create config directory: ' . $dir,
-            ];
+            return self::fail('Unable to create config directory: ' . $dir, $enabledLines);
         }
 
         if ($enabledLines === 0) {
@@ -272,14 +258,7 @@ class Cron
             // the live crontab. Removing a non-existent file is a no-op success.
             if (is_file($path)) {
                 if (!@unlink($path)) {
-                    return [
-                        'ok'             => false,
-                        'enabledJobs'    => 0,
-                        'wrote'          => false,
-                        'removed'        => false,
-                        'updateCronCode' => -1,
-                        'error'          => 'Unable to remove cron file: ' . $path,
-                    ];
+                    return self::fail('Unable to remove cron file: ' . $path);
                 }
                 $removed = true;
             }
@@ -287,14 +266,7 @@ class Cron
             try {
                 Util::writeAtomic($path, $content, 0644);
             } catch (RuntimeException $e) {
-                return [
-                    'ok'             => false,
-                    'enabledJobs'    => $enabledLines,
-                    'wrote'          => false,
-                    'removed'        => false,
-                    'updateCronCode' => -1,
-                    'error'          => 'Failed to write cron file: ' . $e->getMessage(),
-                ];
+                return self::fail('Failed to write cron file: ' . $e->getMessage(), $enabledLines);
             }
             $wrote = true;
         }
@@ -308,6 +280,24 @@ class Cron
             'wrote'          => $wrote,
             'removed'        => $removed,
             'updateCronCode' => $code,
+        ];
+    }
+
+    /**
+     * An apply() result for a failure that left the cron file and the live
+     * crontab untouched.
+     *
+     * @return array{ok:false,enabledJobs:int,wrote:false,removed:false,updateCronCode:-1,error:string}
+     */
+    public static function fail(string $error, int $enabledJobs = 0): array
+    {
+        return [
+            'ok'             => false,
+            'enabledJobs'    => $enabledJobs,
+            'wrote'          => false,
+            'removed'        => false,
+            'updateCronCode' => -1,
+            'error'          => $error,
         ];
     }
 

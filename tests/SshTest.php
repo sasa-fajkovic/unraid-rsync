@@ -1240,13 +1240,7 @@ final class SshTest extends TestCase
         $this->assertStringNotContainsString($this->rtBase, $threw->getMessage());
         $this->assertStringNotContainsString(FixedTokenSsh::TOKEN, $threw->getMessage());
         // ...and the tempnam scratch file is unlinked, so nothing is orphaned.
-        $this->assertSame(
-            [],
-            array_values(array_filter(
-                (array) scandir($this->rtBase . '/pass'),
-                static fn(string $e): bool => strpos($e, '.ur-secret.') === 0
-            ))
-        );
+        $this->assertSame(['.', '..', FixedTokenSsh::TOKEN], scandir($this->rtBase . '/pass'));
     }
 
     public function testNoSecretWriteExceptionInterpolatesAPath(): void
