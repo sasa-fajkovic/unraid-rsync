@@ -521,8 +521,10 @@ function ur_migrate_credentials(string $from, string $to, ?callable $commit = nu
         }
         // A missing /mnt share usually means the array is not started - surface
         // that rather than failing obscurely.
-        if (!is_dir($dstDir) && !@mkdir($dstDir, 0700, true) && !is_dir($dstDir)) {
-            return $refuse('could not create ' . $dstDir . ' (is the array started?).');
+        try {
+            Util::mkdirs($dstDir, 0700);
+        } catch (RuntimeException $e) {
+            return $refuse('could not create ' . $dstDir . ' (is the array started?): ' . $e->getMessage() . '.');
         }
 
         // Two names for one directory: the file is already where the pointer is
@@ -557,8 +559,8 @@ function ur_migrate_credentials(string $from, string $to, ?callable $commit = nu
                         . ' already contains a different credentials.json. Remove or rename it first.',
                 ];
             }
-            // About to become THE keychain: the perms a fresh copy would get.
-            @chmod($dstDir, 0700);
+            // About to become THE keychain: the perms a fresh copy would get. The
+            // dir itself is never chmodded: secretsDirRefusal vetted it.
             @chmod($dstFile, 0600);
         } else {
             try {
@@ -813,10 +815,14 @@ function ur_save_config_locked(): void
         $oldSecretsDir   = Config::sanitizeSecretsDir($config['global']['secretsDir'] ?? '');
         $rawSecretsDir   = is_string($globalIn['secretsDir']) ? trim($globalIn['secretsDir']) : '';
         $cleanSecretsDir = Config::sanitizeSecretsDir($rawSecretsDir);
+        $refusal         = ($cleanSecretsDir !== '' && $cleanSecretsDir !== $oldSecretsDir)
+            ? Config::secretsDirRefusal($cleanSecretsDir) : '';
         if ($rawSecretsDir !== '' && $cleanSecretsDir === '') {
             // Non-empty but invalid: reject, keep the current location.
             $allWarnings[] = 'Secrets directory ignored: it must be an absolute path under /mnt '
                 . '(e.g. /mnt/user/system/unraid.rsync). Credentials stay where they are.';
+        } elseif ($refusal !== '') {
+            $allWarnings[] = 'Secrets directory not changed: ' . $refusal . ' Credentials stay where they are.';
         } elseif ($cleanSecretsDir !== $oldSecretsDir) {
             $secretsMove = [$oldSecretsDir, $cleanSecretsDir];
         }
@@ -1143,13 +1149,29 @@ function ur_normalize_connection_for_save(array $raw, array $existing): array
         // that no key file is in use.
         $conn['keyFilePath'] = '';
     }
-    // A tab opened before a run pinned the host key on first use posts the field
-    // empty; that must not wipe the pin while it still belongs to the same host.
-    if ($prev !== null && trim((string) $conn['remoteHostKey']) === ''
-        && trim((string) ($prev['remoteHostKey'] ?? '')) !== ''
-        && $conn['host'] === (string) ($prev['host'] ?? '')
-        && (int) $conn['port'] === (int) ($prev['port'] ?? 0)) {
-        $conn['remoteHostKey'] = (string) $prev['remoteHostKey'];
+    if ($prev !== null && $conn['transport'] !== 'DAEMON') {
+        $old = Credentials::mergeConnection($prev);
+        // A textarea posts CRLF, so "unchanged" cannot mean byte-equal.
+        $norm      = static fn(string $k): string => (string) preg_replace('/\R/', "\n", trim($k));
+        $oldPin    = $norm($old['remoteHostKey']);
+        $submitted = $norm($conn['remoteHostKey']);
+        if ($conn['host'] === $old['host'] && $conn['port'] === $old['port']) {
+            // A tab opened before a run pinned the host key on first use posts the
+            // field empty; that must not wipe the pin while it still belongs to the same host.
+            if ($submitted === '' && $oldPin !== '') {
+                $conn['remoteHostKey'] = $old['remoteHostKey'];
+            }
+        } elseif ($oldPin !== '' && ($submitted === '' || $submitted === $oldPin)) {
+            // The old pin never matches the new endpoint's known_hosts line, so
+            // accept-new would treat every run as first contact and take ANY key.
+            $conn['remoteHostKey'] = '';
+            try {
+                Logger::event('', 'credentials', 'Connection ' . Util::safeFileId($conn['id'])
+                    . ': the host or port changed, so its pinned host key was cleared (with accept-new,'
+                    . ' the next run or Test connection pins the new one).');
+            } catch (Throwable $e) {
+            }
+        }
     }
     if ($conn['transport'] === 'DAEMON') {
         // Same display:none-still-submits problem as the password above: a card
@@ -1756,6 +1778,10 @@ function ur_keytools_class(): string
 function ur_action_discover_host_key(): void
 {
     $host    = isset($_POST['host']) ? trim((string) $_POST['host']) : '';
+    // A saved IPv6 host is bracketed for rsync; ssh-keyscan wants the literal.
+    if (preg_match('/^\[([^\]]+)\]$/D', $host, $m) && Util::isIpv6Address($m[1])) {
+        $host = $m[1];
+    }
     $port    = isset($_POST['port']) ? (int) $_POST['port'] : 22;
     $timeout = isset($_POST['timeout']) ? (int) $_POST['timeout'] : 10;
 
@@ -1840,6 +1866,9 @@ function ur_action_test_connection(): void
         return;
     }
 
+    if (!defined('UR_HANDLER_TESTING') && function_exists('set_time_limit')) {
+        @set_time_limit(Ssh::probeTimeout($conn) + 10);
+    }
     $res = Ssh::testConnection($creds, $id);
     // 200 regardless of probe success - the probe RAN; the body carries ok +
     // the distinct reason. (A 4xx/5xx is reserved for the request itself
@@ -2380,10 +2409,10 @@ function ur_action_get_job_log(): void
  * is truncated at the top there). Params: id (job id, required) + optional run
  * (a run-file id from listRuns/listHistory); with no run id we serve the latest.
  *
- * Safe to serve in full: the stored file was ALREADY redacted of per-run tmpfs
- * secret paths and size-capped (UR_MAX_RUN_LOG_BYTES) when it was written
- * (Logger::setRedaction / Logger::sink), so nothing secret is on disk to leak.
- * It is served as text/plain with X-Content-Type-Options: nosniff and a
+ * The stored file is size-capped (UR_MAX_RUN_LOG_BYTES) and redacted by the
+ * runner, but only once a pair has finished - and never if the runner was
+ * SIGKILLed - so it is streamed through Logger::scrubSecretPaths, like the
+ * tail. There is no Content-Length: scrubbing changes the size. It is served as text/plain with X-Content-Type-Options: nosniff and a
  * Content-Disposition attachment, so the browser saves it rather than rendering
  * it as HTML (no log-XSS path). The run id is whitelisted + realpath-confined to
  * the job's log dir by Logger::runLogPathById; a bad/traversing id is a 400.
@@ -2411,28 +2440,58 @@ function ur_action_download_job_log(): void
     $fname = $jobId . ($servedRun !== '' ? '-' . $servedRun : '') . '.log';
     $fname = preg_replace('/[^A-Za-z0-9._-]/', '_', $fname);
 
-    $size = @filesize($path);
-
     if (!headers_sent()) {
         header('Content-Type: text/plain; charset=utf-8');
         header('X-Content-Type-Options: nosniff');
         header('Content-Disposition: attachment; filename="' . $fname . '"');
         header('Cache-Control: no-store');
-        if ($size !== false) {
-            header('Content-Length: ' . $size);
-        }
     }
 
     // Test seam: expose what WOULD be streamed without terminating the process
     // or emitting bytes the test harness can't capture (mirrors sendResponse).
     if (defined('UR_HANDLER_TESTING')) {
-        $GLOBALS['ur_last_download'] = ['path' => $path, 'filename' => $fname, 'size' => $size];
+        $body = '';
+        ur_stream_scrubbed($path, static function (string $s) use (&$body): void {
+            $body .= $s;
+        });
+        $GLOBALS['ur_last_download'] = ['path' => $path, 'filename' => $fname, 'size' => strlen($body), 'body' => $body];
         $GLOBALS['ur_last_response_code'] = 200;
         return;
     }
 
-    @readfile($path);
+    ur_stream_scrubbed($path, static function (string $s): void {
+        echo $s;
+    });
     exit;
+}
+
+/**
+ * Feed $path to $emit in chunks with Logger::scrubSecretPaths applied. A chunk
+ * is cut at its last newline and the rest carried into the next one, so a
+ * secret path split across two reads is still scrubbed (a match never spans a
+ * line).
+ *
+ * @param callable(string):void $emit
+ */
+function ur_stream_scrubbed(string $path, callable $emit, int $chunkBytes = 65536): void
+{
+    $fh = @fopen($path, 'rb');
+    if ($fh === false) {
+        return;
+    }
+    $carry = '';
+    while (($chunk = fread($fh, $chunkBytes)) !== false && $chunk !== '') {
+        $carry .= $chunk;
+        $nl = strrpos($carry, "\n");
+        if ($nl !== false) {
+            $emit(Logger::scrubSecretPaths(substr($carry, 0, $nl + 1)));
+            $carry = substr($carry, $nl + 1);
+        }
+    }
+    fclose($fh);
+    if ($carry !== '') {
+        $emit(Logger::scrubSecretPaths($carry));
+    }
 }
 
 /**

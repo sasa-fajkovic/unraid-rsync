@@ -514,6 +514,36 @@ class Config
     }
 
     /**
+     * Why $dir (a non-empty sanitizeSecretsDir() result) cannot BECOME the
+     * secrets dir, or ''. Checked only when the setting changes, so a pointer
+     * already stored keeps loading exactly as before:
+     *   - not a network or add-on mount (/mnt/remotes, /mnt/addons);
+     *   - not a share or pool root (/mnt/<top>/<share>): it needs a dedicated
+     *     directory, which is created 0700 - a share root is shared;
+     *   - an existing directory must already be private: owned by this user and
+     *     not group- or world-writable. It is never chmodded for you.
+     */
+    public static function secretsDirRefusal(string $dir): string
+    {
+        $parts = explode('/', substr($dir, strlen(rtrim(self::$mntRoot, '/')) + 1));
+        if (in_array($parts[0], ['remotes', 'addons'], true)) {
+            return $dir . ' is a network or add-on mount; keep credentials on a local array or pool path.';
+        }
+        if (count($parts) < 3) {
+            return $dir . ' is a share or pool root; use a dedicated directory inside it, e.g. ' . $dir . '/unraid.rsync.';
+        }
+        if (is_dir($dir)) {
+            try {
+                Util::assertPrivateDir($dir);
+            } catch (RuntimeException $e) {
+                return $dir . ' already exists and is owned by another user or writable by group or others;'
+                    . ' run chmod 700 on it, or choose a new directory.';
+            }
+        }
+        return '';
+    }
+
+    /**
      * The effective secrets dir from the loaded config (validated), or '' when
      * unset/invalid (credentials.json stays on /boot). Mirrors logDir().
      */

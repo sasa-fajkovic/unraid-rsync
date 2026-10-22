@@ -21,11 +21,14 @@ final class FakeSsh extends Ssh
     public static $lastProbeEnv = null;
     /** @var int how many per-run tokens were minted (guard-ORDERING probe) */
     public static $tokenMints = 0;
+    /** @var int|null the wall-clock limit runProbe was last called with */
+    public static $lastProbeTimeout = null;
 
-    protected static function runProbe(array $argv, ?array $env = null): array
+    protected static function runProbe(array $argv, ?array $env = null, int $timeoutSec = 30): array
     {
-        self::$lastProbeArgv = $argv;
-        self::$lastProbeEnv  = $env;
+        self::$lastProbeArgv    = $argv;
+        self::$lastProbeEnv     = $env;
+        self::$lastProbeTimeout = $timeoutSec;
         return self::$nextProbe;
     }
 
@@ -47,7 +50,7 @@ final class AcceptNewSsh extends Ssh
 {
     public static string $appendLine = '';
 
-    protected static function runProbe(array $argv, ?array $env = null): array
+    protected static function runProbe(array $argv, ?array $env = null, int $timeoutSec = 30): array
     {
         foreach ($argv as $tok) {
             if (strncmp($tok, 'UserKnownHostsFile=', 19) === 0) {
@@ -55,6 +58,19 @@ final class AcceptNewSsh extends Ssh
             }
         }
         return [0, ''];
+    }
+}
+
+/** Exposes the real (protected) probe runner. */
+final class LiveProbeSsh extends Ssh
+{
+    /**
+     * @param array<int,string> $argv
+     * @return array{0:int,1:string}
+     */
+    public static function probe(array $argv, int $timeoutSec): array
+    {
+        return static::runProbe($argv, null, $timeoutSec);
     }
 }
 
@@ -90,6 +106,7 @@ final class SshTest extends TestCase
         FakeSsh::$nextProbe = [0, ''];
         FakeSsh::$lastProbeArgv = null;
         FakeSsh::$lastProbeEnv = null;
+        FakeSsh::$lastProbeTimeout = null;
         FakeSsh::$tokenMints = 0;
     }
 
@@ -100,6 +117,7 @@ final class SshTest extends TestCase
         FakeSsh::$runtimeBase = '/tmp/unraid.rsync';
         Ssh::$askpassPathOverride = null;
         FakeSsh::$askpassPathOverride = null;
+        ProcIO::$killGraceSec = 1.0;
     }
 
     private function rmrf(string $dir): void
@@ -740,6 +758,78 @@ final class SshTest extends TestCase
         $this->assertSame('--', $argv[$destIdx - 1], 'destination must be preceded by --');
         // ssh is argv[0] for every auth method now - no wrapper program.
         $this->assertSame('ssh', $argv[0]);
+    }
+
+    /**
+     * credentials.json is hand-editable: a ':' or '/' that never went through
+     * validateConnection must still be refused at run time, before any secret
+     * is written.
+     */
+    public function testMaterializeRefusesAHostOrUsernameThatReSplitsTheOperand(): void
+    {
+        foreach ([['host' => 'a:b'], ['host' => 'nas/evil'], ['username' => 'a:b'], ['username' => 'u/x']] as $over) {
+            $creds = Credentials::defaults();
+            // Raw records, as a hand edit leaves them (no mergeConnection).
+            $creds['connections'][] = array_merge(['id' => 'c-pw', 'host' => 'h.example', 'username' => 'sasa',
+                'authMethod' => 'PASSWORD', 'password' => Credentials::obfuscate('pw')], $over);
+            $res = FakeSsh::materialize($creds, 'c-pw');
+            $this->assertFalse($res['ok'], json_encode($over));
+            $this->assertStringContainsString('not valid for SSH', (string) $res['error']);
+        }
+        $this->assertSame(0, FakeSsh::$tokenMints, 'refused before any token or secret exists');
+    }
+
+    public function testTestConnectionHandsSshAnUnbracketedIpv6Host(): void
+    {
+        $creds = Credentials::defaults();
+        $creds['connections'][] = $this->passConn(['host' => '2001:db8::1', 'password' => Credentials::obfuscate('pw')]);
+        $this->assertSame('[2001:db8::1]', $creds['connections'][0]['host']);
+
+        FakeSsh::testConnection($creds, 'c-pw');
+        $this->assertContains('sasa@2001:db8::1', (array) FakeSsh::$lastProbeArgv);
+    }
+
+    public function testAScopedIpv6HostMaterializesAndReachesSshUnbracketedWithItsScope(): void
+    {
+        $creds = Credentials::defaults();
+        // Raw, as stored before the operand rules (bare, not bracketed).
+        $creds['connections'][] = ['id' => 'c-pw', 'name' => 'p', 'host' => 'fe80::1%eth0', 'username' => 'sasa',
+            'authMethod' => 'PASSWORD', 'password' => Credentials::obfuscate('pw')];
+
+        $mat = FakeSsh::materialize($creds, 'c-pw');
+        $this->assertTrue($mat['ok'], (string) ($mat['error'] ?? ''));
+        $this->assertSame('[fe80::1%eth0]', $mat['conn']['host']);
+        FakeSsh::cleanupRuntime((string) $mat['token']);
+
+        FakeSsh::testConnection($creds, 'c-pw');
+        $this->assertContains('sasa@fe80::1%eth0', (array) FakeSsh::$lastProbeArgv);
+    }
+
+    public function testTestConnectionProbeDeadlineFollowsTheConnectTimeout(): void
+    {
+        $creds = Credentials::defaults();
+        $creds['keys'][] = ['id' => 'k-1', 'name' => 'k', 'privateKey' => "KEY\n"];
+        $creds['connections'][] = $this->keyConn(['connectTimeout' => 15]);
+        FakeSsh::testConnection($creds, 'c-key');
+        $this->assertSame(15 + Ssh::PROBE_GRACE, FakeSsh::$lastProbeTimeout);
+    }
+
+    /**
+     * Test connection against a host whose banner overflows the stderr pipe:
+     * the probe read stdout to EOF first, so ssh blocked writing stderr and the
+     * php-fpm worker blocked with it, with no time limit at all.
+     */
+    public function testRealProbeIsBoundedAgainstAStderrFloodThatNeverExits(): void
+    {
+        ProcIO::$killGraceSec = 0.2;
+        $started = microtime(true);
+        [$code, $stderr] = LiveProbeSsh::probe(['bash', '-c', 'exec yes banner-line >&2'], 1);
+        $elapsed = microtime(true) - $started;
+
+        $this->assertSame(Ssh::SSH_EXIT_ERROR, $code);
+        $this->assertSame('Operation timed out: ssh did not finish within 1 seconds.', $stderr);
+        $this->assertLessThan(5.0, $elapsed);
+        $this->assertSame('unreachable', Ssh::classifyProbe([], $code, $stderr)['reason']);
     }
 
     public function testTestConnectionPasswordPassesAskpassEnvToTheProbe(): void

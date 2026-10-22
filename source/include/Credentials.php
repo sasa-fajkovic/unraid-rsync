@@ -426,10 +426,7 @@ class Credentials
         $creds = self::mergeDefaults($creds);
 
         $path = self::path();
-        $dir  = dirname($path);
-        if (!is_dir($dir) && !@mkdir($dir, 0700, true) && !is_dir($dir)) {
-            throw new RuntimeException("Unable to create credentials directory: $dir");
-        }
+        Util::mkdirs(dirname($path), 0700);
 
         $json = json_encode($creds, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
         if ($json === false) {
@@ -571,6 +568,11 @@ class Credentials
         $out['id']       = isset($conn['id'])       ? trim((string) $conn['id'])       : $defaults['id'];
         $out['name']     = isset($conn['name'])     ? trim((string) $conn['name'])     : $defaults['name'];
         $out['host']     = isset($conn['host'])     ? trim((string) $conn['host'])     : $defaults['host'];
+        // rsync splits "user@host:path" at the first ':', so a bare IPv6 literal
+        // retargets the transfer; the bracketed form is the one it parses.
+        if (Util::isIpv6Address($out['host'])) {
+            $out['host'] = '[' . $out['host'] . ']';
+        }
         $out['username'] = isset($conn['username']) ? trim((string) $conn['username']) : $defaults['username'];
         $out['keyId']    = isset($conn['keyId'])    ? trim((string) $conn['keyId'])    : $defaults['keyId'];
         // keyFilePath: a path to an existing key file (KEYFILE auth). Trimmed
@@ -767,8 +769,8 @@ class Credentials
                     . 'whitespace or shell characters. rsync would silently reinterpret such a value '
                     . 'as an SSH target or as a local path.';
             }
-        } elseif (!self::isSafeSshToken($host)) {
-            $errors[] = 'Host contains unsafe characters or begins with "-".';
+        } elseif (!self::isSafeSshHost($host)) {
+            $errors[] = self::SSH_HOST_RULE;
         }
 
         // A username stays REQUIRED for DAEMON: rsyncd's auth_server() returns
@@ -785,8 +787,8 @@ class Credentials
                     . 'whitespace or shell characters. rsync would silently reinterpret such a value '
                     . 'as an SSH target or as a local path.';
             }
-        } elseif (!self::isSafeSshToken($username)) {
-            $errors[] = 'Username contains unsafe characters or begins with "-".';
+        } elseif (!self::isSafeSshUser($username)) {
+            $errors[] = self::SSH_USER_RULE;
         }
 
         $port = (int) ($conn['port'] ?? 0);
@@ -900,6 +902,36 @@ class Credentials
         return !preg_match('/[\s;&|`$()<>"\'\\\\]/', $value);
     }
 
+    const SSH_HOST_RULE = 'Host must be a host name or IPv4 address (letters, digits, ".", "-" and "_", '
+        . 'not beginning with "-") or an IPv6 address.';
+    const SSH_USER_RULE = 'Username may contain only letters, digits, ".", "-" and "_", and must not begin with "-" or ".".';
+
+    /**
+     * True when $value is safe as the host of an SSH "user@host:path" operand: a
+     * host name / IPv4 address, or a BRACKETED IPv6 literal (a %scope included). rsync splits the
+     * operand at the first ':' (outside brackets), so a ':' turns the rest into
+     * the path - "fe80::1:/x" connects to host "fe80" - and a '/' makes the whole
+     * operand a LOCAL path. PURE.
+     */
+    public static function isSafeSshHost(string $value): bool
+    {
+        $value = trim($value);
+        if (preg_match('/^\[([^\]]+)\]$/D', $value, $m)) {
+            return Util::isIpv6Address($m[1]);
+        }
+        return (bool) preg_match('/^[A-Za-z0-9_][A-Za-z0-9_.-]*$/D', $value);
+    }
+
+    /**
+     * True when $value is safe as the user of an SSH "user@host:path" operand:
+     * a POSIX-style name. A ':' or '/' in it re-splits the operand the same way
+     * a bad host does, and an '@' makes it ambiguous. PURE.
+     */
+    public static function isSafeSshUser(string $value): bool
+    {
+        return (bool) preg_match('/^[A-Za-z0-9_][A-Za-z0-9_.-]*$/D', trim($value));
+    }
+
     /**
      * True when a host/username string is safe as the "[user@]host" part of an
      * rsync DAEMON operand "[user@]host::module". STRICTER than isSafeSshToken().
@@ -923,7 +955,7 @@ class Credentials
     /** True when $host is an IPv6 literal, bracketed or bare. PURE. */
     private static function isIpv6Literal(string $host): bool
     {
-        return filter_var(trim(strtolower(trim($host)), '[]'), FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) !== false;
+        return Util::isIpv6Address(trim(strtolower(trim($host)), '[]'));
     }
 
     /**

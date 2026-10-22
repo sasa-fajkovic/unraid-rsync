@@ -142,6 +142,9 @@ class Rsync
         'exclude' => '--exclude',
     ];
 
+    /** --timeout (seconds) for an rsync daemon transfer whose options leave it blank. */
+    const DAEMON_DEFAULT_TIMEOUT = 900;
+
     /**
      * The canonical rsync binary location. rsync ships in Unraid's BASE OS at
      * /usr/bin/rsync, so it is ALWAYS present on a healthy system - the plugin
@@ -218,33 +221,20 @@ class Rsync
         return is_executable($path);
     }
 
+    /** Wall-clock limit on the `rsync --version` probe, in seconds; tests lower it. */
+    public static int $versionProbeTimeout = 10;
+
     /**
      * Run `<rsync> --version` (no shell) and return its STDOUT (rsync prints its
-     * version banner to stdout). stderr is fully drained too - even though the
-     * version banner goes to stdout, leaving stderr unread risks the child
-     * blocking if it ever writes there, so we read both before proc_close. Live
-     * implementation uses proc_open with the argv ARRAY. Overridable in tests.
+     * version banner to stdout), or '' when it did not finish within
+     * $versionProbeTimeout. Both pipes are drained together and the child is
+     * killed and reaped past the deadline (ProcIO::capture), so the Status tab
+     * can never wedge a php-fpm worker on it. Overridable in tests.
      */
     protected static function runVersionProbe(string $rsyncPath): string
     {
-        $descriptors = [
-            0 => ['file', '/dev/null', 'r'],
-            1 => ['pipe', 'w'],
-            2 => ['pipe', 'w'],
-        ];
-        $pipes = [];
-        $proc = @proc_open([$rsyncPath, '--version'], $descriptors, $pipes);
-        if (!is_resource($proc)) {
-            return '';
-        }
-        // Drain BOTH pipes so the child can never block writing to a full stderr
-        // buffer while we wait on stdout. We return stdout (the version banner).
-        $stdout = stream_get_contents($pipes[1]);
-        stream_get_contents($pipes[2]); // drain + discard stderr
-        fclose($pipes[1]);
-        fclose($pipes[2]);
-        proc_close($proc);
-        return is_string($stdout) ? $stdout : '';
+        [, $stdout, , $timedOut] = ProcIO::capture([$rsyncPath, '--version'], null, static::$versionProbeTimeout);
+        return $timedOut ? '' : $stdout;
     }
 
     // --- Run state names (also used in the run summary on /boot). ---
@@ -299,7 +289,8 @@ class Rsync
      *        emits every whitelisted option exactly as before. Exactly ONE
      *        option depends on it: --contimeout, which rsync refuses outright on
      *        anything but a daemon connection (main.c:1558, exit 1 RERR_SYNTAX),
-     *        so it is dropped for any non-DAEMON value. The gate lives HERE and
+     *        so it is dropped for any non-DAEMON value; and a DAEMON value with
+     *        no --timeout gets DAEMON_DEFAULT_TIMEOUT. The gate lives HERE and
      *        not in buildArgv so the live options preview - which calls this
      *        mapper directly, and whose whole point is to show what will really
      *        run - cannot disagree with the argv that really runs.
@@ -309,6 +300,11 @@ class Rsync
     {
         if ($transport !== null && strtoupper(trim($transport)) !== 'DAEMON') {
             unset($opts['contimeout']);
+        }
+        // A daemon transfer has no ServerAlive to notice a stalled rsyncd, which
+        // then holds the job lock forever and every scheduled run is skipped.
+        if ($transport !== null && strtoupper(trim($transport)) === 'DAEMON' && trim((string) ($opts['timeout'] ?? '')) === '') {
+            $opts['timeout'] = (string) self::DAEMON_DEFAULT_TIMEOUT;
         }
 
         $tokens = [];

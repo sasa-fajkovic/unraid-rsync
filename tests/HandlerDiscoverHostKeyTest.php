@@ -94,6 +94,16 @@ final class HandlerDiscoverHostKeyTest extends TestCase
         $this->assertSame(['h.example', 2222, 30], StubDiscoverKeyTools::$calls[0]);
     }
 
+    public function testDiscoverHandsKeyscanAnUnbracketedIpv6Host(): void
+    {
+        $_POST = ['host' => '[2001:db8::1]', 'port' => '22'];
+        $this->runCapture('ur_action_discover_host_key');
+        $this->assertSame('2001:db8::1', StubDiscoverKeyTools::$calls[0][0]);
+        $_POST = ['host' => '[fe80::1%eth0]', 'port' => '22'];
+        $this->runCapture('ur_action_discover_host_key');
+        $this->assertSame('fe80::1%eth0', StubDiscoverKeyTools::$calls[1][0]);
+    }
+
     public function testDiscoverTimeoutReturns504WithCleanJson(): void
     {
         StubDiscoverKeyTools::$next = [

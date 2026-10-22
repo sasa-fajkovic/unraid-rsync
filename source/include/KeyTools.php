@@ -409,7 +409,7 @@ class KeyTools
         $bare = (strlen($host) > 1 && $host[0] === '[' && substr($host, -1) === ']')
             ? substr($host, 1, -1)
             : $host;
-        if (filter_var($bare, FILTER_VALIDATE_IP) !== false) {
+        if (filter_var($bare, FILTER_VALIDATE_IP) !== false || Util::isIpv6Address($bare)) {
             return true;
         }
         // Hostname: labels of [A-Za-z0-9-], dot-separated, no leading/trailing

@@ -39,7 +39,13 @@ on, forked from, or derived from any other plugin.
   `/tmp`), and cleanup never follows symlinks. The runtime-dir creators (Ssh,
   RunState, Logger's tmpfs chain, Notify) also refuse a dir another uid owns or
   group/others can write (`Util::assertPrivateDir`): under `/tmp` a local user
-  can pre-create it, and root's `chmod 0700` leaves them its owner.
+  can pre-create it, and root's `chmod 0700` leaves them its owner. A missing
+  logDir/secretsDir level is created by `Util::mkdirs`, which refuses a
+  symlinked existing ancestor below `/mnt` and chmods only the levels it made:
+  an EXISTING logDir or secretsDir is never chmodded (it may be a share). The
+  run state carries the run's secrets `token`, so `Runner::reportCrashed`
+  sweeps a SIGKILLed run's `keys/`, `pass/`, `known_hosts/` files
+  (`Ssh::sweepRuntime`, only through private runtime dirs).
 - **UI** = a parent hub `source/UnraidRsync.page` (`Menu="Utilities"` →
   **Settings ▸ User Utilities**, `Type="xmenu"`, **empty body**) plus child tab
   pages `source/UR.*.page` (`Menu="UnraidRsync:1..7"` → **Overview / Jobs /
@@ -177,14 +183,37 @@ on, forked from, or derived from any other plugin.
   existing dest, never `rename` across the FAT32↔ext4 device boundary). The
   **tmpfs materialisation is NOT removed** by this (still needed for a discrete
   `ssh -i` key file + per-run isolation + redaction). Per-run tmpfs secrets +
-  run state ALWAYS stay in tmpfs regardless.
+  run state ALWAYS stay in tmpfs regardless. A NEW secretsDir is refused
+  (`Config::secretsDirRefusal`, save time only, so a stored pointer keeps
+  loading) under `/mnt/remotes` or `/mnt/addons`, at a share or pool root
+  (`/mnt/<top>/<share>`), or when it exists but another uid owns it or
+  group/others can write it.
 - **Host-key pinning (`accept-new`) is a real trust-on-first-use now.**
   `Ssh::harvestHostKey()` reads back the key OpenSSH appended to the per-run
   tmpfs known_hosts, and `Ssh::pinHostKey()` writes it into the connection's
   `remoteHostKey` (reload-modify-save, only while still empty) from both
   `Runner::run()`'s `finally` (before `cleanupRuntime`) and
   `Ssh::testConnection()`. Before this, nothing was ever pinned and every run
-  trusted whatever key the host presented.
+  trusted whatever key the host presented. The pin is a compare-and-set on the
+  endpoint too: `pinHostKey($connId, $key, $host, $port)` takes the host:port
+  the key was harvested from and refuses once the stored connection points
+  elsewhere, and a save that changes host or port while posting the old pin
+  back (or blank) clears it - an old pin never matches the new host, so
+  accept-new would otherwise accept ANY key on every run.
+- **SSH host and username are re-split by rsync**: `user@host:path` breaks at
+  the first `:` and a `/` makes the operand local. `Credentials::isSafeSshHost`
+  (host name / IPv4, or a BRACKETED IPv6 literal, `%scope` allowed - see
+  `Util::isIpv6Address`, since FILTER_VALIDATE_IP refuses `fe80::1%eth0`) and `isSafeSshUser`
+  (POSIX-style) run at save AND in `Ssh::materialize` (credentials.json is
+  hand-editable). `mergeConnection` stores a bare IPv6 host bracketed; ssh
+  itself (Test connection, the snapshot helper, ssh-keyscan) gets it unbracketed.
+- **Probes are bounded; transfers are not.** The ssh Test connection and
+  `rsync --version` run through `ProcIO::capture` (both pipes drained, 64 KiB
+  per stream, TERM then KILL then a non-blocking reap within the deadline). A
+  DAEMON transfer whose `timeout` option is blank gets
+  `--timeout=900` (`Rsync::DAEMON_DEFAULT_TIMEOUT`, emitted by `optionTokens` so
+  the preview agrees; `0` still means wait forever), and the daemon marker and
+  `--delete` probes get a wall clock. Never put a wall clock on a real transfer.
 - **Timezone: store UTC, display system-local.** Two conventions, both
   deliberate (issue #135). **Stored/interchange** values stay UTC: the
   `startedAt`/`finishedAt` in `runs/<jobid>.summary.json` + History records

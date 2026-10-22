@@ -90,6 +90,7 @@ declare(strict_types=1);
  */
 
 require_once __DIR__ . '/Credentials.php';
+require_once __DIR__ . '/ProcIO.php';
 require_once __DIR__ . '/Util.php';
 
 class Ssh
@@ -114,6 +115,9 @@ class Ssh
     // ssh exit code that means "ssh itself failed to connect/authenticate"
     // (as opposed to a remote command's own non-zero exit).
     const SSH_EXIT_ERROR = 255;
+
+    /** Seconds a connection test may run beyond the connection's own ConnectTimeout. */
+    const PROBE_GRACE = 20;
 
     // --- runtime paths ------------------------------------------------------
     //
@@ -414,6 +418,17 @@ class Ssh
             ];
         }
 
+        // credentials.json is hand-editable, so re-check what validateConnection
+        // enforced at save time: a ':' or '/' in either half re-splits the rsync
+        // operand into another host or a LOCAL path. Empty halves are the
+        // caller's "incomplete connection" error.
+        if ($conn['host'] !== '' && !Credentials::isSafeSshHost($conn['host'])) {
+            return ['ok' => false, 'error' => 'The Connection host is not valid for SSH. ' . Credentials::SSH_HOST_RULE];
+        }
+        if ($conn['username'] !== '' && !Credentials::isSafeSshUser($conn['username'])) {
+            return ['ok' => false, 'error' => 'The Connection username is not valid for SSH. ' . Credentials::SSH_USER_RULE];
+        }
+
         self::ensureRuntimeDirs();
 
         // Unique per-run token: isolates concurrent runs even of the same conn.
@@ -627,6 +642,26 @@ class Ssh
     }
 
     /**
+     * cleanupRuntime() for a run whose runner died before reaching its own
+     * (Runner::reportCrashed). Only through the private 0700 runtime dirs: a
+     * symlinked dir, or one another uid owns or can write, is left alone.
+     */
+    public static function sweepRuntime(string $token): void
+    {
+        if ($token === '') {
+            return;
+        }
+        try {
+            foreach ([rtrim(static::$runtimeBase, '/'), static::keysDir(), dirname(static::knownHostsPath($token)), dirname(static::passFilePath($token))] as $dir) {
+                Util::assertPrivateDir($dir);
+            }
+        } catch (RuntimeException $e) {
+            return;
+        }
+        self::cleanupRuntime($token);
+    }
+
+    /**
      * Ensure the tmpfs runtime dirs exist with restrictive (700) modes.
      *
      * The runtime base lives under world-writable /tmp, so we defend against a
@@ -798,17 +833,20 @@ class Ssh
      * structure loaded before the run), under Credentials::withLock so a
      * concurrent save is neither clobbered nor clobbers the pin, and only when
      * the stored pin is STILL empty - so an explicit "Discover host key" or
-     * another run's pin always wins. Never throws: a completed run must not fail
-     * because pinning did.
+     * another run's pin always wins - and the stored host and port are STILL
+     * the $host:$port the key was harvested from: a run that started before the
+     * connection was pointed at another machine must not pin the old machine's
+     * key onto the new one. Never throws: a completed run must not fail because
+     * pinning did.
      */
-    public static function pinHostKey(string $connId, string $hostKey): bool
+    public static function pinHostKey(string $connId, string $hostKey, string $host, int $port): bool
     {
         $hostKey = trim($hostKey);
         if ($connId === '' || $hostKey === '') {
             return false;
         }
         try {
-            return Credentials::withLock(static function () use ($connId, $hostKey): bool {
+            return Credentials::withLock(static function () use ($connId, $hostKey, $host, $port): bool {
                 // The run resolved secretsDir at its start; it may have moved since.
                 Credentials::refreshSecretsDir();
                 $creds = Credentials::load();
@@ -817,7 +855,8 @@ class Ssh
                     if (!is_array($conn) || (string) ($conn['id'] ?? '') !== $connId) {
                         continue;
                     }
-                    if (trim((string) ($conn['remoteHostKey'] ?? '')) !== '') {
+                    $now = Credentials::mergeConnection($conn);
+                    if (trim($now['remoteHostKey']) !== '' || $now['host'] !== $host || $now['port'] !== $port) {
                         return false;
                     }
                     $creds['connections'][$i]['remoteHostKey'] = $hostKey;
@@ -895,9 +934,10 @@ class Ssh
         // The `--` ends ssh option parsing so a host/username starting with '-'
         // can never be read as an ssh option (option-injection guard, on top of
         // the validation guard in Credentials::validateConnection).
+        // ssh takes an IPv6 literal unbracketed; only rsync operands need [].
         $argv = array_merge(
             $mat['sshArgv'],
-            ['--', $conn['username'] . '@' . $conn['host'], 'true']
+            ['--', $conn['username'] . '@' . trim($conn['host'], '[]'), 'true']
         );
 
         $exitCode = self::SSH_EXIT_ERROR;
@@ -911,16 +951,26 @@ class Ssh
             // diagnostics. If anyone ever adds -v here, ssh WILL log the identity
             // file path (and more), so the stderr must then be redacted (see
             // Logger::setRedaction) before it is returned to the browser.
-            [$exitCode, $stderr] = static::runProbe($argv, self::childEnv($mat['sshEnv'] ?? []));
+            [$exitCode, $stderr] = static::runProbe($argv, self::childEnv($mat['sshEnv'] ?? []), self::probeTimeout($conn));
             // TOFU: read back whatever accept-new just accepted, while this
             // run's known_hosts still exists (the finally deletes it).
             $hostKey = self::harvestHostKey($mat);
         } finally {
             self::cleanupRuntime((string) $mat['token']);
         }
-        self::pinHostKey($connId, $hostKey);
+        self::pinHostKey($connId, $hostKey, $conn['host'], $conn['port']);
 
         return self::classifyProbe($conn, (int) $exitCode, (string) $stderr);
+    }
+
+    /**
+     * Wall-clock limit for testConnection's probe of a merged connection.
+     *
+     * @param array<string,mixed> $conn
+     */
+    public static function probeTimeout(array $conn): int
+    {
+        return (int) ($conn['connectTimeout'] ?? 10) + self::PROBE_GRACE;
     }
 
     /**
@@ -1033,28 +1083,20 @@ class Ssh
      *
      * @param array<int,string>        $argv
      * @param array<string,string>|null $env  full child environment, or null to inherit
+     * @param int                       $timeoutSec wall-clock limit; the child is killed past it
      * @return array{0:int,1:string}
      */
-    protected static function runProbe(array $argv, ?array $env = null): array
+    protected static function runProbe(array $argv, ?array $env = null, int $timeoutSec = 30): array
     {
-        $descriptors = [
-            0 => ['file', '/dev/null', 'r'],
-            1 => ['pipe', 'w'],
-            2 => ['pipe', 'w'],
-        ];
-        $pipes = [];
-        // Pass the argv ARRAY form so PHP execs directly without /bin/sh.
-        $proc = @proc_open($argv, $descriptors, $pipes, null, $env);
-        if (!is_resource($proc)) {
+        // A sequential read of stdout then stderr deadlocked on a banner over
+        // the 64 KiB pipe buffer and held the php-fpm worker with no time limit.
+        [$code, , $stderr, $timedOut] = ProcIO::capture($argv, $env, $timeoutSec);
+        if ($code === -1) {
             return [self::SSH_EXIT_ERROR, 'Failed to start ssh.'];
         }
-        $stdout = stream_get_contents($pipes[1]);
-        $stderr = stream_get_contents($pipes[2]);
-        fclose($pipes[1]);
-        fclose($pipes[2]);
-        $code = proc_close($proc);
-        // stdout from a `true` probe is empty; keep stderr for classification.
-        unset($stdout);
-        return [(int) $code, is_string($stderr) ? $stderr : ''];
+        if ($timedOut) {
+            return [self::SSH_EXIT_ERROR, "Operation timed out: ssh did not finish within $timeoutSec seconds."];
+        }
+        return [$code, $stderr];
     }
 }

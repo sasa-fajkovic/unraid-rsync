@@ -221,7 +221,7 @@ if (!function_exists('ur_option_help')) {
             // --- scalar value inputs ---------------------------------------
             'maxDelete'      => 'Refuse to delete more than this many files on the destination (--max-delete=N): the run aborts (exit 25) instead of deleting more. LEAVE BLANK for no cap — any number may be deleted. Note 0 is NOT unlimited: it means delete nothing and only warn. Only applies when a Delete option is on; the form pre-fills 25 as a safe starting point the first time you enable delete.',
             'bwlimit'        => 'Cap the transfer bandwidth in KB/s (--bwlimit=RATE), e.g. 5000 for about 5 MB/s. Leave blank for no limit (full speed).',
-            'timeout'        => 'Abort the transfer if no data is sent or received for this many seconds (--timeout=SECONDS). Leave blank for no timeout (wait indefinitely).',
+            'timeout'        => 'Abort the transfer if no data is sent or received for this many seconds (--timeout=SECONDS). Leave blank for no timeout (wait indefinitely) - except on rsync daemon (rsyncd) transfers, where blank means 900 seconds; enter 0 there to wait indefinitely.',
             'contimeout'     => 'Give up if the connection cannot be established within this many seconds (--contimeout=SECONDS). rsync accepts this ONLY when connecting to an rsync daemon (rsyncd) - it rejects it outright on SSH and Local transfers, so it is dropped for those. Leave blank for no connect timeout.',
             'maxSize'        => 'Skip any file larger than this size (--max-size=SIZE), e.g. 100M or 2G. Leave blank for no maximum (transfer files of any size).',
             'minSize'        => 'Skip any file smaller than this size (--min-size=SIZE), e.g. 10K. Leave blank for no minimum.',

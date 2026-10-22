@@ -950,6 +950,57 @@ final class HandlerCredentialsTest extends TestCase
         $this->assertSame('', Config::load()['global']['secretsDir']);
     }
 
+    /** @return array<string,array{0:string,1:string}> */
+    public static function refusedSecretsDirProvider(): array
+    {
+        return [
+            'share root'       => ['/pool/share', 'share or pool root'],
+            'remote mount'     => ['/remotes/nas/creds', 'network or add-on mount'],
+            'group-writable'   => ['/pool/share/open', 'chmod 700'],
+        ];
+    }
+
+    #[DataProvider('refusedSecretsDirProvider')]
+    public function testSaveConfigRefusesAnUnsafeNewSecretsDir(string $rel, string $why): void
+    {
+        $root = $this->scratchMntRoot();
+        mkdir($root . '/pool/share/open', 0777, true);
+        chmod($root . '/pool/share/open', 0777);
+        $seed = Credentials::defaults();
+        $seed['connections'][] = ['id' => 'c-1', 'name' => 'stay', 'host' => 'h', 'username' => 'u'];
+        $this->seedCreds($seed);
+
+        $_POST = ['action' => 'saveConfig', 'csrf_token' => 'test-token', 'global' => ['secretsDir' => $root . $rel]];
+        [$body, $code] = $this->runCapture(fn() => ur_action_save_config());
+
+        $this->assertSame(200, $code, json_encode($body));
+        $this->assertStringContainsString($why, $body['warnings'][0] ?? '');
+        $this->assertSame('', Config::load()['global']['secretsDir']);
+        $this->assertFileExists(Credentials::path(), 'the keychain did not move');
+        clearstatcache();
+        $this->assertSame(0777, fileperms($root . '/pool/share/open') & 0777, 'never chmodded');
+    }
+
+    public function testAMoveIsNotCreatedThroughASymlinkedAncestor(): void
+    {
+        $root = $this->scratchMntRoot();
+        mkdir($root . '/pool/real');
+        symlink($root . '/pool/real', $root . '/pool/link');
+        $src = $this->tempSecretsDir();
+        mkdir($src, 0700, true);
+        file_put_contents($src . '/credentials.json', "KEEP\n");
+
+        $res = ur_migrate_credentials($src, $root . '/pool/link/new', static function (): void {
+            throw new LogicException('commit must not run');
+        });
+
+        $this->assertFalse($res['ok']);
+        $this->assertStringContainsString('symlink', $res['warning']);
+        $this->assertDirectoryDoesNotExist($root . '/pool/real/new');
+        $this->assertSame("KEEP\n", file_get_contents($src . '/credentials.json'));
+        $this->rmSecretsDir($src);
+    }
+
     public function testHandlerEnablesSecretsDirWhenNoCredentialsYet(): void
     {
         // Fresh install: no credentials.json anywhere. Enabling a valid /mnt path
@@ -1276,7 +1327,11 @@ final class HandlerCredentialsTest extends TestCase
         $this->rmSecretsDir($src);
     }
 
-    public function testAnIdenticalLeftoverDestinationIsMadePrivateBeforeItIsUsed(): void
+    /**
+     * The leftover FILE is made private; the directory is not chmodded (it may
+     * not be the plugin's - Config::secretsDirRefusal vets an existing one).
+     */
+    public function testAnIdenticalLeftoverDestinationFileIsMadePrivateAndItsDirLeftAlone(): void
     {
         $src = $this->tempSecretsDir();
         $dst = $this->tempSecretsDir();
@@ -1291,7 +1346,7 @@ final class HandlerCredentialsTest extends TestCase
         $this->assertTrue($res['ok'], $res['warning']);
         clearstatcache();
         $this->assertSame(0600, fileperms($dst . '/credentials.json') & 0777);
-        $this->assertSame(0700, fileperms($dst) & 0777);
+        $this->assertSame(0755, fileperms($dst) & 0777);
 
         $this->rmSecretsDir($src);
         $this->rmSecretsDir($dst);
@@ -1549,7 +1604,7 @@ final class HandlerCredentialsTest extends TestCase
         [$src, $dst] = $this->interruptedMove($root, $root . '/pool/a', true);
         Credentials::$secretsDirOverride = $src;
 
-        $this->assertTrue(Ssh::pinHostKey('c-1', 'h ssh-ed25519 AAAAPIN'));
+        $this->assertTrue(Ssh::pinHostKey('c-1', 'h ssh-ed25519 AAAAPIN', 'h', 22));
 
         $this->assertFileDoesNotExist($src . '/credentials.json');
         $this->assertFileDoesNotExist($src . '/credentials.json.last-good');
@@ -1646,7 +1701,7 @@ final class HandlerCredentialsTest extends TestCase
     // --- a stale Connections tab must not wipe a first-use host-key pin -----
 
     /** @return array<string,mixed> */
-    private function pinnedConnectionPost(string $host, int $port): array
+    private function pinnedConnectionPost(string $host, int $port, string $postedKey = ''): array
     {
         $seed = Credentials::defaults();
         $seed['connections'][] = Credentials::mergeConnection([
@@ -1660,7 +1715,7 @@ final class HandlerCredentialsTest extends TestCase
             'connections' => [0 => [
                 'id' => 'c-pin', 'name' => 'pin renamed', 'transport' => 'SSH', 'host' => $host,
                 'port' => (string) $port, 'username' => 'u', 'authMethod' => 'KEYFILE',
-                'keyFilePath' => '/root/.ssh/id_ed25519', 'remoteHostKey' => '', 'strictHostKey' => 'accept-new',
+                'keyFilePath' => '/root/.ssh/id_ed25519', 'remoteHostKey' => $postedKey, 'strictHostKey' => 'accept-new',
             ]],
         ];
     }
@@ -1690,6 +1745,45 @@ final class HandlerCredentialsTest extends TestCase
         $this->assertSame(200, $code, json_encode($body));
 
         $this->assertSame('', Credentials::findConnection(Credentials::load(), 'c-pin')['remoteHostKey'] ?? null);
+    }
+
+    /**
+     * The Connections form posts the pinned key back as it shows it (CRLF from
+     * the textarea). Pointed at a new host or port, that old pin never matches
+     * the new known_hosts line, so accept-new would take ANY key on every run.
+     */
+    #[DataProvider('movedTargetProvider')]
+    public function testTheOldPinPostedBackForADifferentTargetIsCleared(string $host, int $port): void
+    {
+        $_POST  = $this->pinnedConnectionPost($host, $port, "nas.local ssh-ed25519 AAAAPINNED\r\n");
+        $logged = (int) @filesize(Logger::pluginLogPath());
+        [$body, $code] = $this->runCapture(fn() => ur_action_save_credentials());
+        $this->assertSame(200, $code, json_encode($body));
+
+        $this->assertSame('', Credentials::findConnection(Credentials::load(), 'c-pin')['remoteHostKey'] ?? null);
+        clearstatcache();
+        $this->assertStringContainsString(
+            'Connection c-pin: the host or port changed, so its pinned host key was cleared',
+            (string) file_get_contents(Logger::pluginLogPath(), false, null, $logged)
+        );
+    }
+
+    public function testAnExplicitNewKeyForADifferentTargetIsStored(): void
+    {
+        $_POST = $this->pinnedConnectionPost('nas2.local', 22, 'nas2.local ssh-ed25519 AAAANEW');
+        [$body, $code] = $this->runCapture(fn() => ur_action_save_credentials());
+        $this->assertSame(200, $code, json_encode($body));
+
+        $this->assertSame('nas2.local ssh-ed25519 AAAANEW', Credentials::findConnection(Credentials::load(), 'c-pin')['remoteHostKey'] ?? null);
+    }
+
+    public function testTheOldPinPostedBackForTheSameTargetIsKept(): void
+    {
+        $_POST = $this->pinnedConnectionPost('nas.local', 22, 'nas.local ssh-ed25519 AAAAPINNED');
+        [$body, $code] = $this->runCapture(fn() => ur_action_save_credentials());
+        $this->assertSame(200, $code, json_encode($body));
+
+        $this->assertSame('nas.local ssh-ed25519 AAAAPINNED', Credentials::findConnection(Credentials::load(), 'c-pin')['remoteHostKey'] ?? null);
     }
 
     // =====================================================================

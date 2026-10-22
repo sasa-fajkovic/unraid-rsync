@@ -104,6 +104,45 @@ final class UtilTest extends TestCase
         }
     }
 
+    public function testIsIpv6AddressAcceptsAZoneIdThatFilterVarRefuses(): void
+    {
+        foreach (['2001:db8::1', '::1', 'fe80::1%eth0', 'fe80::1%br0.10', 'fe80::1%2'] as $a) {
+            $this->assertTrue(Util::isIpv6Address($a), $a);
+        }
+        foreach (['10.0.0.5', '10.0.0.5%eth0', 'fe80::1%', 'fe80::1%eth0;id', 'fe80::1%eth0@if5', '[fe80::1]', 'nas', ''] as $a) {
+            $this->assertFalse(Util::isIpv6Address($a), $a);
+        }
+    }
+
+    public function testMkdirsCreatesTheMissingLevelsAndChmodsOnlyThose(): void
+    {
+        chmod($this->dir, 0755);
+        Util::mkdirs($this->dir . '/a/b', 0700);
+        clearstatcache();
+        $this->assertSame(0700, fileperms($this->dir . '/a') & 0777);
+        $this->assertSame(0700, fileperms($this->dir . '/a/b') & 0777);
+        $this->assertSame(0755, fileperms($this->dir) & 0777, 'an existing level is never chmodded');
+
+        chmod($this->dir . '/a/b', 0755);
+        Util::mkdirs($this->dir . '/a/b', 0700);
+        clearstatcache();
+        $this->assertSame(0755, fileperms($this->dir . '/a/b') & 0777, 'nor is an existing leaf');
+    }
+
+    /** A planted link below /mnt would carry a recursive mkdir anywhere. */
+    public function testMkdirsRefusesToCreateThroughASymlinkedAncestor(): void
+    {
+        mkdir($this->dir . '/elsewhere');
+        symlink($this->dir . '/elsewhere', $this->dir . '/link');
+        try {
+            Util::mkdirs($this->dir . '/link/new/leaf', 0700);
+            $this->fail('expected a refusal');
+        } catch (RuntimeException $e) {
+            $this->assertStringContainsString('through the symlink ' . $this->dir . '/link', $e->getMessage());
+        }
+        $this->assertDirectoryDoesNotExist($this->dir . '/elsewhere/new');
+    }
+
     public function testWriteAtomicReplacesTheFileAtTheGivenModeAndLeavesNoTemp(): void
     {
         $path = $this->dir . '/f.json';

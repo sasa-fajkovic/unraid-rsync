@@ -48,6 +48,16 @@ final class Util
     }
 
     /**
+     * True when $s is a bare IPv6 address, optionally with a %scope zone id
+     * (fe80::1%eth0) - which FILTER_VALIDATE_IP alone refuses. PURE.
+     */
+    public static function isIpv6Address(string $s): bool
+    {
+        $addr = preg_match('/^([^%]+)%[A-Za-z0-9_.-]+$/D', $s, $m) ? $m[1] : $s;
+        return filter_var($addr, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) !== false;
+    }
+
+    /**
      * True when $path, or the first existing ancestor of it, lives on the same
      * device as "/" or "/mnt". Both are RAM on Unraid (/mnt may be its own
      * tmpfs), so a local path there means the drive meant to hold it is not
@@ -139,6 +149,39 @@ final class Util
             unset(self::$heldLocks[$lockPath]);
             flock($fh, LOCK_UN);
             fclose($fh);
+        }
+    }
+
+    /**
+     * mkdir -p that will not create through a symlink: an existing ancestor
+     * below the path's top-level directory (/mnt for a logDir or secretsDir)
+     * that is a symlink is refused rather than followed. Only the levels it
+     * creates are chmodded, never one that already existed (a share root
+     * chmodded 0700 locks its users out).
+     *
+     * @throws RuntimeException naming the symlink, or the level it could not create.
+     */
+    public static function mkdirs(string $dir, int $mode): void
+    {
+        $dir     = '/' . trim($dir, '/');
+        $missing = [];
+        for ($p = $dir; !file_exists($p) && !is_link($p); $p = dirname($p)) {
+            $missing[] = $p;
+        }
+        if ($missing === []) {
+            return;
+        }
+        for ($a = $p; substr_count($a, '/') > 1; $a = dirname($a)) {
+            if (is_link($a)) {
+                throw new RuntimeException("Refusing to create $dir through the symlink $a");
+            }
+        }
+        foreach (array_reverse($missing) as $level) {
+            if (@mkdir($level, $mode)) {
+                @chmod($level, $mode);
+            } elseif (!is_dir($level)) {
+                throw new RuntimeException("Unable to create directory: $level");
+            }
         }
     }
 

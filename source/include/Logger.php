@@ -345,12 +345,10 @@ class Logger
             // not exist yet, so create the logs root recursively, then the
             // per-job leaf non-recursively. Each created level still refuses a
             // symlink (defence in depth) via ensureLevel.
-            if (!is_dir($logsDir)) {
-                if (is_link($logsDir)) {
-                    throw new RuntimeException("Refusing to use a symlinked log dir: $logsDir");
-                }
-                @mkdir($logsDir, 0700, true);
+            if (is_link($logsDir)) {
+                throw new RuntimeException("Refusing to use a symlinked log dir: $logsDir");
             }
+            Util::mkdirs($logsDir, 0700);
             self::ensureLevel($logsDir);
             if ($dir !== $logsDir) {
                 self::ensureLevel($dir);
@@ -374,7 +372,8 @@ class Logger
 
     /**
      * Create (if missing) and harden ONE directory level: refuse a symlink,
-     * refuse a non-directory, create it non-recursively at mode 700, and chmod.
+     * refuse a non-directory, create it non-recursively at mode 700 and chmod
+     * it - only a level made here: an existing logDir may be a share others use.
      * The pre- and post-mkdir symlink checks close the TOCTOU where a level is
      * swapped for a symlink between create and use.
      */
@@ -386,13 +385,16 @@ class Logger
         if (file_exists($d) && !is_dir($d)) {
             throw new RuntimeException("Log path exists but is not a directory: $d");
         }
-        if (!is_dir($d) && !@mkdir($d, 0700) && !is_dir($d)) {
+        $made = !is_dir($d) && @mkdir($d, 0700);
+        if (!$made && !is_dir($d)) {
             throw new RuntimeException("Unable to create log dir: $d");
         }
         if (is_link($d)) {
             throw new RuntimeException("Refusing to use a symlinked log dir: $d");
         }
-        @chmod($d, 0700);
+        if ($made) {
+            @chmod($d, 0700);
+        }
     }
 
     /**

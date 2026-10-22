@@ -173,9 +173,9 @@ class RunState
 
     /**
      * Write a job's runtime state atomically (temp + rename). The written shape
-     * is fixed: {jobId, pid, running, dryRun, trigger, startedAt, currentLog}
-     * (jobId is always stamped from the $jobId arg). Unknown keys passed in are
-     * dropped so the file stays canonical. `trigger` is clamped to the closed
+     * is fixed: {jobId, pid, running, dryRun, trigger, startedAt, currentLog},
+     * plus an optional `token` (jobId is always stamped from the $jobId arg).
+     * Unknown keys passed in are dropped so the file stays canonical. `trigger` is clamped to the closed
      * set ('manual'|'schedule', default 'manual').
      *
      * @param array<string,mixed> $state
@@ -193,6 +193,10 @@ class RunState
             'startedAt'  => isset($state['startedAt']) ? (string) $state['startedAt'] : '',
             'currentLog' => isset($state['currentLog']) ? (string) $state['currentLog'] : '',
         ];
+        // The run's secrets token, so a crashed run's tmpfs secrets can be swept.
+        if (is_string($state['token'] ?? null) && $state['token'] !== '') {
+            $out['token'] = $state['token'];
+        }
 
         $path = self::statePath($jobId);
         $dir  = dirname($path);
@@ -219,7 +223,7 @@ class RunState
      * unreadable/corrupt (a missing/garbage state file just means "not
      * running"). The returned array is always the canonical shape.
      *
-     * @return array{jobId:string,pid:int,running:bool,dryRun:bool,trigger:string,startedAt:string,currentLog:string}|null
+     * @return array{jobId:string,pid:int,running:bool,dryRun:bool,trigger:string,startedAt:string,currentLog:string,token?:string}|null
      */
     public static function read(string $jobId): ?array
     {
@@ -243,7 +247,7 @@ class RunState
             'trigger'    => (($data['trigger'] ?? '') === 'schedule') ? 'schedule' : 'manual',
             'startedAt'  => (string) ($data['startedAt'] ?? ''),
             'currentLog' => (string) ($data['currentLog'] ?? ''),
-        ];
+        ] + (is_string($data['token'] ?? null) && $data['token'] !== '' ? ['token' => $data['token']] : []);
     }
 
     /** Remove a job's state file (best-effort). */

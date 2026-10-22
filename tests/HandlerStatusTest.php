@@ -499,6 +499,50 @@ final class HandlerStatusTest extends TestCase
         $this->assertStringContainsString('OLD-RUN-MARKER', (string) file_get_contents($dl['path']));
     }
 
+    /**
+     * The file is redacted by the runner only once a pair has finished (never if
+     * the runner is SIGKILLed); the download must scrub on the way out like the
+     * tail does.
+     */
+    public function testDownloadJobLogScrubsTmpfsSecretPaths(): void
+    {
+        $id   = $this->seedJob('DlScrub');
+        $log  = Logger::openRun($id, 1750000000);
+        $key  = Logger::base() . '/keys/c-1-4242-0123456789ab';
+        $pass = Logger::base() . '/pass/c-1-4242-0123456789ab';
+        file_put_contents($log, "opening connection using: ssh -i $key -p 22\nfailed to open password file $pass\n");
+
+        $_GET = ['id' => $id];
+        [$dl, , $code] = $this->runDownload();
+        $this->assertSame(200, $code);
+        $this->assertStringNotContainsString($key, $dl['body']);
+        $this->assertStringNotContainsString($pass, $dl['body']);
+        $this->assertSame(
+            "opening connection using: ssh -i [redacted] -p 22\nfailed to open password file [redacted]\n",
+            $dl['body']
+        );
+    }
+
+    public function testStreamScrubbedCatchesAPathSplitAcrossChunks(): void
+    {
+        $path = UR_RUNTIME_BASE . '/scrub-' . bin2hex(random_bytes(4)) . '.log';
+        $text = "line one\n-e 'ssh -i " . Logger::base() . "/keys/tok-1 -o UserKnownHostsFile="
+            . Logger::base() . "/known_hosts/tok-1'\nno newline at the end " . Logger::base() . '/pass/tok-1';
+        file_put_contents($path, $text);
+        try {
+            foreach ([1, 2, 7, 13, 40, 65536] as $size) {
+                $out = '';
+                ur_stream_scrubbed($path, static function (string $s) use (&$out): void {
+                    $out .= $s;
+                }, $size);
+                $this->assertSame(Logger::scrubSecretPaths($text), $out, "chunk size $size");
+                $this->assertStringNotContainsString('tok-1', $out, "chunk size $size");
+            }
+        } finally {
+            @unlink($path);
+        }
+    }
+
     public function testDownloadJobLogDefaultsToLatestRun(): void
     {
         $id  = $this->seedJob('DownloadLatest');
