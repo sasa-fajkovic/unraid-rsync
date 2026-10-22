@@ -354,7 +354,9 @@ on, forked from, or derived from any other plugin.
   run's `{state, startedAt, finishedAt, exitCode, reason}`, plus `snapshot` /
   `committed` for a snapshot job (null: none yet). `Snapshot::lastSnapshot`
   reads those, so a dry run no longer hides the "last snapshot" line; a
-  `lastReal` without them (written before) falls back to the top level. A
+  `lastReal` without them (written before) falls back to the top level, and a
+  snapshot job's next `writeSummary` fills them in from that same run's top
+  level or History record (`withSnapshotFields`) before a dry run replaces it. A
   dry run rewrites only the top level; a real run both. A summary written
   before `lastReal` existed reads as its own last real run, or, when it was a
   dry run, as the newest non-dry, non-SKIPPED History record - the real

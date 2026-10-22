@@ -1393,4 +1393,32 @@ final class SnapshotRunnerTest extends TestCase
         $this->assertTrue($last['committed']);
         $this->assertStringEndsWith('(committed)', $last['label']);
     }
+
+    /** A summary from before lastReal carried snapshot fields, then the first dry run after the upgrade. */
+    public function testTheFirstDryRunAfterTheUpgradeKeepsTheSnapshotLine(): void
+    {
+        $stamp = '2026-10-20T030005Z';
+        $old = static fn(array $top): string => (string) json_encode($top + ['lastReal' => [
+            'state' => 'SUCCESS', 'startedAt' => '2026-10-20T03:00:00Z', 'finishedAt' => '2026-10-20T03:10:00Z', 'exitCode' => 0, 'reason' => '',
+        ]]);
+        $dry = ['state' => 'SUCCESS', 'startedAt' => '2026-10-21T03:00:00Z', 'finishedAt' => '2026-10-21T03:01:00Z', 'exitCode' => 0, 'dryRun' => true, 'snapshot' => '', 'committed' => false];
+        $path = UR_CONFIG_BASE . '/runs/' . self::JOB . '.summary.json';
+        @mkdir(dirname($path), 0755, true);
+
+        // Its top level is that same real run.
+        file_put_contents($path, $old(['state' => 'SUCCESS', 'startedAt' => '2026-10-20T03:00:00Z', 'finishedAt' => '2026-10-20T03:10:00Z',
+            'exitCode' => 0, 'dryRun' => false, 'snapshot' => $stamp, 'committed' => true]));
+        $this->assertTrue(Runner::writeSummary(self::JOB, $dry));
+        $this->assertSame($stamp, Snapshot::lastSnapshot(Runner::readSummary(self::JOB))['stamp'] ?? null);
+
+        // Its top level was already a dry run: the real run's History record has it.
+        file_put_contents($path, $old(['state' => 'SUCCESS', 'startedAt' => '2026-10-20T04:00:00Z', 'finishedAt' => '2026-10-20T04:01:00Z',
+            'exitCode' => 0, 'dryRun' => true, 'snapshot' => '', 'committed' => false]));
+        History::append(self::JOB, ['startedAt' => '2026-10-20T03:00:00Z', 'state' => 'SUCCESS', 'snapshot' => $stamp, 'committed' => true]);
+        $this->assertTrue(Runner::writeSummary(self::JOB, $dry));
+        $last = Snapshot::lastSnapshot(Runner::readSummary(self::JOB));
+        $this->assertSame($stamp, $last['stamp'] ?? null);
+        $this->assertTrue($last['committed']);
+        @unlink($path);
+    }
 }

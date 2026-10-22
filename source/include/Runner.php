@@ -2587,6 +2587,9 @@ class Runner
             return Util::withLock(self::summaryPath($jobId, 'lock'), static function () use ($jobId, $path, $out, $keepNewer): bool {
                 $prev     = self::readSummary($jobId);
                 $prevReal = self::lastRealFor($jobId, $prev, false);
+                if (array_key_exists('snapshot', $out)) {
+                    $prevReal = self::withSnapshotFields($jobId, $prev, $prevReal);
+                }
                 $newer    = static fn(?array $old): bool => $keepNewer && $old !== null
                     && strcmp((string) ($old['startedAt'] ?? ''), $out['startedAt']) > 0;
                 $real = ($out['dryRun'] || $newer($prevReal)) ? $prevReal : self::lastReal($out);
@@ -2641,6 +2644,34 @@ class Runner
         ] + (array_key_exists('snapshot', $summary)
             ? ['snapshot' => (string) $summary['snapshot'], 'committed' => !empty($summary['committed'])]
             : []);
+    }
+
+    /**
+     * A lastReal written before it carried snapshot fields gets them from the
+     * same execution: the summary's top level while it is still that run, else
+     * its History record. Unchanged when neither has them.
+     *
+     * @param array<string,mixed>|null $summary
+     * @param array<string,mixed>|null $real
+     * @return array<string,mixed>|null
+     */
+    private static function withSnapshotFields(string $jobId, ?array $summary, ?array $real): ?array
+    {
+        if ($real === null || array_key_exists('snapshot', $real)) {
+            return $real;
+        }
+        $same = static fn(array $r): bool => empty($r['dryRun']) && array_key_exists('snapshot', $r)
+            && ($r['startedAt'] ?? null) === $real['startedAt'];
+        $from = is_array($summary) && $same($summary) ? $summary : null;
+        if ($from === null) {
+            foreach (History::records($jobId) as $r) {
+                if ($same($r)) {
+                    $from = $r;
+                    break;
+                }
+            }
+        }
+        return $from === null ? $real : $real + ['snapshot' => (string) $from['snapshot'], 'committed' => !empty($from['committed'])];
     }
 
     /** <UR_CONFIG_BASE>/runs/<jobid>.summary.json, or its sibling .summary.lock. */
