@@ -46,6 +46,17 @@ final class HandlerCronTest extends TestCase
                 unlink($p);
             }
         }
+        // These tests pin the cron line to --job=j-music. Other suites leave a
+        // j-music summary, History or run log behind in the shared bases, and
+        // since DI-20 a new job dodges such leftovers with a -2 id. Start clean.
+        foreach (glob(rtrim(UR_CONFIG_BASE, '/') . '/runs/j-music.*') ?: [] as $f) {
+            @unlink($f);
+        }
+        $logDir = Logger::jobLogDir('j-music');
+        foreach (glob($logDir . '/*') ?: [] as $f) {
+            @unlink($f);
+        }
+        @rmdir($logDir);
 
         $this->updateCronCalls = [];
         Cron::$updateCronRunner = function (array $argv): int {
