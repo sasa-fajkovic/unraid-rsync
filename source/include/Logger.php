@@ -30,9 +30,6 @@ declare(strict_types=1);
  * the $baseOverride static, so tests write to a temp dir.
  */
 
-if (!defined('UR_RUNTIME_BASE')) {
-    define('UR_RUNTIME_BASE', '/tmp/unraid.rsync');
-}
 
 require_once __DIR__ . '/Util.php';
 
@@ -283,7 +280,7 @@ class Logger
         if (self::$baseOverride !== null && self::$baseOverride !== '') {
             return rtrim((string) self::$baseOverride, '/');
         }
-        return rtrim(UR_RUNTIME_BASE, '/');
+        return Util::runtimeBase();
     }
 
     /** True when a persistent (external) logs dir is configured. */
@@ -325,75 +322,35 @@ class Logger
     }
 
     /**
-     * Ensure a log directory exists (mode 700; logs may name paths/hosts).
-     *
-     * Walks the ancestry base() -> logsDir() -> leaf and creates each level
-     * NON-recursively, refusing a symlink at ANY level. A plain
-     * `mkdir($dir, 0700, true)` would silently FOLLOW a symlinked runtime base
-     * (the base lives under world-writable /tmp), letting an attacker who plants
-     * /tmp/unraid.rsync -> /somewhere redirect root-written logs out of the
-     * sandbox. Mirrors Ssh::ensureRuntimeDirs. The post-mkdir re-check closes the
-     * TOCTOU where a level is swapped for a symlink between create and use.
+     * Ensure a log directory exists (mode 700; logs may name paths/hosts), one
+     * level at a time from base() (tmpfs) or the configured logs root, never
+     * through a symlink (Util::ensureDirLevel).
      */
     private static function ensureDir(string $dir): void
     {
         $logsDir = self::logsDir();
 
         if (self::hasExternalLogsDir()) {
-            // A configured persistent logs dir (e.g. /mnt/user/...): its ancestry
-            // is user-owned (NOT world-writable /tmp), and the parent share may
-            // not exist yet, so create the logs root recursively, then the
-            // per-job leaf non-recursively. Each created level still refuses a
-            // symlink (defence in depth) via ensureLevel.
+            // The share may not exist yet, so its ancestry is created recursively
+            // (Util::mkdirs refuses a symlinked ancestor); the levels we own are not
+            // under world-writable /tmp, so no ownership check.
             if (is_link($logsDir)) {
                 throw new RuntimeException("Refusing to use a symlinked log dir: $logsDir");
             }
             Util::mkdirs($logsDir, 0700);
-            self::ensureLevel($logsDir);
+            Util::ensureDirLevel($logsDir, 'log');
             if ($dir !== $logsDir) {
-                self::ensureLevel($dir);
+                Util::ensureDirLevel($dir, 'log');
             }
             return;
         }
 
-        // Default RAM/tmpfs base: hardened NON-recursive per-level walk. base()
-        // lives under world-writable /tmp, so a plain recursive mkdir could
-        // silently follow a planted symlink and redirect root-written logs out
-        // of the sandbox; refuse a symlink at every level instead.
         $chain = [self::base(), $logsDir];
         if ($dir !== $logsDir) {
             $chain[] = $dir;
         }
         foreach ($chain as $d) {
-            self::ensureLevel($d);
-            Util::assertPrivateDir($d);
-        }
-    }
-
-    /**
-     * Create (if missing) and harden ONE directory level: refuse a symlink,
-     * refuse a non-directory, create it non-recursively at mode 700 and chmod
-     * it - only a level made here: an existing logDir may be a share others use.
-     * The pre- and post-mkdir symlink checks close the TOCTOU where a level is
-     * swapped for a symlink between create and use.
-     */
-    private static function ensureLevel(string $d): void
-    {
-        if (is_link($d)) {
-            throw new RuntimeException("Refusing to use a symlinked log dir: $d");
-        }
-        if (file_exists($d) && !is_dir($d)) {
-            throw new RuntimeException("Log path exists but is not a directory: $d");
-        }
-        $made = !is_dir($d) && @mkdir($d, 0700);
-        if (!$made && !is_dir($d)) {
-            throw new RuntimeException("Unable to create log dir: $d");
-        }
-        if (is_link($d)) {
-            throw new RuntimeException("Refusing to use a symlinked log dir: $d");
-        }
-        if ($made) {
-            @chmod($d, 0700);
+            Util::ensurePrivateDir($d, 'log');
         }
     }
 

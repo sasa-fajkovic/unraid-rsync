@@ -185,6 +185,53 @@ final class Util
         }
     }
 
+    /** The tmpfs runtime base: the UR_RUNTIME_BASE constant, else /tmp/unraid.rsync. */
+    public static function runtimeBase(): string
+    {
+        return rtrim(defined('UR_RUNTIME_BASE') ? (string) UR_RUNTIME_BASE : '/tmp/unraid.rsync', '/');
+    }
+
+    /**
+     * ensureDirLevel(), then refuse the dir unless assertPrivateDir() accepts it.
+     *
+     * @throws RuntimeException naming the dir and the reason.
+     */
+    public static function ensurePrivateDir(string $dir, string $label = 'runtime'): void
+    {
+        self::ensureDirLevel($dir, $label);
+        self::assertPrivateDir($dir);
+    }
+
+    /**
+     * Create ONE dir level if missing (0700, non-recursive), chmodding it only
+     * when made here: an existing logDir may be a share others use. A recursive
+     * mkdir would follow a symlink planted under world-writable /tmp; the second
+     * symlink check closes the swap between create and use.
+     *
+     * @param string $label names the dir in the error ("state", "log", "runtime")
+     * @throws RuntimeException naming the dir and the reason.
+     */
+    public static function ensureDirLevel(string $dir, string $label = 'runtime'): void
+    {
+        if (is_link($dir)) {
+            throw new RuntimeException("Refusing to use a symlinked $label dir: $dir");
+        }
+        if (file_exists($dir) && !is_dir($dir)) {
+            throw new RuntimeException(ucfirst($label) . " path exists but is not a directory: $dir");
+        }
+        $made = !is_dir($dir) && @mkdir($dir, 0700);
+        if (!$made && !is_dir($dir)) {
+            throw new RuntimeException("Unable to create $label dir: $dir");
+        }
+        clearstatcache(true, $dir);
+        if (is_link($dir)) {
+            throw new RuntimeException("Refusing to use a symlinked $label dir: $dir");
+        }
+        if ($made) {
+            @chmod($dir, 0700);
+        }
+    }
+
     /**
      * Refuse a runtime dir another local user could tamper with: a symlink, a
      * non-directory, one not owned by this process's euid, or one writable by

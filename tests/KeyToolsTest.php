@@ -468,6 +468,17 @@ final class KeyToolsTest extends TestCase
      * this, rmTempDir()'s is_dir() followed the link and the root php-fpm worker
      * would have unlinked the TARGET's contents.
      */
+    /** tempDir goes through Util::ensurePrivateDir like every other runtime-dir creator. */
+    public function testTempDirRefusesARuntimeDirAnotherUserOwns(): void
+    {
+        Util::$euid = posix_geteuid() + 1;
+        try {
+            $this->assertSame('', RealRunKeyTools::publicTempDir());
+        } finally {
+            Util::$euid = null;
+        }
+    }
+
     public function testTempDirIsConfinedAndCleanupDoesNotFollowSymlinks(): void
     {
         $dir = RealRunKeyTools::publicTempDir();

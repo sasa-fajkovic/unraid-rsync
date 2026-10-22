@@ -1447,7 +1447,7 @@ final class HandlerTest extends TestCase
 
         $this->assertStringNotContainsString($secret, $raw);
         $this->assertStringNotContainsString(Credentials::obfuscate($secret), $raw);
-        $this->assertStringNotContainsString(rtrim(Ssh::$runtimeBase, '/'), $raw);
+        $this->assertStringNotContainsString(Ssh::base(), $raw);
     }
 
     /**
@@ -1658,7 +1658,7 @@ final class HandlerTest extends TestCase
 
             $this->assertStringNotContainsString($secret, $raw);
             $this->assertStringNotContainsString($stored['password'], $raw);
-            $this->assertStringNotContainsString(rtrim(Ssh::$runtimeBase, '/'), $raw);
+            $this->assertStringNotContainsString(Ssh::base(), $raw);
         } finally {
             $_SERVER['REQUEST_METHOD'] = $prevMethod;
         }

@@ -95,14 +95,8 @@ require_once __DIR__ . '/Util.php';
 
 class Ssh
 {
-    /**
-     * tmpfs base for materialised secrets. RAM-backed, cleared on reboot. The
-     * dir basename equals the plugin name to match the rest of the plugin's
-     * runtime layout (/tmp/unraid.rsync/...). Overridable for tests.
-     *
-     * @var string
-     */
-    public static $runtimeBase = '/tmp/unraid.rsync';
+    /** tmpfs base for materialised secrets; null/'' = Util::runtimeBase(). Test seam. */
+    public static ?string $runtimeBase = null;
 
     /**
      * Optional explicit path to the SSH_ASKPASS helper. When null, askpassPath()
@@ -129,10 +123,17 @@ class Ssh
     // run's own files - so one run's cleanup can never pull a key/known_hosts
     // out from under another in-flight ssh.
 
+    /** The tmpfs base in effect (RAM-backed, cleared on reboot). */
+    public static function base(): string
+    {
+        $b = static::$runtimeBase;
+        return $b !== null && $b !== '' ? rtrim($b, '/') : Util::runtimeBase();
+    }
+
     /** tmpfs dir that holds materialised private keys (mode 700). */
     public static function keysDir(): string
     {
-        return rtrim(static::$runtimeBase, '/') . '/keys';
+        return static::base() . '/keys';
     }
 
     /**
@@ -154,13 +155,13 @@ class Ssh
     /** Path a run's known_hosts materialises to, keyed by run token. */
     public static function knownHostsPath(string $token): string
     {
-        return rtrim(static::$runtimeBase, '/') . '/known_hosts/' . Util::safeFileId($token);
+        return static::base() . '/known_hosts/' . Util::safeFileId($token);
     }
 
     /** tmpfs dir (mode 700) a run fetches its target marker file into. */
     public static function markersDir(): string
     {
-        return rtrim(static::$runtimeBase, '/') . '/markers';
+        return static::base() . '/markers';
     }
 
     /**
@@ -177,7 +178,7 @@ class Ssh
     /** Path a run's password file materialises to, keyed by run token. */
     public static function passFilePath(string $token): string
     {
-        return rtrim(static::$runtimeBase, '/') . '/pass/' . Util::safeFileId($token);
+        return static::base() . '/pass/' . Util::safeFileId($token);
     }
 
     // --- askpass helper -----------------------------------------------------
@@ -652,7 +653,7 @@ class Ssh
             return;
         }
         try {
-            foreach ([rtrim(static::$runtimeBase, '/'), static::keysDir(), dirname(static::knownHostsPath($token)), dirname(static::passFilePath($token))] as $dir) {
+            foreach ([static::base(), static::keysDir(), dirname(static::knownHostsPath($token)), dirname(static::passFilePath($token))] as $dir) {
                 Util::assertPrivateDir($dir);
             }
         } catch (RuntimeException $e) {
@@ -674,28 +675,13 @@ class Ssh
     private static function ensureRuntimeDirs(): void
     {
         foreach ([
-            rtrim(static::$runtimeBase, '/'),
+            static::base(),
             static::keysDir(),
-            rtrim(static::$runtimeBase, '/') . '/known_hosts',
-            rtrim(static::$runtimeBase, '/') . '/pass',
+            static::base() . '/known_hosts',
+            static::base() . '/pass',
             static::markersDir(),
         ] as $dir) {
-            // Reject a symlink at this path outright (do NOT follow it).
-            if (is_link($dir)) {
-                throw new RuntimeException("Refusing to use a symlinked runtime dir: $dir");
-            }
-            if (file_exists($dir) && !is_dir($dir)) {
-                throw new RuntimeException("Runtime path exists but is not a directory: $dir");
-            }
-            if (!is_dir($dir) && !@mkdir($dir, 0700, true) && !is_dir($dir)) {
-                throw new RuntimeException("Unable to create runtime dir: $dir");
-            }
-            // Re-check after creation: a race could have swapped it for a symlink.
-            if (is_link($dir)) {
-                throw new RuntimeException("Refusing to use a symlinked runtime dir: $dir");
-            }
-            @chmod($dir, 0700);
-            Util::assertPrivateDir($dir);
+            Util::ensurePrivateDir($dir);
         }
     }
 

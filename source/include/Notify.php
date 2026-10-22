@@ -240,12 +240,9 @@ class Notify
      */
     private static function privateRuntimeDir(): ?string
     {
-        $dir = rtrim(defined('UR_RUNTIME_BASE') ? (string) UR_RUNTIME_BASE : '/tmp/unraid.rsync', '/');
-        if (!is_link($dir) && !file_exists($dir)) {
-            @mkdir($dir, 0700);
-        }
+        $dir = Util::runtimeBase();
         try {
-            Util::assertPrivateDir($dir);
+            Util::ensurePrivateDir($dir);
         } catch (RuntimeException $e) {
             return null;
         }

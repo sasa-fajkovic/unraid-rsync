@@ -295,4 +295,50 @@ final class UtilTest extends TestCase
         $this->assertFileExists(Logger::openRun('j'));
         $this->assertDirectoryExists(Ssh::ensureMarkersDir());
     }
+
+    public function testEnsurePrivateDirChmodsOnlyALevelItCreated(): void
+    {
+        $made = $this->dir . '/made';
+        $old  = umask(0077);
+        try {
+            Util::ensurePrivateDir($made, 'state');
+        } finally {
+            umask($old);
+        }
+        $this->assertSame(0700, fileperms($made) & 0777);
+
+        chmod($made, 0755);
+        Util::ensurePrivateDir($made, 'state');
+        $this->assertSame(0755, fileperms($made) & 0777, 'an existing dir is never chmodded');
+    }
+
+    public function testEnsurePrivateDirRefusesASymlinkAFileAndAMissingParent(): void
+    {
+        symlink($this->dir, $this->dir . '/link');
+        touch($this->dir . '/file');
+        $cases = [
+            'link'        => 'Refusing to use a symlinked state dir',
+            'file'        => 'State path exists but is not a directory',
+            'missing/sub' => 'Unable to create state dir',
+        ];
+        foreach ($cases as $name => $message) {
+            try {
+                Util::ensurePrivateDir($this->dir . '/' . $name, 'state');
+                $this->fail("$name must be refused");
+            } catch (RuntimeException $e) {
+                $this->assertStringContainsString($message, $e->getMessage());
+            }
+        }
+    }
+
+    public function testEveryRuntimeBaseHonoursUrRuntimeBase(): void
+    {
+        $base = rtrim(UR_RUNTIME_BASE, '/');
+        Ssh::$runtimeBase = null;
+        $this->assertSame($base, Util::runtimeBase());
+        $this->assertSame($base, RunState::base());
+        $this->assertSame($base, Logger::base());
+        $this->assertSame($base, Ssh::base());
+        $this->assertSame($base . '/keys', Ssh::keysDir());
+    }
 }

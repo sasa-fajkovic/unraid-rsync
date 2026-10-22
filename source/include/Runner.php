@@ -381,7 +381,7 @@ class Runner
                             (string) ($mat['passFile'] ?? ''),
                             (string) ($mat['knownHosts'] ?? ''),
                         ],
-                        Ssh::$runtimeBase,
+                        Ssh::base(),
                         $token
                     );
                 }
@@ -416,7 +416,7 @@ class Runner
                     // its --log-file fd as well as through our sink.
                     // setRedaction ignores empty strings and skips the per-token
                     // dirs when $token === '', so the anonymous case is a no-op.
-                    Logger::setRedaction([(string) ($mat['passFile'] ?? '')], Ssh::$runtimeBase, $token);
+                    Logger::setRedaction([(string) ($mat['passFile'] ?? '')], Ssh::base(), $token);
                 }
             }
 

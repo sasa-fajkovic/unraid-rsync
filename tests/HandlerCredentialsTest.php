@@ -2203,7 +2203,7 @@ final class HandlerCredentialsTest extends TestCase
         $needles = [
             self::DAEMON_SECRET,
             Credentials::obfuscate(self::DAEMON_SECRET),
-            rtrim(Ssh::$runtimeBase, '/'),
+            Ssh::base(),
         ];
 
         $bodies = [];
