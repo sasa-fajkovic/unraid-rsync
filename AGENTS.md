@@ -64,7 +64,9 @@ on, forked from, or derived from any other plugin.
   to the ONE `getStatus` poller (`window.urStatus`, `ur_emit_status_poller()`;
   2 s while a job runs, 15 s idle, paused while the document is hidden), and
   shared CSS/JS is emitted once by the `ur_emit_*` helpers. Never add a per-tab
-  polling loop or a per-tab copy of a shared helper.
+  polling loop or a per-tab copy of a shared helper. Page bodies read the config
+  and a job's running state through `PageHelpers::config()` / `running()`,
+  memoised for the request, never `Config::load()` / `RunState::isRunning()`.
 - **Dashboard widget:** `source/UR.Dashboard.page` uses `Menu="Dashboard"` (NOT
   the `UnraidRsync` xmenu) and sets `$mytiles['unraid.rsync']['column1']` to a
   self-contained tile string (markup + scoped CSS + a `getStatus` poller) that
