@@ -61,7 +61,8 @@ ur_emit_status_poller(); /* window.urStatus + window.urUtil + UR_TZ */
 .ur-hist-controls select { width: auto; max-width: 260px; }
 .ur-hist-scroll { overflow-x: auto; }
 .ur-hist-table { width: 100%; border-collapse: collapse; margin-top: 6px; }
-.ur-hist-table th, .ur-hist-table td { padding: 3px 8px; line-height: 1.4; text-align: left; border-bottom: 1px solid var(--border-color, #444); white-space: nowrap; }
+/* Unraid sets td { height: 26px }: with the 3 px padding that is 33 px, auto lands at 30. */
+.ur-hist-table th, .ur-hist-table td { height: auto; padding: 3px 8px; line-height: 1.4; text-align: left; border-bottom: 1px solid var(--border-color, #444); white-space: nowrap; }
 /* Names stay whole; a narrow screen scrolls the table inside .ur-hist-scroll. */
 .ur-hist-table td.ur-hist-name { white-space: nowrap; min-width: 9em; }
 /* View is a <button>, Download an <a>: Unraid's global button rules (min-width,
