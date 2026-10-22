@@ -365,8 +365,10 @@ on, forked from, or derived from any other plugin.
   turns a SUCCESS into FAILED with reason `teardown-failed` (other states keep
   theirs), and what was already written before that failure is rewritten to
   match while the run lock is still held: the summary again, the History
-  record in place (`History::amendLast`, only the run that started at
-  `startedAt`). A post-hook that could not run counts as a failed post-hook. The
+  record in place (`History::amend`, under the History lock, found
+  newest-first by `startedAt` + `logRef` - never by position: a scheduled
+  launch's SKIPPED record, appended without the run lock, can follow it in the
+  same second). A post-hook that could not run counts as a failed post-hook. The
   flush stays first and the pin stays before cleanup. Test seam:
   `Runner::$teardownFault`.
 - **Only a user's Abort for THIS launch is ABORTED.** The abort flag

@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -248,6 +249,52 @@ final class RunnerLifecycleTest extends TestCase
         $this->assertCount(1, $row, 'amended, not a second record');
         $this->assertSame(['FAILED', 'teardown-failed'], [$row[0]['state'], $row[0]['reason']]);
         $this->assertSame('FAILED', $this->statusOf($id)['state']);
+        RunState::releaseLock($this->assertLockFree($id));
+    }
+
+    /** @return array<string,array{0:int}> */
+    public static function skippedOffsetProvider(): array
+    {
+        return ['a later second' => [5], 'the same second' => [0]];
+    }
+
+    /**
+     * A scheduled launch that found this run going appends SKIPPED (without
+     * the run lock) between this run's History append and its amendment.
+     */
+    #[DataProvider('skippedOffsetProvider')]
+    public function testTheAmendmentFindsThisRunsRecordPastAnInterveningSkip(int $offset): void
+    {
+        $id    = $this->saveLocalJob();
+        $state = RunState::stateDir();
+        $moved = $state . '.real-' . bin2hex(random_bytes(3));
+        Rsync::$runner = function (array $argv, $onOutput) use ($state, $moved): int {
+            rename($state, $moved);
+            symlink($moved, $state); // markStopped will throw
+            return 0;
+        };
+        Runner::$teardownFault = static function (string $step) use ($id, $offset): void {
+            if ($step === 'in-flight record') {
+                $ours = History::list($id, 0, 1)['runs'][0];
+                $at   = gmdate('Y-m-d\TH:i:s\Z', (int) strtotime($ours['startedAt']) + $offset);
+                History::append($id, ['startedAt' => $at, 'finishedAt' => $at, 'state' => 'SKIPPED',
+                    'trigger' => 'schedule', 'reason' => 'already-running', 'logRef' => '']);
+            }
+        };
+        try {
+            $res = Runner::run($id, false);
+        } finally {
+            if (is_link($state)) {
+                unlink($state);
+                rename($moved, $state);
+            }
+        }
+
+        $this->assertSame(['FAILED', 'teardown-failed'], [$res['state'], $res['reason'] ?? null]);
+        [$skip, $ours] = History::list($id)['runs'];
+        $this->assertSame(['SKIPPED', 'already-running', ''], [$skip['state'], $skip['reason'], $skip['logRef']], 'the skip is untouched');
+        $this->assertSame(basename($res['runLog']), $ours['logRef']);
+        $this->assertSame(['FAILED', 'teardown-failed'], [$ours['state'], $ours['reason']], 'this run is amended');
         RunState::releaseLock($this->assertLockFree($id));
     }
 

@@ -968,8 +968,8 @@ class Runner
                 });
             }
             if ($historyOk === true && $historySaid !== [$state, $reason]) {
-                $step('History update', static function () use ($jobId, $startedAt, $state, $reason): void {
-                    if (!History::amendLast($jobId, $startedAt, ['state' => $state, 'reason' => $reason])) {
+                $step('History update', static function () use ($jobId, $startedAt, $runLog, $state, $reason): void {
+                    if (!History::amend($jobId, $startedAt, Logger::runIdFromPath($runLog), ['state' => $state, 'reason' => $reason])) {
                         throw new RuntimeException('the History record could not be rewritten as ' . $state);
                     }
                 });
