@@ -236,7 +236,8 @@ A security and data-integrity audit (113 findings) fixed across PRs #189–#207.
 - Snapshot stats lines (`Pair #N (sub): … regular files, … bytes.`) show
   rsync's own figures, e.g. `408.63G` with Human-readable on.
 - Save messages no longer end in `.;`.
-- The log viewer picks up a run that started while it was open.
+- When the log viewer is served a newer run than its run picker lists, it
+  refreshes the picker.
 - **A backup into an unmounted drive no longer lands in RAM.** Right after the
   pre-run hook (which may mount it), every local source and destination must be
   on a mounted drive, not Unraid's RAM root; otherwise the run fails with

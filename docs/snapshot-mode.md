@@ -643,7 +643,8 @@ need to combine several.
    carried into it.
 3. **Pick a sub-directory name for each pair.** It names the pair's directory in
    every snapshot and must be plain ASCII: 1–64 letters, digits, `_` or `-`,
-   starting with a letter or digit (`latest` is reserved). A pair such as
+   starting with a letter or digit, `latest` is reserved, and no two pairs of a
+   job may share a name ignoring case (`Data` and `data` clash). A pair such as
    `Družba Pere Kvržice (1970)` needs a name like `druzba-pere-kvrzice-1970`.
 4. **Run this on the receiver**, as root. Save it (for example as
    `/root/ur-migrate.sh`) and pass the job id, the stamp, the target marker, the
@@ -658,9 +659,10 @@ need to combine several.
    ```
 
    Before it moves anything it checks the stamp's shape, that the marker
-   exists, that the root does not exist yet, that every mirror is a real
-   directory on the root's filesystem (so every move is a rename, never a copy),
-   that `chattr` works there, and that no rsync is running. The filesystem and
+   exists, that the root does not exist yet, that every sub name follows the
+   rules above, that every mirror is a real directory on the root's filesystem
+   (so every move is a rename, never a copy), that `chattr` works there, and
+   that no rsync is running (a failed `pgrep` stops it too). The filesystem and
    `chattr` checks need the root, so it creates the root and sentinel first; if
    one of them fails, remove that new root (`rm -r -- <root>`) before running
    the script again. Then it moves each mirror into `<stamp>.inprogress/<sub>`,
@@ -671,6 +673,7 @@ need to combine several.
    ```sh
    #!/bin/sh
    set -eu
+   export LC_ALL=C
    die() { echo "migration: $*" >&2; exit 1; }
    [ "$#" -ge 6 ] && [ $(( ($# - 4) % 2 )) -eq 0 ] || die "usage: JOB STAMP MARKER ROOT MIRROR SUB [MIRROR SUB ...]"
    JOB=$1; STAMP=$2; MARKER=$3; ROOT=$4; shift 4
@@ -680,8 +683,19 @@ need to combine several.
    esac
    [ -f "$MARKER" ] || die "no target marker at $MARKER"
    [ ! -e "$ROOT" ] || die "$ROOT already exists"
-   i=0; for a in "$@"; do i=$((i+1)); if [ $((i % 2)) -eq 1 ]; then [ -d "$a" ] && [ ! -L "$a" ] || die "$a is not a directory"; fi; done
-   pgrep -x rsync >/dev/null && die "rsync is running"
+   SEEN=' '; i=0
+   for a in "$@"; do
+     i=$((i+1))
+     if [ $((i % 2)) -eq 1 ]; then [ -d "$a" ] && [ ! -L "$a" ] || die "$a is not a directory"; continue; fi
+     case "$a" in ''|[!A-Za-z0-9]*|*[!A-Za-z0-9_-]*) die "bad sub name: $a" ;; esac
+     [ "${#a}" -le 64 ] || die "sub name longer than 64: $a"
+     l=$(printf '%s' "$a" | tr '[:upper:]' '[:lower:]')
+     [ "$l" != latest ] || die "sub name 'latest' is reserved"
+     case "$SEEN" in *" $l "*) die "sub name $a is used twice (case-insensitive)" ;; esac
+     SEEN="$SEEN$l "
+   done
+   rc=0; pgrep -x rsync >/dev/null || rc=$?
+   [ "$rc" -eq 1 ] || die "rsync is running, or pgrep failed (status $rc)"
    mkdir -p -- "${ROOT%/*}"
    mkdir -m 0700 -- "$ROOT"
    printf '%s\n' "$JOB" > "$ROOT/.ur-snapshot-root"
