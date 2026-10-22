@@ -78,6 +78,12 @@ final class Util
     {
         $dir = dirname($path);
         $tmp = @tempnam($dir, '.' . basename($path) . '.');
+        // tempnam() falls back to the system temp dir when $dir is not writable,
+        // and a rename from there is a non-atomic cross-device copy.
+        if ($tmp !== false && dirname((string) realpath($tmp)) !== realpath($dir)) {
+            @unlink($tmp);
+            $tmp = false;
+        }
         if ($tmp === false) {
             throw new RuntimeException("Unable to create temp file in: $dir");
         }

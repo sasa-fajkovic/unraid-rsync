@@ -429,6 +429,40 @@ function ur_release_session_lock(): void
     }
 }
 
+/** True when both paths exist and are the same file (device + inode). */
+function ur_same_file(string $a, string $b): bool
+{
+    $sa = @stat($a);
+    $sb = @stat($b);
+    return $sa !== false && $sb !== false && $sa['dev'] === $sb['dev'] && $sa['ino'] === $sb['ino'];
+}
+
+/**
+ * Remove the /boot credentials.json (and its .last-good) that a secretsDir move
+ * left behind when it stopped between saving the new pointer and unlinking the
+ * source: later saves see the pointer unchanged and never retry that unlink.
+ * Only a copy byte-identical to the one in $secretsDir goes, never the file
+ * itself. The caller holds Credentials::withLock.
+ */
+function ur_remove_stale_boot_credentials(string $secretsDir): void
+{
+    $stale = rtrim(UR_CONFIG_BASE, '/') . '/credentials.json';
+    $live  = rtrim($secretsDir, '/') . '/credentials.json';
+    if ($secretsDir === '' || !is_file($stale) || !is_file($live) || ur_same_file($stale, $live)) {
+        return;
+    }
+    $hash = @hash_file('sha256', $stale);
+    if ($hash === false || $hash !== @hash_file('sha256', $live) || !@unlink($stale)) {
+        return;
+    }
+    @unlink($stale . '.last-good');
+    try {
+        Logger::event('', 'credentials', 'Removed the copy of credentials.json an interrupted move to '
+            . $secretsDir . ' left in ' . dirname($stale) . '.');
+    } catch (Throwable $e) {
+    }
+}
+
 /**
  * Relocate credentials.json when the secrets directory changes, so the file
  * always follows the secretsDir pointer. Moves it from $from to $to (each ''
@@ -449,8 +483,11 @@ function ur_release_session_lock(): void
  *   - copy+unlink, NOT rename(): /boot is FAT32 and /mnt is ext4/xfs/btrfs/zfs,
  *     so a rename across devices fails (EXDEV); a copy works either direction.
  *   - never clobbers: a destination credentials.json with DIFFERENT content
- *     aborts the move. One identical to the source is a copy an interrupted
- *     earlier move left behind, and the move just completes.
+ *     aborts the move, and so does a symlink there. One identical to the
+ *     source is a copy an interrupted earlier move left behind: it is chmodded
+ *     like a fresh copy and the move completes.
+ *   - a source and destination that are one file (an alias dir) only move the
+ *     pointer; nothing is unlinked.
  *   - removes the source only after the commit, so a move OFF the world-readable
  *     flash never leaves secrets lingering there.
  *
@@ -469,10 +506,28 @@ function ur_migrate_credentials(string $from, string $to, ?callable $commit = nu
         $dstFile = $dstDir . '/credentials.json';
         $commit ??= static function (): void {
         };
+        if ($from !== '') {
+            ur_remove_stale_boot_credentials($from);
+        }
 
         // Nothing stored yet: no file to move. The pointer can change freely; the
         // load path returns an empty keychain at the new location.
         if (!is_file($srcFile)) {
+            $commit();
+            return ['ok' => true, 'warning' => ''];
+        }
+
+        if (is_link($dstFile)) {
+            return [
+                'ok'      => false,
+                'warning' => 'Secrets directory not changed: ' . $dstFile
+                    . ' is a symlink. Remove it first.',
+            ];
+        }
+
+        // Two spellings of one place: the file is already where the pointer is
+        // going, and unlinking the "source" would delete the only copy.
+        if (realpath($srcDir) === realpath($dstDir) || ur_same_file($srcFile, $dstFile)) {
             $commit();
             return ['ok' => true, 'warning' => ''];
         }
@@ -486,6 +541,9 @@ function ur_migrate_credentials(string $from, string $to, ?callable $commit = nu
                         . ' already contains a different credentials.json. Remove or rename it first.',
                 ];
             }
+            // About to become THE keychain: the perms a fresh copy would get.
+            @chmod($dstDir, 0700);
+            @chmod($dstFile, 0600);
         } else {
             // A missing /mnt share usually means the array is not started -
             // surface that rather than failing obscurely.
@@ -945,12 +1003,8 @@ function ur_save_config_locked(): void
 function ur_with_credentials_lock(callable $action): void
 {
     Credentials::withLock(static function () use ($action): void {
-        try {
-            $dir = Config::sanitizeSecretsDir(Config::load()['global']['secretsDir'] ?? '');
-            Credentials::$secretsDirOverride = ($dir !== '') ? $dir : null;
-        } catch (Throwable $e) {
-            // Unreadable config: keep the dispatcher's resolution.
-        }
+        Credentials::refreshSecretsDir();
+        ur_remove_stale_boot_credentials((string) Credentials::$secretsDirOverride);
         $action();
     });
 }

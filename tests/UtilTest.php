@@ -130,6 +130,25 @@ final class UtilTest extends TestCase
         $this->assertSame(['occupied'], array_values(array_diff((array) scandir($this->dir), ['.', '..'])));
     }
 
+    public function testWriteAtomicRefusesToStageOutsideAnUnwritableTargetDir(): void
+    {
+        if (posix_geteuid() === 0) {
+            $this->markTestSkipped('root writes into a 0500 dir anyway');
+        }
+        $path = $this->dir . '/f.json';
+        file_put_contents($path, 'old');
+        chmod($this->dir, 0500);
+        try {
+            Util::writeAtomic($path, 'new', 0644);
+            $this->fail('a temp file outside the target dir must be refused');
+        } catch (RuntimeException $e) {
+            $this->assertStringContainsString('Unable to create temp file in', $e->getMessage());
+        } finally {
+            chmod($this->dir, 0700);
+        }
+        $this->assertSame('old', file_get_contents($path));
+    }
+
     public function testWithLockIsExclusiveAcrossFileHandlesAndReentrant(): void
     {
         $lock  = $this->dir . '/x.lock';

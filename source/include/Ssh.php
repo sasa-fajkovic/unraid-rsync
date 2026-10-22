@@ -809,6 +809,8 @@ class Ssh
         }
         try {
             return Credentials::withLock(static function () use ($connId, $hostKey): bool {
+                // The run resolved secretsDir at its start; it may have moved since.
+                Credentials::refreshSecretsDir();
                 $creds = Credentials::load();
                 $conns = is_array($creds['connections'] ?? null) ? $creds['connections'] : [];
                 foreach ($conns as $i => $conn) {

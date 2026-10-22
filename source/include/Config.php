@@ -285,9 +285,13 @@ class Config
      *   - must be a non-empty, absolute (leading "/") string;
      *   - no control bytes (NUL/newline) - those could break a path or a header;
      *   - no "." / ".." traversal segments;
+     *   - canonical (canonicalPath), so every spelling of one directory is one
+     *     string: a secretsDir change from an alias to itself would otherwise
+     *     "move" credentials.json onto itself and unlink the only copy;
      *   - must live UNDER /mnt/<something>/ (array disk, cache, pool, or an
      *     Unassigned Devices mount) - never the bare /mnt, /mnt/user root, or a
-     *     system path like /etc or /boot (flash wear).
+     *     system path like /etc or /boot (flash wear). Checked AFTER
+     *     canonicalising, so a symlink under /mnt cannot lead out of it.
      * Anything failing these returns '' rather than throwing, so an invalid value
      * falls back to the caller's safe default; the save path surfaces a warning.
      *
@@ -310,13 +314,35 @@ class Config
                 return '';
             }
         }
-        $v = rtrim($v, '/');
+        $v = self::canonicalPath($v);
         // Require at least /mnt/<top>/<leaf> so the bare /mnt and /mnt/user roots
         // (and any non-/mnt system path) are rejected.
-        if (!preg_match('#^/mnt/[^/]+/.+#', $v)) {
+        if (!preg_match('#^' . preg_quote(rtrim(self::$mntRoot, '/'), '#') . '/[^/]+/.+#', $v)) {
             return '';
         }
         return $v;
+    }
+
+    /** The storage root sanitizeMntDir() confines to. A test seam; '/mnt' live. */
+    public static string $mntRoot = '/mnt';
+
+    /**
+     * An absolute path with duplicate slashes collapsed, no trailing slash, and
+     * its longest existing ancestor resolved through realpath() (symlinks
+     * followed), so aliases of one directory compare equal. The part that does
+     * not exist yet is kept as written. Expects no "." / ".." segments.
+     */
+    public static function canonicalPath(string $path): string
+    {
+        $head = '/' . implode('/', array_filter(explode('/', $path), static fn(string $s): bool => $s !== ''));
+        $tail = '';
+        while ($head !== '/' && !file_exists($head)) {
+            $tail = '/' . basename($head) . $tail;
+            $head = dirname($head);
+        }
+        $real = realpath($head);
+        $out  = rtrim($real !== false ? $real : $head, '/') . $tail;
+        return $out !== '' ? $out : '/';
     }
 
     /**

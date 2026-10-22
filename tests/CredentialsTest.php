@@ -226,6 +226,38 @@ final class CredentialsTest extends TestCase
     }
 
     /**
+     * A run resolves secretsDir at its start. If credentials.json is moved while
+     * the backup runs, the pin at its end must land in the new file, not find
+     * an empty keychain at the old path and silently drop the key.
+     */
+    public function testAPinFollowsARelocationThatHappenedDuringTheRun(): void
+    {
+        $root = realpath(sys_get_temp_dir()) . '/ur-mnt-' . getmypid() . '-' . bin2hex(random_bytes(4));
+        mkdir($root . '/pool', 0700, true);
+        Config::$mntRoot = $root;
+        try {
+            $cfg = Config::defaults();
+            $cfg['global']['secretsDir'] = $root . '/pool/new';
+            Config::save($cfg);
+            Credentials::$secretsDirOverride = $root . '/pool/new';
+            $creds = Credentials::defaults();
+            $creds['connections'][] = ['id' => 'c-1', 'name' => 'n', 'host' => 'h', 'username' => 'u'];
+            Credentials::save($creds);
+
+            Credentials::$secretsDirOverride = $root . '/pool/old';
+            $this->assertTrue(Ssh::pinHostKey('c-1', 'h ssh-ed25519 AAAAPIN'));
+
+            $this->assertSame($root . '/pool/new', Credentials::$secretsDirOverride);
+            $this->assertSame('h ssh-ed25519 AAAAPIN', Credentials::load()['connections'][0]['remoteHostKey']);
+            $this->assertFileDoesNotExist($root . '/pool/old/credentials.json');
+        } finally {
+            Config::$mntRoot = '/mnt';
+            @unlink(Config::path());
+            exec('rm -rf ' . escapeshellarg($root));
+        }
+    }
+
+    /**
      * Ssh::pinHostKey runs in the runner process while the webGui may be saving
      * credentials.json. Each side reloads, modifies and saves; without the lock
      * the later save drops the other's change.

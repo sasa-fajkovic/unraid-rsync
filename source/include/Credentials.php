@@ -151,6 +151,24 @@ class Credentials
     }
 
     /**
+     * Re-point $secretsDirOverride at config.json's secretsDir. For a writer
+     * holding withLock() whose pointer was resolved earlier (a request's
+     * dispatcher, a run's start): a relocation may have moved the file since,
+     * and a write to the old path would start a second file. Reads config
+     * WITHOUT its lock - the lock order is config, then credentials. An
+     * unreadable config keeps the current value.
+     */
+    public static function refreshSecretsDir(): void
+    {
+        try {
+            $dir = Config::sanitizeSecretsDir(Config::load()['global']['secretsDir'] ?? '');
+        } catch (Throwable $e) {
+            return;
+        }
+        self::$secretsDirOverride = ($dir !== '') ? $dir : null;
+    }
+
+    /**
      * The default top-level credentials structure (an empty keychain).
      *
      * @return array<string,mixed>

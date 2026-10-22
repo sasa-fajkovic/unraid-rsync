@@ -299,6 +299,28 @@ final class ConfigTest extends TestCase
         $this->assertSame(Config::sanitizeLogDir($in), Config::sanitizeSecretsDir($in));
     }
 
+    public function testSanitizeMntDirGivesEverySpellingOfADirOneString(): void
+    {
+        $this->assertSame('/mnt/cache/secrets', Config::sanitizeSecretsDir('/mnt/cache//secrets'));
+        $this->assertSame('/mnt/cache/secrets', Config::sanitizeSecretsDir('/mnt/cache/secrets/'));
+        $this->assertSame('/mnt/cache/secrets', Config::sanitizeSecretsDir('/mnt/cache///secrets//'));
+        $this->assertSame('/mnt/cache/secrets', Config::sanitizeLogDir('/mnt/cache//secrets'));
+
+        $root = realpath(sys_get_temp_dir()) . '/ur-mnt-' . getmypid() . '-' . bin2hex(random_bytes(4));
+        mkdir($root . '/pool/real', 0700, true);
+        symlink($root . '/pool', $root . '/alias');
+        symlink(sys_get_temp_dir(), $root . '/pool/out');
+        Config::$mntRoot = $root;
+        try {
+            $this->assertSame($root . '/pool/real', Config::sanitizeSecretsDir($root . '/alias/real'));
+            $this->assertSame($root . '/pool/real/new', Config::sanitizeSecretsDir($root . '/alias/real/new'));
+            $this->assertSame('', Config::sanitizeSecretsDir($root . '/pool/out/x'), 'a symlink cannot lead out');
+        } finally {
+            Config::$mntRoot = '/mnt';
+            exec('rm -rf ' . escapeshellarg($root));
+        }
+    }
+
     public function testMergeDefaultsSanitizesSecretsDir(): void
     {
         $ok = Config::mergeDefaults(['global' => ['secretsDir' => '/mnt/user/system/unraid.rsync']]);
