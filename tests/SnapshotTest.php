@@ -912,4 +912,20 @@ final class SnapshotTest extends TestCase
         $r = Snapshot::runRemote(self::pieces(['/nonexistent/ssh']), 'root@nas', 'probe', [], false, 30);
         $this->assertNotSame(0, $r['exit']);
     }
+
+    public function testLastSnapshotFollowsTheLastRealRunAndStillReadsOlderSummaries(): void
+    {
+        $real = ['state' => 'SUCCESS', 'dryRun' => false, 'snapshot' => '2026-10-01T030000Z', 'committed' => true];
+        $dry  = ['state' => 'SUCCESS', 'dryRun' => true, 'snapshot' => '', 'committed' => false];
+        $this->assertSame('2026-10-01T030000Z', Snapshot::lastSnapshot($dry + ['lastReal' => $real])['stamp']);
+        $this->assertSame('2026-10-01T030000Z', Snapshot::lastSnapshot($real)['stamp'], 'before lastReal existed');
+        $preFix = ['state' => 'SUCCESS', 'startedAt' => '', 'finishedAt' => '', 'exitCode' => 0, 'reason' => ''];
+        $this->assertSame('2026-10-01T030000Z', Snapshot::lastSnapshot($real + ['lastReal' => $preFix])['stamp'], 'a lastReal with no snapshot fields');
+        $this->assertNull(Snapshot::lastSnapshot($dry + ['lastReal' => null]));
+        $this->assertSame(
+            ['snapshot' => '2026-10-01T030000Z', 'committed' => true],
+            array_intersect_key(Runner::lastReal($real), ['snapshot' => 1, 'committed' => 1])
+        );
+        $this->assertArrayNotHasKey('snapshot', Runner::lastReal(['state' => 'SUCCESS']), 'a mirror keeps its shape');
+    }
 }

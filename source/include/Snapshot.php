@@ -176,6 +176,10 @@ class Snapshot
      */
     public static function lastSnapshot(?array $summary): ?array
     {
+        $real = $summary['lastReal'] ?? null;
+        if (is_array($real) && array_key_exists('snapshot', $real)) {
+            $summary = $real;
+        }
         $stamp = is_string($summary['snapshot'] ?? null) ? $summary['snapshot'] : '';
         if (!self::isStamp($stamp)) {
             return null;

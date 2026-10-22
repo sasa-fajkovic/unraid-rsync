@@ -2589,11 +2589,11 @@ class Runner
 
     /**
      * The last non-dry run of a summary: {state, startedAt, finishedAt,
-     * exitCode, reason}, or null when there has been none. A summary written
+     * exitCode, reason}, plus a snapshot job's {snapshot, committed}, or null when there has been none. A summary written
      * before lastReal existed is its own last real run unless it was a dry run.
      *
      * @param array<string,mixed>|null $summary
-     * @return array{state:string,startedAt:string,finishedAt:string,exitCode:int|null,reason:string}|null
+     * @return array{state:string,startedAt:string,finishedAt:string,exitCode:int|null,reason:string,snapshot?:string,committed?:bool}|null
      */
     public static function lastReal(?array $summary): ?array
     {
@@ -2614,7 +2614,9 @@ class Runner
             'finishedAt' => (string) ($summary['finishedAt'] ?? ''),
             'exitCode'   => isset($summary['exitCode']) ? (int) $summary['exitCode'] : null,
             'reason'     => (string) ($summary['reason'] ?? ''),
-        ];
+        ] + (array_key_exists('snapshot', $summary)
+            ? ['snapshot' => (string) $summary['snapshot'], 'committed' => !empty($summary['committed'])]
+            : []);
     }
 
     /** <UR_CONFIG_BASE>/runs/<jobid>.summary.json, or its sibling .summary.lock. */
@@ -2632,7 +2634,7 @@ class Runner
      * every poll; never over a summary that changed since $summary was read.
      *
      * @param array<string,mixed>|null $summary
-     * @return array{state:string,startedAt:string,finishedAt:string,exitCode:int|null,reason:string}|null
+     * @return array{state:string,startedAt:string,finishedAt:string,exitCode:int|null,reason:string,snapshot?:string,committed?:bool}|null
      */
     public static function lastRealFor(string $jobId, ?array $summary, bool $writeThrough = true): ?array
     {

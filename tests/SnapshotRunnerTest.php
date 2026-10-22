@@ -1372,4 +1372,25 @@ final class SnapshotRunnerTest extends TestCase
         $meta = json_decode((string) $this->rx['dirs'][$this->stamp()]['meta'], true);
         $this->assertSame(408630000000, $meta['subs']['a']['bytes']);
     }
+
+    /** The snapshot line follows the last REAL run, like the badge: a dry run must not hide it. */
+    public function testADryRunKeepsTheLastRealRunsSnapshotLine(): void
+    {
+        $this->saveJob();
+        $this->seedSnapshot($this->stamp(1));
+        $stamp = $this->stamp();
+        $this->assertSame(Rsync::STATE_SUCCESS, $this->runJob()['state']);
+        $this->clock += 3600;
+        $res = $this->runJob(true);
+        $this->assertSame(Rsync::STATE_SUCCESS, $res['state'], $this->log($res));
+
+        $summary = Runner::readSummary(self::JOB);
+        $this->assertTrue($summary['dryRun']);
+        $this->assertSame('', $summary['snapshot'], 'the top level is still the dry run');
+        $last = Snapshot::lastSnapshot($summary);
+        $this->assertNotNull($last);
+        $this->assertSame($stamp, $last['stamp']);
+        $this->assertTrue($last['committed']);
+        $this->assertStringEndsWith('(committed)', $last['label']);
+    }
 }

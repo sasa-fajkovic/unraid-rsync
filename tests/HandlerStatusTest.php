@@ -307,9 +307,14 @@ final class HandlerStatusTest extends TestCase
         $this->assertSame('last snapshot 2026-10-21 03:00:05 (not committed)', $body['jobs'][$id]['snapshot']['label']);
         $this->assertFalse($body['jobs'][$id]['snapshot']['committed']);
 
-        // A dry run, or a failure before the stamp was created, records ''.
+        // A dry run records '' but the line follows the last real run.
+        Runner::writeSummary($id, ['state' => 'SUCCESS', 'dryRun' => true, 'snapshot' => '', 'committed' => false]);
+        [$body] = $this->runCapture('ur_action_get_status');
+        $this->assertSame('last snapshot 2026-10-21 03:00:05 (not committed)', $body['jobs'][$id]['snapshot']['label']);
+
+        // A failure before the stamp was created records ''.
         foreach (['', '2026-02-30T030005Z', 'x'] as $none) {
-            Runner::writeSummary($id, ['state' => 'SUCCESS', 'dryRun' => true, 'snapshot' => $none, 'committed' => false]);
+            Runner::writeSummary($id, ['state' => 'FAILED', 'snapshot' => $none, 'committed' => false]);
             [$body] = $this->runCapture('ur_action_get_status');
             $this->assertNull($body['jobs'][$id]['snapshot'], var_export($none, true));
         }
