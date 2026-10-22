@@ -2788,6 +2788,123 @@ final class RunnerTest extends TestCase
         $this->assertSame(['rsync', 'rsync'], $this->trace);
     }
 
+    /**
+     * The live box, every job together: one KEYFILE SSH connection with a pinned
+     * host key, --delete with a cap on every job, a sudo --rsync-path, summary
+     * logs, hooks on three jobs, sources on four filesystems (shfs, shfs, btrfs,
+     * zfs) under a RAM / and /mnt, all destinations on one host. Save-time
+     * validation is clean and every job reaches its transfers. The one refusal
+     * this box can hit: the zfs pool not imported, so /mnt/personal is an empty
+     * directory on the RAM root.
+     */
+    public function testTheLiveBoxDeleteJobSetValidatesAndRuns(): void
+    {
+        $rt  = $this->newRuntime();
+        $key = UR_RUNTIME_BASE . '/live-box-id_ed25519';
+        file_put_contents($key, "KEY\n");
+        $creds = Credentials::defaults();
+        $creds['connections'][] = Credentials::mergeConnection([
+            'id' => 'c-box', 'name' => 'backup box', 'host' => 'backup.lan', 'username' => 'root',
+            'authMethod' => 'KEYFILE', 'keyFilePath' => $key, 'remoteHostKey' => 'backup.lan ssh-ed25519 AAAAhostkey',
+        ]);
+
+        $immich = array_map(
+            static fn(string $x): array => ["/mnt/personal/immich/$x/", "/mnt/usb12tb/personal/immich/$x/"],
+            ['library', 'upload', 'thumbs', 'encoded-video', 'profile']
+        );
+        $titles = static fn(string $cat, array $names): array => array_map(
+            static fn(string $t): array => ["/mnt/user0/media/$cat/$t/", "/mnt/usb12tb/$cat/$t/"],
+            $names
+        );
+        $shape = [
+            'appdata'   => [[['/mnt/cache/appdata/', '/mnt/usb12tb/appdata/'], ['/mnt/personal/paperless/', '/mnt/usb12tb/personal/paperless/']], true],
+            'nextcloud' => [[['/mnt/personal/nextcloud/', '/mnt/usb12tb/personal/nextcloud/'], ['/mnt/personal/nextcloud-db/', '/mnt/usb12tb/personal/nextcloud-db/']], true],
+            'immich'    => [$immich, true],
+            'music'     => [[['/mnt/user/media/music/', '/mnt/usb4tb/music/']], false],
+            'movies'    => [$titles('movies', ['Amélie (2001)', 'Léon. The Professional (1994)', 'Mr. Smith Goes to Washington (1939)']), false],
+            'cartoons'  => [$titles('cartoons', ['Spirited Away (2001)', 'WALL·E (2008)']), false],
+            'tv-shows'  => [$titles('tv-shows', ['Mr. Robot (2015)', 'The Office (US) (2005)', 'Dark (2017)']), false],
+        ];
+        $config = Config::load();
+        foreach ($shape as $name => [$pairs, $hooks]) {
+            $config['jobs'][] = Job::normalize([
+                'id' => "j-$name", 'name' => $name, 'schedule' => '0 3 * * *', 'transport' => 'SSH', 'direction' => 'PUSH',
+                'connectionId' => 'c-box', 'logLevel' => 'summary', 'notifyMode' => 'off', 'useGlobalDefaults' => false,
+                'preHook' => $hooks ? 'PRE' : '', 'postHook' => $hooks ? 'POST' : '',
+                'pairs' => array_map(static fn(array $p): array => ['local' => $p[0], 'remote' => $p[1]], $pairs),
+                'rsyncOptions' => [
+                    'archive' => true, 'delete' => true, 'maxDelete' => $name === 'immich' ? '2000' : '1000',
+                    'remoteRsyncPath' => '/usr/local/bin/rsync-sudo',
+                ],
+            ]);
+        }
+        $jobs = $config['jobs'];
+
+        // Save time: exactly what ur_validate_jobs checks, on one resolved endpoint.
+        foreach ($jobs as $job) {
+            $this->assertSame(['valid' => true, 'errors' => [], 'warnings' => []], Job::validate($job, $creds, $config['global']), $job['name']);
+            $this->assertSame([], Job::ancestryErrors($job, $job['rsyncOptions'], Job::protectedTargets($jobs, $job['id'], $creds), $creds));
+            $this->assertSame([], Job::snapshotRootErrors($job, $jobs, $creds));
+            $this->assertSame('SSH@backup.lan:22', Job::destinations($job, $creds)['scope']);
+        }
+
+        Config::save($config);
+        Credentials::save($creds);
+        $devs = ['/' => 1, '/mnt' => 1, '/mnt/user' => 10, '/mnt/user0' => 11, '/mnt/cache' => 12, '/mnt/personal' => 13];
+        $prev = Util::$devIdOf;
+        Util::$devIdOf = static function (string $p) use (&$devs): int|false {
+            return $devs[$p] ?? false;
+        };
+        Runner::$localLister = static fn(string $p): array => ['.', '..', 'data'];
+        $this->fakeRsync(null, "drwxr-xr-x          4,096 2026/10/20 12:00:00 .\n");
+        $origBase = Ssh::$runtimeBase;
+        Ssh::$runtimeBase = $rt;
+        try {
+            foreach ($shape as $name => [$pairs, $hooks]) {
+                $this->trace = [];
+                $this->argvs = [];
+                RunState::clear("j-$name");
+                $res = Runner::run("j-$name", false);
+                $this->assertSame(Rsync::STATE_SUCCESS, $res['state'], $name . ': ' . (string) @file_get_contents($res['runLog']));
+
+                $n = count($pairs);
+                $this->assertSame(array_merge(
+                    array_fill(0, $n, 'probe'),
+                    $hooks ? ['hook:PRE:'] : [],
+                    array_fill(0, $n, 'rsync'),
+                    $hooks ? ['hook:POST:SUCCESS'] : []
+                ), $this->trace, $name);
+                foreach (array_slice($this->argvs, $n) as $k => $argv) {
+                    $this->assertContains('--delete', $argv);
+                    $this->assertContains('--max-delete=' . ($name === 'immich' ? '2000' : '1000'), $argv);
+                    $this->assertContains('--rsync-path=/usr/local/bin/rsync-sudo', $argv);
+                    $this->assertSame([$pairs[$k][0], 'root@backup.lan:' . $pairs[$k][1]], array_slice($argv, -2), 'titles pass through verbatim');
+                }
+            }
+
+            // The zfs pool is not imported: /mnt/personal is an empty directory on
+            // the RAM root. The pre-hook runs, then nothing is copied - not even
+            // pair 1, which reads from /mnt/cache.
+            $devs['/mnt/personal'] = 1;
+            $this->trace = [];
+            RunState::clear('j-appdata');
+            $res = Runner::run('j-appdata', false);
+            $this->assertSame(Rsync::STATE_FAILED, $res['state']);
+            $this->assertSame('source-not-mounted', $res['reason'] ?? '');
+            $this->assertSame(['probe', 'probe', 'hook:PRE:', 'hook:POST:FAILED'], $this->trace);
+            $this->assertStringContainsString(
+                'Pair #2: the source /mnt/personal/paperless/ is on the RAM root filesystem',
+                (string) file_get_contents($res['runLog'])
+            );
+        } finally {
+            Util::$devIdOf = $prev;
+            Ssh::$runtimeBase = $origBase;
+            Credentials::save(Credentials::defaults());
+            $this->rmTree($rt);
+            @unlink($key);
+        }
+    }
+
     public function testAnEmptySourceRefusesADeleteRunButADryRunOnlySaysSo(): void
     {
         $this->fakeRsync();
