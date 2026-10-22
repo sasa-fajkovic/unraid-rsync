@@ -2178,6 +2178,9 @@ final class OptionsFormHelpTest extends TestCase
         $this->assertStringContainsString('j.lastDryRun ? ', $dash);
         $this->assertStringContainsString('esc(j.lastDryRun.label)', $dash);
         $this->assertStringContainsString("String(j.state || '')", $dash, 'the badge is getStatus state, derived from lastReal');
+        // P6's muted last-run time and tooltip are the real run's too.
+        $this->assertStringContainsString('var fin = real ? Date.parse(real.finishedAt) / 1000 : 0;', $dash);
+        $this->assertStringNotContainsString('j.lastRun.', $dash);
     }
 
     private function emitted(string $fn): string
