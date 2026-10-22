@@ -2237,7 +2237,7 @@ final class JobTest extends TestCase
     {
         $creds = Credentials::defaults();
         $creds['connections'][] = ['id' => 'c-1', 'name' => 'nas', 'host' => 'nas.lan', 'username' => 'root'];
-        $creds['connections'][] = ['id' => 'c-2', 'name' => 'nas again', 'host' => 'NAS.lan', 'port' => 22, 'username' => 'root'];
+        $creds['connections'][] = ['id' => 'c-2', 'name' => 'nas again', 'host' => 'NAS.lan', 'port' => 22, 'username' => 'backup'];
         $creds['connections'][] = ['id' => 'c-3', 'name' => 'other', 'host' => 'other.lan', 'username' => 'root'];
         $creds['connections'][] = ['id' => 'd-1', 'name' => 'mod', 'transport' => 'DAEMON', 'host' => 'nas.lan', 'username' => 'u1'];
         $creds['connections'][] = ['id' => 'd-2', 'name' => 'mod2', 'transport' => 'DAEMON', 'host' => 'nas.lan', 'username' => 'u2'];
@@ -2265,6 +2265,8 @@ final class JobTest extends TestCase
         $ghost = $this->sshDeleteJob('/srv/backup', ['connectionId' => 'c-gone']);
         $this->assertSame([], Job::ancestryErrors($ghost, $ghost['rsyncOptions'], Job::protectedTargets([$inner, $ghost], 'j-mirror', $creds), $creds));
         $this->assertSame('SSH:c-gone', Job::destinations($ghost, $creds)['scope']);
+        // Another login to the same host writes to the same directories.
+        $this->assertSame('SSH@nas.lan:22', Job::destinations($outer, $creds)['scope']);
 
         // Daemon: two logins to one daemon see the same module.
         $mod = static fn(string $id, string $conn, string $ref, bool $delete): array => Job::normalize([

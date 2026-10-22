@@ -886,10 +886,11 @@ class Job
     }
 
     /**
-     * The filesystem a remote destination lives on: host:port:user for SSH and
-     * host:port for DAEMON (the module is the first segment of every daemon
-     * path), so two Connections to one endpoint share a scope. Falls back to
-     * the connection id when it cannot be resolved; validate() reports that.
+     * The filesystem a remote destination lives on: host:port, so two
+     * Connections to one endpoint share a scope. Not the user: an absolute path
+     * is the same directory whoever logs in, and every daemon path starts with
+     * its module. Falls back to the connection id when it cannot be resolved;
+     * validate() reports that.
      *
      * @param array<string,mixed>|null $creds
      */
@@ -899,11 +900,8 @@ class Job
         if ($conn === null) {
             return $transport . ':' . $connectionId;
         }
-        $c    = Credentials::mergeConnection($conn);
-        $host = strtolower((string) $c['host']);
-        return $transport === 'DAEMON'
-            ? "DAEMON@$host:{$c['port']}"
-            : "$transport@$host:{$c['port']}:{$c['username']}";
+        $c = Credentials::mergeConnection($conn);
+        return $transport . '@' . strtolower((string) $c['host']) . ':' . $c['port'];
     }
 
     /**

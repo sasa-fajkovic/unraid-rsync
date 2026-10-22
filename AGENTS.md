@@ -244,8 +244,8 @@ on, forked from, or derived from any other plugin.
   notification.
 - **Delete and mount safety.** The `--delete` overlap rules compare destinations
   per resolved ENDPOINT, not per connection id: `Job::remoteScope()` is
-  `host:port:user` for SSH and `host:port` for DAEMON (the module is the first
-  path segment), resolved through the loaded credentials - so callers pass
+  `host:port` for SSH and DAEMON (not the user: an absolute path is the same
+  directory whoever logs in; a daemon path starts with its module), resolved through the loaded credentials - so callers pass
   `$creds` to `protectedTargets` / `ancestryErrors` / `snapshotRootErrors`; the
   connection id is only the fallback for an unresolvable one. Two pairs of one
   delete job may not share or nest destinations (`Job::pairOverlapErrors`): they
