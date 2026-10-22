@@ -1804,16 +1804,27 @@ final class OptionsFormHelpTest extends TestCase
             'pairs'     => [['local' => '/mnt/user/x/', 'remote' => '/mnt/disk1/x/']],
         ]);
         Config::save($cfg);
-        History::append('zz-alert-test', ['startedAt' => '2026-10-01T00:00:00Z', 'state' => 'FAILED', 'exitCode' => 11]);
+        History::append('j-zz-alert-test', ['startedAt' => '2026-10-01T00:00:00Z', 'state' => 'FAILED', 'exitCode' => 11, 'jobName' => 'zz-alert-test']);
+        History::append('j-old-thing', ['startedAt' => '2026-09-01T00:00:00Z', 'state' => 'SUCCESS']);
         try {
             $html = $this->renderPageBody(__DIR__ . '/../source/pages/history.php');
         } finally {
             @unlink(Config::path());
-            @unlink(History::path('zz-alert-test'));
+            @unlink(History::path('j-zz-alert-test'));
+            @unlink(History::path('j-old-thing'));
         }
 
         $this->assertStringContainsString('<option value="j-hist-live">Live Job</option>', $html);
-        $this->assertStringContainsString('<option value="zz-alert-test">zz-alert-test (deleted)</option>', $html);
+        // A deleted job reads as its rows do: the stored name, else the id without "j-".
+        $this->assertStringContainsString('<option value="j-zz-alert-test">zz-alert-test (deleted)</option>', $html);
+        $this->assertStringContainsString('<option value="j-old-thing">old-thing (deleted)</option>', $html);
+        // View (a <button>) and Download (an <a>) must out-rank Unraid's global
+        // button rules to render as one compact pair; names stay whole.
+        $this->assertStringContainsString('.ur-hist-table button.ur-btn,', $html);
+        $this->assertMatchesRegularExpression('/\.ur-hist-table a\.ur-btn \{[^}]*margin: 0;[^}]*padding: 2px 8px;/', $html);
+        $this->assertStringContainsString('.ur-hist-table button.ur-btn:focus-visible', $html);
+        $this->assertMatchesRegularExpression('/\.ur-hist-table td\.ur-hist-name \{[^}]*white-space: nowrap;[^}]*min-width: 9em;/', $html);
+        $this->assertDoesNotMatchRegularExpression('/td\.ur-hist-name \{[^}]*word-break/', $html);
         $this->assertStringContainsString('<option value="problems">Problems only</option>', $html);
         $this->assertStringContainsString('<option value="1">Dry run</option>', $html);
         $this->assertStringContainsString("'&state=' + encodeURIComponent(stateSel.value) + '&dryRun=' + encodeURIComponent(typeSel.value)", $html);

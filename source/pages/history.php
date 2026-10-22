@@ -44,9 +44,14 @@ try {
 } catch (Throwable $e) {
     $jobs = [];
 }
-// Ids that only survive in History (the job was deleted since).
-$deletedIds = array_values(array_diff(History::jobIds(), array_keys($jobs)));
-sort($deletedIds);
+// Jobs that only survive in History (deleted since), labelled the way their
+// rows are: the name stored in the newest record, else the id without "j-".
+$deleted = [];
+foreach (array_diff(History::jobIds(), array_keys($jobs)) as $jid) {
+    $stored = (string) (History::list($jid, 0, 1)['runs'][0]['jobName'] ?? '');
+    $deleted[$jid] = $stored !== '' ? $stored : (string) preg_replace('/^j-/', '', $jid);
+}
+asort($deleted);
 
 ur_emit_badge_assets();  /* the ONE badge palette + window.urBadge */
 ur_emit_status_poller(); /* window.urStatus + window.urUtil + UR_TZ */
@@ -56,8 +61,23 @@ ur_emit_status_poller(); /* window.urStatus + window.urUtil + UR_TZ */
 .ur-hist-controls select { width: auto; max-width: 260px; }
 .ur-hist-scroll { overflow-x: auto; }
 .ur-hist-table { width: 100%; border-collapse: collapse; margin-top: 6px; }
-.ur-hist-table th, .ur-hist-table td { padding: 6px 10px; text-align: left; border-bottom: 1px solid var(--border-color, #444); white-space: nowrap; }
-.ur-hist-table td.ur-hist-name { white-space: normal; word-break: break-word; }
+.ur-hist-table th, .ur-hist-table td { padding: 4px 8px; text-align: left; border-bottom: 1px solid var(--border-color, #444); white-space: nowrap; }
+/* Names stay whole; a narrow screen scrolls the table inside .ur-hist-scroll. */
+.ur-hist-table td.ur-hist-name { white-space: nowrap; min-width: 9em; }
+/* View is a <button>, Download an <a>: Unraid's global button rules (min-width,
+   margins, orange border) beat the shared .ur-btn on the button alone, so pin
+   the pair here with selectors that out-rank them. */
+.ur-hist-table button.ur-btn,
+.ur-hist-table a.ur-btn {
+  display: inline-block; box-sizing: border-box; height: auto; min-width: 0; margin: 0; padding: 2px 8px;
+  font-size: 12px; font-weight: bold; line-height: 1.4; letter-spacing: normal; text-transform: none; text-decoration: none;
+  border: 1px solid rgba(127,127,127,0.4); border-radius: 4px; background: rgba(127,127,127,0.15); color: inherit;
+  vertical-align: middle; cursor: pointer;
+}
+.ur-hist-table button.ur-btn:hover,
+.ur-hist-table a.ur-btn:hover { background: rgba(127,127,127,0.28); border-color: rgba(127,127,127,0.6); color: inherit; }
+.ur-hist-table button.ur-btn:focus-visible,
+.ur-hist-table a.ur-btn:focus-visible { outline: 2px solid var(--blue-500, #216feb); outline-offset: 1px; }
 .ur-hist-exit[title] { text-decoration: underline dotted; cursor: help; }
 .ur-hist-logs .ur-btn + .ur-btn { margin-left: 6px; }
 .ur-hist-when-sub { display: none; font-size: 0.85em; opacity: 0.75; }
@@ -99,7 +119,7 @@ ur_emit_status_poller(); /* window.urStatus + window.urUtil + UR_TZ */
   <?=_('Past executions across all jobs — real runs and dry-runs, started manually or on schedule. Use the filters to narrow the list. How many are kept per job is the "Keep last N executions" setting on the Global Settings tab')?>. <?=ur_tz_note()?>
 </p>
 
-<?php if (empty($jobs) && empty($deletedIds)): ?>
+<?php if (empty($jobs) && empty($deleted)): ?>
 <div class="ur-empty-state"><?=_('No jobs configured yet — add one in the Jobs tab')?>.</div>
 <?php else: ?>
 
@@ -110,8 +130,8 @@ ur_emit_status_poller(); /* window.urStatus + window.urUtil + UR_TZ */
     <?php foreach ($jobs as $jid => $jname): ?>
       <option value="<?=ur_h($jid)?>"><?=ur_h($jname)?></option>
     <?php endforeach; ?>
-    <?php foreach ($deletedIds as $jid): ?>
-      <option value="<?=ur_h($jid)?>"><?=ur_h($jid . ' ' . ur_t_text('(deleted)'))?></option>
+    <?php foreach ($deleted as $jid => $jname): ?>
+      <option value="<?=ur_h($jid)?>"><?=ur_h($jname . ' ' . ur_t_text('(deleted)'))?></option>
     <?php endforeach; ?>
   </select>
   <label for="ur-hist-state"><?=_('Status')?>:</label>

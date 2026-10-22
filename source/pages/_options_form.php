@@ -708,11 +708,12 @@ if (!function_exists('ur_emit_option_help_assets')) {
   opacity: 0; transition: opacity .12s ease-in-out;
   -webkit-user-select: none; -moz-user-select: none; user-select: none;
 }
-/* Reveal on hover/focus of the row (dt), and keep it visible while open. */
+/* Reveal on hover or keyboard focus, and keep it visible while open. :focus-visible,
+   not :focus: a mouse click leaves focus on the span, which kept a closed "?" shown. */
 .ur-dt:hover .ur-help,
-.ur-help:focus,
+.ur-help:focus-visible,
 .ur-help[aria-expanded="true"] { opacity: 1; }
-.ur-help:focus { outline: 1px solid var(--blue-200, #bce8f1); outline-offset: 1px; }
+.ur-help:focus-visible { outline: 1px solid var(--blue-200, #bce8f1); outline-offset: 1px; }
 /* Touch devices have no hover: always show the icon there. */
 @media (hover: none) { .ur-help { opacity: 1; } }
 
