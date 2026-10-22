@@ -123,6 +123,58 @@ final class ProcIOTest extends TestCase
         $this->assertGreaterThanOrEqual(0.3, microtime(true) - $started);
     }
 
+    public function testCaptureReturnsBothStreamsAndTheExitCode(): void
+    {
+        $this->assertSame([3, 'OUT', 'ERR', false], ProcIO::capture(['bash', '-c', 'printf OUT; printf ERR >&2; exit 3'], null, 5));
+    }
+
+    /**
+     * The Test-connection hang: a child that floods stderr and never exits.
+     * capture() must cap what it keeps, kill the child at the deadline and REAP
+     * it - a zombie would still answer kill(pid, 0).
+     */
+    public function testCaptureKillsAndReapsAChildThatFloodsStderrAndNeverExits(): void
+    {
+        $pidFile = UR_RUNTIME_BASE . '/procio-flood-' . bin2hex(random_bytes(4));
+        $prev    = ProcIO::$killGraceSec;
+        ProcIO::$killGraceSec = 0.2;
+        try {
+            $started = microtime(true);
+            [, , $err, $timedOut] = ProcIO::capture(
+                ['bash', '-c', 'echo $$ > ' . escapeshellarg($pidFile) . '; exec yes floodfloodflood >&2'],
+                null,
+                0.5
+            );
+            $elapsed = microtime(true) - $started;
+        } finally {
+            ProcIO::$killGraceSec = $prev;
+        }
+        $pid = (int) file_get_contents($pidFile);
+        @unlink($pidFile);
+
+        $this->assertTrue($timedOut);
+        $this->assertSame(65536, strlen($err));
+        $this->assertLessThan(3.0, $elapsed);
+        $this->assertGreaterThan(0, $pid);
+        $this->assertFalse(posix_kill($pid, 0), 'the killed child must be reaped, not left a zombie');
+    }
+
+    public function testCaptureEscalatesToSigkillForAChildThatIgnoresSigterm(): void
+    {
+        $prev = ProcIO::$killGraceSec;
+        ProcIO::$killGraceSec = 0.2;
+        try {
+            $started = microtime(true);
+            [$code, , , $timedOut] = ProcIO::capture(['bash', '-c', "trap '' TERM; while :; do sleep 0.05; done"], null, 0.3);
+            $elapsed = microtime(true) - $started;
+        } finally {
+            ProcIO::$killGraceSec = $prev;
+        }
+        $this->assertTrue($timedOut);
+        $this->assertSame(128 + 9, $code);
+        $this->assertLessThan(3.0, $elapsed);
+    }
+
     public function testSkipsNonResourceEntriesGracefully(): void
     {
         // Defensive: non-resource pipe entries are ignored, callback never fires.

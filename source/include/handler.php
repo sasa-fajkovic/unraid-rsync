@@ -1840,6 +1840,9 @@ function ur_action_test_connection(): void
         return;
     }
 
+    if (!defined('UR_HANDLER_TESTING') && function_exists('set_time_limit')) {
+        @set_time_limit(Ssh::probeTimeout($conn) + 10);
+    }
     $res = Ssh::testConnection($creds, $id);
     // 200 regardless of probe success - the probe RAN; the body carries ok +
     // the distinct reason. (A 4xx/5xx is reserved for the request itself

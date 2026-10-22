@@ -218,33 +218,20 @@ class Rsync
         return is_executable($path);
     }
 
+    /** Wall-clock limit on the `rsync --version` probe, in seconds; tests lower it. */
+    public static int $versionProbeTimeout = 10;
+
     /**
      * Run `<rsync> --version` (no shell) and return its STDOUT (rsync prints its
-     * version banner to stdout). stderr is fully drained too - even though the
-     * version banner goes to stdout, leaving stderr unread risks the child
-     * blocking if it ever writes there, so we read both before proc_close. Live
-     * implementation uses proc_open with the argv ARRAY. Overridable in tests.
+     * version banner to stdout), or '' when it did not finish within
+     * $versionProbeTimeout. Both pipes are drained together and the child is
+     * killed and reaped past the deadline (ProcIO::capture), so the Status tab
+     * can never wedge a php-fpm worker on it. Overridable in tests.
      */
     protected static function runVersionProbe(string $rsyncPath): string
     {
-        $descriptors = [
-            0 => ['file', '/dev/null', 'r'],
-            1 => ['pipe', 'w'],
-            2 => ['pipe', 'w'],
-        ];
-        $pipes = [];
-        $proc = @proc_open([$rsyncPath, '--version'], $descriptors, $pipes);
-        if (!is_resource($proc)) {
-            return '';
-        }
-        // Drain BOTH pipes so the child can never block writing to a full stderr
-        // buffer while we wait on stdout. We return stdout (the version banner).
-        $stdout = stream_get_contents($pipes[1]);
-        stream_get_contents($pipes[2]); // drain + discard stderr
-        fclose($pipes[1]);
-        fclose($pipes[2]);
-        proc_close($proc);
-        return is_string($stdout) ? $stdout : '';
+        [, $stdout, , $timedOut] = ProcIO::capture([$rsyncPath, '--version'], null, static::$versionProbeTimeout);
+        return $timedOut ? '' : $stdout;
     }
 
     // --- Run state names (also used in the run summary on /boot). ---

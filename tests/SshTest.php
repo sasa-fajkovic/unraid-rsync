@@ -21,11 +21,14 @@ final class FakeSsh extends Ssh
     public static $lastProbeEnv = null;
     /** @var int how many per-run tokens were minted (guard-ORDERING probe) */
     public static $tokenMints = 0;
+    /** @var int|null the wall-clock limit runProbe was last called with */
+    public static $lastProbeTimeout = null;
 
-    protected static function runProbe(array $argv, ?array $env = null): array
+    protected static function runProbe(array $argv, ?array $env = null, int $timeoutSec = 30): array
     {
-        self::$lastProbeArgv = $argv;
-        self::$lastProbeEnv  = $env;
+        self::$lastProbeArgv    = $argv;
+        self::$lastProbeEnv     = $env;
+        self::$lastProbeTimeout = $timeoutSec;
         return self::$nextProbe;
     }
 
@@ -47,7 +50,7 @@ final class AcceptNewSsh extends Ssh
 {
     public static string $appendLine = '';
 
-    protected static function runProbe(array $argv, ?array $env = null): array
+    protected static function runProbe(array $argv, ?array $env = null, int $timeoutSec = 30): array
     {
         foreach ($argv as $tok) {
             if (strncmp($tok, 'UserKnownHostsFile=', 19) === 0) {
@@ -55,6 +58,19 @@ final class AcceptNewSsh extends Ssh
             }
         }
         return [0, ''];
+    }
+}
+
+/** Exposes the real (protected) probe runner. */
+final class LiveProbeSsh extends Ssh
+{
+    /**
+     * @param array<int,string> $argv
+     * @return array{0:int,1:string}
+     */
+    public static function probe(array $argv, int $timeoutSec): array
+    {
+        return static::runProbe($argv, null, $timeoutSec);
     }
 }
 
@@ -90,6 +106,7 @@ final class SshTest extends TestCase
         FakeSsh::$nextProbe = [0, ''];
         FakeSsh::$lastProbeArgv = null;
         FakeSsh::$lastProbeEnv = null;
+        FakeSsh::$lastProbeTimeout = null;
         FakeSsh::$tokenMints = 0;
     }
 
@@ -100,6 +117,7 @@ final class SshTest extends TestCase
         FakeSsh::$runtimeBase = '/tmp/unraid.rsync';
         Ssh::$askpassPathOverride = null;
         FakeSsh::$askpassPathOverride = null;
+        ProcIO::$killGraceSec = 1.0;
     }
 
     private function rmrf(string $dir): void
@@ -740,6 +758,33 @@ final class SshTest extends TestCase
         $this->assertSame('--', $argv[$destIdx - 1], 'destination must be preceded by --');
         // ssh is argv[0] for every auth method now - no wrapper program.
         $this->assertSame('ssh', $argv[0]);
+    }
+
+    public function testTestConnectionProbeDeadlineFollowsTheConnectTimeout(): void
+    {
+        $creds = Credentials::defaults();
+        $creds['keys'][] = ['id' => 'k-1', 'name' => 'k', 'privateKey' => "KEY\n"];
+        $creds['connections'][] = $this->keyConn(['connectTimeout' => 15]);
+        FakeSsh::testConnection($creds, 'c-key');
+        $this->assertSame(15 + Ssh::PROBE_GRACE, FakeSsh::$lastProbeTimeout);
+    }
+
+    /**
+     * Test connection against a host whose banner overflows the stderr pipe:
+     * the probe read stdout to EOF first, so ssh blocked writing stderr and the
+     * php-fpm worker blocked with it, with no time limit at all.
+     */
+    public function testRealProbeIsBoundedAgainstAStderrFloodThatNeverExits(): void
+    {
+        ProcIO::$killGraceSec = 0.2;
+        $started = microtime(true);
+        [$code, $stderr] = LiveProbeSsh::probe(['bash', '-c', 'exec yes banner-line >&2'], 1);
+        $elapsed = microtime(true) - $started;
+
+        $this->assertSame(Ssh::SSH_EXIT_ERROR, $code);
+        $this->assertSame('Operation timed out: ssh did not finish within 1 seconds.', $stderr);
+        $this->assertLessThan(5.0, $elapsed);
+        $this->assertSame('unreachable', Ssh::classifyProbe([], $code, $stderr)['reason']);
     }
 
     public function testTestConnectionPasswordPassesAskpassEnvToTheProbe(): void

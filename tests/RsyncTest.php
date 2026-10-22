@@ -1432,6 +1432,8 @@ final class RsyncTest extends TestCase
     {
         Rsync::$daemonProbeRunner = null;
         Rsync::$daemonProbeTimeout = Rsync::DAEMON_PROBE_TIMEOUT;
+        Rsync::$versionProbeTimeout = 10;
+        ProcIO::$killGraceSec = 1.0;
         Rsync::$rsyncPathOverride = null;
         foreach ($this->fakeBins as $path) {
             @unlink($path);
@@ -1604,6 +1606,27 @@ PHPSTUB);
         $this->assertLessThan(10.0, microtime(true) - $started);
 
         $this->assertSame(3, Rsync::run([$this->fakeRsync('exit(3);')], null, null, null, static fn(): bool => false));
+    }
+
+    /**
+     * The Status tab's `rsync --version`: a binary that floods stderr past the
+     * pipe buffer and never exits used to block the read of stdout forever.
+     */
+    public function testVersionProbeIsBoundedAgainstAStderrFloodThatNeverExits(): void
+    {
+        Rsync::$versionProbeTimeout = 1;
+        ProcIO::$killGraceSec       = 0.2;
+        Rsync::$rsyncPathOverride   = $this->fakeRsync('echo "rsync  version 9\n"; while (true) { fwrite(STDERR, str_repeat("x", 65536)); }');
+
+        $started = microtime(true);
+        $line    = Rsync::rsyncVersionLine();
+        $elapsed = microtime(true) - $started;
+
+        $this->assertSame('', $line, 'a probe that had to be killed reports nothing');
+        $this->assertLessThan(5.0, $elapsed);
+
+        Rsync::$rsyncPathOverride = $this->fakeRsync('echo "rsync  version 3.4.1  protocol version 32\n";');
+        $this->assertSame('rsync  version 3.4.1  protocol version 32', Rsync::rsyncVersionLine());
     }
 }
 
