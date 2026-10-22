@@ -12,7 +12,7 @@ use PHPUnit\Framework\Attributes\DataProvider;
  *     rewrite; update_cron invoked via an injected stub with the absolute path;
  *     empty/removed when there are no enabled jobs).
  *   - nextRun(): pure 5-field cron evaluation across many expressions, including
- *     the standard day-of-month/day-of-week OR semantics, month rollover,
+ *     dcron 4.5's day-of-month/day-of-week rule and step forms, month rollover,
  *     end-of-month / February, and malformed -> null.
  *
  * Everything is driven through the injectable seams so nothing touches the real
@@ -633,52 +633,89 @@ final class CronTest extends TestCase
         $this->assertSame('2026-06-15 00:00', date('Y-m-d H:i', $next));
     }
 
-    public function testNextRunDomDowOrSemantics(): void
+    /**
+     * dcron 4.5 (the crond Unraid ships) decides the day by VALUES (FixDayDow):
+     * a numeric day-of-month with a restricted day-of-week clears every
+     * weekday, so "0 0 13 * 1" never fires - not "the 13th or Mondays" as
+     * vixie-cron would. It still saves (isValidExpression); there is just no
+     * next run. Cross-checked against dcron 4.5's ParseField/FixDayDow and the
+     * TestJobs match compiled verbatim.
+     */
+    public function testNextRunNumericDomWithARestrictedDowNeverFiresUnderDcron(): void
     {
-        // 0 0 13 * 1 : BOTH dom(13) and dow(Mon) restricted -> fires when EITHER
-        // matches. From Sat 2026-06-13 12:34 the NEXT match is the next Monday
-        // (2026-06-15), not next month's 13th, because dow Monday comes first.
-        $next = Cron::nextRun('0 0 13 * 1', $this->from());
-        $this->assertSame('2026-06-15 00:00', date('Y-m-d H:i', $next));
-
-        // And a day that is the 13th but NOT a Monday still matches via dom: take
-        // a reference just after midnight on 2026-07-12 (a Sunday); the 13th
-        // (Monday) matches both, but to prove OR we use 2026-09 where the 13th is
-        // a Sunday -> still matches via dom.
-        $refSep = mktime(0, 5, 0, 9, 1, 2026); // 2026-09-01
-        $nextSep = Cron::nextRun('0 0 13 * 1', $refSep);
-        // 2026-09-07 is the first Monday in Sep (dow match) -> comes before the
-        // 13th, so OR picks the Monday.
-        $this->assertSame('2026-09-07 00:00', date('Y-m-d H:i', $nextSep));
+        foreach (['0 0 13 * 1', '0 3 1-7 * 1', '0 3 1-31 * mon-fri', '0 3 1,15 * 0'] as $expr) {
+            $this->assertTrue(Cron::isValidExpression($expr), "$expr still saves");
+            $this->assertNull(Cron::nextRun($expr, $this->from()), "$expr never fires under dcron 4.5");
+        }
     }
 
-    public function testNextRunWildcardStepDayIsUnrestrictedForOrRule(): void
+    public function testNextRunAllSevenWeekdaysLeaveTheDayOfMonthAlone(): void
     {
-        // vixie-cron decides the dom/dow OR rule by the FIRST char of the day
-        // field. "*/01" is star-prefixed -> dom is UNRESTRICTED, so only the dow
-        // (Mondays) constrains the day. Without this, dom would wrongly count as
-        // restricted, the OR rule would kick in, dom would match every day, and
-        // the weekday constraint would be ignored.
-        // From Sat 2026-06-13 12:34 -> next Monday 2026-06-15 00:00.
-        $next = Cron::nextRun('0 0 */01 * 1', $this->from());
-        $this->assertSame('2026-06-15 00:00', date('Y-m-d H:i', $next));
-        $this->assertSame('1', date('w', $next)); // Monday, not just "next day"
+        // dcron: a day-of-week that covers every day is no restriction, so
+        // "0-6" is "*" (vixie would OR it with the 15th and fire daily).
+        $first  = Cron::nextRun('0 0 15 * 0-6', $this->from());
+        $second = Cron::nextRun('0 0 15 * 0-6', (int) $first);
+        $this->assertSame('2026-06-15 00:00', date('Y-m-d H:i', (int) $first));
+        $this->assertSame('2026-07-15 00:00', date('Y-m-d H:i', (int) $second));
+    }
 
-        // Leading-zero variant behaves identically to "*".
+    public function testNextRunWildcardStepDayWithARestrictedDowUsesTheDowAlone(): void
+    {
+        // "*" and "*/n" in day-of-month include dcron's day 0, so with a
+        // restricted day-of-week only the weekday counts: every Monday.
+        foreach (['0 0 */01 * 1', '0 0 */2 * 1'] as $expr) {
+            $next = Cron::nextRun($expr, $this->from());
+            $this->assertSame('2026-06-15 00:00', date('Y-m-d H:i', (int) $next), $expr);
+            $this->assertSame('2026-06-22 00:00', date('Y-m-d H:i', (int) Cron::nextRun($expr, (int) $next)), $expr);
+        }
+    }
+
+    public function testNextRunWildcardStepDayOfMonthCountsFromDayZero(): void
+    {
+        // dcron fills "*" in day-of-month from 0: "*\/2" is days 2,4,...,30 and
+        // "*\/3" days 3,6,...,30. It is not "every day" (the old reading).
         $this->assertSame(
-            Cron::nextRun('0 0 * * 1', $this->from()),
-            Cron::nextRun('0 0 */01 * 1', $this->from())
+            ['2026-06-14 03:00', '2026-06-16 03:00', '2026-06-18 03:00'],
+            $this->fires('0 3 */2 * *', 3)
+        );
+        $this->assertSame(
+            ['2026-06-15 03:00', '2026-06-18 03:00', '2026-06-21 03:00'],
+            $this->fires('0 3 */3 * *', 3)
+        );
+        // Day 30 to day 2: there is no day 0 or 1 in the set.
+        $this->assertSame('2026-08-02 03:00', date('Y-m-d H:i', (int) Cron::nextRun('0 3 */2 * *', mktime(4, 0, 0, 7, 30, 2026))));
+    }
+
+    public function testNextRunWildcardStepDayOfWeekRestrictsTheDays(): void
+    {
+        // "*\/2" in day-of-week is Sun, Tue, Thu, Sat, not every day.
+        $this->assertSame(
+            ['2026-06-14 03:00', '2026-06-16 03:00', '2026-06-18 03:00'],
+            $this->fires('0 3 * * */2', 3)
         );
     }
 
-    public function testNextRunWildcardStepTwoIsUnrestrictedForOrRule(): void
+    public function testNextRunSingleValueWithAStepIsThatValueAlone(): void
     {
-        // "*/2" is also star-prefixed -> unrestricted for the OR rule (matching
-        // real cron, which keys only on the leading "*"). dow Monday therefore
-        // constrains the day on its own.
-        $next = Cron::nextRun('0 0 */2 * 1', $this->from());
-        $this->assertSame('2026-06-15 00:00', date('Y-m-d H:i', $next));
-        $this->assertSame('1', date('w', $next));
+        // dcron collapses "N/step" to N before the step applies: "5/20" is :05
+        // only, not :05, :25, :45.
+        $this->assertSame(
+            ['2026-06-13 13:05', '2026-06-13 14:05', '2026-06-13 15:05'],
+            $this->fires('5/20 * * * *', 3)
+        );
+    }
+
+    /** @return array<int,string> the next $n fire times from from(), local Y-m-d H:i */
+    private function fires(string $expr, int $n): array
+    {
+        $out = [];
+        $ts  = $this->from();
+        for ($i = 0; $i < $n; $i++) {
+            $ts = Cron::nextRun($expr, $ts);
+            $this->assertNotNull($ts, $expr);
+            $out[] = date('Y-m-d H:i', $ts);
+        }
+        return $out;
     }
 
     public function testNextRunDomRestrictedDowStarUsesDomOnly(): void
