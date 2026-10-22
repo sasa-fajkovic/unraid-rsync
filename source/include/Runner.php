@@ -1384,33 +1384,16 @@ class Runner
      */
     public static function resolvePair(array $job, array $pair, string $transport, string $userHost = ''): array
     {
-        $local  = (string) ($pair['local'] ?? '');
         $remote = (string) ($pair['remote'] ?? '');
-        $direction = strtoupper(trim((string) ($job['direction'] ?? 'PUSH')));
-
-        // DAEMON must come BEFORE the `!== 'SSH'` fallthrough below: after it, a
-        // daemon job would run as LOCAL with a bare relative operand.
-        if ($transport === 'DAEMON') {
-            // One character's difference from the SSH arm: '::' instead of ':'.
-            $remoteOperand = $userHost . '::' . $remote;
-            if ($direction === 'PULL') {
-                return ['src' => $remoteOperand, 'dest' => $local];
-            }
-            return ['src' => $local, 'dest' => $remoteOperand];
-        }
-
-        if ($transport !== 'SSH') {
-            // LOCAL: both are local paths; canonical direction is PUSH.
-            return ['src' => $local, 'dest' => $remote];
-        }
-
-        // SSH: the remote side is qualified user@host:path.
-        $remoteOperand = $userHost . ':' . $remote;
-
-        if ($direction === 'PULL') {
-            return ['src' => $remoteOperand, 'dest' => $local];
-        }
-        return ['src' => $local, 'dest' => $remoteOperand];
+        // SSH qualifies the remote side user@host:path, DAEMON user@host::module;
+        // LOCAL (and an unknown transport) leaves both as paths on this box.
+        $sep      = ['SSH' => ':', 'DAEMON' => '::'][$transport] ?? null;
+        $operands = [
+            'local'  => (string) ($pair['local'] ?? ''),
+            'remote' => $sep === null ? $remote : $userHost . $sep . $remote,
+        ];
+        $sides = Job::sides($job, $transport);
+        return ['src' => $operands[$sides['src']], 'dest' => $operands[$sides['dst']]];
     }
 
     /**
@@ -1453,63 +1436,7 @@ class Runner
      */
     public static function guardrailErrors(array $job, array $pair, string $transport, array $opts): array
     {
-        $errors = [];
-        $local  = trim((string) ($pair['local'] ?? ''));
-        $remote = trim((string) ($pair['remote'] ?? ''));
-        $direction = strtoupper(trim((string) ($job['direction'] ?? 'PUSH')));
-        $snapshotOn = Config::normalizeSnapshot($job['snapshot'] ?? null) !== null;
-
-        // local field: always a local path on this box.
-        if ($local === '') {
-            $errors[] = 'local path is required.';
-        } else {
-            foreach (Job::pairLocalErrors($job, $transport, $local, 'local path') as $e) {
-                $errors[] = $e;
-            }
-        }
-
-        // remote field: local guardrails under LOCAL, a module reference under
-        // DAEMON, otherwise a non-root remote sub-path.
-        if ($snapshotOn) {
-            // Snapshot mode writes to <root>/<stamp>/<sub>; Job::snapshotErrors()
-            // checks `remote` and `sub`, as Job::validate does.
-        } elseif ($remote === '') {
-            if ($transport === 'LOCAL') {
-                $errors[] = 'second local path is required.';
-            } elseif ($transport === 'DAEMON') {
-                $errors[] = 'daemon module path is required.';
-            } else {
-                $errors[] = 'remote path is required.';
-            }
-        } elseif ($transport === 'LOCAL') {
-            foreach (Job::checkLocalPath($remote, 'second local path') as $e) {
-                $errors[] = $e;
-            }
-        } elseif ($transport === 'DAEMON') {
-            foreach (Job::checkDaemonModule($remote, 'daemon module path') as $e) {
-                $errors[] = $e;
-            }
-        } else {
-            foreach (Job::checkRemotePath($remote, 'remote path') as $e) {
-                $errors[] = $e;
-            }
-        }
-
-        // --delete destination must be a specific sub-dir. Determine which side
-        // is the destination EXACTLY as resolvePair() does: for LOCAL transport
-        // direction is coerced to PUSH (dest = `remote`), so we must not let a
-        // hand-edited direction=PULL on a LOCAL job check the wrong side. Only
-        // the two remote transports let PULL flip the destination to the `local`
-        // side - and an unknown hand-edited transport keeps LOCAL's answer,
-        // which is what resolvePair()'s fallthrough does with it too.
-        $deleteOn = !empty($opts['delete']) || !empty($opts['deleteExcluded']);
-        if ($deleteOn) {
-            $destIsRemote = in_array($transport, ['SSH', 'DAEMON'], true) ? ($direction !== 'PULL') : true;
-            $e = Job::deleteDestError($transport, $destIsRemote, $destIsRemote ? $remote : $local);
-            if ($e !== '') {
-                $errors[] = $e;
-            }
-        }
+        $errors = Job::pairErrors($job, $pair, $transport, $opts)['errors'];
 
         // --rsync-path reaches the remote shell, and config.json is user-writable,
         // so re-check it here the same way both path sides are re-checked above:
@@ -1561,7 +1488,7 @@ class Runner
             $errors,
             Job::pairOverlapErrors($job, $opts),
             Job::optionErrors($opts, $transport, $direction),
-            Job::markerErrors($job, $transport, $direction),
+            Job::markerErrors($job, $transport),
             Job::ancestryErrors($job, $opts, Job::protectedTargets($jobs, $jobId, $creds), $creds),
             Job::snapshotRootErrors($job, $jobs, $creds)
         );
@@ -1581,13 +1508,13 @@ class Runner
             return $errors !== [] ? 'guardrail' : 'snapshot-preflight';
         }
 
-        if (!self::checkTargetMarker($job, $transport, $direction, $opts, $sshPieces, $userHost, $runLog, $jobId)) {
+        if (!self::checkTargetMarker($job, $transport, $opts, $sshPieces, $userHost, $runLog, $jobId)) {
             return 'dest-not-mounted';
         }
 
         // Snapshot mode forces delete off, whatever $opts says. A local
         // destination is probed by localChecks(), after the pre-hook.
-        if (!$snapshotOn && in_array($transport, ['SSH', 'DAEMON'], true) && $direction !== 'PULL'
+        if (!$snapshotOn && in_array($transport, ['SSH', 'DAEMON'], true) && Job::sides($job, $transport)['dst'] === 'remote'
             && (!empty($opts['delete']) || !empty($opts['deleteExcluded']))) {
             return self::probeDeleteDestinations($pairs, $opts, $sshPieces, $userHost, $transport === 'DAEMON', $runLog, $jobId);
         }
@@ -1610,7 +1537,7 @@ class Runner
     {
         clearstatcache();
         $remoteHost = in_array($transport, ['SSH', 'DAEMON'], true);
-        $pull       = $remoteHost && strtoupper(trim((string) ($job['direction'] ?? 'PUSH'))) === 'PULL';
+        $pull       = Job::sides($job, $transport)['dst'] === 'local';
         $deleteOn   = Config::normalizeSnapshot($job['snapshot'] ?? null) === null
             && (!empty($opts['delete']) || !empty($opts['deleteExcluded']));
         $list       = self::$localLister
@@ -1677,13 +1604,13 @@ class Runner
      * @param array<string,mixed>      $opts
      * @param array<string,mixed>|null $sshPieces
      */
-    private static function checkTargetMarker(array $job, string $transport, string $direction, array $opts, ?array $sshPieces, string $userHost, string $runLog, string $jobId): bool
+    private static function checkTargetMarker(array $job, string $transport, array $opts, ?array $sshPieces, string $userHost, string $runLog, string $jobId): bool
     {
         $marker = trim((string) ($job['targetMarker'] ?? ''));
         if ($marker === '') {
             return true;
         }
-        $remote = in_array($transport, ['SSH', 'DAEMON'], true) && $direction !== 'PULL';
+        $remote = in_array($transport, ['SSH', 'DAEMON'], true) && Job::sides($job, $transport)['dst'] === 'remote';
         $src    = $remote ? $userHost . ($transport === 'DAEMON' ? '::' : ':') . $marker : $marker;
         $file   = Ssh::ensureMarkersDir() . '/' . Util::safeFileId($jobId . '-' . self::pid() . '-' . bin2hex(random_bytes(6)));
         $argv   = Rsync::auxArgv(
