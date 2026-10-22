@@ -80,7 +80,7 @@ deleted by a retention policy.
 /mnt/backup/snapshots/appdata/.ur-snapshot-root  sentinel: first line = the job id
 /mnt/backup/snapshots/appdata/2026-10-20T030000Z/appdata/...   one snapshot, one dir per pair ("sub")
 /mnt/backup/snapshots/appdata/2026-10-21T030000Z/appdata/...
-/mnt/backup/snapshots/appdata/2026-10-21T030000Z.inprogress/  a run that did not commit (reused next run)
+/mnt/backup/snapshots/appdata/2026-10-22T030000Z.inprogress/  a run that did not commit (reused next run)
 /mnt/backup/snapshots/appdata/latest -> 2026-10-21T030000Z     for humans; the plugin never reads it
 /mnt/backup/snapshots/appdata/.ur-hold           deletions on hold (see below)
 /mnt/backup/snapshots/appdata/<stamp>/.ur-keep   this snapshot is pinned, never pruned
@@ -88,9 +88,11 @@ deleted by a retention policy.
 
 Names are UTC stamps (`YYYY-MM-DDTHHMMSSZ`). Only a name that is exactly a stamp
 is a complete snapshot. Besides pruning old snapshots, the plugin only deletes
-its own leftovers: older `<stamp>.inprogress` copies of runs that did not
-commit (the newest one is kept as a link basis) and `.deleting` directories of
-an interrupted deletion. Nothing else in the root is ever deleted.
+its own leftovers: `<stamp>.inprogress` copies of runs that did not commit and
+`.deleting` directories of an interrupted deletion. The newest unfinished copy
+is kept as a link basis only while its stamp is newer than the newest complete
+snapshot (or no snapshot is complete yet); every other one, including an
+outdated newest one, is deleted by the next real run. Nothing else in the root is ever deleted.
 
 Other names you may see:
 
@@ -176,9 +178,9 @@ every run log of the job (`Run started for job "Appdata" (j-appdata)`) and in
    no snapshot. Review those plans for a couple of weeks, then turn **Prune dry
    run** off and Apply. At most **Max deletions per run** snapshots are deleted
    per run; the rest wait for later runs. Prune dry run does not cover the
-   cleanup of leftovers: older unfinished `<stamp>.inprogress` copies and
-   `.deleting` directories are still removed by every real run (unless
-   `.ur-hold` exists).
+   cleanup of leftovers: unfinished `<stamp>.inprogress` copies (all but a
+   newest one that is newer than the last committed snapshot) and `.deleting`
+   directories are still removed by every real run (unless `.ur-hold` exists).
 
 ## How a run works
 
@@ -236,12 +238,15 @@ flowchart TD
    path) must be able to list the root. Every pair's source must exist, be a
    directory and not be empty. Every pair needs a **link basis**,
    `<previous snapshot>/<sub>`, or its **seed** flag. The log ends this part with
-   `Snapshot root checked: previous snapshot <stamp>` (and, when one exists,
-   `unfinished <stamp>.inprogress reused as a link-dest`).
+   `Snapshot root checked: previous snapshot <stamp>`, plus
+   `unfinished <stamp>.inprogress reused as a link-dest` when the newest
+   unfinished copy is newer than the newest complete snapshot (or none is
+   complete yet).
 5. **Cleanup** (real runs only, skipped while `.ur-hold` exists): leftover
-   `.deleting` directories and every unfinished `.inprogress` copy except the
-   newest one are deleted. A failed deletion does not fail the run; it sets
-   `prune-failed`.
+   `.deleting` directories and every unfinished `.inprogress` copy are deleted,
+   except the newest one when step 4 kept it as a link basis. An unfinished copy
+   older than the last commit is deleted too. A failed deletion does not fail
+   the run; it sets `prune-failed`.
 6. **Pre-run hook**, if the job has one.
 7. **`<stamp>.inprogress` is created** (real runs only). Failure:
    `snapshot-mkstamp-failed`.
@@ -289,12 +294,13 @@ Exit 25 (`--max-delete` cap) cannot happen: deletion is forced off.
 
 **A run that does not commit** leaves `<stamp>.inprogress` on the receiver and
 logs `Snapshot <stamp> was not committed; <stamp>.inprogress is kept for the next run.`
-It is never committed later. The next run uses the newest unfinished copy as a
-second `--link-dest`, so files it already received are linked instead of sent
-again. Older unfinished copies are deleted by the next real run's cleanup. The
-newest one stays until a later unfinished copy replaces it; it is not a
-snapshot, is never counted by retention, and is not needed for anything else
-(you can remove it by hand while no run of the job is active).
+It is never committed later. While the newest unfinished copy is newer than
+the newest complete snapshot (or no snapshot is complete yet), the next run uses
+it as a second `--link-dest`, so files it already received are linked instead
+of sent again. Every other unfinished copy is deleted by the next real run's
+cleanup, and so is the newest one once a later run has committed: an
+unfinished copy older than the last commit is never a link basis again. It is
+not a snapshot and is never counted by retention.
 
 **Abort** stops the run at the next safe point: between pairs, during a pair
 (rsync is stopped), during a deletion, or just before the commit. An aborted run
