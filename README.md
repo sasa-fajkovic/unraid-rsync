@@ -250,7 +250,9 @@ wrong path on either side can wipe a backup. The plugin refuses those runs:
 
 - **At save:** two pairs of one delete job may not write to the same or nested
   directories, and a `--delete` destination may not be, contain or lie inside
-  another job's destination on the same host and port.
+  another job's destination on the same host and port. A host name and an IP
+  address for one machine are not recognised as the same host, so use one name
+  per destination machine in every connection.
 - **Target marker** (optional per job): a file on the destination drive, with
   the content it must hold. Missing or different → the run fails with
   `dest-not-mounted` before the pre-run hook and before anything is written.
