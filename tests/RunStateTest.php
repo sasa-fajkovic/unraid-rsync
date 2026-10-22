@@ -289,15 +289,86 @@ final class RunStateTest extends TestCase
             return $pid < 0;
         };
         $asked = [];
-        RunState::$groupHoldsLock = static function (int $pgid, string $lock) use (&$asked): bool {
+        RunState::$groupHoldsLock = static function (int $pgid, string $lock) use (&$asked, &$sent): bool {
             $asked[] = [$pgid, basename($lock)];
-            return $pgid === 999;
+            return $pgid === 999 && $sent === [];
         };
         FakeRunState::write('j-music', ['pid' => 999, 'running' => true]);
         FakeRunState::$alive = false;
         $this->assertTrue(FakeRunState::signalRun('j-music', 15));
-        $this->assertSame([-999, 15], $sent[0] ?? null, 'a dead leader: only its group, never the bare pid');
+        $this->assertSame([[-999, 15]], $sent, 'a dead leader: only its group, never the bare pid');
         $this->assertSame([999, 'j-music.lock'], $asked[0], 'only after a member is seen holding this job\'s run lock');
+    }
+
+    public function testHookPgidIsRecordedClearedAndDroppedByMarkStopped(): void
+    {
+        RunState::write('j-hook', ['pid' => 5, 'running' => true, 'gen' => 'g1']);
+        RunState::setHookPgid('j-hook', 4242);
+        $this->assertSame(4242, RunState::read('j-hook')['hookPgid'] ?? null);
+        $this->assertSame('g1', RunState::read('j-hook')['gen'] ?? null);
+        RunState::setHookPgid('j-hook', 0);
+        $this->assertArrayNotHasKey('hookPgid', RunState::read('j-hook'));
+        RunState::setHookPgid('j-hook', 4242);
+        RunState::markStopped('j-hook');
+        $this->assertArrayNotHasKey('hookPgid', RunState::read('j-hook'));
+    }
+
+    public function testSignalRunEscalatesToKillWhenAnOrphanedHookIgnoresTerm(): void
+    {
+        $sent = [];
+        RunState::$kill = static function (int $pid, int $sig) use (&$sent): bool {
+            $sent[] = [$pid, $sig];
+            return true;
+        };
+        RunState::$groupHoldsLock = static fn(int $pgid, string $lock): bool => $pgid === 777
+            && !in_array([-777, 9], $sent, true);
+        RunState::$abortKillGraceSec = 0.2;
+        FakeRunState::write('j-music', ['pid' => 999, 'running' => true]);
+        FakeRunState::setHookPgid('j-music', 777);
+        FakeRunState::$alive = false;
+        $this->assertTrue(FakeRunState::signalRun('j-music', 15));
+        $this->assertSame([[-777, 15], [-777, 9]], $sent, 'the dead runner\'s own group holds nothing, so only the hook\'s');
+    }
+
+    public function testSignalRunStopsARealOrphanedHookSessionHoldingTheLockFile(): void
+    {
+        $setsid = is_executable('/usr/bin/setsid') ? '/usr/bin/setsid' : '/bin/setsid';
+        if (!is_dir('/proc/self/fd') || !is_executable($setsid)) {
+            $this->markTestSkipped('needs Linux /proc and util-linux setsid');
+        }
+        $lock = RunState::acquireLock('j-real');
+        RunState::releaseLock($lock);
+        $proc = proc_open([$setsid, 'sh', '-c', 'exec 3<"$1"; exec sleep 30', 'hook', RunState::lockPath('j-real')], [], $pipes);
+        $this->assertIsResource($proc);
+        $hook = proc_get_status($proc)['pid'];
+        try {
+            for ($i = 0; $i < 50 && !RunState::groupHoldsLock($hook, RunState::lockPath('j-real')); $i++) {
+                usleep(20000);
+            }
+            RunState::write('j-real', ['pid' => 2147483647, 'running' => true, 'hookPgid' => $hook]);
+            RunState::$abortKillGraceSec = 2.0;
+            $this->assertTrue(RunState::signalRun('j-real', 15));
+            $this->assertFalse(RunState::groupHoldsLock($hook, RunState::lockPath('j-real')));
+        } finally {
+            proc_terminate($proc, 9);
+            proc_close($proc);
+        }
+    }
+
+    public function testSignalRunLeavesTheHookToALiveRunner(): void
+    {
+        $sent = [];
+        RunState::$kill = static function (int $pid, int $sig) use (&$sent): bool {
+            $sent[] = [$pid, $sig];
+            return true;
+        };
+        RunState::$groupHoldsLock = static fn(int $pgid, string $lock): bool => true;
+        FakeRunState::write('j-music', ['pid' => 999, 'running' => true]);
+        FakeRunState::setHookPgid('j-music', 777);
+        FakeRunState::$alive = true;
+        FakeRunState::$cmdline = "php\0runner.php\0--job=j-music";
+        $this->assertTrue(FakeRunState::signalRun('j-music', 15));
+        $this->assertSame([[-999, 15]], $sent, 'a live runner stops its own hook');
     }
 
     /** The runner's pid was reused by a group leader that exited and left children: not ours. */

@@ -2712,6 +2712,41 @@ final class RunnerTest extends TestCase
         }
     }
 
+    public function testRunHookProcessReportsTheHooksOwnSessionLeader(): void
+    {
+        if (!is_executable('/usr/bin/setsid') && !is_executable('/bin/setsid')) {
+            $this->markTestSkipped('needs util-linux setsid (present on Unraid and in CI)');
+        }
+        $started = [];
+        $out = '';
+        $code = Runner::runHookProcess('read -r _ _ _ _ pgid _ < /proc/$$/stat; echo "$pgid"', [], static function (string $c) use (&$out): void {
+            $out .= $c;
+        }, 10, null, static function (int $pgid) use (&$started): void {
+            $started[] = $pgid;
+        });
+        $this->assertSame(0, $code, $out);
+        $this->assertCount(1, $started);
+        $this->assertSame((string) $started[0], trim($out), 'bash leads its own group');
+    }
+
+    /** While a hook runs its group is in the run state, so Abort can reach it if the runner dies. */
+    public function testTheRunStateCarriesTheHooksGroupOnlyWhileItRuns(): void
+    {
+        $seen = [];
+        Runner::$hookRunner = function (string $hook, array $env, $onOutput, int $timeoutSec = 0, ?callable $onStart = null) use (&$seen): int {
+            $this->assertNotNull($onStart);
+            $onStart($hook === 'PRE' ? 4242 : 4343);
+            $seen[$hook] = RunState::read('j-pre')['hookPgid'] ?? null;
+            return 0;
+        };
+        $this->fakeRsync();
+        $id  = $this->saveLocalJob('j-pre', ['preHook' => 'PRE', 'postHook' => 'POST']);
+        $res = Runner::run($id, false);
+        $this->assertSame(Rsync::STATE_SUCCESS, $res['state']);
+        $this->assertSame(['PRE' => 4242, 'POST' => 4343], $seen);
+        $this->assertArrayNotHasKey('hookPgid', RunState::read($id));
+    }
+
     public function testRunHookProcessStopsOnAbortAndPassesExitCodesThrough(): void
     {
         $noop = static function (string $c): void {

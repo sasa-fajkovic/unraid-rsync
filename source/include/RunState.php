@@ -76,6 +76,9 @@ class RunState
      */
     public static ?\Closure $groupHoldsLock = null;
 
+    /** Seconds Abort waits for a dead run's group to let go of the lock before SIGKILL. */
+    public static float $abortKillGraceSec = 5.0;
+
     /** The runtime base dir actually in effect. */
     public static function base(): string
     {
@@ -200,6 +203,9 @@ class RunState
         if (is_string($state['gen'] ?? null) && $state['gen'] !== '') {
             $out['gen'] = $state['gen'];
         }
+        if ((int) ($state['hookPgid'] ?? 0) > 0) {
+            $out['hookPgid'] = (int) $state['hookPgid'];
+        }
 
         $json = json_encode($out, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
         if ($json === false) {
@@ -213,7 +219,7 @@ class RunState
      * unreadable/corrupt (a missing/garbage state file just means "not
      * running"). The returned array is always the canonical shape.
      *
-     * @return array{jobId:string,pid:int,running:bool,dryRun:bool,trigger:string,startedAt:string,currentLog:string,token?:string,gen?:string}|null
+     * @return array{jobId:string,pid:int,running:bool,dryRun:bool,trigger:string,startedAt:string,currentLog:string,token?:string,gen?:string,hookPgid?:int}|null
      */
     public static function read(string $jobId): ?array
     {
@@ -238,7 +244,8 @@ class RunState
             'startedAt'  => (string) ($data['startedAt'] ?? ''),
             'currentLog' => (string) ($data['currentLog'] ?? ''),
         ] + (is_string($data['token'] ?? null) && $data['token'] !== '' ? ['token' => $data['token']] : [])
-          + (is_string($data['gen'] ?? null) && $data['gen'] !== '' ? ['gen' => $data['gen']] : []);
+          + (is_string($data['gen'] ?? null) && $data['gen'] !== '' ? ['gen' => $data['gen']] : [])
+          + ((int) ($data['hookPgid'] ?? 0) > 0 ? ['hookPgid' => (int) $data['hookPgid']] : []);
     }
 
     /** A fresh launch generation. */
@@ -282,7 +289,23 @@ class RunState
         }
         $state['running'] = false;
         $state['pid']     = 0;
+        unset($state['hookPgid']);
         self::write($jobId, $state);
+    }
+
+    /**
+     * Record (pgid > 0) or clear the process group of the hook the runner is
+     * running: a hook has its own session, so a runner that dies during it
+     * leaves a group only this record can name.
+     */
+    public static function setHookPgid(string $jobId, int $pgid): void
+    {
+        $state = self::read($jobId);
+        if ($state === null) {
+            return;
+        }
+        unset($state['hookPgid']);
+        self::write($jobId, $state + ($pgid > 0 ? ['hookPgid' => $pgid] : []));
     }
 
     /**
@@ -313,25 +336,46 @@ class RunState
     }
 
     /**
-     * Send $sig to this job's run: the live runner's group (else its pid), or,
-     * once the runner is dead, its group - an orphaned rsync is still in it -
-     * but only while a member of that group holds this job's run lock open: a
-     * dead leader's pid can be reused by an unrelated group. A pid reused by
-     * another process is never signalled.
+     * Send $sig to this job's run: the live runner's group (else its pid; it
+     * stops its own hook). Once the runner is dead: its group (an orphaned
+     * rsync) and the recorded hook's session, each only while a member holds
+     * this job's run lock open - a dead leader's pid can be reused by an
+     * unrelated group - and SIGKILLed if it still holds it after
+     * $abortKillGraceSec. A pid reused by another process is never signalled.
      */
     public static function signalRun(string $jobId, int $sig): bool
     {
-        $pid = (int) (self::read($jobId)['pid'] ?? 0);
-        if ($pid <= 0) {
+        $state = self::read($jobId);
+        $pid   = (int) ($state['pid'] ?? 0);
+        if ($pid > 0 && static::pidAlive($pid)) {
+            if (!self::cmdlineMatchesJob(static::pidCmdline($pid), $jobId)) {
+                return false;
+            }
+            return self::kill(-$pid, $sig) || self::kill($pid, $sig);
+        }
+        $signalled = false;
+        foreach (array_unique([$pid, (int) ($state['hookPgid'] ?? 0)]) as $pgid) {
+            if ($pgid > 0 && self::stopGroup($pgid, $sig, self::lockPath($jobId))) {
+                $signalled = true;
+            }
+        }
+        return $signalled;
+    }
+
+    private static function stopGroup(int $pgid, int $sig, string $lockPath): bool
+    {
+        if (!self::groupHoldsLock($pgid, $lockPath) || !self::kill(-$pgid, $sig)) {
             return false;
         }
-        if (!static::pidAlive($pid)) {
-            return self::groupHoldsLock($pid, self::lockPath($jobId)) && self::kill(-$pid, $sig);
+        $deadline = microtime(true) + self::$abortKillGraceSec;
+        while (self::groupHoldsLock($pgid, $lockPath)) {
+            if (microtime(true) >= $deadline) {
+                self::kill(-$pgid, defined('SIGKILL') ? SIGKILL : 9);
+                break;
+            }
+            usleep(50000);
         }
-        if (!self::cmdlineMatchesJob(static::pidCmdline($pid), $jobId)) {
-            return false;
-        }
-        return self::kill(-$pid, $sig) || self::kill($pid, $sig);
+        return true;
     }
 
     /**

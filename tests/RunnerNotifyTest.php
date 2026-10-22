@@ -667,6 +667,34 @@ final class RunnerNotifyTest extends TestCase
         $this->assertCount(1, $this->captured);
     }
 
+    /** The runner died during a hook: the hook's own session holds the lock and Abort must reach it. */
+    public function testAbortStopsAnOrphanedHookThenTheCrashIsReportedOnce(): void
+    {
+        $id = $this->saveJob('always');
+        $this->writeDeadRunnerState($id);
+        RunState::setHookPgid($id, 777);
+        $held = RunState::acquireLock($id);
+        $sent = [];
+        RunState::$kill = static function (int $pid, int $sig) use (&$sent, &$held): bool {
+            $sent[] = [$pid, $sig];
+            RunState::releaseLock($held);
+            return true;
+        };
+        RunState::$groupHoldsLock = static fn(int $pgid, string $lock): bool => $pgid === 777 && is_resource($held);
+        try {
+            $this->assertTrue(RunState::isRunning($id));
+            $this->assertTrue(RunState::signalRun($id, 15));
+            $this->assertSame([[-777, 15]], $sent, 'the hook\'s group, not the dead runner\'s');
+            $this->assertCount(0, $this->captured);
+        } finally {
+            RunState::releaseLock($held);
+        }
+        $this->assertFalse(RunState::isRunning($id));
+        $this->assertFalse(RunState::isRunning($id));
+        $this->assertCount(1, $this->captured);
+        $this->assertArrayNotHasKey('hookPgid', RunState::read($id));
+    }
+
     public function testNextRunReportsTheDeadRunnerBeforeStarting(): void
     {
         $id = $this->saveJob('always');

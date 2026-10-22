@@ -60,10 +60,10 @@ require_once __DIR__ . '/Util.php';
 class Runner
 {
     /**
-     * Injectable hook runner: fn(string $hookScript, array $env, callable(string):void $onOutput, int $timeoutSec): int
+     * Injectable hook runner: fn(string $hookScript, array $env, callable(string):void $onOutput, int $timeoutSec, callable(int):void $onStart): int
      * Returns the hook's exit code (or HOOK_TIMED_OUT). null => the live runner (bash -c).
      *
-     * @var (\Closure(string, array<string,string>, callable(string):void, int): int)|null
+     * @var (\Closure(string, array<string,string>, callable(string):void, int, callable(int):void): int)|null
      */
     public static ?\Closure $hookRunner = null;
 
@@ -590,6 +590,7 @@ class Runner
                 $preMin = Config::hookTimeoutMinutes($global, 'preHookTimeout');
                 Logger::event($runLog, $jobId, 'Running pre-run hook.');
                 $preExit = self::runHook(
+                    $jobId,
                     $preHook,
                     $hookEnvBase,
                     $runLog,
@@ -894,6 +895,7 @@ class Runner
                 $abortedBefore = RunState::abortRequested($jobId);
                 Logger::event($runLog, $jobId, 'Running post-run hook.');
                 $postExit = self::runHook(
+                    $jobId,
                     $postHook,
                     $postEnv,
                     $runLog,
@@ -2405,21 +2407,37 @@ class Runner
      * @param (callable():bool)|null $stopWhen   true = kill the hook (Abort)
      * @return int the exit code, or HOOK_TIMED_OUT
      */
-    private static function runHook(string $hook, array $env, string $runLog, int $timeoutSec = 0, ?callable $stopWhen = null): int
+    private static function runHook(string $jobId, string $hook, array $env, string $runLog, int $timeoutSec = 0, ?callable $stopWhen = null): int
     {
         // Hook stdout/stderr (captured + browser-visible) flows through the same
         // redacting, size-capped sink as rsync output (F1 + F3).
         $sink = Logger::sink($runLog);
+        $recorded = false;
+        $onStart  = static function (int $pgid) use ($jobId, &$recorded): void {
+            try {
+                RunState::setHookPgid($jobId, $pgid);
+                $recorded = true;
+            } catch (Throwable $e) {
+                // Best-effort: only an Abort after this runner dies needs it.
+            }
+        };
 
         try {
             if (self::$hookRunner !== null) {
-                return (int) (self::$hookRunner)($hook, $env, $sink, $timeoutSec);
+                return (int) (self::$hookRunner)($hook, $env, $sink, $timeoutSec, $onStart);
             }
-            return self::runHookProcess($hook, $env, $sink, $timeoutSec, $stopWhen);
+            return self::runHookProcess($hook, $env, $sink, $timeoutSec, $stopWhen, $onStart);
         } finally {
             // A hook whose last write had no trailing newline would otherwise
             // stay in the sink buffer until the next sink on this path reset it.
             Logger::flushSink($runLog);
+            if ($recorded) {
+                try {
+                    RunState::setHookPgid($jobId, 0);
+                } catch (Throwable $e) {
+                    // markStopped drops it too.
+                }
+            }
         }
     }
 
@@ -2445,9 +2463,10 @@ class Runner
      * @param callable(string):void  $onOutput
      * @param int                    $timeoutSec 0 = no limit
      * @param (callable():bool)|null $stopWhen   true = kill now (exit 143)
+     * @param (callable(int):void)|null $onStart called with the hook's process group, when it has its own
      * @return int the exit code, or HOOK_TIMED_OUT
      */
-    public static function runHookProcess(string $hook, array $env, callable $onOutput, int $timeoutSec = 0, ?callable $stopWhen = null): int
+    public static function runHookProcess(string $hook, array $env, callable $onOutput, int $timeoutSec = 0, ?callable $stopWhen = null, ?callable $onStart = null): int
     {
         $descriptors = [
             0 => ['file', '/dev/null', 'r'],
@@ -2467,6 +2486,11 @@ class Runner
         if (!is_resource($proc)) {
             $onOutput("Failed to start hook (bash).\n");
             return 127;
+        }
+        // setsid execs bash in a new session (proc_open's child leads no group).
+        $leader = proc_get_status($proc)['pid'];
+        if ($setsid !== null && $leader > 0 && $onStart !== null) {
+            $onStart($leader);
         }
 
         // Drain stdout AND stderr concurrently with a non-blocking select loop.
