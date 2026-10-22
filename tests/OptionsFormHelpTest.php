@@ -2398,18 +2398,23 @@ final class OptionsFormHelpTest extends TestCase
     public function testNoJobsShowsTheEmptyStateInTheListUntilACardIsAdded(): void
     {
         @unlink(Config::path());
-        $page = Dom\HTMLDocument::createFromString('<!doctype html><body>' . $this->renderPageBody(__DIR__ . '/../source/pages/jobs.php'), LIBXML_NOERROR);
+        $html = $this->renderPageBody(__DIR__ . '/../source/pages/jobs.php');
+        $page = Dom\HTMLDocument::createFromString('<!doctype html><body>' . $html, LIBXML_NOERROR);
         $this->assertNull($page->querySelector('#ur-jobs-container .ur-job-card'));
         $empty = $page->querySelector('#ur-jobs-container > .ur-empty-state.ur-jobs-empty');
         $this->assertSame('No jobs configured yet.', trim((string) $empty?->textContent));
-        // Add job appends a card to the same container; removing the last one brings it back.
-        $this->assertStringContainsString(
-            '#ur-jobs-container:has(.ur-job-card) > .ur-jobs-empty { display: none; }',
-            (string) file_get_contents(__DIR__ . '/../source/pages/jobs.php')
-        );
+        $this->assertFalse($empty?->hasAttribute('hidden'));
+        // No :has(): older browsers on Unraid admin boxes lack it.
+        $this->assertStringNotContainsString(':has(', $html);
+        // Add job and Remove job both re-sync it after changing the list.
+        $this->assertSame(1, preg_match('/function syncEmptyState\(\) \{(.*?)\n  \}\n/s', $html, $m));
+        $this->assertStringContainsString("if (empty) { empty.hidden = !!container.querySelector('.ur-job-card'); }", $m[1]);
+        $this->assertSame(1, preg_match('/function addJob\(\) \{(.*?)\n  \}\n/s', $html, $m));
+        $this->assertStringContainsString("document.getElementById('ur-jobs-container').appendChild(card);\n    syncEmptyState();", $m[1]);
+        $this->assertStringContainsString("pendingDelCard.parentNode.removeChild(pendingDelCard);\n        syncEmptyState();", $html);
     }
 
-    /** Removing the last saved card client-side must leave the empty state for the CSS to reveal. */
+    /** Removing the last saved card client-side must leave an empty state to reveal. */
     #[RunInSeparateProcess]
     #[PreserveGlobalState(false)]
     public function testSavedJobsStillRenderTheEmptyStateForTheRemovePath(): void
@@ -2418,6 +2423,7 @@ final class OptionsFormHelpTest extends TestCase
         $this->assertNotNull($page->querySelector('#ur-jobs-container > .ur-job-card[data-jobid="j-mirror"]'));
         $empty = $page->querySelector('#ur-jobs-container > .ur-empty-state.ur-jobs-empty');
         $this->assertSame('No jobs configured yet.', trim((string) $empty?->textContent));
+        $this->assertTrue($empty?->hasAttribute('hidden'), 'hidden server-side while jobs exist');
     }
 
     #[RunInSeparateProcess]

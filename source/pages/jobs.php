@@ -532,7 +532,6 @@ function ur_snap_disabled(bool $snapOn): string
 .ur-job-head .ur-last-run-cell, .ur-job-head .ur-next-run-cell { flex: 0 0 20em; font-size: 12px; color: var(--color-text-secondary, #666); }
 .ur-job-head .ur-last-run-cell::before, .ur-job-head .ur-next-run-cell::before { content: attr(data-label) ": "; }
 .ur-job-run-result:empty { display: none; }
-#ur-jobs-container:has(.ur-job-card) > .ur-jobs-empty { display: none; }
 @media (max-width: 700px) {
   .ur-job-row { flex-wrap: wrap; }
   .ur-job-head .ur-job-sub { margin-left: 0; flex-basis: 100%; white-space: normal; }
@@ -825,7 +824,7 @@ ur_emit_status_poller();
   <input type="hidden" name="configRevision" value="<?=Config::revision($config)?>">
 
   <div id="ur-jobs-container">
-    <div class="ur-empty-state ur-jobs-empty"><?=_('No jobs configured yet')?>.</div>
+    <div class="ur-empty-state ur-jobs-empty"<?=empty($jobs) ? '' : ' hidden'?>><?=_('No jobs configured yet')?>.</div>
     <?php foreach ($jobs as $i => $job) {
         ur_render_job_card($job, (int) $i);
     } ?>
@@ -892,6 +891,12 @@ ur_emit_status_poller();
     return max + 1;
   }
 
+  function syncEmptyState() {
+    var container = document.getElementById('ur-jobs-container');
+    var empty = container ? container.querySelector('.ur-jobs-empty') : null;
+    if (empty) { empty.hidden = !!container.querySelector('.ur-job-card'); }
+  }
+
   function addJob() {
     var tpl = document.getElementById('ur-job-template').innerHTML;
     var idx = nextJobIndex();
@@ -902,6 +907,7 @@ ur_emit_status_poller();
     wrap.innerHTML = html.trim();
     var card = wrap.firstElementChild;
     document.getElementById('ur-jobs-container').appendChild(card);
+    syncEmptyState();
     /* A cloned card defaults to SSH transport, so seed its Connection-required
      * state to match. */
     syncAllConnRequired();
@@ -1070,6 +1076,7 @@ ur_emit_status_poller();
     document.getElementById('ur-confirm-ok').addEventListener('click', function () {
       if (pendingDelCard && pendingDelCard.parentNode) {
         pendingDelCard.parentNode.removeChild(pendingDelCard);
+        syncEmptyState();
         var apply = form ? form.querySelector('input[type=submit]') : null;
         if (apply) { apply.disabled = false; }
       }
