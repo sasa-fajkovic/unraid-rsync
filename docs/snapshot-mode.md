@@ -255,7 +255,7 @@ flowchart TD
    basis, and `--link-dest=<root>/<newest unfinished>.inprogress/<sub>` when an
    unfinished copy was kept. The `Quiet` log level runs as `Summary`, because the
    statistics feed the anomaly check. After each pair the log shows
-   `Pair #1 (appdata): <n> regular files, <n> bytes.`
+   `Pair #1 (appdata): <files> regular files, <size> bytes.`
 9. **Completion gate**: see [When a snapshot counts](#when-a-snapshot-counts).
 10. **Commit**, when the gate passes: the receiver is checked again, the
     [anomaly check](#suspect-runs) runs, an Abort is honoured one last time, and
@@ -462,6 +462,9 @@ next run's baseline and a later prune could remove the good snapshots.
 - **`<root>/<stamp>/.ur-keep`** pins that snapshot: it is never pruned. The plugin
   sets it on the snapshot before a suspect one; you can set your own with
   `touch`. Unpin with `rm /mnt/backup/snapshots/appdata/2026-10-20T030000Z/.ur-keep`.
+  The [migration script](#migrating-an-existing-mirror) pins the snapshot it
+  creates; remove that pin once newer snapshots cover your retention window, or
+  right away if you do not want it.
 
 The plugin never removes either file.
 
@@ -498,9 +501,10 @@ checks a run would fill it, and prune would judge the real snapshots by the
 wrong listing.
 
 Two snapshot roots may not be the same or lie inside each other, and no other
-job may write into a snapshot root (checked per connection, when you save and at
-run time). Two connections to the same host are not compared; the sentinel
-catches that case at run time.
+job may write into a snapshot root (checked per destination host and port, when
+you save and at run time, so two connections to the same host count as one).
+One machine reached under two names (a host name and an IP address) is not
+recognised; the sentinel catches that case at run time.
 
 ### What the plugin never deletes
 
@@ -574,7 +578,7 @@ output lands in the run log, which the browser shows.
 
 ## Status and History
 
-- **Jobs** tab, **Last run** column: a second line
+- **Jobs** tab, the job's **Last run** cell: a second line
   `last snapshot <date time> (committed)` or `(not committed)`, in the server's
   timezone. Hover it for the UTC stamp.
 - **Overview** tab and the **Dashboard** tile: the same line.
@@ -618,63 +622,74 @@ need to combine several.
 1. **Disable the job and Apply**, and do not press Run (a disabled job can still
    be run by hand). Check that no rsync is running on the receiver
    (`pgrep -a rsync`).
-2. **Take the stamp from the job's last successful real run** (UTC, as History
+2. **Take the stamp from the job's last good real run** (UTC, as History
    stores it). Do not type one by hand. On the Unraid server:
 
    ```sh
-   grep '"state":"SUCCESS"' /boot/config/plugins/unraid.rsync/runs/j-appdata.history.jsonl \
+   grep -E '"state":"(SUCCESS|WARNING)"' /boot/config/plugins/unraid.rsync/runs/j-appdata.history.jsonl \
      | grep '"dryRun":false' | tail -n 1 \
      | sed -E 's/.*"startedAt":"([0-9-]+)T([0-9]{2}):([0-9]{2}):([0-9]{2})Z".*/\1T\2\3\4Z/'
    ```
 
-3. **Run this on the receiver** with your values. It creates the root and
-   sentinel, moves each mirror into one snapshot named after that stamp, leaves
-   an empty, immutable directory at each old mirror path (so a stale mirror job
-   cannot quietly fill it again), and pins that snapshot:
+   A WARNING run (for example a mirror run that hit `--max-delete`) is fine as
+   the basis: the first snapshot run builds a fresh tree from the source and
+   only links files that are unchanged, so whatever the mirror got wrong is not
+   carried into it.
+3. **Pick a sub-directory name for each pair.** It names the pair's directory in
+   every snapshot and must be plain ASCII: 1–64 letters, digits, `_` or `-`,
+   starting with a letter or digit (`latest` is reserved). A pair such as
+   `Družba Pere Kvržice (1970)` needs a name like `druzba-pere-kvrzice-1970`.
+4. **Run this on the receiver**, as root. Save it (for example as
+   `/root/ur-migrate.sh`) and pass the job id, the stamp, the target marker, the
+   new snapshot root, then one mirror path and sub name per pair, as many pairs
+   as the job has:
+
+   ```sh
+   sh /root/ur-migrate.sh j-appdata 2026-10-20T030000Z /mnt/backup/.unraid-rsync-target \
+     /mnt/backup/snapshots/appdata \
+     /mnt/backup/mirror/appdata appdata \
+     /mnt/backup/mirror/docs docs
+   ```
+
+   Before it moves anything it checks the stamp's shape, that the marker
+   exists, that the root does not exist yet, that every mirror is a real
+   directory on the root's filesystem (so every move is a rename, never a copy),
+   that `chattr` works there, and that no rsync is running. The filesystem and
+   `chattr` checks need the root, so it creates the root and sentinel first; if
+   one of them fails, remove that new root (`rm -r -- <root>`) before running
+   the script again. Then it moves each mirror into `<stamp>.inprogress/<sub>`,
+   leaves an empty, immutable directory at each old mirror path (so a stale
+   mirror job cannot quietly fill it again), flushes, renames the copy to
+   `<stamp>`, points `latest` at it and pins it (`.ur-keep`):
 
    ```sh
    #!/bin/sh
-   # Adapt the paths; read before running.
    set -eu
-   JOB=j-appdata
-   STAMP=2026-10-20T030000Z
-   MARKER=/mnt/backup/.unraid-rsync-target
-   ROOT=/mnt/backup/snapshots/appdata
-   MIRROR1=/mnt/backup/mirror/appdata
-   SUB1=appdata
-   MIRROR2=/mnt/backup/mirror/docs
-   SUB2=docs
-
    die() { echo "migration: $*" >&2; exit 1; }
+   [ "$#" -ge 6 ] && [ $(( ($# - 4) % 2 )) -eq 0 ] || die "usage: JOB STAMP MARKER ROOT MIRROR SUB [MIRROR SUB ...]"
+   JOB=$1; STAMP=$2; MARKER=$3; ROOT=$4; shift 4
    case "$STAMP" in
      [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) ;;
      *) die "not a stamp: $STAMP" ;;
    esac
    [ -f "$MARKER" ] || die "no target marker at $MARKER"
    [ ! -e "$ROOT" ] || die "$ROOT already exists"
-   [ -d "$MIRROR1" ] && [ ! -L "$MIRROR1" ] || die "$MIRROR1 is not a directory"
-   [ -d "$MIRROR2" ] && [ ! -L "$MIRROR2" ] || die "$MIRROR2 is not a directory"
-
+   i=0; for a in "$@"; do i=$((i+1)); if [ $((i % 2)) -eq 1 ]; then [ -d "$a" ] && [ ! -L "$a" ] || die "$a is not a directory"; fi; done
+   pgrep -x rsync >/dev/null && die "rsync is running"
    mkdir -p -- "${ROOT%/*}"
    mkdir -m 0700 -- "$ROOT"
    printf '%s\n' "$JOB" > "$ROOT/.ur-snapshot-root"
    DEV=$(stat -c %d -- "$ROOT")
    [ "$(stat -c %d -- "$MARKER")" = "$DEV" ] || die "$MARKER is not on the filesystem of $ROOT"
-   [ "$(stat -c %d -- "$MIRROR1")" = "$DEV" ] || die "$MIRROR1 is not on the filesystem of $ROOT"
-   [ "$(stat -c %d -- "$MIRROR2")" = "$DEV" ] || die "$MIRROR2 is not on the filesystem of $ROOT"
-   # chattr must work here before anything is moved.
-   mkdir -- "$ROOT/.chattr-test"
-   chattr +i -- "$ROOT/.chattr-test"
-   chattr -i -- "$ROOT/.chattr-test"
-   rmdir -- "$ROOT/.chattr-test"
-
+   i=0; for a in "$@"; do i=$((i+1)); if [ $((i % 2)) -eq 1 ]; then [ "$(stat -c %d -- "$a")" = "$DEV" ] || die "$a is not on the filesystem of $ROOT"; fi; done
+   mkdir -- "$ROOT/.chattr-test"; chattr +i -- "$ROOT/.chattr-test"; chattr -i -- "$ROOT/.chattr-test"; rmdir -- "$ROOT/.chattr-test"
    mkdir -m 0700 -- "$ROOT/$STAMP.inprogress"
-   mv -T -- "$MIRROR1" "$ROOT/$STAMP.inprogress/$SUB1"
-   mkdir -- "$MIRROR1"
-   chattr +i -- "$MIRROR1"
-   mv -T -- "$MIRROR2" "$ROOT/$STAMP.inprogress/$SUB2"
-   mkdir -- "$MIRROR2"
-   chattr +i -- "$MIRROR2"
+   while [ "$#" -gt 0 ]; do
+     MIRROR=$1; SUB=$2; shift 2
+     mv -T -- "$MIRROR" "$ROOT/$STAMP.inprogress/$SUB"
+     mkdir -- "$MIRROR"
+     chattr +i -- "$MIRROR"
+   done
    sync -f "$ROOT"
    mv -T -- "$ROOT/$STAMP.inprogress" "$ROOT/$STAMP"
    ln -s -- "$STAMP" "$ROOT/.latest.tmp"
@@ -684,17 +699,23 @@ need to combine several.
    echo "migrated: $ROOT/$STAMP"
    ```
 
-   One `MIRROR`/`SUB` pair per job pair; add or remove lines to match.
-4. **Switch the job to snapshot mode**: root, marker and content, retention,
+5. **Switch the job to snapshot mode**: root, marker and content, retention,
    **Prune dry run** on, each pair's sub name, and **no seed** (the snapshot you
    just made is the basis). Apply.
-5. **Dry-run.** Each pair should link against the migrated snapshot (no "new pair"
+6. **Dry-run.** Each pair should link against the migrated snapshot (no "new pair"
    and no `--link-dest arg does not exist` line), and only the changes since the
    last mirror run should be listed. Then Run, and check on the receiver that
    unchanged files are hard links (`stat -c %h` shows a link count above 1),
    `latest` points at the new stamp, and `df` grew by about the size of the
    changes. The first snapshot has no metadata, so the first run logs that the
    anomaly check has no baseline.
+7. **Unpin the migrated snapshot when you no longer need it.** The script pins
+   it (`.ur-keep`), so retention never deletes it and it keeps every file the
+   mirror held. Once newer snapshots cover your retention window (with daily 7,
+   after seven daily snapshots), or right away if you do not want the pin,
+   remove it on the receiver:
+   `rm /mnt/backup/snapshots/appdata/2026-10-20T030000Z/.ur-keep`. From the next
+   real run on, prune treats it like any other snapshot.
 
 **Rollback (per job).** Disable the job and Apply. Then on the receiver, as root
 (adapt the paths; read before running):
@@ -737,6 +758,83 @@ when **no** job has snapshot mode on does `config.json` go back to the format an
 older plugin release can read (schema 2); install an older release only after
 that. With a snapshot job enabled, an older release refuses the configuration and
 runs nothing.
+
+### Going back to snapshot mode after a rollback
+
+The rollback leaves the root, its sentinel and every other snapshot in place, so
+no new migration is needed.
+
+1. **Turn snapshot mode back on** in the job: root, marker and content,
+   retention, **Prune dry run**, and each pair's sub name (turning snapshot mode
+   off dropped them). No **seed**: the next run links against the newest
+   complete snapshot in the root, and the `<stamp>.rolledback` directory is
+   ignored. If the rollback took the only snapshot there is nothing to link
+   against, the run says `no complete snapshot yet`, and every pair needs
+   **seed** for that one run. Apply.
+2. **Dry-run, then Run.**
+3. **Before you remove the restored mirror**, check that every file in it is in
+   `latest` with the same size and modification time. Files that reached the
+   mirror after the original migration can exist only there (in a live test,
+   two subtitle files did). Save this on the receiver (for example as
+   `/root/ur-check.sh`) and run it as root with the root, then one mirror path
+   and sub name per pair. It needs GNU `find`, changes nothing, lists every
+   mirror entry that `latest` lacks or holds with another type, size or mtime,
+   and exits non-zero on any mismatch:
+
+   ```sh
+   #!/bin/sh
+   set -eu
+   export LC_ALL=C
+   die() { echo "check: $*" >&2; exit 1; }
+   [ "$#" -ge 3 ] && [ $(( ($# - 1) % 2 )) -eq 0 ] || die "usage: ROOT MIRROR SUB [MIRROR SUB ...]"
+   ROOT=$1; shift
+   LATEST=$(readlink -- "$ROOT/latest") || die "no latest in $ROOT"
+   case "$LATEST" in
+     [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) ;;
+     *) die "latest does not name a snapshot: $LATEST" ;;
+   esac
+   T=$(mktemp -d)
+   trap 'rm -rf -- "$T"' EXIT
+   list() { (cd -- "$1" && find . ! -type d -printf '%y %s %T@ %p\n') | sed -E 's/^(. [0-9]+ [0-9]+)\.[0-9]+ /\1 /' | sort; }
+   bad=0
+   while [ "$#" -gt 0 ]; do
+     MIRROR=$1; SUB=$2; shift 2
+     [ -d "$MIRROR" ] && [ ! -L "$MIRROR" ] || die "$MIRROR is not a directory"
+     [ -d "$ROOT/$LATEST/$SUB" ] || die "no $SUB in $ROOT/$LATEST"
+     list "$MIRROR" > "$T/mirror"
+     list "$ROOT/$LATEST/$SUB" > "$T/latest"
+     comm -23 "$T/mirror" "$T/latest" > "$T/diff"
+     if [ -s "$T/diff" ]; then
+       echo "$MIRROR: missing from $ROOT/$LATEST/$SUB, or a different type, size or mtime (type size mtime path):"
+       cat -- "$T/diff"
+       bad=1
+     fi
+   done
+   [ "$bad" -eq 0 ] || die "mismatch: keep the mirror until every entry above is accounted for"
+   echo "ok: every file in the mirror(s) is in $ROOT/$LATEST with the same size and mtime"
+   ```
+
+   ```sh
+   sh /root/ur-check.sh /mnt/backup/snapshots/appdata \
+     /mnt/backup/mirror/appdata appdata \
+     /mnt/backup/mirror/docs docs
+   ```
+
+   A file the source changed or deleted since the mirror's last run is listed
+   too. Rescue whatever you want to keep (for example copy it back to the
+   source and run the job again) until the check prints `ok`.
+4. **Remove the mirror, recreate its tombstone and delete the leftover**, per
+   pair, on the receiver as root:
+
+   ```sh
+   rm -rf --one-file-system -- /mnt/backup/mirror/appdata
+   mkdir -- /mnt/backup/mirror/appdata
+   chattr +i -- /mnt/backup/mirror/appdata
+   ```
+
+   and once for the job, with the stamp the rollback printed:
+   `rm -rf --one-file-system -- /mnt/backup/snapshots/appdata/<stamp>.rolledback`
+   (the plugin never deletes it).
 
 ## Backing up the flash drive (/boot)
 
@@ -790,13 +888,14 @@ affected by it.
   is on, so the root, the retention and each pair's sub name and seed flag are
   gone after you apply. The pairs need absolute remote paths again.
 - **Protection for a mirror over the old root.** While a job has snapshot mode
-  on, no other job on the same connection may write into its root, and a
+  on, no other job on the same host and port may write into its root, and a
   `--delete` mirror may not be, contain or lie inside it (checked when you save
   and at run time). Once snapshot mode is off that rule no longer covers the
-  root. One run-time check remains on any connection: an SSH push `--delete`
-  mirror whose destination directory directly contains `.ur-snapshot-root`,
-  `snapshots` or `.unraid-rsync-target` is refused with `dest-is-protected`.
-  Do not point a mirror job at the old root or its parent.
+  root. One run-time check remains on any connection: a `--delete` mirror
+  whose destination directory directly contains `.ur-snapshot-root`,
+  `snapshots` or `.unraid-rsync-target` is refused with `dest-is-protected`
+  (SSH and rsync daemon destinations are listed before the pre-run hook, local
+  ones after it). Do not point a mirror job at the old root or its parent.
 - **Schema 3 and downgrading the plugin.** `config.json` carries schema version
   3 while at least one job has snapshot mode on, and 2 otherwise. An older plugin
   release cannot read schema 3: it refuses the configuration and runs nothing,
@@ -879,6 +978,42 @@ means files that cannot be read on the source; exit 30 or 35 a timeout.
 **`Snapshot mode cannot be used with this option: …`.**
 A refused option is set, possibly in Global Settings when the job uses the
 global config. See [Options](#options).
+
+**The job shows Running for minutes after its runner was killed (`kill -9`,
+out of memory).**
+The rsync the runner started keeps going on its own: it still holds the job's
+run lock (a new run is refused with `already-running`) and keeps copying into
+`<stamp>.inprogress`. Press **Abort**: the plugin signals the run's whole
+process group, which stops that rsync. Once it has exited, the run is recorded
+as crashed (state CRASHED, reason `crashed`, an alert). The post-run hook did
+not run, so start by hand whatever the pre-run hook stopped. The next run
+reuses the newest unfinished copy as a link basis, so what was already copied
+is not sent again.
+
+**Exit 24 (`files vanished during transfer`), state WARNING.**
+The snapshot is still committed and the notification is *normal*. An
+application kept writing while rsync read its files, typically a database
+(SQLite `-wal` / `-shm` files), and such a copy may not be consistent. Stop the
+container in the pre-run hook (`docker stop <name>`) and start it in the
+post-run hook (`docker start <name>`).
+
+**Runs take longer, and services stay down longer, than with the mirror.**
+Every unchanged file becomes a hard link in the new snapshot, one `link()` per
+file on the receiver, so the run time grows with the number of files, not with
+the amount of change. The post-run hook runs after the commit, so a service the
+pre-run hook stops stays down for the whole run. Measured on a Raspberry Pi 3B
+receiver with a USB drive: a Nextcloud job with about 180,000 files went from
+about 2.5 to about 4.8 minutes.
+
+**Every snapshot uses space even when nothing changed.** Directories cannot be
+hard-linked, so each snapshot has its own copy of every directory: about
+0.66 GB per snapshot for a tree with about 165,000 directories. Count that in
+when you choose the retention.
+
+**`Pair #1 (appdata): … regular files, … bytes.` shows a rounded figure.**
+The figures are rsync's own statistics. With **Human-readable** (`-h`) on,
+rsync rounds them (for example `408.63G`) and the line shows them as rsync
+printed them. Turn Human-readable off for exact counts.
 
 **How much space do the snapshots really use?** `ls -l` and the file manager
 count every hard link in full. GNU `du` counts each file once per invocation, so
