@@ -29,16 +29,23 @@ Cond="version_compare(parse_ini_file('/etc/unraid-version')['version'],'7.0.0','
  *     (the canonical `tile-header` block), exactly like every built-in tile.
  *
  * The tile is read-only: it lists each job with a colored last-execution badge,
- * polling our existing read-only getStatus GET endpoint (no CSRF needed). It is a
+ * polling our existing read-only getStatus GET endpoint (no CSRF needed), and
+ * not at all while the browser tab is hidden. It is a
  * normal sortable dashboard tile (the `title` attribute on the <tbody> is both
  * its Content-Manager description and its sortable key), so users show/hide it
  * and drag it to whatever position they like through the dashboard's own
  * controls; the chosen position is remembered per user.
  */
 
+require_once '/usr/local/emhttp/plugins/unraid.rsync/include/PageHelpers.php';
+
 $slug = 'unraid.rsync';
 
-$mytiles[$slug]['column1'] = <<<'HTML'
+/* The badge vocabulary is PageHelpers::STATES, the map the plugin's own tabs
+ * render from, injected where the tile's script reads it. */
+$urStates = json_encode(PageHelpers::STATES, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
+
+$mytiles[$slug]['column1'] = str_replace('__UR_STATES__', $urStates === false ? '{}' : $urStates, <<<'HTML'
 <tbody class="sortable" title="Rsync Backups">
   <tr><td>
     <span class="tile-header" id="ur-dash-header">
@@ -81,17 +88,9 @@ $mytiles[$slug]['column1'] = <<<'HTML'
 (function () {
   'use strict';
   var URL = '/plugins/unraid.rsync/include/handler.php?action=getStatus';
-  function cls(state, running) {
-    if (running) { return 'ur-d-running'; }
-    switch ((state || '').toUpperCase()) {
-      case 'SUCCESS': return 'ur-d-success';
-      /* TIMEOUT is a WARNING, not a failure - same vocabulary as the tabs
-         (window.urBadge) and the server's own Runner::notifyImportance. */
-      case 'WARNING': case 'PARTIAL': case 'TIMEOUT': return 'ur-d-warning';
-      case 'FAILED': return 'ur-d-failed';
-      case 'ABORTED': return 'ur-d-aborted';
-      default: return 'ur-d-pending';
-    }
+  var STATES = __UR_STATES__;
+  function stateOf(j) {
+    return STATES[j.running ? 'RUNNING' : String(j.state || '').toUpperCase()] || STATES.PENDING;
   }
   function esc(t) { var d = document.createElement('div'); d.textContent = (t == null ? '' : t); return d.innerHTML; }
   function render(jobs) {
@@ -108,17 +107,21 @@ $mytiles[$slug]['column1'] = <<<'HTML'
     var html = ids.map(function (id) {
       var j = jobs[id];
       if (j.running) { anyRunning = true; }
-      var label = j.running ? 'Running' : ((j.state || 'pending').charAt(0) + (j.state || 'pending').slice(1).toLowerCase());
+      var st = stateOf(j);
       /* Snapshot jobs only: a second line under the name. */
       var snap = j.snapshot ? '<span class="ur-d-snap" title="' + esc(j.snapshot.stamp) + '">' + esc(j.snapshot.label) + '</span>' : '';
       return '<div class="ur-d-row' + (snap ? ' ur-d-has-snap' : '') + '"><span class="ur-d-name">' + esc(j.name) +
-             '</span><span class="ur-d-badge ' + cls(j.state, j.running) + '">' + esc(label) + '</span>' + snap + '</div>';
+             '</span><span class="ur-d-badge ur-d-' + esc(st.cls) + '">' + esc(st.label) + '</span>' + snap + '</div>';
     }).join('');
     body.innerHTML = html;
     return anyRunning;
   }
   var timer = null;
   function poll() {
+    if (timer) { clearTimeout(timer); timer = null; }
+    /* Nothing is fetched while the browser tab is hidden; visibilitychange
+     * below polls at once when it is shown again. */
+    if (document.hidden) { return; }
     fetch(URL, { credentials: 'same-origin', cache: 'no-store' })
       .then(function (r) { return r.json(); })
       .then(function (d) { return render((d && d.jobs) || {}); })
@@ -128,9 +131,10 @@ $mytiles[$slug]['column1'] = <<<'HTML'
         timer = setTimeout(poll, anyRunning ? 3000 : 20000);
       });
   }
+  document.addEventListener('visibilitychange', function () { if (!document.hidden) { poll(); } });
   if (document.readyState !== 'loading') { poll(); }
   else { document.addEventListener('DOMContentLoaded', poll); }
 })();
 </script>
-HTML;
+HTML);
 ?>

@@ -5,12 +5,14 @@
  * Renders:
  *   - an overall running/idle indicator + a live list of currently-running jobs,
  *     each with an Abort control (CSRF-checked POST);
- *   - a viewer for the rolling cross-job plugin.log, auto-tailed every 1s.
+ *   - a viewer for the rolling cross-job plugin.log, tailed incrementally
+ *     (getPluginLog&since=) only while it is on screen.
  *
  * The plugin-log text is fetched from the read-only getPluginLog GET poller and
- * is ALREADY HTML-escaped server-side (Logger::tail). We inject it into a <pre>
- * as escaped HTML and never build raw innerHTML from unescaped log bytes (the
- * log-XSS guard). The running-jobs list and badges come from getStatus.
+ * is ALREADY HTML-escaped server-side (Logger::readFrom). We inject it into a
+ * <pre> as escaped HTML and never build raw innerHTML from unescaped log bytes
+ * (the log-XSS guard). The running-jobs list comes from the shared getStatus
+ * poller (window.urStatus).
  *
  * Native look comes from the inherited dynamix CSS/JS; we reuse the badge styles
  * defined on the Jobs tab and add only a couple of local rules for this tab.
@@ -22,7 +24,7 @@ require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Rsync.php';
 require_once '/usr/local/emhttp/plugins/unraid.rsync/pages/_options_form.php'; // ur_render_csrf_token + ur_js
 
 $csrf = ur_render_csrf_token();
-$handlerUrl = '/plugins/unraid.rsync/include/handler.php';
+$handlerUrl = PageHelpers::HANDLER_URL;
 
 // Initial running/idle snapshot, rendered server-side so the tab is meaningful
 // before the first poll completes. A config read error is non-fatal here - the
@@ -63,11 +65,11 @@ $rsyncMissingMsg  = $rsyncAvailable ? '' : Rsync::rsyncMissingMessage();
  * emitted BEFORE the markup and script that follow. */
 ur_emit_badge_assets();
 ur_emit_ajax_helpers();
+ur_emit_status_poller();
 ?>
 <style>
 .ur-rsync-status { margin: 8px 0; }
 .ur-rsync-status #ur-rsync-detail { margin-top: 6px; }
-.ur-rsync-status .ur-err { color: var(--red-800, #b71c1c); }
 .ur-status-running-list { list-style: none; padding: 0; margin: 8px 0; }
 .ur-status-running-list li { margin: 4px 0; }
 .ur-status-running-list .ur-job-name { display: inline-block; min-width: 220px; }
@@ -79,15 +81,8 @@ ur_emit_ajax_helpers();
 /* Placeholder shown when the plugin log is empty (no run yet). Muted, non-mono so
    it reads as a hint rather than log content. */
 .ur-plugin-log-pre.ur-log-empty { color: #888; font-style: italic; }
-/* Empty-state hint shown when there are zero jobs. A plain visible callout — NOT
-   blockquote.inline_help, which the dynamix base CSS hides by default
-   (.inline_help { display:none }), so it would be invisible without help mode. */
-.ur-empty-state {
-  margin: 10px 0; padding: 10px 12px; border-radius: 4px;
-  background: var(--blue-100, #d9edf7);
-  border: 1px solid var(--blue-200, #bce8f1);
-  color: var(--blockquote-text-color, #31708f);
-}
+.ur-plugin-log-wrap { position: relative; }
+.ur-log-jump { position: absolute; right: 18px; bottom: 10px; }
 </style>
 
 <div class="title">
@@ -114,8 +109,8 @@ ur_emit_ajax_helpers();
   </span>
   &nbsp;<span id="ur-overall-text"><?php
     echo empty($initialRunning)
-      ? htmlspecialchars(_('No jobs are running.'), ENT_QUOTES, 'UTF-8')
-      : htmlspecialchars(sprintf(_('%d job(s) running.'), count($initialRunning)), ENT_QUOTES, 'UTF-8');
+      ? ur_h(ur_t_text('No jobs are running.'))
+      : ur_h(sprintf(ur_t_text('%d job(s) running.'), count($initialRunning)));
   ?></span>
 </div>
 
@@ -141,7 +136,7 @@ ur_emit_ajax_helpers();
   &nbsp;<code id="ur-rsync-path"><?=htmlspecialchars($rsyncPath, ENT_QUOTES, 'UTF-8')?></code>
   <div id="ur-rsync-detail">
     <?php if ($rsyncAvailable): ?>
-      <code id="ur-rsync-version"><?=htmlspecialchars($rsyncVersionLine !== '' ? $rsyncVersionLine : _('(version unavailable)'), ENT_QUOTES, 'UTF-8')?></code>
+      <code id="ur-rsync-version"><?=ur_h($rsyncVersionLine !== '' ? $rsyncVersionLine : ur_t_text('(version unavailable)'))?></code>
     <?php else: ?>
       <span id="ur-rsync-version" class="ur-err"><?=htmlspecialchars($rsyncMissingMsg, ENT_QUOTES, 'UTF-8')?></span>
     <?php endif; ?>
@@ -155,7 +150,10 @@ ur_emit_ajax_helpers();
 <div class="title">
   <span class="left"><i class="fa fa-file-text-o title"></i>&nbsp;<?=_('Plugin log')?></span>
 </div>
-<pre id="ur-plugin-log-pre" class="ur-plugin-log-pre"><?=_('Loading…')?></pre>
+<div class="ur-plugin-log-wrap">
+  <pre id="ur-plugin-log-pre" class="ur-plugin-log-pre"><?=_('Loading…')?></pre>
+  <button type="button" id="ur-log-jump" class="ur-log-jump" style="display:none"><?=_('Jump to latest')?></button>
+</div>
 
 <script type="text/javascript">
 (function () {
@@ -163,101 +161,160 @@ ur_emit_ajax_helpers();
 
   var HANDLER_URL = <?=ur_js($handlerUrl)?>;
   var CSRF_TOKEN  = <?=ur_js($csrf)?>;
-  var STATUS_URL  = HANDLER_URL + '?action=getStatus';
-  var PLUGIN_LOG_URL = HANDLER_URL + '?action=getPluginLog';
 
-  function cssEsc(v) { return String(v).replace(/["\\]/g, '\\$&'); }
-
-  /* ---- running-jobs list + overall indicator (getStatus poll) ---- */
+  /* ---- running-jobs list + overall indicator (shared getStatus poller) ---- */
+  var shownRunning = null;
   function applyStatus(payload) {
-    var jobs = (payload && payload.jobs) ? payload.jobs : {};
+    var jobs = payload.jobs || {};
     var list = document.getElementById('ur-running-jobs');
     var badge = document.getElementById('ur-overall-badge');
     var text  = document.getElementById('ur-overall-text');
     if (!list) { return; }
 
-    var running = [];
-    Object.keys(jobs).forEach(function (jobId) {
-      if (jobs[jobId] && jobs[jobId].running) { running.push(jobId); }
-    });
-
-    /* Rebuild the running list from scratch each poll (it is small). getStatus
-     * carries the job name; fall back to a previously-rendered name, then the
-     * id, so a newly-started job still shows a human-friendly label. */
-    var existingNames = {};
-    Array.prototype.forEach.call(list.querySelectorAll('li[data-jobid]'), function (li) {
-      var nm = li.querySelector('.ur-job-name');
-      existingNames[li.getAttribute('data-jobid')] = nm ? nm.textContent : li.getAttribute('data-jobid');
-    });
-
-    list.innerHTML = '';
-    running.forEach(function (jobId) {
-      var li = document.createElement('li');
-      li.setAttribute('data-jobid', jobId);
-      var name = document.createElement('span');
-      name.className = 'ur-job-name';
-      var label = (jobs[jobId] && jobs[jobId].name) || existingNames[jobId] || jobId;
-      name.textContent = label;                           // textContent: no XSS
-      var b = document.createElement('span');
-      b.className = 'ur-badge';
-      window.urBadge.apply(b, 'RUNNING');
-      var btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'ur-status-abort';
-      btn.setAttribute('data-jobid', jobId);
-      btn.textContent = 'Abort';
-      li.appendChild(name);
-      li.appendChild(document.createTextNode(' '));
-      li.appendChild(b);
-      li.appendChild(document.createTextNode(' '));
-      li.appendChild(btn);
-      list.appendChild(li);
-    });
+    var running = Object.keys(jobs).filter(function (id) { return jobs[id] && jobs[id].running; });
+    /* Rebuild only when the set changes, so an Abort button already clicked
+     * (disabled) or focused is not replaced under the pointer every poll. */
+    var sig = JSON.stringify(running.map(function (id) { return [id, jobs[id].name || '']; }));
+    if (sig !== shownRunning) {
+      shownRunning = sig;
+      list.textContent = '';
+      running.forEach(function (jobId) {
+        var li = document.createElement('li');
+        li.setAttribute('data-jobid', jobId);
+        var name = document.createElement('span');
+        name.className = 'ur-job-name';
+        name.textContent = jobs[jobId].name || jobId;
+        var b = document.createElement('span');
+        b.className = 'ur-badge';
+        window.urBadge.apply(b, 'RUNNING');
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'ur-status-abort';
+        btn.setAttribute('data-jobid', jobId);
+        btn.textContent = 'Abort';
+        li.appendChild(name);
+        li.appendChild(document.createTextNode(' '));
+        li.appendChild(b);
+        li.appendChild(document.createTextNode(' '));
+        li.appendChild(btn);
+        list.appendChild(li);
+      });
+    }
 
     if (badge && text) {
       if (running.length) {
-        badge.className = 'ur-badge ur-badge-running';
-        badge.textContent = 'Running';
+        badge.classList.remove('ur-badge-idle');
+        window.urBadge.apply(badge, 'RUNNING');
         text.textContent = running.length + ' job(s) running.';
       } else {
-        badge.className = 'ur-badge ur-badge-idle';
+        /* Idle is not a run state, so it is not in the badge vocabulary. */
+        window.urBadge.CLASSES.forEach(function (c) { badge.classList.remove(c); });
+        badge.classList.add('ur-badge-idle');
         badge.textContent = 'Idle';
         text.textContent = 'No jobs are running.';
       }
     }
   }
+  window.urStatus.subscribe(applyStatus);
 
-  function pollStatus() {
-    fetch(STATUS_URL, { credentials: 'same-origin' })
-      .then(function (r) { return r.json(); })
-      .then(applyStatus)
-      .catch(function () { /* transient */ });
+  /* ---- plugin log: incremental tail, only while on screen ----
+   * Every tab body shares one document, so this would otherwise poll whichever
+   * tab is open. It fetches only while the <pre> is actually visible - every 3 s
+   * while a job runs, every 10 s otherwise, at once when it comes into view -
+   * and only the bytes after `offset`, which it appends. */
+  var pre  = document.getElementById('ur-plugin-log-pre');
+  var jump = document.getElementById('ur-log-jump');
+  var EMPTY_TEXT = 'No log entries yet. The plugin log fills as jobs run; it lives in memory and is cleared on reboot.';
+  var MAX_CHARS = 262144;
+  var offset = 0, wantReset = true, inflight = false, lastFetch = 0, wasVisible = false;
+  /* Escaped HTML waiting to be written (null = nothing), and whether it
+   * replaces the box or extends it. */
+  var pending = null, replaceNext = false;
+  /* Follow the newest lines until the user scrolls up; scrolling back to the
+   * bottom (or Jump to latest) resumes following. */
+  var follow = true;
+
+  function onScreen() { return !document.hidden && pre.offsetParent !== null; }
+  function atBottom() { return pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 20; }
+  function toBottom() { pre.scrollTop = pre.scrollHeight; }
+  function syncJump() { jump.style.display = follow ? 'none' : ''; }
+
+  /* A drag-selection inside the log must survive the next poll. */
+  function selecting() {
+    var sel = window.getSelection ? window.getSelection() : null;
+    if (!sel || sel.isCollapsed || !sel.rangeCount) { return false; }
+    return pre.contains(sel.anchorNode) || pre.contains(sel.focusNode);
   }
 
-  /* ---- plugin log tail ---- */
-  var pre = document.getElementById('ur-plugin-log-pre');
-  function pollPluginLog() {
-    fetch(PLUGIN_LOG_URL, { credentials: 'same-origin' })
+  /* `pending` is ALREADY HTML-escaped server-side (Logger::readFrom). */
+  function render() {
+    if (pending === null || selecting()) { return; }
+    if (replaceNext) {
+      pre.classList.toggle('ur-log-empty', pending === '');
+      if (pending === '') { pre.textContent = EMPTY_TEXT; } else { pre.innerHTML = pending; }
+    } else {
+      pre.insertAdjacentHTML('beforeend', pending);
+    }
+    pending = null;
+    replaceNext = false;
+    if (follow) { toBottom(); }
+  }
+
+  function fetchLog() {
+    if (inflight) { return; }
+    inflight = true;
+    lastFetch = Date.now();
+    if (pre.textContent.length > MAX_CHARS) { wantReset = true; }
+    var since = wantReset ? 0 : offset;
+    fetch(HANDLER_URL + '?action=getPluginLog&since=' + since, { credentials: 'same-origin', cache: 'no-store' })
       .then(function (r) { return r.json(); })
       .then(function (body) {
-        if (!pre || !body || !body.ok) { return; }
-        /* Empty plugin log => nothing has been written yet (no job has run since
-         * boot; the log lives in tmpfs and is cleared on reboot). Show an explicit
-         * placeholder instead of a blank box that reads as broken. */
-        if (!body.log) {
-          pre.classList.add('ur-log-empty');
-          pre.textContent = 'No log entries yet. The plugin log fills as jobs run; it lives in memory and is cleared on reboot.';
-          return;
+        if (!body || !body.ok || typeof body.offset !== 'number') { return; }
+        var text = body.text || '';
+        /* A truncated chunk opens with a marker line standing in for the gap,
+         * so it is appended like any other unless a reset was asked for. */
+        if (wantReset || body.reset
+            || (text !== '' && pending === null && pre.classList.contains('ur-log-empty'))) {
+          pending = text;
+          replaceNext = true;
+        } else if (text !== '') {
+          pending = (pending === null ? '' : pending) + text;
         }
-        pre.classList.remove('ur-log-empty');
-        /* body.log is ALREADY HTML-escaped server-side; inject as escaped HTML
-         * so the <pre> shows it verbatim. Preserve the scroll-to-bottom UX. */
-        var atBottom = (pre.scrollTop + pre.clientHeight) >= (pre.scrollHeight - 20);
-        pre.innerHTML = body.log || '';
-        if (atBottom) { pre.scrollTop = pre.scrollHeight; }
+        wantReset = false;
+        offset = body.offset;
+        render();
       })
-      .catch(function () { /* transient */ });
+      .catch(function () { /* transient; the next tick retries */ })
+      .then(function () { inflight = false; });
   }
+
+  pre.addEventListener('scroll', function () {
+    if (!pre.clientHeight) { return; }
+    follow = atBottom();
+    syncJump();
+  });
+  jump.addEventListener('click', function () {
+    follow = true;
+    toBottom();
+    syncJump();
+  });
+
+  /* A 1 s local tick, requesting nothing unless a fetch is due: it notices the
+   * tab coming into view (no event reports that) and writes output held back
+   * while text was selected. */
+  function tick() {
+    var vis = onScreen();
+    if (vis && !wasVisible) {
+      if (follow) { toBottom(); }
+      fetchLog();
+    } else if (vis) {
+      render();
+      if (Date.now() - lastFetch >= (window.urStatus.anyRunning() ? 3000 : 10000)) { fetchLog(); }
+    }
+    wasVisible = vis;
+  }
+  tick();
+  setInterval(tick, 1000);
 
   /* ---- abort control ---- */
   document.addEventListener('click', function (ev) {
@@ -282,10 +339,9 @@ ur_emit_ajax_helpers();
           }
         }
         /* On an application-level failure the abort didn't take, so re-enable the
-         * button. On success the next poll rebuilds the list and the button goes
-         * away with its row. */
+         * button. On success the next poll drops the row and its button. */
         if (!ok) { t.disabled = false; }
-        pollStatus();
+        window.urStatus.refresh();
       });
   });
 
@@ -318,12 +374,6 @@ ur_emit_ajax_helpers();
       })
       .catch(function () { /* keep the server-rendered snapshot */ });
   }
-
-  /* Poll status + plugin log every 1s; check rsync presence once. */
-  pollStatus();
-  pollPluginLog();
   refreshRsyncStatus();
-  setInterval(pollStatus, 1000);
-  setInterval(pollPluginLog, 1000);
 })();
 </script>

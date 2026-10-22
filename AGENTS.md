@@ -48,7 +48,12 @@ on, forked from, or derived from any other plugin.
   cards) and **Credentials** (the managed SSH-key keychain) are SEPARATE
   tabs/bodies (`connections.php` / `credentials.php`); a connection references a
   managed key by id via its KEY auth method. **Overview** (`overview.php`) is a
-  read-only status board that polls `getStatus`.
+  read-only status board. All seven tabs render into ONE document, so every
+  tab's script runs whichever tab is shown: Overview, Jobs and Status subscribe
+  to the ONE `getStatus` poller (`window.urStatus`, `ur_emit_status_poller()`;
+  2 s while a job runs, 15 s idle, paused while the document is hidden), and
+  shared CSS/JS is emitted once by the `ur_emit_*` helpers. Never add a per-tab
+  polling loop or a per-tab copy of a shared helper.
 - **Dashboard widget:** `source/UR.Dashboard.page` uses `Menu="Dashboard"` (NOT
   the `UnraidRsync` xmenu) and sets `$mytiles['unraid.rsync']['column1']` to a
   self-contained tile string (markup + scoped CSS + a `getStatus` poller) that
@@ -57,7 +62,8 @@ on, forked from, or derived from any other plugin.
   Unraid version for the pre-7.2 header fixup.
 - **Backend classes** in `source/include/`: `Config`, `Credentials`, `Job`, `Ssh`,
   `Rsync`, `RunState`, `Runner`, `Logger`, `Cron`, `Notify`, `KeyTools`,
-  `History`, `Snapshot`, `ProcIO`, `Util`, and `handler.php` (the POST/GET front
+  `History`, `Snapshot`, `ProcIO`, `Util`, `PageHelpers` (the pure display rules
+  the pages and `getStatus` share), and `handler.php` (the POST/GET front
   controller). Plus `source/scripts/{runner,apply-cron,reap-crashed}.php`, the
   `askpass.sh` password helper and `ur-snapshot.sh` remote snapshot helper in
   `source/scripts/`, and the `source/event/started` array-start hook.
@@ -272,11 +278,13 @@ on, forked from, or derived from any other plugin.
   whatever `schedule` string it was last saved with — so anything that computes
   a next fire from that string is reporting a time that will never happen
   (`Cron::buildContent()` skips the job). `getStatus` carries `manualOnly` and a null
-  `nextRun` for it, and all THREE renderers must agree, in this clause order:
+  `nextRun` for it, and both renderers must agree, in this clause order:
   manual-only, then disabled, then no computable next (em-dash), then the time.
-  They are `ur_next_run_label()` (PHP, Jobs), `nextRunLabel()` (JS, Jobs) and
-  the `.ur-ov-next` chain (JS, Overview) — the JS ones run every second on top of
-  the PHP one, so a clause missing there silently overwrites a correct cell.
+  They are `PageHelpers::nextRunLabel()` (PHP, the Jobs server render) and
+  `window.urUtil.nextRunLabel()` (JS, `ur_emit_page_assets()`, used by Jobs and
+  Overview) — the JS one runs every second on top of the PHP one, so a clause
+  missing there silently overwrites a correct cell. `PageHelpersTest` and
+  `OptionsFormHelpTest` pin the order on both sides.
   `Runner::run` re-applies Cron's rule: a `--trigger=schedule` run of a disabled
   or manual-only job (a stale line after a failed `update_cron`) only logs to
   `plugin.log` and exits 1 with reason `not-scheduled` — no state, History or
@@ -316,8 +324,12 @@ on, forked from, or derived from any other plugin.
   into the POST body, so the wire protocol is unchanged (`action=<x>`); the same
   shadowing is why that helper reads `form.getAttribute('action')` for the URL
   rather than `form.action`. `FormActionTest` guards all of it.
-- **HTML-escape all output**; the log viewer renders `Logger::tail()` output, which
-  is already escaped (log-XSS guard). Captured run output is also **redacted** of
+- **HTML-escape all output**; the log viewer renders `Logger::tail()` /
+  `Logger::readFrom()` output, which is already escaped (log-XSS guard).
+  **`_()` and `ur_t()` return HTML, not text**: Unraid's `_()` turns `'` into
+  `&apos;` and `*x*` into `<i>x</i>`, so `ur_h(ur_t(...))` printed a literal
+  `&apos;`. Emit `_()` output raw; anything that must be escaped (attributes, JS,
+  a mix with user data) takes `ur_t_text()` and then `ur_h()`. Captured run output is also **redacted** of
   per-run tmpfs secret paths and **size-capped** before it is written
   (`Logger::setRedaction` / `Logger::sink` / `UR_MAX_RUN_LOG_BYTES`).
 - **CSRF**: every state-changing POST verifies the webGui `csrf_token` via

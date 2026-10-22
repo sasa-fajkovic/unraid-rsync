@@ -1718,6 +1718,236 @@ final class OptionsFormHelpTest extends TestCase
      * gives readable file/line numbers if the body ever errors, and sidesteps any
      * null-on-failure surprises from preg_replace().
      */
+    // --- P4: one shared poller + shared helpers, emitted once per document ----
+
+    /**
+     * Every tab renders into ONE document, so Overview + Jobs + Status together
+     * must define the getStatus poller, the shared helpers and the shared CSS
+     * exactly once - the per-tab loops and copies are what this replaced.
+     */
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testTabsShareOnePollerAndOneCopyOfTheHelpers(): void
+    {
+        $cfg = Config::defaults();
+        $cfg['jobs'][] = Job::normalize([
+            'id'        => 'j-doc',
+            'name'      => 'Doc Job',
+            'transport' => 'LOCAL',
+            'pairs'     => [['local' => '/mnt/user/x/', 'remote' => '/mnt/disk1/x/']],
+        ]);
+        Config::save($cfg);
+        try {
+            $html = '';
+            foreach (['overview', 'jobs', 'status', 'history', 'connections', 'credentials', 'settings'] as $tab) {
+                $html .= $this->renderPageBody(__DIR__ . '/../source/pages/' . $tab . '.php');
+            }
+        } finally {
+            @unlink(Config::path());
+        }
+
+        foreach ([
+            '/window\.urStatus\s*=/'          => 'the shared getStatus poller',
+            '/window\.urUtil\s*=/'            => 'the shared helpers',
+            '/function relativeTime\(/'       => 'relativeTime',
+            '/function cssEsc\(/'             => 'cssEsc',
+            '/function isoToEpoch\(/'         => 'isoToEpoch',
+            '/\.ur-required\s*\{/'            => 'the .ur-required rule',
+            '/\.ur-empty-state\s*\{/'         => 'the .ur-empty-state rule',
+            '/action=getStatus/'              => 'a getStatus request',
+            '/addEventListener\(\'visibilitychange\'/' => 'the visibility listener',
+        ] as $re => $what) {
+            $this->assertSame(1, preg_match_all($re, $html), "$what must appear exactly once per document");
+        }
+        foreach (['.ur-result {', '.ur-ok {', '.ur-err {'] as $rule) {
+            $this->assertStringContainsString($rule, $html, "missing shared result rule $rule");
+        }
+        $this->assertStringNotContainsString('setInterval(pollStatus', $html);
+        $this->assertStringNotContainsString('setInterval(pollPluginLog', $html);
+        $this->assertSame(3, substr_count($html, 'window.urStatus.subscribe('), 'Overview, Jobs and Status subscribe');
+    }
+
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testStatusPollerPausesWhenHiddenAndKeepsOneRequestInFlight(): void
+    {
+        $js = $this->emitted('ur_emit_status_poller');
+        $this->assertStringContainsString('document.hidden', $js);
+        $this->assertStringContainsString("addEventListener('visibilitychange'", $js);
+        $this->assertStringContainsString('if (inflight) { again = true; return; }', $js);
+        // A page loaded in a background tab, and a refresh queued behind an
+        // in-flight request that lands after the tab was hidden, both go
+        // through poll(): it must bail out before marking a request in flight.
+        $this->assertSame(1, preg_match('/function poll\(\) \{(.*?)\n  \}/s', $js, $m));
+        $guard = strpos($m[1], 'if (document.hidden) { return; }');
+        $this->assertNotFalse($guard, 'poll() must not fetch while the document is hidden');
+        $this->assertLessThan(strpos($m[1], 'inflight = true'), $guard);
+        $this->assertLessThan(strpos($m[1], 'fetch('), $guard);
+        $this->assertStringContainsString('if (again) { again = false; poll(); }', $js);
+        $this->assertMatchesRegularExpression('/FAST_MS = 2000, IDLE_MS = 15000/', $js);
+    }
+
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testStatusPageTailsThePluginLogIncrementallyAndOnlyWhenVisible(): void
+    {
+        $html = $this->renderPageBody(__DIR__ . '/../source/pages/status.php');
+        $this->assertStringContainsString("'?action=getPluginLog&since=' + since", $html);
+        $this->assertStringContainsString('pre.offsetParent !== null', $html);
+        $this->assertStringContainsString('window.getSelection', $html);
+        $this->assertStringContainsString('insertAdjacentHTML', $html);
+        $this->assertStringContainsString('id="ur-log-jump"', $html);
+        // The follow decision is a flag driven by the user's scroll, never a
+        // height measured on a box that may be hidden (zero height) at poll time.
+        $this->assertStringContainsString('var follow = true;', $html);
+        $this->assertStringContainsString('if (follow) { toBottom(); }', $html);
+    }
+
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testJsNextRunLabelKeepsTheClauseOrder(): void
+    {
+        $js = $this->emitted('ur_emit_page_assets');
+        $this->assertSame(1, preg_match('/function nextRunLabel\(s, now\) \{(.*?)\n  \}/s', $js, $m));
+        $body = $m[1];
+        $order = [
+            strpos($body, 's.manualOnly'),
+            strpos($body, 's.enabled === false'),
+            strpos($body, '!s.nextRun'),
+            strpos($body, 'window.urFmtLocal'),
+        ];
+        $this->assertNotContains(false, $order);
+        $sorted = $order;
+        sort($sorted);
+        $this->assertSame($sorted, $order, 'JS next-run clauses must be manual-only, disabled, em-dash, time');
+        $this->assertStringContainsString("'manual (on demand)'", $body);
+        $this->assertStringContainsString("'disabled'", $body);
+    }
+
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testBadgeVocabularyIsRenderedFromTheOnePhpMap(): void
+    {
+        $js = $this->emitted('ur_emit_badge_assets');
+        $this->assertStringContainsString('"PENDING":{"cls":"pending","label":"Never run"}', $js);
+        $this->assertStringNotContainsString("case 'SUCCESS'", $js);
+        $this->assertSame('ur-badge-warning', ur_state_badge_class('timeout'));
+        $this->assertSame('Never run', ur_state_label('PENDING'));
+    }
+
+    public function testDashboardTileUsesTheSharedVocabularyAndPausesWhenHidden(): void
+    {
+        $src = (string) file_get_contents(__DIR__ . '/../source/UR.Dashboard.page');
+        $body = substr($src, (int) strpos($src, "\n---\n") + 5);
+        $body = (string) preg_replace("#^require_once '/usr/local/emhttp/[^']+';$#m", '', $body);
+        $base = (string) tempnam(sys_get_temp_dir(), 'ur_dash_');
+        $tmp = $base . '.php';
+        file_put_contents($tmp, $body);
+        try {
+            $mytiles = [];
+            include $tmp;
+        } finally {
+            @unlink($tmp);
+            @unlink($base);
+        }
+        $tile = $mytiles['unraid.rsync']['column1'];
+        $this->assertStringNotContainsString('__UR_STATES__', $tile);
+        $this->assertStringContainsString('"label":"Never run"', $tile);
+        $this->assertStringNotContainsString('Pending', $tile);
+        $this->assertStringContainsString('if (document.hidden) { return; }', $tile);
+        $this->assertStringContainsString("addEventListener('visibilitychange'", $tile);
+    }
+
+    public function testOnlyTheSharedEmittersDefineHelpersOrTheHandlerUrl(): void
+    {
+        foreach (glob(__DIR__ . '/../source/pages/*.php') as $file) {
+            if (basename($file) === '_options_form.php') {
+                continue;
+            }
+            $src = (string) file_get_contents($file);
+            $name = basename($file);
+            foreach (['function cssEsc', 'function isoToEpoch', 'function fmtLocal', 'function fmtDuration', '.ur-required {', '.ur-empty-state {'] as $dup) {
+                $this->assertStringNotContainsString($dup, $src, "$name redefines $dup; use the shared emitter");
+            }
+            $this->assertStringNotContainsString("'/plugins/unraid.rsync/include/handler.php'", $src, "$name: use PageHelpers::HANDLER_URL");
+            $this->assertStringNotContainsString('window.location.reload()', $src, "$name: use window.urUtil.reloadSoon");
+            // SEC-17: a label is never re-parsed as HTML.
+            $this->assertDoesNotMatchRegularExpression('/innerHTML\s*=[^;]*textContent/', $src, "$name re-parses textContent as HTML");
+        }
+    }
+
+    public function testCronReadingGivesNoClientSideVerdict(): void
+    {
+        $src = (string) file_get_contents(__DIR__ . '/../source/pages/jobs.php');
+        $this->assertStringNotContainsString('Not a valid 5-field cron expression', $src);
+        $this->assertStringNotContainsString('ur-cron-bad', $src);
+        $this->assertStringNotContainsString('fieldOk(', $src);
+    }
+
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testPreviewRerunsAnEditMadeWhileARequestWasInFlight(): void
+    {
+        $js = $this->emitted('ur_emit_option_help_assets');
+        $this->assertStringContainsString('if (box._urPreviewPending) { box._urPreviewDirty = true; return; }', $js);
+        $this->assertStringContainsString('previewDone(box);', $js);
+    }
+
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testErrTextPrefersMessageThenError(): void
+    {
+        $js = $this->emitted('ur_emit_ajax_helpers');
+        $this->assertStringContainsString('(res.body.message || res.body.error)', $js);
+    }
+
+    // --- UXB-7: _() returns HTML; never escape it a second time --------------
+
+    public function testTranslatedTextIsHtmlAndItsPlainTextFormIsDecoded(): void
+    {
+        $this->assertSame('rsync&apos;s', ur_t("rsync's"));
+        $this->assertSame("rsync's", ur_t_text("rsync's"));
+        // A literal asterisk is never read as Unraid's *italic* markup.
+        $this->assertSame('include */ then exclude *', ur_t_text('include */ then exclude *'));
+        $this->assertStringNotContainsString('<i>', ur_t('include */ then exclude *'));
+    }
+
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testHelpWithAnApostropheRendersOnceEscapedEverywhere(): void
+    {
+        $this->assertStringContainsString("rsync's", ur_option_help()['compressLevel']);
+        ob_start();
+        ur_render_rsync_options(Config::defaultRsyncOptions(), 'global[defaultRsyncOptions]', 'urApos');
+        $html = (string) ob_get_clean();
+
+        $this->assertStringNotContainsString('&amp;apos;', $html);
+        $this->assertStringNotContainsString('&amp;#', $html);
+        $this->assertDoesNotMatchRegularExpression('/="[^"]*&apos;[^"]*"/', $html, 'no &apos; inside an attribute');
+        $this->assertStringContainsString('rsync&#039;s default level', $html);
+        $this->assertStringNotContainsString('&lt;i&gt;', $html, 'filter help asterisks must not turn into <i>');
+    }
+
+    public function testNoPageEscapesTranslatedHtmlASecondTime(): void
+    {
+        foreach (glob(__DIR__ . '/../source/pages/*.php') as $file) {
+            $src = (string) file_get_contents($file);
+            $this->assertDoesNotMatchRegularExpression(
+                '/(?:ur_h|htmlspecialchars)\(\s*(?:sprintf\(\s*)?(?:_|ur_t)\(/',
+                $src,
+                basename($file) . ' escapes _()/ur_t() output, which is already HTML; use ur_t_text()'
+            );
+        }
+    }
+
+    private function emitted(string $fn): string
+    {
+        require_once __DIR__ . '/../source/pages/_options_form.php';
+        ob_start();
+        $fn();
+        return (string) ob_get_clean();
+    }
+
     private function renderPageBody(string $pageFile): string
     {
         require_once __DIR__ . '/../source/pages/_options_form.php';

@@ -30,7 +30,8 @@ declare(strict_types=1);
  *   GET  downloadJobLog   a whole (redacted, size-capped) run log as text/plain.
  *   GET  listRuns         a job's recent run logs.
  *   GET  listHistory      a job's paginated execution history.
- *   GET  getPluginLog     HTML-escaped tail of the cross-job plugin.log.
+ *   GET  getPluginLog     HTML-escaped tail of the cross-job plugin.log;
+ *                         with since=<byte offset>, only what was appended.
  *   GET  getRsyncStatus   rsync binary presence + version line.
  *
  * Every POST action is CSRF-protected with the webGui csrf_token. Secrets
@@ -94,6 +95,7 @@ require_once __DIR__ . '/Cron.php';
 // because the bootstrap loads all classes). The detached run itself launches a
 // separate runner.php process that requires Runner on its own.
 require_once __DIR__ . '/Runner.php';
+require_once __DIR__ . '/PageHelpers.php';
 
 /**
  * Re-sync the live crontab to the saved config. This is the single place the
@@ -150,11 +152,11 @@ function sendResponse(array $payload, int $code = 200): void
     if ($json === false) {
         $code = 500;
         $json = json_encode(
-            ['error' => 'Internal error: response could not be encoded.'],
+            ['ok' => false, 'error' => 'Internal error: response could not be encoded.'],
             JSON_UNESCAPED_SLASHES
         );
         if ($json === false) {
-            $json = '{"error":"Internal error."}';
+            $json = '{"ok":false,"error":"Internal error."}';
         }
     }
 
@@ -182,13 +184,14 @@ function sendResponse(array $payload, int $code = 200): void
 }
 
 /**
- * Emit a JSON error response (a `{ "error": "..." }` envelope) and stop.
+ * Emit a JSON error response (a `{ "ok": false, "error": "..." }` envelope) and
+ * stop. Every failure body carries both, whatever its HTTP code.
  *
  * @param array<string,mixed> $extra
  */
 function sendError(string $message, int $code = 400, array $extra = []): void
 {
-    sendResponse(array_merge(['error' => $message], $extra), $code);
+    sendResponse(array_merge(['ok' => false, 'error' => $message], $extra), $code);
 }
 
 /**
@@ -1833,12 +1836,7 @@ function ur_action_test_connection(): void
             @set_time_limit(Rsync::DAEMON_PROBE_TIMEOUT + 10);
         }
         $res = Rsync::listDaemonModules($conn);
-        sendResponse([
-            'ok'      => (bool) $res['ok'],
-            'reason'  => (string) $res['reason'],
-            'message' => (string) $res['message'],
-            'modules' => array_values($res['modules']),
-        ], 200);
+        sendResponse(ur_probe_envelope($res, array_values($res['modules'])), 200);
         return;
     }
 
@@ -1846,14 +1844,31 @@ function ur_action_test_connection(): void
     // 200 regardless of probe success - the probe RAN; the body carries ok +
     // the distinct reason. (A 4xx/5xx is reserved for the request itself
     // failing.)
-    sendResponse([
+    // An ssh probe never lists modules; the key is still present so the client
+    // has one response shape to render.
+    sendResponse(ur_probe_envelope($res, []), 200);
+}
+
+/**
+ * The testConnection body. A failed probe also carries `error` (= message) so
+ * it matches every other failure envelope.
+ *
+ * @param array<string,mixed> $res
+ * @param array<int,mixed>    $modules
+ * @return array<string,mixed>
+ */
+function ur_probe_envelope(array $res, array $modules): array
+{
+    $out = [
         'ok'      => (bool) $res['ok'],
         'reason'  => (string) $res['reason'],
         'message' => (string) $res['message'],
-        // Always present so the client has one response shape to render; an ssh
-        // probe never lists modules.
-        'modules' => [],
-    ], 200);
+        'modules' => $modules,
+    ];
+    if (!$out['ok']) {
+        $out['error'] = $out['message'];
+    }
+    return $out;
 }
 
 // =====================================================================
@@ -2159,13 +2174,7 @@ function ur_safe_job_id(string $id): string
  */
 function ur_derive_state(bool $running, ?array $summary): string
 {
-    if ($running) {
-        return 'RUNNING';
-    }
-    if (is_array($summary) && !empty($summary['state'])) {
-        return (string) $summary['state'];
-    }
-    return Rsync::STATE_PENDING; // 'PENDING' - no summary == never run
+    return PageHelpers::deriveState($running, $summary);
 }
 
 /**
@@ -2596,11 +2605,22 @@ function ur_running_history_row(array $state): array
 /**
  * GET getPluginLog: the HTML-escaped tail of the rolling cross-job plugin.log.
  * Bounded. No id needed - there is one plugin log.
+ *
+ * With since=<byte offset> it answers {ok, size, offset, text, truncated, reset}
+ * instead: only the complete lines appended after `since` (Logger::readFrom), so
+ * a poller stops re-downloading the whole 128 KiB tail every tick. `offset` is
+ * the next `since`. Without `since` the response is unchanged.
  */
 function ur_action_get_plugin_log(): void
 {
-    $log = Logger::tail(Logger::pluginLogPath(), UR_GET_LOG_TAIL_BYTES);
-    sendResponse(['ok' => true, 'log' => $log], 200);
+    $since = $_GET['since'] ?? null;
+    if ($since === null || !is_string($since) || !ctype_digit($since)) {
+        $log = Logger::tail(Logger::pluginLogPath(), UR_GET_LOG_TAIL_BYTES);
+        sendResponse(['ok' => true, 'log' => $log], 200);
+        return;
+    }
+    $chunk = Logger::readFrom(Logger::pluginLogPath(), (int) $since, UR_GET_LOG_TAIL_BYTES);
+    sendResponse(['ok' => true] + $chunk, 200);
 }
 
 /**

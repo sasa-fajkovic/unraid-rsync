@@ -33,7 +33,7 @@ $logDir      = Config::sanitizeLogDir($config['global']['logDir'] ?? '');
 $secretsDir  = Config::sanitizeSecretsDir($config['global']['secretsDir'] ?? '');
 $preHookMin  = Config::hookTimeoutMinutes($config['global'], 'preHookTimeout');
 $postHookMin = Config::hookTimeoutMinutes($config['global'], 'postHookTimeout');
-$handlerUrl  = '/plugins/unraid.rsync/include/handler.php';
+$handlerUrl  = PageHelpers::HANDLER_URL;
 
 /* Emit the option help CSS/JS once, in LIVE page-body context, before the form
  * (which is the only place this page renders the shared options block). On the
@@ -47,6 +47,7 @@ ur_emit_option_help_assets();
  * text->JSON parse that surfaces a non-JSON 403/500 WITH its status instead of
  * failing silently in r.json(). */
 ur_emit_ajax_helpers();
+ur_emit_page_assets();
 /* Re-enable the plugin's own Apply button once the form is edited (Unraid's
  * framework disables it on load and won't re-enable our custom forms). */
 ur_emit_form_enable_assets();

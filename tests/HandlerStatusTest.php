@@ -609,6 +609,121 @@ final class HandlerStatusTest extends TestCase
         $this->assertStringContainsString('&amp;', $body['log']);
     }
 
+    private function writePluginLog(string $bytes, bool $append = false): string
+    {
+        $path = Logger::pluginLogPath();
+        @mkdir(dirname($path), 0777, true);
+        file_put_contents($path, $bytes, $append ? FILE_APPEND : 0);
+        return $path;
+    }
+
+    private function pluginLogSince(int $since): array
+    {
+        $_GET = ['since' => (string) $since];
+        try {
+            return $this->runCapture('ur_action_get_plugin_log');
+        } finally {
+            $_GET = [];
+        }
+    }
+
+    public function testGetPluginLogWithoutSinceKeepsTheTailShape(): void
+    {
+        $this->writePluginLog("one\ntwo\n");
+        [$body, $code] = $this->runCapture('ur_action_get_plugin_log');
+        $this->assertSame(200, $code);
+        $this->assertSame(['ok' => true, 'log' => "one\ntwo\n"], $body);
+    }
+
+    public function testGetPluginLogSinceReturnsOnlyNewCompleteLinesEscaped(): void
+    {
+        $this->writePluginLog("first <b>\n");
+        [$body] = $this->pluginLogSince(0);
+        $this->assertSame("first &lt;b&gt;\n", $body['text']);
+        $this->assertSame(10, $body['offset']);
+        $this->assertSame(10, $body['size']);
+        $this->assertFalse($body['reset']);
+        $this->assertFalse($body['truncated']);
+
+        // A half-written line is held back until its newline lands, so a
+        // multi-byte character is never escaped in two halves.
+        $this->writePluginLog("second\nthi\u{00e9}", true);
+        [$body] = $this->pluginLogSince(10);
+        $this->assertSame("second\n", $body['text']);
+        $this->assertSame(17, $body['offset']);
+
+        $this->writePluginLog("rd\n", true);
+        [$body] = $this->pluginLogSince(17);
+        $this->assertSame("thi\u{00e9}rd\n", $body['text']);
+
+        [$body] = $this->pluginLogSince($body['offset']);
+        $this->assertSame('', $body['text']);
+    }
+
+    public function testGetPluginLogSincePastTheEndResetsToTheStart(): void
+    {
+        $this->writePluginLog("fresh\n");
+        [$body] = $this->pluginLogSince(5000);
+        $this->assertTrue($body['reset']);
+        $this->assertSame("fresh\n", $body['text']);
+        $this->assertSame(6, $body['offset']);
+    }
+
+    public function testGetPluginLogSinceSkipsAGapLargerThanTheCap(): void
+    {
+        $line = str_repeat('x', 99) . "\n";
+        $this->writePluginLog(str_repeat($line, (int) ceil(UR_GET_LOG_TAIL_BYTES / 100) + 50));
+        [$body] = $this->pluginLogSince(0);
+        $this->assertTrue($body['truncated']);
+        $this->assertStringStartsWith("[... earlier output truncated ...]\n", $body['text']);
+        $this->assertSame($body['size'], $body['offset']);
+        $this->assertLessThanOrEqual(UR_GET_LOG_TAIL_BYTES + 64, strlen($body['text']));
+    }
+
+    public function testGetPluginLogNeverReturnsAPartOfAnOversizedUnfinishedLine(): void
+    {
+        // One line longer than the window, written in two halves that split a
+        // two-byte character (é = C3 A9) between them.
+        $this->writePluginLog("a\n" . str_repeat('x', UR_GET_LOG_TAIL_BYTES + 5000) . "\xC3");
+        [$body] = $this->pluginLogSince(2);
+        $this->assertSame('', $body['text']);
+        $this->assertSame(2, $body['offset'], 'the offset must stay at the last completed line');
+
+        $this->writePluginLog("\xA9 end\n", true);
+        [$body] = $this->pluginLogSince($body['offset']);
+        $this->assertSame("[... earlier output truncated ...]\n", $body['text'], 'the oversized line is skipped whole');
+        $this->assertTrue($body['truncated']);
+        $this->assertSame($body['size'], $body['offset']);
+        $this->assertStringNotContainsString("\u{FFFD}", $body['text']);
+
+        $this->writePluginLog("next\n", true);
+        [$body] = $this->pluginLogSince($body['offset']);
+        $this->assertSame("next\n", $body['text']);
+    }
+
+    public function testGetPluginLogNonNumericSinceFallsBackToTheTail(): void
+    {
+        $this->writePluginLog("x\n");
+        $_GET = ['since' => '-1'];
+        [$body] = $this->runCapture('ur_action_get_plugin_log');
+        $this->assertSame(['ok' => true, 'log' => "x\n"], $body);
+    }
+
+    // ---- error envelopes ---------------------------------------------------
+
+    public function testEveryErrorEnvelopeCarriesOkFalseAndError(): void
+    {
+        [$body, $code] = $this->runCapture(fn() => sendError('Nope.', 409, ['running' => true]));
+        $this->assertSame(409, $code);
+        $this->assertSame(['ok' => false, 'error' => 'Nope.', 'running' => true], $body);
+
+        $_GET = ['action' => 'noSuchAction'];
+        [$body, $code] = $this->runCapture('ur_handle_request');
+        $this->assertSame(400, $code);
+        $this->assertFalse($body['ok']);
+        $this->assertSame('Unknown action.', $body['error']);
+    }
+
     // ---- getRsyncStatus (FIX 3: presence check) ---------------------------
 
     public function testGetRsyncStatusPresent(): void

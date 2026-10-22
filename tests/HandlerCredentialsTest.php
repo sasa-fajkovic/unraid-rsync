@@ -2461,6 +2461,7 @@ final class HandlerCredentialsTest extends TestCase
             'reason'  => 'unreachable',
             'message' => 'Could not reach the rsync daemon. Check the host, the port and the network.',
             'modules' => [],
+            'error'   => 'Could not reach the rsync daemon. Check the host, the port and the network.',
         ], $body);
     }
 
@@ -2503,6 +2504,7 @@ final class HandlerCredentialsTest extends TestCase
             'reason'  => 'config',
             'message' => 'Host and username are required to test a connection.',
             'modules' => [],
+            'error'   => 'Host and username are required to test a connection.',
         ], $body);
     }
 

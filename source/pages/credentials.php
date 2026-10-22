@@ -48,14 +48,9 @@ try {
     $loadError = $e->getMessage();
 }
 $keys       = (isset($creds['keys']) && is_array($creds['keys'])) ? $creds['keys'] : [];
-$handlerUrl = '/plugins/unraid.rsync/include/handler.php';
+$handlerUrl = PageHelpers::HANDLER_URL;
 ?>
 <style>
-/* The "required" field marker: a red asterisk paired with the HTML5 `required`
-   attribute on the mandatory inputs. text-decoration:none drops the dotted
-   <abbr> underline so it reads as a clean asterisk. */
-.ur-required { color: var(--red-800, #b71c1c); font-weight: bold; text-decoration: none; cursor: help; }
-
 /* Inline two-step delete confirm: an "armed" Delete button reuses the
    required-asterisk red so the destructive intent reads clearly, and the
    consequence warning is shown inline next to it (never in a popup). */
@@ -172,6 +167,7 @@ ur_emit_form_enable_assets();
 /* The shared front-end helpers (window.urAjax: postForm/postFormElement/show/
  * errText + the two-step delete confirm) this page's script below uses. */
 ur_emit_ajax_helpers();
+ur_emit_page_assets();
 ?>
 
 <!-- Rename/reorder existing keys (no secret material in this form). -->
@@ -247,7 +243,7 @@ ur_emit_ajax_helpers();
       window.urAjax.postForm(HANDLER, { action: 'generateKey', name: name, type: type }, CSRF).then(function (res) {
         if (res.ok && res.body && res.body.ok) {
           window.urAjax.show(keyResult, true, 'Key "' + res.body.name + '" generated. Fingerprint: ' + (res.body.fingerprint || '?'));
-          setTimeout(function () { window.location.reload(); }, 800);
+          window.urUtil.reloadSoon(false);
         } else {
           window.urAjax.show(keyResult, false, window.urAjax.errText(res, 'Key generation failed.'));
         }
@@ -267,7 +263,7 @@ ur_emit_ajax_helpers();
       window.urAjax.postForm(HANDLER, { action: 'importKey', name: name, privateKey: priv, publicKey: pub }, CSRF).then(function (res) {
         if (res.ok && res.body && res.body.ok) {
           window.urAjax.show(keyResult, true, 'Key "' + res.body.name + '" imported. Fingerprint: ' + (res.body.fingerprint || '?'));
-          setTimeout(function () { window.location.reload(); }, 800);
+          window.urUtil.reloadSoon(false);
         } else {
           window.urAjax.show(keyResult, false, window.urAjax.errText(res, 'Key import failed.'));
         }
@@ -302,7 +298,7 @@ ur_emit_ajax_helpers();
           var kid = t.getAttribute('data-key-id');
           window.urAjax.postForm(HANDLER, { action: 'deleteKey', id: kid }, CSRF).then(function (res) {
             if (res.ok && res.body && res.body.ok) {
-              window.location.reload();
+              window.urUtil.reloadSoon(false);
             } else {
               window.urAjax.show(keyResult, false, window.urAjax.errText(res, 'Delete failed.'));
             }
@@ -326,7 +322,7 @@ ur_emit_ajax_helpers();
       window.urAjax.postFormElement(keysForm).then(function (res) {
         if (res.ok && res.body && res.body.ok) {
           window.urAjax.show(result, true, res.body.message || 'Saved.');
-          setTimeout(function () { window.location.reload(); }, 600);
+          window.urUtil.reloadSoon(false);
         } else {
           window.urAjax.show(result, false, window.urAjax.errText(res, 'Save failed.'));
         }
