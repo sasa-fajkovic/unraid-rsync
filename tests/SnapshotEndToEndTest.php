@@ -239,22 +239,23 @@ final class SnapshotEndToEndTest extends TestCase
             file_put_contents("{$this->root}/$d/a/junk", 'x');
         }
 
-        // Run 3: cleanup removes the .deleting and the older stale run, keeps
-        // the newest stale one; prune (keepDaily 2) removes run 1.
+        // Run 3: cleanup removes the .deleting and both stale runs (they are
+        // older than the last commit, so neither is a link-dest); prune
+        // (keepDaily 2) removes run 1.
         $this->runDay();
         $s3 = $this->stampNow();
-        $this->assertSame(['2026-09-03T000000Z.inprogress', $s2, $s3, 'latest'], $this->names());
-        $this->assertSame(['probe', 'check', 'list', 'delete', 'delete', 'check', 'mkstamp', 'check', 'commit', 'list', 'delete'], $this->ops);
+        $this->assertSame([$s2, $s3, 'latest'], $this->names());
+        $this->assertSame(['probe', 'check', 'list', 'delete', 'delete', 'delete', 'check', 'mkstamp', 'check', 'commit', 'list', 'delete'], $this->ops);
         $this->assertIsInt(History::list(self::JOB, 0, 1)['runs'][0]['growthKB'] ?? null, 'growth is measured after cleanup');
         $this->assertSame([$ino1, 2], $this->ino("{$this->root}/$s2/a/f0.txt"), 'run 1 is gone, its data lives on in run 2 and 3');
         $h = History::list(self::JOB, 0, 1)['runs'][0];
         $this->assertTrue($h['committed']);
         $this->assertSame(1, $h['pruned']);
 
-        // Run 4: prune removes run 2; the newest stale run is still kept.
+        // Run 4: prune removes run 2.
         $this->runDay();
         $s4 = $this->stampNow();
-        $this->assertSame(['2026-09-03T000000Z.inprogress', $s3, $s4, 'latest'], $this->names());
+        $this->assertSame([$s3, $s4, 'latest'], $this->names());
         $this->assertSame($s4, readlink($this->root . '/latest'));
         $this->assertSame([$ino1, 2], $this->ino("{$this->root}/$s4/a/f0.txt"));
         $this->assertSame('changed', file_get_contents("{$this->root}/$s4/a/f1.txt"));
