@@ -650,13 +650,14 @@ final class RunnerNotifyTest extends TestCase
 
     public function testDeadRunnerIsNotReapedWhileTheLockIsHeld(): void
     {
-        // A held lock is a runner that is starting (it reaps the state itself)
-        // or another detector mid-report.
+        // A held lock is a runner that is starting (it reaps the state itself),
+        // another detector mid-report, or a SIGKILLed runner's orphaned rsync:
+        // busy either way.
         $id = $this->saveJob('always');
         $this->writeDeadRunnerState($id);
         $held = RunState::acquireLock($id);
         try {
-            $this->assertFalse(RunState::isRunning($id));
+            $this->assertTrue(RunState::isRunning($id));
             $this->assertTrue(RunState::read($id)['running'], 'left for the lock holder');
             $this->assertCount(0, $this->captured);
         } finally {

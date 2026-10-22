@@ -483,7 +483,10 @@ on, forked from, or derived from any other plugin.
   `Runner::reportCrashed` records a dead runner exactly once (appends a
   `crashed` History record, writes the `CRASHED` summary unless a later run
   already wrote one, notifies, deletes the in-flight record) - plus, once per
-  job after the upgrade, the `lastReal` write-through above. The check
+  job after the upgrade, the `lastReal` write-through above. Not while another
+  holder has the run lock: a SIGKILLed runner's orphaned rsync inherits it, so
+  `isRunning` stays true and Abort (`RunState::signalRun`) signals the dead
+  runner's process group, never a reused pid. The check
   is **match-ANY** across all server-side-trusted token sources (`$GLOBALS['var']['csrf_token']`,
   `$_SESSION['csrf_token']`, and `var.ini`) — `ur_csrf_token_candidates()` /
   `ur_check_csrf()`. **Do NOT revert to "first non-empty source wins":** on the

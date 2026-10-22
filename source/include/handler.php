@@ -2179,28 +2179,11 @@ function ur_action_abort_job(): void
     // the launch it is for: the running one, or the one runJob just recorded.
     RunState::requestAbort($jobId, (string) (RunState::read($jobId)['gen'] ?? ''));
 
-    // Only signal a pid we have VERIFIED is this job's live runner. isRunning()
-    // is PID-reuse-safe (running flag + posix_kill + cmdline match), so this
-    // guards against SIGTERMing an unrelated process whose pid was reused after
-    // a stale state file. If the runner isn't (or is no longer) running, the
-    // abort flag alone is sufficient and we skip signalling.
-    $signalled = false;
-    if (RunState::isRunning($jobId) && function_exists('posix_kill')) {
-        $state = RunState::read($jobId);
-        $pid   = ($state !== null) ? (int) $state['pid'] : 0;
-        if ($pid > 0) {
-            // SIGTERM the whole process group (negative pid) so the rsync CHILD
-            // is killed too - the runner was launched via setsid into its own
-            // group, whose pgid equals the runner pid. Fall back to the bare pid
-            // if the group signal isn't permitted.
-            $sig = defined('SIGTERM') ? SIGTERM : 15;
-            if (@posix_kill(-$pid, $sig)) {
-                $signalled = true;
-            } elseif (@posix_kill($pid, $sig)) {
-                $signalled = true;
-            }
-        }
-    }
+    // isRunning() is PID-reuse-safe and stays true while a SIGKILLed runner's
+    // orphaned rsync holds the run lock; signalRun then reaches that group (the
+    // runner was setsid'd, pgid = its pid) and never a reused pid.
+    $signalled = RunState::isRunning($jobId)
+        && RunState::signalRun($jobId, defined('SIGTERM') ? SIGTERM : 15);
 
     sendResponse([
         'ok'        => true,

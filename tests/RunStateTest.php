@@ -260,6 +260,68 @@ final class RunStateTest extends TestCase
         $this->assertFalse(FakeRunState::read('j-music')['running']);
     }
 
+    /** A SIGKILLed runner's rsync keeps the inherited run lock: the job is busy, not idle. */
+    public function testIsRunningStaysTrueWhileAnOrphanHoldsTheRunLockAfterTheRunnerDied(): void
+    {
+        FakeRunState::write('j-music', ['pid' => 999, 'running' => true, 'currentLog' => '/l']);
+        FakeRunState::$alive = false;
+        $orphan = RunState::acquireLock('j-music');
+        $this->assertIsResource($orphan);
+        try {
+            $this->assertTrue(FakeRunState::isRunning('j-music'));
+            $this->assertTrue(FakeRunState::read('j-music')['running'], 'nothing is reaped while the lock is held');
+            FakeRunState::$alive = true;
+            FakeRunState::$cmdline = 'sleep 100000';
+            $this->assertTrue(FakeRunState::isRunning('j-music'), 'a reused pid with the lock held is still busy');
+        } finally {
+            RunState::releaseLock($orphan);
+        }
+        FakeRunState::$alive = false;
+        $this->assertFalse(FakeRunState::isRunning('j-music'), 'lock free: reaped as before');
+        $this->assertFalse(FakeRunState::read('j-music')['running']);
+    }
+
+    public function testSignalRunHitsTheOrphanGroupOfADeadRunnerOnly(): void
+    {
+        $sent = [];
+        RunState::$kill = static function (int $pid, int $sig) use (&$sent): bool {
+            $sent[] = [$pid, $sig];
+            return $pid < 0;
+        };
+        FakeRunState::write('j-music', ['pid' => 999, 'running' => true]);
+        FakeRunState::$alive = false;
+        $this->assertTrue(FakeRunState::signalRun('j-music', 15));
+        $this->assertSame([[-999, 15]], $sent, 'a dead leader: only its group, never the bare pid');
+    }
+
+    public function testSignalRunNeverSignalsAReusedPid(): void
+    {
+        $sent = [];
+        RunState::$kill = static function (int $pid, int $sig) use (&$sent): bool {
+            $sent[] = [$pid, $sig];
+            return true;
+        };
+        FakeRunState::write('j-music', ['pid' => 999, 'running' => true]);
+        FakeRunState::$alive = true;
+        FakeRunState::$cmdline = 'sleep 100000';
+        $this->assertFalse(FakeRunState::signalRun('j-music', 15));
+        $this->assertSame([], $sent);
+    }
+
+    public function testSignalRunSignalsALiveRunnerGroupThenFallsBackToItsPid(): void
+    {
+        $sent = [];
+        RunState::$kill = static function (int $pid, int $sig) use (&$sent): bool {
+            $sent[] = [$pid, $sig];
+            return $pid > 0;
+        };
+        FakeRunState::write('j-music', ['pid' => 999, 'running' => true]);
+        FakeRunState::$alive = true;
+        FakeRunState::$cmdline = "php\0runner.php\0--job=j-music";
+        $this->assertTrue(FakeRunState::signalRun('j-music', 15));
+        $this->assertSame([[-999, 15], [999, 15]], $sent);
+    }
+
     public function testIsRunningFalseWhenNotRunningFlag(): void
     {
         FakeRunState::write('j-music', ['pid' => 999, 'running' => false]);

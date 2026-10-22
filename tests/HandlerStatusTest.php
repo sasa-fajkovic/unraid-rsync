@@ -979,6 +979,33 @@ final class HandlerStatusTest extends TestCase
         RunState::clearAbort($id);
     }
 
+    /** A SIGKILLed runner: its orphaned rsync holds the run lock, Abort must reach its group. */
+    public function testAbortSignalsTheOrphanGroupOfASigkilledRunner(): void
+    {
+        $id  = $this->seedJob('orphan-rsync');
+        $pid = 2147483647;
+        RunState::write($id, ['pid' => $pid, 'running' => true, 'currentLog' => '/x']);
+        RunState::clearAbort($id);
+        $sent = [];
+        RunState::$kill = static function (int $p, int $sig) use (&$sent): bool {
+            $sent[] = $p;
+            return true;
+        };
+        $orphan = RunState::acquireLock($id);
+        try {
+            $_POST = ['id' => $id];
+            [$body, $code] = $this->runCapture('ur_action_abort_job');
+            $this->assertSame(200, $code, json_encode($body));
+            $this->assertTrue($body['signalled']);
+            $this->assertSame([-$pid], $sent);
+            $this->assertTrue(RunState::read($id)['running'], 'not reaped while the orphan holds the lock');
+        } finally {
+            RunState::releaseLock($orphan);
+            RunState::clear($id);
+            RunState::clearAbort($id);
+        }
+    }
+
     public function testAbortUnknownIdWithLiveStateIsAccepted(): void
     {
         // An id that is NOT a configured job (e.g. the job row was just deleted)

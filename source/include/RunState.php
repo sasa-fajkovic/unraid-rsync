@@ -60,6 +60,14 @@ class RunState
      */
     public static ?\Closure $afterStaleAbortRead = null;
 
+    /**
+     * Test seam: fn(int $pid, int $sig): bool in place of posix_kill for
+     * signalRun. null => posix_kill.
+     *
+     * @var (\Closure(int,int):bool)|null
+     */
+    public static ?\Closure $kill = null;
+
     /** The runtime base dir actually in effect. */
     public static function base(): string
     {
@@ -273,7 +281,9 @@ class RunState
      * Is this job currently running? PID-reuse-safe (see the class docblock):
      * requires running=true AND the pid alive AND the pid's cmdline to be our
      * runner for THIS job. A state that claims running but fails the liveness or
-     * cmdline check is STALE - we clear it and report false.
+     * cmdline check is STALE - we clear it and report false, unless another
+     * holder still has the run lock: a SIGKILLed runner's rsync inherits it and
+     * keeps transferring, so the job stays busy until that child exits.
      */
     public static function isRunning(string $jobId): bool
     {
@@ -289,28 +299,57 @@ class RunState
         // A dead pid, or one REUSED by an unrelated process: the worker died
         // without clearing state.
         if ($pid <= 0 || !static::pidAlive($pid) || !self::cmdlineMatchesJob(static::pidCmdline($pid), $jobId)) {
-            self::reapStale($jobId);
-            return false;
+            return !self::reapStale($jobId);
         }
         return true;
+    }
+
+    /**
+     * Send $sig to this job's run: the live runner's group (else its pid), or,
+     * once the runner is dead, its group alone - an orphaned rsync is still in
+     * it, and a pid still naming a live group cannot be reused. A pid reused by
+     * another process is never signalled.
+     */
+    public static function signalRun(string $jobId, int $sig): bool
+    {
+        $pid = (int) (self::read($jobId)['pid'] ?? 0);
+        if ($pid <= 0) {
+            return false;
+        }
+        if (!static::pidAlive($pid)) {
+            return self::kill(-$pid, $sig);
+        }
+        if (!self::cmdlineMatchesJob(static::pidCmdline($pid), $jobId)) {
+            return false;
+        }
+        return self::kill(-$pid, $sig) || self::kill($pid, $sig);
+    }
+
+    private static function kill(int $pid, int $sig): bool
+    {
+        if (self::$kill !== null) {
+            return (self::$kill)($pid, $sig);
+        }
+        return function_exists('posix_kill') && @posix_kill($pid, $sig);
     }
 
     /**
      * Report a dead runner's leftover state exactly once. A live runner holds
      * the run lock from before it writes running=true until after markStopped,
      * so running=true under a lock WE hold can only be a dead one; a lock we
-     * cannot get belongs to a starting runner (which reaps it itself) or to a
-     * concurrent detector.
+     * cannot get belongs to a starting runner (which reaps it itself), to a
+     * concurrent detector, or to an orphaned child of a SIGKILLed runner.
+     * False only when another holder has the lock.
      */
-    private static function reapStale(string $jobId): void
+    private static function reapStale(string $jobId): bool
     {
         try {
             $lock = self::acquireLock($jobId);
         } catch (Throwable $e) {
-            return; // a status poll must not fail on it; the next run reports it
+            return true; // a status poll must not fail on it; the next run reports it
         }
         if ($lock === null) {
-            return;
+            return false;
         }
         try {
             $stale = self::takeStale($jobId);
@@ -323,6 +362,7 @@ class RunState
         } finally {
             self::releaseLock($lock);
         }
+        return true;
     }
 
     /**
