@@ -452,7 +452,13 @@ class Logger
      */
     public static function append(string $path, string $line): bool
     {
-        self::ensureDir(dirname($path));
+        // Never throws: the Runner logs outside its try, and an exception there
+        // would skip the post-hook and leave pre-hook-stopped services down.
+        try {
+            self::ensureDir(dirname($path));
+        } catch (Throwable $e) {
+            return false;
+        }
         if ($line === '' || substr($line, -1) !== "\n") {
             $line .= "\n";
         }
@@ -727,10 +733,13 @@ class Logger
      * past it. The Runner calls this every Runner::$logCapCheckSec during a
      * pair, which bounds one long pair's log continuously.
      *
+     * @param bool|null $failed set to true when a trim was due but the file
+     *        could not be opened, locked, truncated or marked
      * @return bool true when the file was trimmed.
      */
-    public static function enforceRunLogCap(string $path): bool
+    public static function enforceRunLogCap(string $path, ?bool &$failed = null): bool
     {
+        $failed = false;
         if (!self::isRunLogPath($path) || !is_file($path)) {
             return false;
         }
@@ -744,6 +753,7 @@ class Logger
         }
         $fh = @fopen($path, 'r+b');
         if ($fh === false) {
+            $failed = true;
             return false;
         }
         $trimmed = false;
@@ -752,18 +762,19 @@ class Logger
             // so moves an earlier marker below the cap.
             $at = strpos((string) @stream_get_contents($fh, $cap + strlen($marker), 0), $marker);
             if ($at !== false && $size > $at + strlen($marker)) {
-                @ftruncate($fh, $at + strlen($marker));
-                $trimmed = true;
+                $trimmed = @ftruncate($fh, $at + strlen($marker));
+                $failed  = !$trimmed;
             } elseif ($at === false && $size > $cap) {
-                @ftruncate($fh, $cap);
-                @fseek($fh, $cap);
-                @fwrite($fh, $marker);
-                $trimmed = true;
+                $trimmed = @ftruncate($fh, $cap) && @fseek($fh, $cap) === 0
+                    && @fwrite($fh, $marker) === strlen($marker);
+                $failed  = !$trimmed;
             }
             if ($at !== false || $trimmed) {
                 self::$capped[$path] = true;
             }
             @flock($fh, LOCK_UN);
+        } else {
+            $failed = true;
         }
         @fclose($fh);
         return $trimmed;
@@ -872,17 +883,22 @@ class Logger
         if ($runLog !== '') {
             self::append($runLog, $line);
         }
-        self::ensureDir(self::logsDir());
         $plugin = self::pluginLogPath();
-        // A sibling lock: a lock held on plugin.log itself is renamed away with
-        // it, and a writer waiting on it would then append to plugin.log.1.
-        return Util::withLock($plugin . '.lock', static function () use ($plugin, $stamp, $jobId, $message): bool {
-            clearstatcache(true, $plugin);
-            if ((int) @filesize($plugin) > self::PLUGIN_LOG_MAX_BYTES) {
-                @rename($plugin, $plugin . '.1');
-            }
-            return self::append($plugin, '[' . $stamp . '] [' . $jobId . '] ' . $message);
-        });
+        // Never throws, like append(). A sibling lock: a lock held on plugin.log
+        // itself is renamed away with it, and a writer waiting on it would then
+        // append to plugin.log.1.
+        try {
+            self::ensureDir(self::logsDir());
+            return Util::withLock($plugin . '.lock', static function () use ($plugin, $stamp, $jobId, $message): bool {
+                clearstatcache(true, $plugin);
+                if ((int) @filesize($plugin) > self::PLUGIN_LOG_MAX_BYTES) {
+                    @rename($plugin, $plugin . '.1');
+                }
+                return self::append($plugin, '[' . $stamp . '] [' . $jobId . '] ' . $message);
+            });
+        } catch (Throwable $e) {
+            return false;
+        }
     }
 
     /**

@@ -1046,6 +1046,45 @@ final class LoggerTest extends TestCase
         $this->assertSame(1, substr_count($body, Logger::TRUNCATE_MARKER_PREFIX));
     }
 
+    public function testEventAndAppendReturnFalseWhenThePluginLogLockIsUnusable(): void
+    {
+        Logger::event('', 'j-a', 'creates the dir');
+        $lock = Logger::pluginLogPath() . '.lock';
+        @unlink($lock);
+        mkdir($lock);
+        try {
+            $this->assertFalse(Logger::event('', 'j-a', 'no lock'));
+        } finally {
+            rmdir($lock);
+        }
+        Logger::$logsDirOverride = '/dev/null/not-a-dir';
+        $this->assertFalse(Logger::append(Logger::pluginLogPath(), 'no dir'));
+    }
+
+    public function testEnforceRunLogCapReportsWhetherTheTrimFailed(): void
+    {
+        Logger::$maxRunLogBytesOverride = 1024;
+        $path = Logger::openRun('j-trimfail', 1750000000);
+        Logger::enforceRunLogCap($path, $failed);
+        $this->assertFalse($failed, 'nothing to trim is not a failure');
+
+        file_put_contents($path, str_repeat('x', 3000));
+        $this->assertTrue(Logger::enforceRunLogCap($path, $failed));
+        $this->assertFalse($failed);
+
+        file_put_contents($path, str_repeat('x', 3000), FILE_APPEND);
+        chmod($path, 0400);
+        try {
+            if (is_writable($path)) {
+                $this->markTestSkipped('cannot make a file read-only as the current user');
+            }
+            $this->assertFalse(Logger::enforceRunLogCap($path, $failed));
+            $this->assertTrue($failed);
+        } finally {
+            chmod($path, 0600);
+        }
+    }
+
     public function testTrimWhileAnAppendWriterHoldsTheLogOpen(): void
     {
         Logger::$maxRunLogBytesOverride = 1024;
