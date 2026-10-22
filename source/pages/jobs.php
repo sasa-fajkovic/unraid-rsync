@@ -825,7 +825,7 @@ ur_emit_status_poller();
   <input type="hidden" name="configRevision" value="<?=Config::revision($config)?>">
 
   <div id="ur-jobs-container">
-    <?php if (empty($jobs)): ?><div class="ur-empty-state ur-jobs-empty"><?=_('No jobs configured yet')?>.</div><?php endif; ?>
+    <div class="ur-empty-state ur-jobs-empty"><?=_('No jobs configured yet')?>.</div>
     <?php foreach ($jobs as $i => $job) {
         ur_render_job_card($job, (int) $i);
     } ?>

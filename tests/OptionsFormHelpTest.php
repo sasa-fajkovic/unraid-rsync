@@ -2409,6 +2409,17 @@ final class OptionsFormHelpTest extends TestCase
         );
     }
 
+    /** Removing the last saved card client-side must leave the empty state for the CSS to reveal. */
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testSavedJobsStillRenderTheEmptyStateForTheRemovePath(): void
+    {
+        $page = $this->jobsPage();
+        $this->assertNotNull($page->querySelector('#ur-jobs-container > .ur-job-card[data-jobid="j-mirror"]'));
+        $empty = $page->querySelector('#ur-jobs-container > .ur-empty-state.ur-jobs-empty');
+        $this->assertSame('No jobs configured yet.', trim((string) $empty?->textContent));
+    }
+
     #[RunInSeparateProcess]
     #[PreserveGlobalState(false)]
     public function testAnEditedCardBlocksRunUntilApplyAndActionButtonsDoNotEnableApply(): void
