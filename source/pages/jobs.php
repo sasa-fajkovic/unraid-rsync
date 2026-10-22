@@ -283,7 +283,7 @@ function ur_render_job_card($job, $index): void
     echo '<div class="ur-global-preview" id="' . ur_h($idb . '_globalpreview') . '"' . ($useGlobal ? '' : ' hidden') . '>'
         . ur_h(ur_t_text('Runs with')) . ': <code class="ur-global-line"' . $gAttrs . '>'
         . ur_h($gLine !== '' ? $gLine : $none) . '</code> '
-        . '<a href="#ur-settings-form" class="ur-goto">' . ur_h(ur_t_text('Edit on the Global Settings tab')) . '</a></div>';
+        . '<a href="#ur-settings-form" class="ur-goto localURL">' . ur_h(ur_t_text('Edit on the Global Settings tab')) . '</a></div>';
     echo '</dd>';
 
     // log level
@@ -473,7 +473,7 @@ function ur_render_pair_row(string $prefix, $k, array $pair, bool $snapOn): void
         . ($snapOn ? ' required' : ' disabled style="display:none"') . '>';
     echo '<label class="ur-snap-only"' . ur_snap_style($snapOn) . '> <input type="checkbox" class="ur-snap-field" name="' . ur_h($base . '[seed]') . '" value="1"'
         . (!empty($pair['seed']) ? ' checked' : '') . ur_snap_disabled($snapOn) . '> ' . ur_h(ur_t_text('seed')) . '</label>';
-    echo ' <button type="button" class="ur-pair-del" data-ur-edit aria-label="' . ur_h(ur_t_text('Remove pair')) . '" title="' . ur_h(ur_t_text('Remove pair')) . '">&minus;</button>';
+    echo ' <button type="button" class="ur-pair-del ur-btn ur-btn-plain" data-ur-edit aria-label="' . ur_h(ur_t_text('Remove pair')) . '" title="' . ur_h(ur_t_text('Remove pair')) . '">&minus;</button>';
     echo '</div>';
 }
 
@@ -542,6 +542,20 @@ function ur_snap_disabled(bool $snapOn): string
 .ur-log-modal-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
 .ur-log-modal-head .ur-log-title { font-weight: bold; flex: 0 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ur-log-modal-head select { flex: 1 1 auto; min-width: 0; }
+/* Narrow: the title takes its own line rather than clipping the job name. */
+@media (max-width: 700px) {
+  .ur-log-modal-head { flex-wrap: wrap; }
+  .ur-log-modal-head .ur-log-title { white-space: normal; flex: 1 1 100%; }
+}
+/* Unraid's global button rules (86px min-width, margins, orange border) would
+   make the "−" an empty orange box: same out-ranking reset as History's buttons. */
+.ur-pair-row button.ur-pair-del {
+  display: inline-block; box-sizing: border-box; height: auto; min-width: 0; margin: 0; padding: 0 9px;
+  font-size: 16px; font-weight: bold; line-height: 1.5; letter-spacing: normal; text-transform: none;
+  border: 1px solid rgba(127,127,127,0.4); border-radius: 4px; background: rgba(127,127,127,0.15); color: inherit;
+  vertical-align: middle; cursor: pointer;
+}
+.ur-pair-row button.ur-pair-del:hover { background: rgba(127,127,127,0.28); border-color: rgba(127,127,127,0.6); color: inherit; }
 .ur-log-pre {
   flex: 1; overflow: auto; margin: 0;
   background: #000; color: #d0d0d0;
@@ -772,7 +786,7 @@ ur_emit_status_poller();
         $runAttr  = $running ? ' disabled' : '';
     ?>
       <tr data-jobid="<?=htmlspecialchars($jid, ENT_QUOTES, 'UTF-8')?>">
-        <td><?php if ($jid !== ''): ?><a href="#<?=ur_h('ur-jobcard-' . $jid)?>" class="ur-goto ur-job-link" aria-controls="<?=ur_h('ur-jobcard-' . $jid)?>" title="<?=ur_h(ur_t_text('Edit this job'))?>"><?=ur_h($jname)?></a><?php else: ?><?=ur_h($jname)?><?php endif; ?></td>
+        <td><?php if ($jid !== ''): ?><a href="#<?=ur_h('ur-jobcard-' . $jid)?>" class="ur-goto ur-job-link localURL" aria-controls="<?=ur_h('ur-jobcard-' . $jid)?>" title="<?=ur_h(ur_t_text('Edit this job'))?>"><?=ur_h($jname)?></a><?php else: ?><?=ur_h($jname)?><?php endif; ?></td>
         <td class="ur-row-actions">
           <span class="ur-badge ur-state-badge <?=htmlspecialchars(ur_state_badge_class($state), ENT_QUOTES, 'UTF-8')?>"
                 data-jobid="<?=htmlspecialchars($jid, ENT_QUOTES, 'UTF-8')?>"><?=htmlspecialchars(ur_state_label($state), ENT_QUOTES, 'UTF-8')?></span>
@@ -800,7 +814,7 @@ ur_emit_status_poller();
 <div id="ur-log-modal" class="ur-log-modal" aria-hidden="true">
   <div class="ur-log-modal-inner" role="dialog" aria-modal="true" aria-labelledby="ur-log-title">
     <div class="ur-log-modal-head">
-      <span class="ur-log-title" id="ur-log-title"><?=_('Run log')?></span>
+      <span class="ur-log-title" id="ur-log-title" title="<?=ur_h(ur_t_text('Run log'))?>"><?=_('Run log')?></span>
       <label for="ur-log-run-select"><?=_('Run')?>:</label>
       <select id="ur-log-run-select"></select>
       <span id="ur-log-live" class="ur-badge ur-badge-running" style="display:none"><?=_('Live')?></span>
@@ -1515,7 +1529,7 @@ ur_emit_status_poller();
     if (!jobId || !modal) { return; }
     viewer.jobId = jobId;
     viewer.run = '';
-    if (modalTitle) { modalTitle.textContent = 'Run log — ' + jobName; }
+    if (modalTitle) { modalTitle.textContent = modalTitle.title = 'Run log — ' + jobName; }
     if (modalPre) { modalPre.textContent = 'Loading…'; }
     /* Remember what to restore focus to, then move focus into the dialog (the
      * Close button) so keyboard users land inside it. */

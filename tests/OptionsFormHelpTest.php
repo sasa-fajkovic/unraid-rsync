@@ -2222,6 +2222,7 @@ final class OptionsFormHelpTest extends TestCase
         $this->assertNotNull($row);
 
         $link = $row->querySelector('a.ur-goto');
+        $this->assertContains('localURL', explode(' ', (string) $link?->getAttribute('class')), 'else Unraid asks "External Link?"');
         $this->assertSame('#ur-jobcard-j-mirror', $link?->getAttribute('href'));
         $this->assertSame('ur-jobcard-j-mirror', $link?->getAttribute('aria-controls'));
         $this->assertSame('Mirror', trim((string) $link?->textContent));
@@ -2396,6 +2397,7 @@ final class OptionsFormHelpTest extends TestCase
         $this->assertStringContainsString('--delete', (string) $code?->textContent);
         $this->assertSame(PageHelpers::optionsLine($GLOBALS['globalOpts'], 'DAEMON'), $code?->getAttribute('data-line-daemon'));
         $this->assertSame('#ur-settings-form', $box?->querySelector('a.ur-goto')?->getAttribute('href'));
+        $this->assertContains('localURL', explode(' ', (string) $box?->querySelector('a.ur-goto')?->getAttribute('class')));
         $this->assertSame('ur_job_0_globalpreview', $on->querySelector('#ur_job_0_useglobal')?->getAttribute('data-global-preview'));
 
         $job['useGlobalDefaults'] = false;
@@ -2536,6 +2538,7 @@ final class OptionsFormHelpTest extends TestCase
         $this->assertStringStartsWith('2026-10-20 ', (string) $row?->querySelector('.ur-ov-last')?->textContent);
         $this->assertSame('manual (on demand)', $row?->querySelector('.ur-ov-next')?->textContent);
         $this->assertSame('#ur-jobcard-j-ov', $row?->querySelector('a.ur-goto')?->getAttribute('href'));
+        $this->assertContains('localURL', explode(' ', (string) $row?->querySelector('a.ur-goto')?->getAttribute('class')));
         $this->assertStringNotContainsString('…', (string) $row?->textContent);
     }
 
@@ -2561,6 +2564,40 @@ final class OptionsFormHelpTest extends TestCase
         }
         $this->assertStringNotContainsString('#1a1a1a', $dash);
         $this->assertStringNotContainsString('#9aa0a6', $css);
+    }
+
+    /** Every in-page anchor the plugin builds carries localURL, the class Unraid's external-link guard skips. */
+    public function testEveryInPageAnchorIsMarkedLocal(): void
+    {
+        foreach (glob(__DIR__ . '/../source/pages/*.php') ?: [] as $file) {
+            $src = (string) file_get_contents($file);
+            preg_match_all('/<a [^>]*href="#[^"]*"[^>]*>/', $src, $m);
+            foreach ($m[0] as $tag) {
+                if (str_contains($tag, 'class="ur-goto')) {
+                    $this->assertStringContainsString('localURL', $tag, basename($file));
+                }
+            }
+        }
+        $this->assertStringContainsString("a.className = 'localURL';", (string) file_get_contents(__DIR__ . '/../source/pages/_options_form.php'), 'the blob download anchor');
+    }
+
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testLogTitleKeepsTheFullNameAndThePairRemoveIsACompactButton(): void
+    {
+        $page = $this->jobsPage();
+        $this->assertSame('Run log', $page->getElementById('ur-log-title')?->getAttribute('title'));
+        $js = (string) file_get_contents(__DIR__ . '/../source/pages/jobs.php');
+        $this->assertStringContainsString("modalTitle.textContent = modalTitle.title = 'Run log — ' + jobName;", $js);
+        $this->assertMatchesRegularExpression('/@media \(max-width: 700px\) \{[^}]*\.ur-log-modal-head \{ flex-wrap: wrap; \}\s*\.ur-log-modal-head \.ur-log-title \{ white-space: normal;/', $js);
+
+        $del = $page->querySelector('.ur-pair-row button.ur-pair-del');
+        $this->assertSame(['ur-pair-del', 'ur-btn', 'ur-btn-plain'], explode(' ', (string) $del?->getAttribute('class')));
+        $this->assertSame('Remove pair', $del?->getAttribute('aria-label'));
+        $this->assertSame(1, preg_match('/\.ur-pair-row button\.ur-pair-del \{([^}]*)\}/', $js, $m));
+        foreach (['min-width: 0', 'height: auto', 'margin: 0', 'font-size: 16px'] as $rule) {
+            $this->assertStringContainsString($rule, $m[1]);
+        }
     }
 
     public function testLogPickerReadsStartToFinishWithTheBadgeLabel(): void
