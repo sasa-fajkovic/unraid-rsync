@@ -36,10 +36,15 @@ on, forked from, or derived from any other plugin.
   controller push the validated path in); empty = tmpfs. Run state + secrets
   ALWAYS stay in tmpfs regardless. `ssh-keygen`/`ssh-keyscan` scratch dirs live
   under `keygen/` in this same 0700 runtime base (`KeyTools` no longer uses bare
-  `/tmp`), and cleanup never follows symlinks. The runtime-dir creators (Ssh,
-  RunState, Logger's tmpfs chain, Notify) also refuse a dir another uid owns or
-  group/others can write (`Util::assertPrivateDir`): under `/tmp` a local user
-  can pre-create it, and root's `chmod 0700` leaves them its owner. A missing
+  `/tmp`), and cleanup never follows symlinks. The base is `Util::runtimeBase()`
+  (`UR_RUNTIME_BASE`, else `/tmp/unraid.rsync`) for every class. The runtime-dir
+  creators (Ssh, RunState, Logger's tmpfs chain, Notify, `KeyTools::tempDir`) all
+  go through `Util::ensurePrivateDir`: one level at a time, never through a
+  symlink, chmod 0700 only on a level it created, then refuse a dir another uid
+  owns or group/others can write (`Util::assertPrivateDir`): under `/tmp` a local
+  user can pre-create it, and root's `chmod 0700` leaves them its owner. An
+  EXISTING runtime dir is never chmodded either, so one root owns with group or
+  world write is refused rather than tightened. A missing
   logDir/secretsDir level is created by `Util::mkdirs`, which refuses a
   symlinked existing ancestor below `/mnt` and chmods only the levels it made:
   an EXISTING logDir or secretsDir is never chmodded (it may be a share). The
@@ -209,7 +214,11 @@ on, forked from, or derived from any other plugin.
   itself (Test connection, the snapshot helper, ssh-keyscan) gets it unbracketed.
 - **Probes are bounded; transfers are not.** The ssh Test connection and
   `rsync --version` run through `ProcIO::capture` (both pipes drained, 64 KiB
-  per stream, TERM then KILL then a non-blocking reap within the deadline). A
+  per stream, TERM then KILL then a non-blocking reap within the deadline). Every
+  kill goes through `ProcIO::terminate` (TERM, the caller's grace, KILL, up to
+  `ProcIO::$killGraceSec`, then `proc_close` only once the child has exited; one
+  that survives SIGKILL is abandoned, never waited for); hooks pass a signaller
+  so their whole process group is killed. A
   DAEMON transfer whose `timeout` option is blank gets
   `--timeout=900` (`Rsync::DAEMON_DEFAULT_TIMEOUT`, emitted by `optionTokens` so
   the preview agrees; `0` still means wait forever), and the daemon marker and
