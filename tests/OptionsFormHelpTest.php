@@ -1804,16 +1804,27 @@ final class OptionsFormHelpTest extends TestCase
             'pairs'     => [['local' => '/mnt/user/x/', 'remote' => '/mnt/disk1/x/']],
         ]);
         Config::save($cfg);
-        History::append('zz-alert-test', ['startedAt' => '2026-10-01T00:00:00Z', 'state' => 'FAILED', 'exitCode' => 11]);
+        History::append('j-zz-alert-test', ['startedAt' => '2026-10-01T00:00:00Z', 'state' => 'FAILED', 'exitCode' => 11, 'jobName' => 'Alert Test']);
+        History::append('j-old-thing', ['startedAt' => '2026-09-01T00:00:00Z', 'state' => 'SUCCESS']);
         try {
             $html = $this->renderPageBody(__DIR__ . '/../source/pages/history.php');
         } finally {
             @unlink(Config::path());
-            @unlink(History::path('zz-alert-test'));
+            @unlink(History::path('j-zz-alert-test'));
+            @unlink(History::path('j-old-thing'));
         }
 
         $this->assertStringContainsString('<option value="j-hist-live">Live Job</option>', $html);
-        $this->assertStringContainsString('<option value="zz-alert-test">zz-alert-test (deleted)</option>', $html);
+        // A deleted job reads as its rows do: the stored name, else the id without "j-".
+        $this->assertStringContainsString('<option value="j-zz-alert-test">Alert Test (deleted)</option>', $html);
+        $this->assertStringContainsString('<option value="j-old-thing">old-thing (deleted)</option>', $html);
+        // View (a <button>) and Download (an <a>) must out-rank Unraid's global
+        // button rules to render as one compact pair; names stay whole.
+        $this->assertStringContainsString('.ur-hist-table button.ur-btn,', $html);
+        $this->assertMatchesRegularExpression('/\.ur-hist-table a\.ur-btn \{[^}]*margin: 0;[^}]*padding: 2px 8px;/', $html);
+        $this->assertStringContainsString('.ur-hist-table button.ur-btn:focus-visible', $html);
+        $this->assertMatchesRegularExpression('/\.ur-hist-table td\.ur-hist-name \{[^}]*white-space: nowrap;[^}]*min-width: 9em;/', $html);
+        $this->assertDoesNotMatchRegularExpression('/td\.ur-hist-name \{[^}]*word-break/', $html);
         $this->assertStringContainsString('<option value="problems">Problems only</option>', $html);
         $this->assertStringContainsString('<option value="1">Dry run</option>', $html);
         $this->assertStringContainsString("'&state=' + encodeURIComponent(stateSel.value) + '&dryRun=' + encodeURIComponent(typeSel.value)", $html);
@@ -2109,6 +2120,17 @@ final class OptionsFormHelpTest extends TestCase
         $html = $this->renderPageBody(__DIR__ . '/../source/pages/jobs.php');
         $this->assertStringContainsString("querySelector('table.ur-job-list tr[data-jobid=\"'", $html);
         $this->assertStringNotContainsString("querySelector('tr[data-jobid=\"'", $html);
+    }
+
+    /** A mouse click leaves focus on the "?", so plain :focus kept a closed help icon showing. */
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testHelpIconRevealsOnFocusVisibleNotOnMouseFocus(): void
+    {
+        $css = $this->emitted('ur_emit_option_help_assets');
+        $this->assertSame(1, preg_match('/([^{}]*)\{\s*opacity:\s*1;\s*\}/', $css, $m), 'the reveal rule');
+        $this->assertStringContainsString('.ur-help:focus-visible', $m[1]);
+        $this->assertDoesNotMatchRegularExpression('/\.ur-help:focus(?!-visible)/', $css);
     }
 
     private function emitted(string $fn): string
