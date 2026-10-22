@@ -181,8 +181,9 @@ A security and data-integrity audit (113 findings) fixed across PRs #189–#207.
   write, and one directory under two names (`/mnt/user/…` vs `/mnt/cache/…`)
   never loses its only copy.
 - Every teardown step of a run (post-run hook, prune, host-key pin, secret
-  cleanup, summary, History) runs even when an earlier one fails; a run whose
-  summary or History could not be written ends FAILED (`teardown-failed`).
+  cleanup, summary, History) runs even when an earlier one fails; an otherwise
+  successful run whose summary or History could not be written ends FAILED
+  (`teardown-failed`).
 - Only a user's Abort of this very run counts as ABORTED: an Abort clicked
   before the run started is honoured, an Abort during the pre-run hook is
   ABORTED, and a shutdown signal or rsync exit 20 without one is FAILED
