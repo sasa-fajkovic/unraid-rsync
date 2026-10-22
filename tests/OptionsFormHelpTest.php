@@ -1805,16 +1805,6 @@ final class OptionsFormHelpTest extends TestCase
 
     #[RunInSeparateProcess]
     #[PreserveGlobalState(false)]
-    public function testJobsRowLookupIsScopedToTheJobsTable(): void
-    {
-        // All tabs share one document and Overview's rows carry the same
-        // data-jobid, so an unscoped lookup finds the Overview row and the Jobs
-        // cells never update (seen live on 7.3.2).
-        $html = $this->renderPageBody(__DIR__ . '/../source/pages/jobs.php');
-        $this->assertStringContainsString("querySelector('table.ur-job-list tr[data-jobid=\"'", $html);
-        $this->assertStringNotContainsString("querySelector('tr[data-jobid=\"'", $html);
-    }
-
     public function testJsNextRunLabelKeepsTheClauseOrder(): void
     {
         $js = $this->emitted('ur_emit_page_assets');
@@ -1948,6 +1938,16 @@ final class OptionsFormHelpTest extends TestCase
                 basename($file) . ' escapes _()/ur_t() output, which is already HTML; use ur_t_text()'
             );
         }
+    }
+
+    public function testJobsRowLookupIsScopedToTheJobsTable(): void
+    {
+        // All tabs share one document and Overview's rows carry the same
+        // data-jobid, so an unscoped lookup finds the Overview row and the Jobs
+        // cells never update (seen live on 7.3.2).
+        $html = $this->renderPageBody(__DIR__ . '/../source/pages/jobs.php');
+        $this->assertStringContainsString("querySelector('table.ur-job-list tr[data-jobid=\"'", $html);
+        $this->assertStringNotContainsString("querySelector('tr[data-jobid=\"'", $html);
     }
 
     private function emitted(string $fn): string
