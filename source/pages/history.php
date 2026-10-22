@@ -61,7 +61,7 @@ ur_emit_status_poller(); /* window.urStatus + window.urUtil + UR_TZ */
 .ur-hist-controls select { width: auto; max-width: 260px; }
 .ur-hist-scroll { overflow-x: auto; }
 .ur-hist-table { width: 100%; border-collapse: collapse; margin-top: 6px; }
-.ur-hist-table th, .ur-hist-table td { padding: 4px 8px; text-align: left; border-bottom: 1px solid var(--border-color, #444); white-space: nowrap; }
+.ur-hist-table th, .ur-hist-table td { padding: 3px 8px; line-height: 1.4; text-align: left; border-bottom: 1px solid var(--border-color, #444); white-space: nowrap; }
 /* Names stay whole; a narrow screen scrolls the table inside .ur-hist-scroll. */
 .ur-hist-table td.ur-hist-name { white-space: nowrap; min-width: 9em; }
 /* View is a <button>, Download an <a>: Unraid's global button rules (min-width,
@@ -194,6 +194,7 @@ ur_emit_status_poller(); /* window.urStatus + window.urUtil + UR_TZ */
       </span>
     </div>
     <div id="ur-hist-trunc" class="ur-notice" hidden><?=_('This shows the most recent part of a long log (the tail). Use Download full log for the complete file; Copy copies what is shown')?>.</div>
+    <div id="ur-hist-progress" class="ur-notice" hidden><?=_('Overall progress (--info=progress2) can read 0% for most of a run: rsync keeps growing the total while it scans, so only the final line is reliable')?>.</div>
     <pre id="ur-hist-log-pre" class="ur-hist-log-pre"></pre>
   </div>
 </div>
@@ -224,6 +225,7 @@ ur_emit_ajax_helpers();  /* window.urAjax.show, for the inline download error */
   var modalTit = document.getElementById('ur-hist-modal-title');
   var modalDl  = document.getElementById('ur-hist-log-download');
   var truncEl  = document.getElementById('ur-hist-trunc');
+  var progEl   = document.getElementById('ur-hist-progress');
   var dlResult = document.getElementById('ur-hist-dl-result');
 
   var offset = 0;
@@ -445,8 +447,10 @@ ur_emit_ajax_helpers();  /* window.urAjax.show, for the inline download error */
           modalPre.innerHTML = body.log;
           modalPre.scrollTop = modalPre.scrollHeight;
           truncEl.hidden = !body.truncated;
+          progEl.hidden = !/to-chk=\d+\/\d+/.test(body.log);
         } else {
           /* The record persists across reboots but its tmpfs log does not. */
+          progEl.hidden = true;
           modalPre.textContent = urI18n('hist.logGone', 'Log not retained (run logs live in RAM and are cleared on reboot).');
         }
       })

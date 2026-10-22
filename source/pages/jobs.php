@@ -1,3 +1,5 @@
+          var progEl = document.getElementById('ur-log-progress');
+          if (progEl) { progEl.hidden = !/to-chk=\d+\/\d+/.test(body.log || ''); }
 <?php
 /**
  * jobs.php - the Jobs tab body.
@@ -820,6 +822,7 @@ ur_emit_status_poller();
       <span id="ur-log-live" class="ur-badge ur-badge-running" style="display:none"><?=_('Live')?></span>
       <button type="button" id="ur-log-close"><?=_('Close')?></button>
     </div>
+    <div id="ur-log-progress" class="ur-notice" hidden><?=_('Overall progress (--info=progress2) can read 0% for most of a run: rsync keeps growing the total while it scans, so only the final line is reliable')?>.</div>
     <pre id="ur-log-pre" class="ur-log-pre"></pre>
   </div>
 </div>
