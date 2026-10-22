@@ -2727,7 +2727,7 @@ final class OptionsFormHelpTest extends TestCase
         $page = $this->jobsPage();
         $this->assertSame('Run log', $page->getElementById('ur-log-title')?->getAttribute('title'));
         $js = (string) file_get_contents(__DIR__ . '/../source/pages/jobs.php');
-        $this->assertStringContainsString("modalTitle.textContent = modalTitle.title = 'Run log — ' + jobName;", $js);
+        $this->assertStringContainsString("modalTitle.textContent = modalTitle.title = urI18n('jobs.logTitle', 'Run log — %s', jobName);", $js);
         $this->assertMatchesRegularExpression('/@media \(max-width: 700px\) \{[^}]*\.ur-log-modal-head \{ flex-wrap: wrap; \}\s*\.ur-log-modal-head \.ur-log-title \{ white-space: normal;/', $js);
 
         $del = $page->querySelector('.ur-pair-row button.ur-pair-del');
