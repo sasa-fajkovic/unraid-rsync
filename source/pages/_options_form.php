@@ -1406,6 +1406,7 @@ if (!function_exists('ur_emit_badge_assets')) {
 <style>
 /* State badges. Colors read correctly under any webGui theme (fixed values with
    a dynamix palette var where one exists). */
+.ur-badge[hidden] { display: none; }
 .ur-badge {
   display: inline-block;
   min-width: 64px;
