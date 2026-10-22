@@ -341,17 +341,18 @@ class RunState
      * rsync) and the recorded hook's session, each only while a member holds
      * this job's run lock open - a dead leader's pid can be reused by an
      * unrelated group - and SIGKILLed if it still holds it after
-     * $abortKillGraceSec. A pid reused by another process is never signalled.
+     * $abortKillGraceSec. A pid reused by another process is never signalled,
+     * but the hook it left is still checked.
      */
     public static function signalRun(string $jobId, int $sig): bool
     {
         $state = self::read($jobId);
         $pid   = (int) ($state['pid'] ?? 0);
         if ($pid > 0 && static::pidAlive($pid)) {
-            if (!self::cmdlineMatchesJob(static::pidCmdline($pid), $jobId)) {
-                return false;
+            if (self::cmdlineMatchesJob(static::pidCmdline($pid), $jobId)) {
+                return self::kill(-$pid, $sig) || self::kill($pid, $sig);
             }
-            return self::kill(-$pid, $sig) || self::kill($pid, $sig);
+            $pid = 0; // reused by another process: neither it nor its group is ours
         }
         $signalled = false;
         foreach (array_unique([$pid, (int) ($state['hookPgid'] ?? 0)]) as $pgid) {

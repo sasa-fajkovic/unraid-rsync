@@ -320,8 +320,7 @@ final class RunStateTest extends TestCase
             $sent[] = [$pid, $sig];
             return true;
         };
-        RunState::$groupHoldsLock = static fn(int $pgid, string $lock): bool => $pgid === 777
-            && !in_array([-777, 9], $sent, true);
+        RunState::$groupHoldsLock = static fn(int $pgid, string $lock): bool => $pgid === 777;
         RunState::$abortKillGraceSec = 0.2;
         FakeRunState::write('j-music', ['pid' => 999, 'running' => true]);
         FakeRunState::setHookPgid('j-music', 777);
@@ -353,6 +352,25 @@ final class RunStateTest extends TestCase
             proc_terminate($proc, 9);
             proc_close($proc);
         }
+    }
+
+    /** The runner died during a hook and its pid was reused: the hook is still ours to stop. */
+    public function testSignalRunStopsTheOrphanedHookWhenTheRunnersPidWasReused(): void
+    {
+        $sent = [];
+        RunState::$kill = static function (int $pid, int $sig) use (&$sent): bool {
+            $sent[] = [$pid, $sig];
+            return true;
+        };
+        RunState::$groupHoldsLock = static function (int $pgid, string $lock) use (&$sent): bool {
+            return $sent === [];
+        };
+        FakeRunState::write('j-music', ['pid' => 999, 'running' => true]);
+        FakeRunState::setHookPgid('j-music', 777);
+        FakeRunState::$alive = true;
+        FakeRunState::$cmdline = 'sleep 100000';
+        $this->assertTrue(FakeRunState::signalRun('j-music', 15));
+        $this->assertSame([[-777, 15]], $sent, 'the reused pid and its group are never signalled');
     }
 
     public function testSignalRunLeavesTheHookToALiveRunner(): void
