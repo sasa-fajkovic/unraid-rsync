@@ -341,6 +341,7 @@ function ur_render_job_card($job, $index): void
         . ur_h(ur_t('The transfer\'s SSH login must be able to read the root as root: either log in as root, or point Remote rsync path at a wrapper on the receiver that runs rsync through sudo, and turn on "Use sudo on the receiver" on the connection.'))
         . '</p><p>'
         . ur_h(ur_t('Pruning starts as a dry run: it logs which snapshots it would delete and deletes none until you turn "Prune dry run" off. Unfinished copies left by failed runs are still cleaned up.'))
+        . '</p><p><a href="' . ur_h('https://github.com/sasa-fajkovic/unraid-rsync/blob/main/docs/snapshot-mode.md') . '" target="_blank" rel="noopener noreferrer">' . ur_h(ur_t('Full guide')) . '</a>'
         . '</p></blockquote></div>';
     echo '</dd>';
 

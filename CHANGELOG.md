@@ -128,6 +128,13 @@ user-facing highlights.
   snapshot job as a mirror. The README covers setup, restores, migrating an
   existing mirror and rolling back.
 
+### Documentation
+- **Snapshot mode user guide** in [docs/snapshot-mode.md](docs/snapshot-mode.md):
+  setup, how a run works, retention with a worked example, safety nets, alert
+  reasons, hooks, restoring, migrating and troubleshooting. The README keeps a
+  short overview, the Jobs form links the guide, and the Community Applications
+  text now lists the rsync daemon transport and snapshot mode.
+
 ### Fixed
 - **Snapshot mode: an unfinished snapshot older than the last commit is now
   removed** by the next real run instead of being kept forever as a link-dest.
