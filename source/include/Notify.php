@@ -181,7 +181,7 @@ class Notify
                 if ((int) floor($now) === $last) {
                     self::pause($last + 1 - $now);
                 }
-                $code = static::dispatch($command);
+                $code = self::dispatch($command);
                 // The second dispatch ENDED in: notify's own stamp is never later.
                 @file_put_contents(self::runtimeDir() . '/notify.last', (string) (int) floor(self::now()));
             } finally {

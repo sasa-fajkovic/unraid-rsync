@@ -819,15 +819,13 @@ class Rsync
         $status = @proc_get_status($proc);
         $code   = proc_close($proc);
 
-        if (is_array($status)) {
-            if (!empty($status['signaled']) && isset($status['termsig'])) {
-                return 128 + (int) $status['termsig'];
-            }
-            // While `running` is false the reported exitcode is authoritative;
-            // proc_close may already have returned -1 by the time we get here.
-            if (array_key_exists('exitcode', $status) && (int) $status['exitcode'] >= 0) {
-                return (int) $status['exitcode'];
-            }
+        if ($status['signaled']) {
+            return 128 + $status['termsig'];
+        }
+        // While `running` is false the reported exitcode is authoritative;
+        // proc_close may already have returned -1 by the time we get here.
+        if ($status['exitcode'] >= 0) {
+            return $status['exitcode'];
         }
 
         // Fallback to proc_close's value; a negative (already-reaped) result has

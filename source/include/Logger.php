@@ -992,7 +992,7 @@ class Logger
         $summary = null;
         if ($summaryReader !== null) {
             $summary = $summaryReader($jobId);
-        } elseif (class_exists('Runner') && method_exists('Runner', 'readSummary')) {
+        } elseif (class_exists('Runner')) {
             $summary = Runner::readSummary($jobId);
         }
         $summaryStartTs = null;

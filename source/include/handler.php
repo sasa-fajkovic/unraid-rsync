@@ -1706,7 +1706,7 @@ function ur_runner_script_path(): string
  */
 function ur_php_binary(): string
 {
-    if (PHP_SAPI === 'cli' && defined('PHP_BINARY') && PHP_BINARY !== '' && is_executable(PHP_BINARY)) {
+    if (PHP_SAPI === 'cli' && defined('PHP_BINARY') && is_executable(PHP_BINARY)) {
         return PHP_BINARY;
     }
     foreach (['/usr/bin/php', '/usr/local/bin/php', '/bin/php'] as $cand) {
@@ -2588,7 +2588,6 @@ function ur_dispatch(): void
                 case 'dryRunJob':         ur_action_run_job(true);         return;
                 case 'abortJob':          ur_action_abort_job();           return;
             }
-            return;
 
             // Read-only GET pollers (no CSRF; side-effect-free reads). They must be
             // GET so a poll never mutates state; reject a POST to one so the contract
@@ -2613,7 +2612,6 @@ function ur_dispatch(): void
                 case 'getPluginLog':    ur_action_get_plugin_log();   return;
                 case 'getRsyncStatus':  ur_action_get_rsync_status(); return;
             }
-            return;
 
         default:
             sendError('Unknown action.', 400);
@@ -2644,9 +2642,7 @@ function ur_fatal_shutdown_handler(): void
         // nothing - the client's bad-JSON path will surface an error with status.
         return;
     }
-    if (!headers_sent()) {
-        header('Content-Type: application/json');
-    }
+    header('Content-Type: application/json');
     http_response_code(500);
     echo json_encode(
         ['error' => 'The request failed with an internal error.'],

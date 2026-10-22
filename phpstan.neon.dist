@@ -7,7 +7,7 @@
 #
 # treatPhpDocTypesAsCertain is OFF: this code DELIBERATELY re-validates values
 # whose PHPDoc type is not guaranteed at runtime (JSON-decoded config.json /
-# credentials.json, proc_get_status() arrays, etc.). Trusting the PHPDoc would
+# credentials.json, etc.). Trusting the PHPDoc would
 # flag those defensive checks as "always true" and pressure us to delete the
 # very guards that make the plugin robust against malformed on-disk state.
 #
