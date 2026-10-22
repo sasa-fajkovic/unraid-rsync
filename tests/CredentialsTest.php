@@ -414,7 +414,7 @@ final class CredentialsTest extends TestCase
 
     public function testIsSafeSshHostAcceptsHostNamesIpv4AndBracketedIpv6(): void
     {
-        foreach (['100.102.1.36', 'nas.local', 'my-nas.sub.example.net', 'NAS', 'host_1', 'nas.', '[2001:db8::1]', '[fe80::1]', '[::1]'] as $h) {
+        foreach (['100.102.1.36', 'nas.local', 'my-nas.sub.example.net', 'NAS', 'host_1', 'nas.', '[2001:db8::1]', '[fe80::1]', '[::1]', '[fe80::1%eth0]'] as $h) {
             $this->assertTrue(Credentials::isSafeSshHost($h), "'$h' must be accepted");
         }
     }
@@ -426,8 +426,8 @@ final class CredentialsTest extends TestCase
     public function testIsSafeSshHostRejectsShapesThatReSplitTheOperand(): void
     {
         foreach (['fe80::1', 'nas:2222', 'a:b', 'nas/evil', '/nas', 'user@nas', '-oProxyCommand=x', '.nas',
-            '[nas]', '[2001:db8::1', '2001:db8::1]', '[2001:db8::1]:22', 'a b', "a
-b", 'h;id', 'h$(id)', '', '   '] as $h) {
+            '[nas]', '[2001:db8::1', '2001:db8::1]', '[2001:db8::1]:22', 'a b', "a\nb", 'h;id', 'h$(id)', '', '   ',
+            'fe80::1%eth0', '[fe80::1%]', '[fe80::1%eth0;id]', '[fe80::1%eth0/x]', '[10.0.0.5%eth0]'] as $h) {
             $this->assertFalse(Credentials::isSafeSshHost($h), "'$h' must be rejected");
         }
     }
@@ -452,6 +452,18 @@ b", 'h;id', 'h$(id)', '', '   '] as $h) {
         $this->assertSame('[2001:db8::1]', Credentials::mergeConnection(['host' => '[2001:db8::1]'])['host']);
         $this->assertSame('100.102.1.36', Credentials::mergeConnection(['host' => '100.102.1.36'])['host']);
         $this->assertSame('nas.local', Credentials::mergeConnection(['host' => 'nas.local'])['host']);
+        $this->assertSame('[fe80::1%eth0]', Credentials::mergeConnection(['host' => 'fe80::1%eth0'])['host']);
+        $this->assertSame('[fe80::1%eth0]', Credentials::mergeConnection(['host' => '[fe80::1%eth0]'])['host']);
+    }
+
+    /** A scoped link-local host was valid before the operand rules and must stay so. */
+    public function testValidateConnectionAcceptsAScopedIpv6Host(): void
+    {
+        $conn = Credentials::mergeConnection([
+            'id' => 'c', 'name' => 'n', 'host' => 'fe80::1%eth0', 'username' => 'sasa',
+            'authMethod' => 'KEYFILE', 'keyFilePath' => '/root/.ssh/id_ed25519',
+        ]);
+        $this->assertSame(['valid' => true, 'errors' => []], Credentials::validateConnection($conn, Credentials::defaults()));
     }
 
     public function testValidateConnectionAcceptsAnIpv6HostAndRejectsAColonInTheUsername(): void

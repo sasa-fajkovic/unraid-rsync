@@ -570,7 +570,7 @@ class Credentials
         $out['host']     = isset($conn['host'])     ? trim((string) $conn['host'])     : $defaults['host'];
         // rsync splits "user@host:path" at the first ':', so a bare IPv6 literal
         // retargets the transfer; the bracketed form is the one it parses.
-        if (filter_var($out['host'], FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) !== false) {
+        if (Util::isIpv6Address($out['host'])) {
             $out['host'] = '[' . $out['host'] . ']';
         }
         $out['username'] = isset($conn['username']) ? trim((string) $conn['username']) : $defaults['username'];
@@ -908,7 +908,7 @@ class Credentials
 
     /**
      * True when $value is safe as the host of an SSH "user@host:path" operand: a
-     * host name / IPv4 address, or a BRACKETED IPv6 literal. rsync splits the
+     * host name / IPv4 address, or a BRACKETED IPv6 literal (a %scope included). rsync splits the
      * operand at the first ':' (outside brackets), so a ':' turns the rest into
      * the path - "fe80::1:/x" connects to host "fe80" - and a '/' makes the whole
      * operand a LOCAL path. PURE.
@@ -917,7 +917,7 @@ class Credentials
     {
         $value = trim($value);
         if (preg_match('/^\[([^\]]+)\]$/D', $value, $m)) {
-            return filter_var($m[1], FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) !== false;
+            return Util::isIpv6Address($m[1]);
         }
         return (bool) preg_match('/^[A-Za-z0-9_][A-Za-z0-9_.-]*$/D', $value);
     }
@@ -955,7 +955,7 @@ class Credentials
     /** True when $host is an IPv6 literal, bracketed or bare. PURE. */
     private static function isIpv6Literal(string $host): bool
     {
-        return filter_var(trim(strtolower(trim($host)), '[]'), FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) !== false;
+        return Util::isIpv6Address(trim(strtolower(trim($host)), '[]'));
     }
 
     /**

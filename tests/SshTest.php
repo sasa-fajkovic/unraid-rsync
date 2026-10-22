@@ -789,6 +789,22 @@ final class SshTest extends TestCase
         $this->assertContains('sasa@2001:db8::1', (array) FakeSsh::$lastProbeArgv);
     }
 
+    public function testAScopedIpv6HostMaterializesAndReachesSshUnbracketedWithItsScope(): void
+    {
+        $creds = Credentials::defaults();
+        // Raw, as stored before the operand rules (bare, not bracketed).
+        $creds['connections'][] = ['id' => 'c-pw', 'name' => 'p', 'host' => 'fe80::1%eth0', 'username' => 'sasa',
+            'authMethod' => 'PASSWORD', 'password' => Credentials::obfuscate('pw')];
+
+        $mat = FakeSsh::materialize($creds, 'c-pw');
+        $this->assertTrue($mat['ok'], (string) ($mat['error'] ?? ''));
+        $this->assertSame('[fe80::1%eth0]', $mat['conn']['host']);
+        FakeSsh::cleanupRuntime((string) $mat['token']);
+
+        FakeSsh::testConnection($creds, 'c-pw');
+        $this->assertContains('sasa@fe80::1%eth0', (array) FakeSsh::$lastProbeArgv);
+    }
+
     public function testTestConnectionProbeDeadlineFollowsTheConnectTimeout(): void
     {
         $creds = Credentials::defaults();

@@ -202,7 +202,8 @@ on, forked from, or derived from any other plugin.
   accept-new would otherwise accept ANY key on every run.
 - **SSH host and username are re-split by rsync**: `user@host:path` breaks at
   the first `:` and a `/` makes the operand local. `Credentials::isSafeSshHost`
-  (host name / IPv4, or a BRACKETED IPv6 literal) and `isSafeSshUser`
+  (host name / IPv4, or a BRACKETED IPv6 literal, `%scope` allowed - see
+  `Util::isIpv6Address`, since FILTER_VALIDATE_IP refuses `fe80::1%eth0`) and `isSafeSshUser`
   (POSIX-style) run at save AND in `Ssh::materialize` (credentials.json is
   hand-editable). `mergeConnection` stores a bare IPv6 host bracketed; ssh
   itself (Test connection, the snapshot helper, ssh-keyscan) gets it unbracketed.

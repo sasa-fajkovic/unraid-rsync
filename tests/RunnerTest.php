@@ -1106,6 +1106,13 @@ final class RunnerTest extends TestCase
         $this->assertSame('root@[2001:db8::1]:/data/dst/', end($argv));
     }
 
+    public function testAScopedIpv6HostReachesRsyncBracketedWithItsScope(): void
+    {
+        [$res, $argv] = $this->runSshJob('j-v6scope', ['host' => 'fe80::1%eth0'], static fn(): int => 0);
+        $this->assertSame(Rsync::STATE_SUCCESS, $res['state']);
+        $this->assertSame('root@[fe80::1%eth0]:/data/dst/', end($argv));
+    }
+
     /**
      * A run that started before the connection was pointed at another machine
      * must not pin the OLD machine's key (the one it harvested) onto the new one.

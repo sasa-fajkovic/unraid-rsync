@@ -1779,7 +1779,7 @@ function ur_action_discover_host_key(): void
 {
     $host    = isset($_POST['host']) ? trim((string) $_POST['host']) : '';
     // A saved IPv6 host is bracketed for rsync; ssh-keyscan wants the literal.
-    if (preg_match('/^\[([^\]]+)\]$/D', $host, $m) && filter_var($m[1], FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) !== false) {
+    if (preg_match('/^\[([^\]]+)\]$/D', $host, $m) && Util::isIpv6Address($m[1])) {
         $host = $m[1];
     }
     $port    = isset($_POST['port']) ? (int) $_POST['port'] : 22;

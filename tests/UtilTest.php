@@ -104,6 +104,16 @@ final class UtilTest extends TestCase
         }
     }
 
+    public function testIsIpv6AddressAcceptsAZoneIdThatFilterVarRefuses(): void
+    {
+        foreach (['2001:db8::1', '::1', 'fe80::1%eth0', 'fe80::1%br0.10', 'fe80::1%2'] as $a) {
+            $this->assertTrue(Util::isIpv6Address($a), $a);
+        }
+        foreach (['10.0.0.5', '10.0.0.5%eth0', 'fe80::1%', 'fe80::1%eth0;id', 'fe80::1%eth0@if5', '[fe80::1]', 'nas', ''] as $a) {
+            $this->assertFalse(Util::isIpv6Address($a), $a);
+        }
+    }
+
     public function testMkdirsCreatesTheMissingLevelsAndChmodsOnlyThose(): void
     {
         chmod($this->dir, 0755);

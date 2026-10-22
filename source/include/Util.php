@@ -48,6 +48,16 @@ final class Util
     }
 
     /**
+     * True when $s is a bare IPv6 address, optionally with a %scope zone id
+     * (fe80::1%eth0) - which FILTER_VALIDATE_IP alone refuses. PURE.
+     */
+    public static function isIpv6Address(string $s): bool
+    {
+        $addr = preg_match('/^([^%]+)%[A-Za-z0-9_.-]+$/D', $s, $m) ? $m[1] : $s;
+        return filter_var($addr, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) !== false;
+    }
+
+    /**
      * True when $path, or the first existing ancestor of it, lives on the same
      * device as "/" or "/mnt". Both are RAM on Unraid (/mnt may be its own
      * tmpfs), so a local path there means the drive meant to hold it is not

@@ -789,6 +789,8 @@ final class SnapshotTest extends TestCase
         };
         Snapshot::runRemote(self::pieces(), 'root@[2001:db8::1]', 'probe', [], false, 120);
         $this->assertContains('root@2001:db8::1', $seen);
+        Snapshot::runRemote(self::pieces(), 'root@[fe80::1%eth0]', 'probe', [], false, 120);
+        $this->assertContains('root@fe80::1%eth0', $seen);
     }
 
     public function testRunRemoteCapsWhatTheSeamReturns(): void
