@@ -15,8 +15,9 @@ user-facing highlights.
 - **Notifications for runs that never did their job.** A run that could not
   start (configuration unreadable, job not found, lock or run-state error) sends
   an *alert* `<job>: run did not start`. A scheduled run skipped because the
-  previous one is still running sends a *warning*; the same case started by hand
-  stays silent (the UI already says so). A run whose runner died sends an
+  previous one is still running is recorded in History as SKIPPED and sends a
+  *normal* notification (under `always`); the same case started by hand stays
+  silent (the UI already says so). A run whose runner died sends an
   *alert* `<job>: previous run died without finishing` once, noting that the
   post-hook did not run. That includes a run cut off by a reboot or power loss,
   detected from a small in-flight record on `/boot` and reported a few minutes
@@ -134,8 +135,107 @@ user-facing highlights.
   reasons, hooks, restoring, migrating and troubleshooting. The README keeps a
   short overview, the Jobs form links the guide, and the Community Applications
   text now lists the rsync daemon transport and snapshot mode.
+- **Snapshot guide, from migrating eight real jobs:** a migration script for
+  any number of pairs (a WARNING run's stamp is a valid basis; sub names must
+  be plain ASCII), when and how to unpin the migrated snapshot, going back to
+  snapshot mode after a rollback with a script that checks the restored mirror
+  against `latest` before it is removed, and troubleshooting for an orphaned
+  transfer after a killed runner, exit 24 from live databases, longer runs and
+  service downtime, per-snapshot directory cost and rounded `-h` figures.
+- **README** brought in line with the current UI: one Jobs list, Overview,
+  Dashboard tile, History, dry runs that never paint the badge, delete safety,
+  config durability, and the persistent log and secrets directories.
+
+### Audit remediation (#189–#207)
+
+A security and data-integrity audit (113 findings) fixed across PRs #189–#207.
+
+#### Security
+- Changing a Connection's host or port clears its pinned host key, and a run
+  that finishes after such an edit can no longer pin the old host's key. The
+  Connection shows the pin as a fingerprint, with **Clear pin on Apply** and
+  **Replace…**.
+- SSH host and user names are validated at save and again before every run
+  (bracketed and scoped IPv6 literals included).
+- **Test connection** and the rsync version check are bounded in time and
+  output, so a hung or chatty peer can no longer hang a web request.
+- Downloaded run logs are scrubbed of per-run secret paths like the viewer; a
+  crashed run's RAM key, password and known_hosts files are removed when the
+  crash is recorded.
+- **Secrets directory** refuses `/mnt/remotes`, `/mnt/addons`, share or pool
+  roots and directories that are not private; the plugin never chmods a
+  directory it did not create, and refuses a RAM working directory under
+  `/tmp/unraid.rsync` that it does not own or that others can write.
+- rsync daemon transfers get `--timeout=900` when the timeout option is blank.
+- The `.plg` carries a SHA256 next to the MD5.
+
+#### Data safety
+- An empty `config.json` or `credentials.json` (a flash write cut short) is
+  refused instead of loading as a fresh install, which used to delete every
+  schedule. Saves fsync before the rename and keep `<name>.last-good`.
+- Every config and credentials write is locked, and a Jobs or Global Settings
+  save from a page that is out of date is refused (409, *reload and reapply*)
+  instead of undoing another change.
+- Moving the secrets directory is one transaction (copy, checksum, record,
+  switch, remove); an interrupted move is settled on the next credentials
+  write, and one directory under two names (`/mnt/user/…` vs `/mnt/cache/…`)
+  never loses its only copy.
+- Every teardown step of a run (post-run hook, prune, host-key pin, secret
+  cleanup, summary, History) runs even when an earlier one fails; a run whose
+  summary or History could not be written ends FAILED (`teardown-failed`).
+- Only a user's Abort of this very run counts as ABORTED: an Abort clicked
+  before the run started is honoured, an Abort during the pre-run hook is
+  ABORTED, and a shutdown signal or rsync exit 20 without one is FAILED
+  (`terminated`).
+- A new job never reuses the id of a removed job whose summary, History or logs
+  are still on disk.
+
+#### Status & UI
+- **The Jobs tab is one list**: each job's card header is its status row (badge,
+  Last run, Next run, Logs / Run / Dry-run / Abort); click it to edit. Run and
+  Dry-run wait for unsaved edits to be applied.
+- **A dry run never paints the badge.** Badges, Last run and the Dashboard
+  follow the last real run; a newer dry run shows as a second line
+  (`Dry-run OK · <time>`).
+- A crashed run or a scheduled hard failure now replaces a stale SUCCESS on the
+  badge (CRASHED / FAILED), never over a newer run. A scheduled start that finds
+  the job running is recorded as SKIPPED and keeps the last real outcome.
+- **Next run** follows Unraid's cron (dcron 4.5) exactly; a schedule it never
+  fires shows `—`.
+- One shared status poll (every 2 s while a job runs, 15 s otherwise, paused in
+  a hidden tab) drives Overview, Jobs, Status and History; a scheduled run shows
+  up without a click.
+- History: status and type filters, a page box, deleted jobs selectable, the
+  last rsync error and exit-code meaning as tooltips, compact View / Download.
+  Status: plugin log filtered by job, wrap, copy and download. Dashboard: job
+  counts, next run and last-run time per row. Global Settings: storage first,
+  with the current credentials location.
+- Connections as accordion cards, separate Generate / Import key sections, badge
+  colours that pass WCAG AA, and translated labels that survive the first poll
+  (no more `&apos;` in help text).
+
+#### Logging
+- A run log is held to its 16 MiB cap every 2 s while rsync runs, not only
+  afterwards; a pair is stopped only when trimming fails and the log passes 4×
+  the cap (WARNING, `log-cap-exceeded`).
+- A job's logs are capped at 256 MiB in total, and `plugin.log` rotates to
+  `plugin.log.1` past 1 MiB.
+- Two runs of one job in the same second get separate logs (`run-<UTC>-2.log`).
+- History writes are locked and survive a partial last line; a summary or
+  History record that cannot be written is reported once in `plugin.log`.
+- The log viewers explain when rsync's overall progress percentage
+  (`--info=progress2`) is misleading.
 
 ### Fixed
+- **A job whose runner was killed shows Running until its transfer stops.** The
+  rsync it started keeps the run lock and keeps copying; **Abort** now stops it
+  (the run's whole process group is signalled), and the crash is recorded once
+  it exits.
+- Dry-run file listings show UTF-8 file names as they are.
+- Snapshot stats lines (`Pair #N (sub): … regular files, … bytes.`) show
+  rsync's own figures, e.g. `408.63G` with Human-readable on.
+- Save messages no longer end in `.;`.
+- The log viewer picks up a run that started while it was open.
 - **A backup into an unmounted drive no longer lands in RAM.** Right after the
   pre-run hook (which may mount it), every local source and destination must be
   on a mounted drive, not Unraid's RAM root; otherwise the run fails with
