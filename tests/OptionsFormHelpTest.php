@@ -1804,7 +1804,7 @@ final class OptionsFormHelpTest extends TestCase
             'pairs'     => [['local' => '/mnt/user/x/', 'remote' => '/mnt/disk1/x/']],
         ]);
         Config::save($cfg);
-        History::append('j-zz-alert-test', ['startedAt' => '2026-10-01T00:00:00Z', 'state' => 'FAILED', 'exitCode' => 11, 'jobName' => 'zz-alert-test']);
+        History::append('j-zz-alert-test', ['startedAt' => '2026-10-01T00:00:00Z', 'state' => 'FAILED', 'exitCode' => 11, 'jobName' => 'Alert Test']);
         History::append('j-old-thing', ['startedAt' => '2026-09-01T00:00:00Z', 'state' => 'SUCCESS']);
         try {
             $html = $this->renderPageBody(__DIR__ . '/../source/pages/history.php');
@@ -1816,7 +1816,7 @@ final class OptionsFormHelpTest extends TestCase
 
         $this->assertStringContainsString('<option value="j-hist-live">Live Job</option>', $html);
         // A deleted job reads as its rows do: the stored name, else the id without "j-".
-        $this->assertStringContainsString('<option value="j-zz-alert-test">zz-alert-test (deleted)</option>', $html);
+        $this->assertStringContainsString('<option value="j-zz-alert-test">Alert Test (deleted)</option>', $html);
         $this->assertStringContainsString('<option value="j-old-thing">old-thing (deleted)</option>', $html);
         // View (a <button>) and Download (an <a>) must out-rank Unraid's global
         // button rules to render as one compact pair; names stay whole.
@@ -2120,6 +2120,17 @@ final class OptionsFormHelpTest extends TestCase
         $html = $this->renderPageBody(__DIR__ . '/../source/pages/jobs.php');
         $this->assertStringContainsString("querySelector('table.ur-job-list tr[data-jobid=\"'", $html);
         $this->assertStringNotContainsString("querySelector('tr[data-jobid=\"'", $html);
+    }
+
+    /** A mouse click leaves focus on the "?", so plain :focus kept a closed help icon showing. */
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testHelpIconRevealsOnFocusVisibleNotOnMouseFocus(): void
+    {
+        $css = $this->emitted('ur_emit_option_help_assets');
+        $this->assertSame(1, preg_match('/([^{}]*)\{\s*opacity:\s*1;\s*\}/', $css, $m), 'the reveal rule');
+        $this->assertStringContainsString('.ur-help:focus-visible', $m[1]);
+        $this->assertDoesNotMatchRegularExpression('/\.ur-help:focus(?!-visible)/', $css);
     }
 
     private function emitted(string $fn): string
