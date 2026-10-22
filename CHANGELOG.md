@@ -136,6 +136,19 @@ user-facing highlights.
   text now lists the rsync daemon transport and snapshot mode.
 
 ### Fixed
+- **A backup into an unmounted drive no longer lands in RAM.** Right after the
+  pre-run hook (which may mount it), every local source and destination must be
+  on a mounted drive, not Unraid's RAM root; otherwise the run fails with
+  `source-not-mounted` or `dest-not-mounted` before anything is copied.
+- **More `--delete` safety.** A delete-enabled run refuses an empty local source
+  (`source-empty`; a dry run only reports it), and now checks local and rsync
+  daemon destinations for a drive root or snapshot store too (`dest-is-protected`,
+  or `dest-probe-failed` when a daemon destination cannot be listed). At save
+  time two pairs of one delete job may no longer write to the same or nested
+  directories, and two Connections to the same host are recognised as one
+  destination filesystem.
+- **A stale cron line no longer runs a disabled or manual-only job.**
+- **The run-log size cap now holds on every pair**, not only the first one.
 - **Snapshot mode: an unfinished snapshot older than the last commit is now
   removed** by the next real run instead of being kept forever as a link-dest.
 - **Two notifications in the same second no longer drop one.** Unraid's

@@ -238,6 +238,29 @@ on, forked from, or derived from any other plugin.
   They are `ur_next_run_label()` (PHP, Jobs), `nextRunLabel()` (JS, Jobs) and
   the `.ur-ov-next` chain (JS, Overview) — the JS ones run every second on top of
   the PHP one, so a clause missing there silently overwrites a correct cell.
+  `Runner::run` re-applies Cron's rule: a `--trigger=schedule` run of a disabled
+  or manual-only job (a stale line after a failed `update_cron`) only logs to
+  `plugin.log` and exits 1 with reason `not-scheduled` — no state, History or
+  notification.
+- **Delete and mount safety.** The `--delete` overlap rules compare destinations
+  per resolved ENDPOINT, not per connection id: `Job::remoteScope()` is
+  `host:port:user` for SSH and `host:port` for DAEMON (the module is the first
+  path segment), resolved through the loaded credentials - so callers pass
+  `$creds` to `protectedTargets` / `ancestryErrors` / `snapshotRootErrors`; the
+  connection id is only the fallback for an unresolvable one. Two pairs of one
+  delete job may not share or nest destinations (`Job::pairOverlapErrors`): they
+  run as separate transfers. At run time `preflight()` (before the pre-hook)
+  lists every remote `--delete` destination, SSH and DAEMON push, and any listing
+  failure refuses the run; `Runner::localChecks()` runs **after** the pre-hook
+  (which may mount the storage) and refuses a local source or destination whose
+  first existing ancestor is on the RAM root's device (`Util::isOnRootFs`,
+  seam `Util::$devIdOf`): `--mkpath` is on by default, so an unmounted
+  `/mnt/disks/<x>` destination was being backed up into RAM as SUCCESS, and an
+  empty mountpoint is a valid source a mirror empties the backup to match. With
+  a delete option on it also refuses an empty local source (`source-empty`; a
+  **dry run only logs it**, so the preview still shows the damage) and a local
+  destination holding a `PROTECTED_ENTRIES` name. `tests/bootstrap.php` makes
+  every path but `/` its own device, so tests that need "not mounted" set the seam.
 - **NEVER name a form input `action`.** An input named `action` becomes a NAMED
   PROPERTY of its `<form>`, so `form.action` returns that input instead of the
   URL string. Unraid's own layout JS runs
