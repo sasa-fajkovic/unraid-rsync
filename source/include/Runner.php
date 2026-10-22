@@ -63,34 +63,34 @@ class Runner
      * Injectable hook runner: fn(string $hookScript, array $env, callable(string):void $onOutput, int $timeoutSec): int
      * Returns the hook's exit code (or HOOK_TIMED_OUT). null => the live runner (bash -c).
      *
-     * @var (callable(string, array<string,string>, callable(string):void, int): int)|null
+     * @var (\Closure(string, array<string,string>, callable(string):void, int): int)|null
      */
-    public static $hookRunner = null;
+    public static ?\Closure $hookRunner = null;
 
     /**
      * Injectable pid provider: fn(): int. null => getmypid(). Lets tests pin the
      * recorded pid so the state file is deterministic.
      *
-     * @var callable|null
+     * @var \Closure|null
      */
-    public static $pidProvider = null;
+    public static ?\Closure $pidProvider = null;
 
     /**
      * Injectable scandir for a snapshot job's local sources: fn(string $path): array|false.
      * null => scandir().
      *
-     * @var callable|null
+     * @var \Closure|null
      */
-    public static $scanDir = null;
+    public static ?\Closure $scanDir = null;
 
     /**
      * Injectable listing of a delete job's local source and destination:
      * fn(string $path): array|false|null - the entries, false when the path
      * exists but cannot be listed, null when it does not exist. null => scandir().
      *
-     * @var (callable(string):(array<int,string>|false|null))|null
+     * @var (\Closure(string):(array<int,string>|false|null))|null
      */
-    public static $localLister = null;
+    public static ?\Closure $localLister = null;
 
     /**
      * How often, in seconds, a running pair trims its run log back to the cap
@@ -109,17 +109,17 @@ class Runner
      * Injectable mid-pair trim: fn(string $runLog): bool, true when the trim
      * failed. null => Logger::enforceRunLogCap.
      *
-     * @var (callable(string):bool)|null
+     * @var (\Closure(string):bool)|null
      */
-    public static $logTrimmer = null;
+    public static ?\Closure $logTrimmer = null;
 
     /**
      * Injectable teardown fault: fn(string $step): void, called before each
      * teardown step of run()'s finally; tests throw from it. null => none.
      *
-     * @var (callable(string):void)|null
+     * @var (\Closure(string):void)|null
      */
-    public static $teardownFault = null;
+    public static ?\Closure $teardownFault = null;
 
     /** Resolve our own pid (overridable for tests). */
     private static function pid(): int

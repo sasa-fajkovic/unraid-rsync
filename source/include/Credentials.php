@@ -122,7 +122,7 @@ class Credentials
      *
      * @var string|null
      */
-    public static $secretsDirOverride = null;
+    public static ?string $secretsDirOverride = null;
 
     /**
      * Absolute path to credentials.json. Lives under $secretsDirOverride when set

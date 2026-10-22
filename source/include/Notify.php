@@ -58,28 +58,28 @@ class Notify
      *
      * @var string
      */
-    public static $notifyPath = '/usr/local/emhttp/webGui/scripts/notify';
+    public static string $notifyPath = '/usr/local/emhttp/webGui/scripts/notify';
 
     /**
      * Injectable command runner: fn(string $command): int returning the exit
      * code. null => the live runner (exec()). Tests set this to capture the
      * exact shell command WITHOUT invoking the real notify script.
      *
-     * @var callable|null
+     * @var \Closure|null
      */
-    public static $runner = null;
+    public static ?\Closure $runner = null;
 
     /**
      * Injectable clock and sleep for the same-second spacing in send():
      * fn(): float (unix seconds) and fn(float $seconds): void. null => microtime()
      * and usleep().
      *
-     * @var callable|null
+     * @var \Closure|null
      */
-    public static $clock = null;
+    public static ?\Closure $clock = null;
 
-    /** @var callable|null */
-    public static $sleep = null;
+    /** @var \Closure|null */
+    public static ?\Closure $sleep = null;
 
     /** Longest send() waits for another send's lock before sending without it. */
     const LOCK_TIMEOUT_SECS = 10;

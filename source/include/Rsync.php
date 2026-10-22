@@ -164,7 +164,7 @@ class Rsync
      *
      * @var string|null
      */
-    public static $rsyncPathOverride = null;
+    public static ?string $rsyncPathOverride = null;
 
     /** Resolve the rsync binary path to check/run (honours the test override). */
     public static function rsyncPath(): string
@@ -764,9 +764,9 @@ class Rsync
      * Injectable process runner. null => use defaultRun (real proc_open).
      * Signature: fn(array $argv, callable(string):void $onOutput, ?array $env, ?int $timeoutSec, ?callable $stopWhen): int
      *
-     * @var (callable(array<int,string>, callable(string):void, array<string,string>|null, int|null, (callable():bool)|null): int)|null
+     * @var (\Closure(array<int,string>, callable(string):void, array<string,string>|null, int|null, (callable():bool)|null): int)|null
      */
-    public static $runner = null;
+    public static ?\Closure $runner = null;
 
     /**
      * The live process runner: proc_open with the argv array (no shell), pumping
@@ -867,9 +867,9 @@ class Rsync
      * fn(array $argv): array{0:int,1:string} returning [exitCode, combined
      * output] instead of spawning. Tests set this; production leaves it null.
      *
-     * @var callable|null
+     * @var \Closure|null
      */
-    public static $daemonProbeRunner = null;
+    public static ?\Closure $daemonProbeRunner = null;
 
     /**
      * List an rsync daemon's public modules: `rsync --port=N -- [user@]host::`.

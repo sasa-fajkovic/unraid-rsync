@@ -104,7 +104,7 @@ class Ssh
      *
      * @var string|null
      */
-    public static $askpassPathOverride = null;
+    public static ?string $askpassPathOverride = null;
 
     // ssh exit code that means "ssh itself failed to connect/authenticate"
     // (as opposed to a remote command's own non-zero exit).

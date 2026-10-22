@@ -257,7 +257,7 @@ class Job
      * @param mixed $rawPairs
      * @return array<int,array{local:string,remote:string,sub?:string,seed?:true}>
      */
-    public static function normalizePairs($rawPairs): array
+    public static function normalizePairs(mixed $rawPairs): array
     {
         $pairs = [];
         if (!is_array($rawPairs)) {
@@ -294,7 +294,7 @@ class Job
      * @param mixed $raw
      * @return array<string,mixed>
      */
-    public static function normalizeRsyncOptions($raw): array
+    public static function normalizeRsyncOptions(mixed $raw): array
     {
         $opts = is_array($raw) ? $raw : [];
         $out  = [];
@@ -1608,7 +1608,7 @@ class Job
      *
      * @param mixed $value
      */
-    public static function toBool($value): bool
+    public static function toBool(mixed $value): bool
     {
         if (is_bool($value)) {
             return $value;

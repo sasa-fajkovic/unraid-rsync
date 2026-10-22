@@ -221,7 +221,7 @@ class Config
      *
      * @param mixed $value
      */
-    public static function clampHookTimeout($value, int $default): int
+    public static function clampHookTimeout(mixed $value, int $default): int
     {
         $n = filter_var($value, FILTER_VALIDATE_INT);
         if ($n === false || $n < 0) {
@@ -259,7 +259,7 @@ class Config
      *
      * @param mixed $value
      */
-    public static function clampRetention($value): int
+    public static function clampRetention(mixed $value): int
     {
         // Strict integer validation: FILTER_VALIDATE_INT rejects "1e3", "2.9",
         // "" and other non-integer numerics (which a bare (int) cast would
@@ -297,7 +297,7 @@ class Config
      *
      * @param mixed $value
      */
-    private static function sanitizeMntDir($value): string
+    private static function sanitizeMntDir(mixed $value): string
     {
         if (!is_string($value)) {
             return '';
@@ -477,7 +477,7 @@ class Config
      *
      * @param mixed $value
      */
-    public static function sanitizeLogDir($value): string
+    public static function sanitizeLogDir(mixed $value): string
     {
         return self::sanitizeMntDir($value);
     }
@@ -508,7 +508,7 @@ class Config
      *
      * @param mixed $value
      */
-    public static function sanitizeSecretsDir($value): string
+    public static function sanitizeSecretsDir(mixed $value): string
     {
         return self::sanitizeMntDir($value);
     }
@@ -989,7 +989,7 @@ class Config
      * @param mixed $raw
      * @return array<int,array{type:string,pattern:string}>
      */
-    public static function normalizeFilters($raw): array
+    public static function normalizeFilters(mixed $raw): array
     {
         if (!is_array($raw)) {
             return [];

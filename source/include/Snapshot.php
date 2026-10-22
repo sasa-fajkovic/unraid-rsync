@@ -124,17 +124,17 @@ class Snapshot
     /**
      * Clock seam: fn(): DateTimeImmutable|int (an epoch). null = the system clock.
      *
-     * @var (callable():(DateTimeImmutable|int))|null
+     * @var (\Closure():(DateTimeImmutable|int))|null
      */
-    public static $nowProvider = null;
+    public static ?\Closure $nowProvider = null;
 
     /**
      * Exec seam: fn(array $argv, ?array $env, int $timeoutSec, ?callable $stopWhen):
      * array{exit:int,stdout:string,stderr:string}. null = proc_open.
      *
-     * @var callable|null
+     * @var \Closure|null
      */
-    public static $remoteRunner = null;
+    public static ?\Closure $remoteRunner = null;
 
     /** Path of the helper to read instead of the installed one (tests). */
     public static ?string $helperPathOverride = null;

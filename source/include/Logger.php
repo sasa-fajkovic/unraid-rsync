@@ -84,7 +84,7 @@ class Logger
      *
      * @var array<string,array{buf:string,pending:string,pct:int,at:float,last:string}>
      */
-    private static $sinkState = [];
+    private static array $sinkState = [];
 
     /**
      * Exact secret strings (per-run materialised tmpfs paths) that MUST be
@@ -98,7 +98,7 @@ class Logger
      *
      * @var array<int,string>
      */
-    public static $redactStrings = [];
+    public static array $redactStrings = [];
 
     /**
      * Per-run runtime secret DIRECTORIES to redact defensively: any path under
@@ -108,7 +108,7 @@ class Logger
      *
      * @var array<int,string>
      */
-    public static $redactDirs = [];
+    public static array $redactDirs = [];
 
     /** The placeholder a redacted secret path is replaced with in the log. */
     const REDACT_PLACEHOLDER = '[redacted]';
@@ -123,7 +123,7 @@ class Logger
      *
      * @var array<string,bool>
      */
-    private static $capped = [];
+    private static array $capped = [];
 
     /**
      * Arm per-run secret-path redaction for everything subsequently appended to
@@ -209,7 +209,7 @@ class Logger
      *
      * @var int|null
      */
-    public static $maxRunLogBytesOverride = null;
+    public static ?int $maxRunLogBytesOverride = null;
 
     /** The per-run-log byte cap (override > UR_MAX_RUN_LOG_BYTES > 16 MiB). */
     public static function maxRunLogBytes(): int
@@ -222,7 +222,7 @@ class Logger
     }
 
     /** @var int|null per-job byte budget override; null => UR_MAX_JOB_LOG_BYTES. */
-    public static $maxJobLogBytesOverride = null;
+    public static ?int $maxJobLogBytesOverride = null;
 
     /** The per-job run-log byte budget (override > UR_MAX_JOB_LOG_BYTES). */
     public static function maxJobLogBytes(): int
@@ -247,7 +247,7 @@ class Logger
      *
      * @var int|null
      */
-    public static $retention = null;
+    public static ?int $retention = null;
 
     /**
      * The basename pattern a run log matches: run-<UTCts>.log, or
@@ -262,7 +262,7 @@ class Logger
      *
      * @var string|null
      */
-    public static $baseOverride = null;
+    public static ?string $baseOverride = null;
 
     /**
      * Optional absolute, persistent logs directory (an array/pool path under
@@ -273,7 +273,7 @@ class Logger
      *
      * @var string|null
      */
-    public static $logsDirOverride = null;
+    public static ?string $logsDirOverride = null;
 
     public static function base(): string
     {

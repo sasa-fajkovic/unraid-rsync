@@ -50,15 +50,15 @@ class RunState
      *
      * @var string|null
      */
-    public static $baseOverride = null;
+    public static ?string $baseOverride = null;
 
     /**
      * Test seam: fn(): void, called by clearStaleAbort once it has taken the
      * flag it judges - where a concurrent abortJob would land. null => none.
      *
-     * @var (callable():void)|null
+     * @var (\Closure():void)|null
      */
-    public static $afterStaleAbortRead = null;
+    public static ?\Closure $afterStaleAbortRead = null;
 
     /** The runtime base dir actually in effect. */
     public static function base(): string

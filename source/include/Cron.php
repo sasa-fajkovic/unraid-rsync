@@ -100,9 +100,9 @@ class Cron
      * code). null => the live runner (defaultRunUpdateCron: /bin/sh, escaped path).
      * Tests set this to a stub that records the argv instead of executing.
      *
-     * @var callable|null
+     * @var \Closure|null
      */
-    public static $updateCronRunner = null;
+    public static ?\Closure $updateCronRunner = null;
 
     /**
      * Overridable absolute path to update_cron. null => the documented default
@@ -112,7 +112,7 @@ class Cron
      *
      * @var string|null
      */
-    public static $updateCronPath = null;
+    public static ?string $updateCronPath = null;
 
     /** Resolve the absolute path to update_cron. */
     public static function updateCronPath(): string

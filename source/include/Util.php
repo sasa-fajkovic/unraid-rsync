@@ -19,9 +19,9 @@ final class Util
      * stat() device id seam: fn(string $path): int|false, false when the path
      * does not exist. null => stat().
      *
-     * @var (callable(string):(int|false))|null
+     * @var (\Closure(string):(int|false))|null
      */
-    public static $devIdOf = null;
+    public static ?\Closure $devIdOf = null;
 
     /**
      * Sanitise an id for use as a filename segment: strip anything that isn't
