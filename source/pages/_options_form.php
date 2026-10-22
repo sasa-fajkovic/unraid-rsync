@@ -1854,6 +1854,7 @@ input.ur-switch:disabled { opacity: 0.5; cursor: default; }
       .then(function (res) {
         var url = URL.createObjectURL(res.blob);
         var a = document.createElement('a');
+        a.className = 'localURL';
         a.href = url; a.download = res.fname;
         document.body.appendChild(a); a.click(); document.body.removeChild(a);
         setTimeout(function () { URL.revokeObjectURL(url); }, 1000);

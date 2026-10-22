@@ -75,7 +75,7 @@ ur_emit_page_assets();  /* shared CSS (.ur-empty-state) + window.urUtil */
         $snapLast = Config::normalizeSnapshot($job['snapshot'] ?? null) !== null ? Snapshot::lastSnapshot($summary) : null;
     ?>
       <tr data-jobid="<?=ur_h($jid)?>">
-        <td class="ur-ov-name"><a href="#<?=ur_h('ur-jobcard-' . $jid)?>" class="ur-goto ur-job-link" aria-controls="<?=ur_h('ur-jobcard-' . $jid)?>" title="<?=ur_h(ur_t_text('Edit this job'))?>"><?=ur_h((string) ($job['name'] ?? $jid))?></a></td>
+        <td class="ur-ov-name"><a href="#<?=ur_h('ur-jobcard-' . $jid)?>" class="ur-goto ur-job-link localURL" aria-controls="<?=ur_h('ur-jobcard-' . $jid)?>" title="<?=ur_h(ur_t_text('Edit this job'))?>"><?=ur_h((string) ($job['name'] ?? $jid))?></a></td>
         <td class="ur-ov-state"><span class="ur-badge <?=ur_h(ur_state_badge_class($state))?>"><?=ur_h(ur_state_label($state))?></span></td>
         <td class="ur-ov-last ur-ov-muted"><?=ur_h(PageHelpers::lastRunLabel($lastReal, $urNow))?><?php if ($dryLine !== ''): ?><div class="ur-dry-run"><?=ur_h($dryLine)?></div><?php endif; ?><?php if ($snapLast !== null): ?><div class="ur-ov-muted" title="<?=ur_h($snapLast['stamp'])?>"><?=ur_h($snapLast['label'])?></div><?php endif; ?></td>
         <td class="ur-ov-next ur-ov-muted"><?=ur_h(PageHelpers::nextRunLabel($job, $urNow))?></td>
