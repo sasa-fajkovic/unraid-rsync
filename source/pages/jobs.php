@@ -1505,7 +1505,7 @@ ur_emit_status_poller();
 
   /* ---- per-run log viewer ---- */
   var viewer = {
-    jobId: '', run: '', running: false, timer: null
+    jobId: '', run: '', running: false, timer: null, listedFor: ''
   };
   var modal      = document.getElementById('ur-log-modal');
   var modalTitle = document.getElementById('ur-log-title');
@@ -1522,6 +1522,7 @@ ur_emit_status_poller();
     if (!jobId || !modal) { return; }
     viewer.jobId = jobId;
     viewer.run = '';
+    viewer.listedFor = '';
     if (modalTitle) { modalTitle.textContent = modalTitle.title = urI18n('jobs.logTitle', 'Run log — %s', jobName); }
     if (modalPre) { modalPre.textContent = urI18n('loading', 'Loading…'); }
     if (modalProg) { modalProg.hidden = true; }
@@ -1600,6 +1601,13 @@ ur_emit_status_poller();
       .then(function (r) { return r.json(); })
       .then(function (body) {
         if (!body || !body.ok) { if (modalProg) { modalProg.hidden = true; } return; }
+        /* Run opened the viewer before its log existed, so the picker still
+         * names the previous run "(latest)": relist once per served run. */
+        if (!viewer.run && body.run && modalSel && viewer.listedFor !== body.run
+            && (!modalSel.options.length || modalSel.options[0].value !== body.run)) {
+          viewer.listedFor = body.run;
+          refreshRunList();
+        }
         viewer.running = !!body.running;
         if (modalLive) { modalLive.style.display = body.running ? '' : 'none'; }
         if (modalPre) {

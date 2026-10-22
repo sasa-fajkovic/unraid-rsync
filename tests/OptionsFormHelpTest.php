@@ -2898,6 +2898,31 @@ final class OptionsFormHelpTest extends TestCase
         );
     }
 
+    /** Run opens the viewer before the new run's log exists: the picker must catch up, once. */
+    public function testLogViewerRefreshesAStaleRunPickerOnceWhenTheServedRunIsNewer(): void
+    {
+        $src = (string) file_get_contents(__DIR__ . '/../source/pages/jobs.php');
+        $this->assertSame(1, preg_match('/  function fetchJobLog\(\) \{.*?\n  \}\n/s', $src, $m));
+        $this->assertStringContainsString('refreshRunList()', $m[0]);
+        $node = trim((string) shell_exec('command -v node 2>/dev/null'));
+        if ($node === '') {
+            $this->markTestSkipped('node is not installed');
+        }
+        $js = 'var calls = 0; function refreshRunList() { calls++; }'
+            . 'var HANDLER_URL = "/h", modalLive = null, modalPre = null, modalProg = null, served, viewer, modalSel;'
+            . 'function fetch() { return Promise.resolve({ json: function () { return { ok: true, run: served, log: "", running: true }; } }); }'
+            . $m[0]
+            . 'async function poll(run, picked, first) {'
+            . '  calls = 0; served = run; viewer = { jobId: "j", run: picked, running: false, listedFor: "" };'
+            . '  modalSel = { options: first ? [{ value: first }, { value: "run-x.log" }] : [], selectedIndex: picked ? 1 : 0, value: picked || first };'
+            . '  await fetchJobLog(); await fetchJobLog(); await fetchJobLog(); return calls; }'
+            . '(async function () { process.stdout.write(JSON.stringify(['
+            . '  await poll("run-new.log", "", "run-old.log"), await poll("run-new.log", "", ""),'
+            . '  await poll("run-old.log", "", "run-old.log"), await poll("run-new.log", "run-x.log", "run-old.log")])); })();';
+        $out = shell_exec(escapeshellarg($node) . ' -e ' . escapeshellarg($js));
+        $this->assertSame([1, 1, 0, 0], json_decode((string) $out, true));
+    }
+
     private function emitted(string $fn): string
     {
         require_once __DIR__ . '/../source/pages/_options_form.php';
