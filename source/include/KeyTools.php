@@ -563,13 +563,8 @@ class KeyTools
         // (detached, and group-killable on timeout). If setsid is absent the
         // command still runs detached via the backgrounding shell; the timeout
         // kill then falls back to the recorded child pid.
-        $setsid = '';
-        foreach (['/usr/bin/setsid', '/bin/setsid'] as $cand) {
-            if (@is_executable($cand)) {
-                $setsid = $cand . ' ';
-                break;
-            }
-        }
+        $setsid = ProcIO::which('setsid');
+        $setsid = $setsid !== null ? $setsid . ' ' : '';
 
         // The inner shell: record its own pid (which, under setsid, is the
         // session/process-group leader so a timeout can group-kill the whole

@@ -1943,12 +1943,7 @@ function ur_php_binary(): string
     if (PHP_SAPI === 'cli' && defined('PHP_BINARY') && is_executable(PHP_BINARY)) {
         return PHP_BINARY;
     }
-    foreach (['/usr/bin/php', '/usr/local/bin/php', '/bin/php'] as $cand) {
-        if (is_executable($cand)) {
-            return $cand;
-        }
-    }
-    return 'php';
+    return Util::phpBinary();
 }
 
 /**
@@ -1997,14 +1992,8 @@ function ur_launch_runner(string $jobId, bool $dryRun, string $gen = ''): bool
     // works - abort then falls back to signalling the bare runner pid and the
     // abort flag still stops the run between pairs - so it is best-effort, not
     // required for correctness.
-    $setsid = '';
-    foreach (['/usr/bin/setsid', '/bin/setsid'] as $cand) {
-        if (is_executable($cand)) {
-            $setsid = $cand . ' ';
-            break;
-        }
-    }
-    $full = $setsid . $cmd . ' >/dev/null 2>&1 &';
+    $setsid = ProcIO::which('setsid');
+    $full   = ($setsid !== null ? $setsid . ' ' : '') . $cmd . ' >/dev/null 2>&1 &';
 
     // exec returns immediately because the command backgrounds itself; capture
     // the launching shell's exit so a failed dispatch is reported as such.

@@ -809,20 +809,10 @@ class Rsync
         );
 
         if ($stopped) {
-            @proc_terminate($proc);
-            $until = microtime(true) + 5;
-            // Keep the status that saw the exit: a later proc_get_status no
-            // longer reports the signal, and 143 would read as a plain 1.
-            while (!empty(($status = @proc_get_status($proc))['running'])) {
-                if (microtime(true) >= $until) {
-                    @proc_terminate($proc, 9);
-                }
-                usleep(20000);
-            }
-            return self::reapExitCode($proc, $status);
+            // 143 as well when a child that survived SIGKILL had to be abandoned.
+            return ProcIO::terminate($proc, 5.0) ?? 143;
         }
         if ($deadline !== null && self::waitOrKill($proc, $deadline)) {
-            self::reapExitCode($proc);
             $onOutput("rsync did not finish within $timeoutSec seconds and was stopped.\n");
             return 35;
         }
@@ -830,60 +820,32 @@ class Rsync
     }
 
     /**
-     * Wait for $proc to exit, or kill it (TERM, then KILL for a wedged one) once
-     * $deadline passes; true when it was killed. EOF on both pipes is NOT proof
-     * the child has exited: one that closes stdout and stderr and lingers would
-     * otherwise leave proc_close() blocking for as long as it likes.
+     * Wait for $proc to exit, or kill it once $deadline passes; true when it was
+     * killed (and then already closed or abandoned by ProcIO::terminate). EOF on
+     * both pipes is NOT proof the child has exited: one that closes stdout and
+     * stderr and lingers would otherwise leave proc_close() blocking.
      *
      * @param resource $proc
      */
     private static function waitOrKill($proc, float $deadline): bool
     {
-        while (true) {
-            $running = @proc_get_status($proc);
-            if (empty($running['running'])) {
-                return false;
-            }
-            if (microtime(true) >= $deadline) {
-                @proc_terminate($proc);
-                @proc_terminate($proc, 9);
-                return true;
-            }
-            usleep(20000);
+        if (ProcIO::waitFor($proc, $deadline)[1] === '') {
+            return false;
         }
+        ProcIO::terminate($proc, 0.0);
+        return true;
     }
 
     /**
-     * Close a proc_open handle and return its exit code, encoding a signalled
-     * child as 128+signal (the shell convention) so SIGTERM(15) -> 143.
-     *
-     * Capture the final status BEFORE proc_close: proc_close only returns the
-     * exit CODE and gives -1 once the child has already been reaped, so a
-     * process killed by a signal (our SIGTERM abort, or the daemon probe's
-     * deadline kill) would otherwise be lost. proc_get_status reports
-     * `signaled` + `termsig`.
+     * Close a proc_open handle that has exited (or must be waited for) and return
+     * its exit code (ProcIO::reapExitCode, the status captured BEFORE proc_close).
      *
      * @param resource $proc
-     * @param array{signaled:bool,termsig:int,exitcode:int}|null $status the
-     *        status that already saw the exit, when the caller polled for it
      */
-    private static function reapExitCode($proc, ?array $status = null): int
+    private static function reapExitCode($proc): int
     {
-        $status = $status ?? @proc_get_status($proc);
-        $code   = proc_close($proc);
-
-        if ($status['signaled']) {
-            return 128 + $status['termsig'];
-        }
-        // While `running` is false the reported exitcode is authoritative;
-        // proc_close may already have returned -1 by the time we get here.
-        if ($status['exitcode'] >= 0) {
-            return $status['exitcode'];
-        }
-
-        // Fallback to proc_close's value; a negative (already-reaped) result has
-        // no usable code, so treat it as a generic failure.
-        return $code < 0 ? 1 : $code;
+        $status = (array) @proc_get_status($proc);
+        return ProcIO::reapExitCode($status, proc_close($proc));
     }
 
     /**
@@ -1008,7 +970,7 @@ class Rsync
             // handle: a lingering child would wedge this php-fpm worker in
             // proc_close(), exactly what DAEMON_PROBE_TIMEOUT exists to prevent.
             $timedOut = self::waitOrKill($proc, $deadline);
-            $exit     = self::reapExitCode($proc);
+            $exit     = $timedOut ? 35 : self::reapExitCode($proc);
         }
 
         if ($timedOut) {

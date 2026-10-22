@@ -2446,12 +2446,10 @@ class Runner
         $pipes = [];
         // argv form: bash receives the hook as one argument to -c, so the user's
         // shell is bash and nothing of ours is re-parsed.
-        $argv = ['bash', '-c', $hook];
-        foreach (['/usr/bin/setsid', '/bin/setsid'] as $setsid) {
-            if (is_executable($setsid)) {
-                $argv = array_merge([$setsid, '-w'], $argv);
-                break;
-            }
+        $argv   = ['bash', '-c', $hook];
+        $setsid = ProcIO::which('setsid');
+        if ($setsid !== null) {
+            $argv = array_merge([$setsid, '-w'], $argv);
         }
         $childEnv = array_merge(self::inheritEnv(), $env);
         $proc = @proc_open($argv, $descriptors, $pipes, null, $childEnv);
@@ -2474,71 +2472,20 @@ class Runner
             $stopWhen
         );
 
-        // EOF on both pipes is not proof bash has exited, so the deadline and
-        // the stop request are polled until it has. The status that first
-        // shows the exit is the only one that reports a signal; a later
-        // proc_get_status() call no longer does.
-        $kill = '';
-        while (true) {
-            $status = @proc_get_status($proc);
-            if (empty($status['running'])) {
-                break;
-            }
-            if ($deadline !== null && microtime(true) >= $deadline) {
-                $kill = 'timeout';
-            } elseif ($stopWhen !== null && $stopWhen()) {
-                $kill = 'stop';
-            }
-            if ($kill !== '') {
-                self::killHook($proc, (int) $status['pid']);
-                break;
-            }
-            usleep(100000);
+        [$status, $kill] = ProcIO::waitFor($proc, $deadline, $stopWhen, 100000);
+        if ($kill === '') {
+            return ProcIO::reapExitCode($status, proc_close($proc));
         }
-
-        $code = proc_close($proc);
-        if ($kill === 'timeout') {
-            return self::HOOK_TIMED_OUT;
-        }
-        if ($kill === 'stop') {
-            return 143;
-        }
-        if ($status['signaled']) {
-            return 128 + $status['termsig'];
-        }
-        if ($status['exitcode'] >= 0) {
-            return $status['exitcode'];
-        }
-        return $code < 0 ? 1 : $code;
-    }
-
-    /**
-     * SIGTERM the hook's process group, then SIGKILL it after the grace period.
-     * The group is the hook's own (setsid), so this can never reach the runner;
-     * when there is no such group (no setsid) only bash itself is signalled.
-     *
-     * @param resource $proc
-     */
-    private static function killHook($proc, int $pid): void
-    {
-        $signal = static function (int $sig) use ($proc, $pid): void {
+        // The group is the hook's own (setsid), so this can never reach the
+        // runner; when there is no such group only bash itself is signalled.
+        $pid = (int) ($status['pid'] ?? 0);
+        ProcIO::terminate($proc, (float) self::$hookKillGraceSec, static function (int $sig) use ($proc, $pid): void {
             if ($pid > 0 && function_exists('posix_kill') && @posix_kill(-$pid, $sig)) {
                 return;
             }
             @proc_terminate($proc, $sig);
-        };
-        $signal(15);
-        $until = microtime(true) + self::$hookKillGraceSec;
-        while (microtime(true) < $until) {
-            $status = @proc_get_status($proc);
-            if (empty($status['running'])) {
-                break;
-            }
-            usleep(100000);
-        }
-        // Unconditionally: bash may be gone while a child that ignores SIGTERM
-        // still holds the group.
-        $signal(9);
+        });
+        return $kill === 'timeout' ? self::HOOK_TIMED_OUT : 143;
     }
 
     /**

@@ -926,43 +926,12 @@ class Snapshot
             $stopWhen
         );
 
-        // EOF on both pipes is not proof ssh has exited (see runHookProcess).
-        // The status that first shows the exit is the only one that reports a
-        // signal; a later proc_get_status() call no longer does.
-        $kill = '';
-        while (true) {
-            $status = @proc_get_status($proc);
-            if (empty($status['running'])) {
-                break;
-            }
-            if ($deadline !== null && microtime(true) >= $deadline) {
-                $kill = 'timeout';
-            } elseif ($stopWhen !== null && $stopWhen()) {
-                $kill = 'stop';
-            }
-            if ($kill !== '') {
-                @proc_terminate($proc, 15);
-                $until = microtime(true) + self::KILL_GRACE_SEC;
-                while (microtime(true) < $until && !empty(@proc_get_status($proc)['running'])) {
-                    usleep(20000);
-                }
-                @proc_terminate($proc, 9);
-                break;
-            }
-            usleep(20000);
-        }
-
-        $code = proc_close($proc);
-        if ($kill === 'timeout') {
-            $code = self::REMOTE_TIMED_OUT;
-        } elseif ($kill === 'stop') {
-            $code = 143;
-        } elseif ($status['signaled']) {
-            $code = 128 + $status['termsig'];
-        } elseif ($status['exitcode'] >= 0) {
-            $code = $status['exitcode'];
-        } elseif ($code < 0) {
-            $code = 1;
+        [$status, $kill] = ProcIO::waitFor($proc, $deadline, $stopWhen);
+        if ($kill === '') {
+            $code = ProcIO::reapExitCode($status, proc_close($proc));
+        } else {
+            ProcIO::terminate($proc, (float) self::KILL_GRACE_SEC);
+            $code = $kill === 'timeout' ? self::REMOTE_TIMED_OUT : 143;
         }
         return ['exit' => $code, 'stdout' => $buf[1], 'stderr' => $buf[2]];
     }

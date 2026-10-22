@@ -5,6 +5,8 @@ declare(strict_types=1);
 /**
  * Util.php - tiny stateless helpers shared across backend classes.
  */
+require_once __DIR__ . '/ProcIO.php';
+
 final class Util
 {
     /** The euid assertPrivateDir() expects to own a dir; null = posix_geteuid(). Test seam. */
@@ -33,6 +35,12 @@ final class Util
             return 'unknown';
         }
         return $clean;
+    }
+
+    /** The CLI php to launch scripts with: an absolute path when one exists, else bare 'php'. */
+    public static function phpBinary(): string
+    {
+        return ProcIO::which('php') ?? 'php';
     }
 
     /** First non-empty trimmed line of a (possibly multi-line) blob. */

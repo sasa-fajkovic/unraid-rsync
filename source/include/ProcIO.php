@@ -123,26 +123,99 @@ class ProcIO
             $deadline
         );
 
-        $timedOut = false;
-        $signals  = [15, 9];
-        while (true) {
-            $st = proc_get_status($proc);
-            if (!$st['running']) {
-                // proc_get_status() has reaped it, so this cannot block.
-                proc_close($proc);
-                $code = $st['signaled'] ? 128 + $st['termsig'] : $st['exitcode'];
-                return [$code, $buf[1], $buf[2], $timedOut];
-            }
-            if (microtime(true) >= $deadline) {
-                if ($signals === []) {
-                    // Dropping the handle without proc_close() waits with WNOHANG.
-                    return [124, $buf[1], $buf[2], true];
-                }
-                $timedOut = true;
-                proc_terminate($proc, array_shift($signals));
-                $deadline = microtime(true) + self::$killGraceSec;
-            }
-            usleep(20000);
+        [$status, $why] = self::waitFor($proc, $deadline);
+        if ($why === '') {
+            return [self::reapExitCode($status, proc_close($proc)), $buf[1], $buf[2], false];
         }
+        return [self::terminate($proc, self::$killGraceSec) ?? 124, $buf[1], $buf[2], true];
+    }
+
+    /**
+     * Poll $proc until it exits, $deadlineAt passes, or $stopWhen() returns true.
+     * EOF on both pipes is not proof a child has exited. The status that first
+     * shows the exit is the only one that reports a signal; a later
+     * proc_get_status() call no longer does, so it is returned for reapExitCode().
+     *
+     * @param resource               $proc
+     * @param (callable():bool)|null $stopWhen
+     * @return array{0:array<string,mixed>,1:string} [last status, '' (exited) | 'timeout' | 'stop']
+     */
+    public static function waitFor($proc, ?float $deadlineAt, ?callable $stopWhen = null, int $pollUsec = 20000): array
+    {
+        while (true) {
+            $status = (array) @proc_get_status($proc);
+            if (empty($status['running'])) {
+                return [$status, ''];
+            }
+            if ($deadlineAt !== null && microtime(true) >= $deadlineAt) {
+                return [$status, 'timeout'];
+            }
+            if ($stopWhen !== null && $stopWhen()) {
+                return [$status, 'stop'];
+            }
+            usleep($pollUsec);
+        }
+    }
+
+    /**
+     * The exit code from a status that saw the exit, a signalled child encoded
+     * as 128+signal (SIGTERM -> 143). $fallback is proc_close()'s result, used
+     * only when the status carries no code; a negative one becomes 1.
+     *
+     * @param array<string,mixed> $status
+     */
+    public static function reapExitCode(array $status, int $fallback): int
+    {
+        if (!empty($status['signaled'])) {
+            return 128 + (int) $status['termsig'];
+        }
+        if ((int) ($status['exitcode'] ?? -1) >= 0) {
+            return (int) $status['exitcode'];
+        }
+        return $fallback < 0 ? 1 : $fallback;
+    }
+
+    /**
+     * SIGTERM $proc, give it $graceSec, then SIGKILL and up to $killGraceSec more,
+     * and close it once it has exited. Never blocks: a child that survives SIGKILL
+     * (an uninterruptible syscall) is abandoned unclosed - proc_close() would wait
+     * for it, and dropping the handle only waits with WNOHANG.
+     *
+     * @param resource                $proc
+     * @param (callable(int):void)|null $signal sends a signal; a caller that kills
+     *        a process GROUP passes one, and then always gets the SIGKILL: the
+     *        group leader may be gone while a child that ignored SIGTERM holds it.
+     * @return int|null the exit code (reapExitCode), or null when abandoned
+     */
+    public static function terminate($proc, float $graceSec, ?callable $signal = null): ?int
+    {
+        $group  = $signal !== null;
+        $signal = $signal ?? static function (int $sig) use ($proc): void {
+            @proc_terminate($proc, $sig);
+        };
+        $signal(15);
+        [$status] = self::waitFor($proc, microtime(true) + $graceSec);
+        $running  = !empty($status['running']);
+        if ($running || $group) {
+            $signal(9);
+        }
+        if ($running) {
+            [$status] = self::waitFor($proc, microtime(true) + self::$killGraceSec);
+            if (!empty($status['running'])) {
+                return null;
+            }
+        }
+        return self::reapExitCode($status, proc_close($proc));
+    }
+
+    /** Absolute path of an executable $name in /usr/bin, /usr/local/bin or /bin, else null. */
+    public static function which(string $name): ?string
+    {
+        foreach (['/usr/bin/', '/usr/local/bin/', '/bin/'] as $dir) {
+            if (@is_executable($dir . $name)) {
+                return $dir . $name;
+            }
+        }
+        return null;
     }
 }

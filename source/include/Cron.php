@@ -76,9 +76,7 @@ if (!defined('UR_CRON_RUNNER_PATH')) {
 // /usr/bin/php). Overridable for tests (pinned so line assertions stay
 // deterministic regardless of the test host's php location).
 if (!defined('UR_CRON_PHP_PATH')) {
-    define('UR_CRON_PHP_PATH', is_executable('/usr/bin/php') ? '/usr/bin/php'
-        : (is_executable('/usr/local/bin/php') ? '/usr/local/bin/php'
-        : (is_executable('/bin/php') ? '/bin/php' : 'php')));
+    define('UR_CRON_PHP_PATH', Util::phpBinary());
 }
 
 class Cron
