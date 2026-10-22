@@ -91,31 +91,58 @@ class History
     }
 
     /**
-     * Append ONE execution record (best-effort; never throws). The append is
-     * atomic per line via LOCK_EX so concurrent runs of different jobs (and the
-     * lazy prune) can't interleave a half-written line.
+     * The per-job lock that append() and prune() share. A sibling file, never
+     * the history file itself: prune() replaces that by rename, so a lock held
+     * on its inode would let an append land in the file being discarded.
+     */
+    private static function lockPath(string $jobId): string
+    {
+        return self::dir() . '/' . Util::safeFileId($jobId) . '.history.lock';
+    }
+
+    /**
+     * Append ONE execution record. Never throws. A partial last line (a write
+     * cut short by power loss) is ended with "\n" first, so it stays one
+     * unparseable line instead of swallowing this record.
      *
      * @param array<string,mixed> $record
+     * @return bool false when the record could not be written
      */
-    public static function append(string $jobId, array $record): void
+    public static function append(string $jobId, array $record): bool
     {
         $dir = self::dir();
         if (!is_dir($dir) && !@mkdir($dir, 0755, true) && !is_dir($dir)) {
-            return;
+            return false;
         }
         $json = json_encode(self::normalizeRecord($record), JSON_UNESCAPED_SLASHES);
         if ($json === false) {
-            return;
+            return false;
         }
-        // chmod only when the file is first created, so a normal append doesn't
-        // touch the inode's mode every run (extra flash metadata write).
-        $path  = self::path($jobId);
-        $isNew = !is_file($path);
-        if (@file_put_contents($path, $json . "\n", FILE_APPEND | LOCK_EX) === false) {
-            return;
-        }
-        if ($isNew) {
-            @chmod($path, 0644);
+        $path = self::path($jobId);
+        try {
+            return Util::withLock(self::lockPath($jobId), static function () use ($path, $json): bool {
+                clearstatcache(true, $path);
+                $size = is_file($path) ? (int) @filesize($path) : -1;
+                $sep  = '';
+                if ($size > 0) {
+                    $fh   = @fopen($path, 'rb');
+                    $last = ($fh !== false && @fseek($fh, -1, SEEK_END) === 0) ? @fread($fh, 1) : "\n";
+                    if ($fh !== false) {
+                        fclose($fh);
+                    }
+                    $sep = ($last === "\n") ? '' : "\n";
+                }
+                if (@file_put_contents($path, $sep . $json . "\n", FILE_APPEND | LOCK_EX) === false) {
+                    return false;
+                }
+                // chmod only on create: a mode change per run is another flash write.
+                if ($size < 0) {
+                    @chmod($path, 0644);
+                }
+                return true;
+            });
+        } catch (Throwable $e) {
+            return false;
         }
     }
 
@@ -197,7 +224,8 @@ class History
     /**
      * Prune to the newest $keep records. LAZY: only rewrites the file when it is
      * actually over the cap (so a run that doesn't exceed the cap pays no extra
-     * flash write). Atomic temp + rename. Best-effort; never throws.
+     * flash write). Util::writeAtomic under the lock append() takes, so an
+     * append racing the rewrite is never lost. Best-effort; never throws.
      */
     public static function prune(string $jobId, int $keep): void
     {
@@ -206,22 +234,17 @@ class History
         if (!is_file($path)) {
             return;
         }
-        $lines = @file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
-        if (!is_array($lines) || count($lines) <= $keep) {
-            return; // under cap -> no rewrite
-        }
-        $kept = array_slice($lines, -$keep); // newest $keep (chronological tail)
-        $tmp  = @tempnam(self::dir(), '.history.');
-        if ($tmp === false) {
-            return;
-        }
-        if (@file_put_contents($tmp, implode("\n", $kept) . "\n") === false) {
-            @unlink($tmp);
-            return;
-        }
-        @chmod($tmp, 0644);
-        if (!@rename($tmp, $path)) {
-            @unlink($tmp);
+        try {
+            Util::withLock(self::lockPath($jobId), static function () use ($path, $keep): void {
+                $lines = @file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+                if (!is_array($lines) || count($lines) <= $keep) {
+                    return; // under cap -> no rewrite
+                }
+                // newest $keep (chronological tail)
+                Util::writeAtomic($path, implode("\n", array_slice($lines, -$keep)) . "\n", 0644);
+            });
+        } catch (Throwable $e) {
+            // best-effort
         }
     }
 }
