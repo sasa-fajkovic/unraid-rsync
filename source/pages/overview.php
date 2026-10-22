@@ -6,14 +6,17 @@
  * run's state (colored badge) and time, a later dry run as a second line, and
  * when it next runs — a single place to see the health of every job at a glance.
  *
- * The page renders a skeleton row per job (id + name from config) and then polls
- * the shared getStatus poller (window.urStatus, also feeding the Jobs and Status
- * tabs) to fill in state/last-run/next-run live, rendered through the same
- * window.urUtil / urBadge helpers as the Jobs tab. No state-changing actions
- * live on this tab.
+ * The first paint is rendered server-side through PageHelpers (the same rules
+ * as the Jobs tab); the shared getStatus poller (window.urStatus, also feeding
+ * the Jobs and Status tabs) then keeps state/last-run/next-run live through
+ * the window.urUtil / urBadge mirrors. A job name opens its editor on the Jobs
+ * tab. No state-changing actions live on this tab.
  */
 
 require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Config.php';
+require_once '/usr/local/emhttp/plugins/unraid.rsync/include/RunState.php';
+require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Runner.php';
+require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Cron.php';
 // ur_js helper:
 require_once '/usr/local/emhttp/plugins/unraid.rsync/pages/_options_form.php';
 
@@ -26,7 +29,7 @@ try {
         }
         $jid = (string) ($job['id'] ?? '');
         if ($jid !== '') {
-            $jobs[$jid] = (string) ($job['name'] ?? $jid);
+            $jobs[$jid] = $job;
         }
     }
 } catch (Throwable $e) {
@@ -39,7 +42,7 @@ ur_emit_page_assets();  /* shared CSS (.ur-empty-state) + window.urUtil */
 .ur-ov-table { width: 100%; border-collapse: collapse; margin-top: 8px; }
 .ur-ov-table th, .ur-ov-table td { padding: 7px 10px; text-align: left; border-bottom: 1px solid var(--border-color, #444); }
 .ur-ov-table td.ur-ov-name { font-weight: bold; word-break: break-word; }
-.ur-ov-muted { color: var(--color-text-secondary, #888); }
+.ur-ov-muted { color: var(--color-text-secondary, #666); }
 </style>
 
 <div class="title">
@@ -62,12 +65,20 @@ ur_emit_page_assets();  /* shared CSS (.ur-empty-state) + window.urUtil */
     </tr>
   </thead>
   <tbody id="ur-ov-rows">
-    <?php foreach ($jobs as $jid => $jname): ?>
-      <tr data-jobid="<?=htmlspecialchars($jid, ENT_QUOTES, 'UTF-8')?>">
-        <td class="ur-ov-name"><?=htmlspecialchars($jname, ENT_QUOTES, 'UTF-8')?></td>
-        <td class="ur-ov-state"><span class="ur-badge ur-badge-pending"><?=_('…')?></span></td>
-        <td class="ur-ov-last ur-ov-muted"><?=_('…')?></td>
-        <td class="ur-ov-next ur-ov-muted"><?=_('…')?></td>
+    <?php $urNow = time();
+    foreach ($jobs as $jid => $job):
+        $jid      = (string) $jid;
+        $summary  = Runner::readSummary($jid);
+        $lastReal = Runner::lastRealFor($jid, $summary);
+        $state    = PageHelpers::deriveState(RunState::isRunning($jid), $lastReal);
+        $dryLine  = PageHelpers::dryRunLine(PageHelpers::lastDryRun($summary), $urNow);
+        $snapLast = Config::normalizeSnapshot($job['snapshot'] ?? null) !== null ? Snapshot::lastSnapshot($summary) : null;
+    ?>
+      <tr data-jobid="<?=ur_h($jid)?>">
+        <td class="ur-ov-name"><a href="#<?=ur_h('ur-jobcard-' . $jid)?>" class="ur-goto ur-job-link" aria-controls="<?=ur_h('ur-jobcard-' . $jid)?>" title="<?=ur_h(ur_t_text('Edit this job'))?>"><?=ur_h((string) ($job['name'] ?? $jid))?></a></td>
+        <td class="ur-ov-state"><span class="ur-badge <?=ur_h(ur_state_badge_class($state))?>"><?=ur_h(ur_state_label($state))?></span></td>
+        <td class="ur-ov-last ur-ov-muted"><?=ur_h(PageHelpers::lastRunLabel($lastReal, $urNow))?><?php if ($dryLine !== ''): ?><div class="ur-dry-run"><?=ur_h($dryLine)?></div><?php endif; ?><?php if ($snapLast !== null): ?><div class="ur-ov-muted" title="<?=ur_h($snapLast['stamp'])?>"><?=ur_h($snapLast['label'])?></div><?php endif; ?></td>
+        <td class="ur-ov-next ur-ov-muted"><?=ur_h(PageHelpers::nextRunLabel($job, $urNow))?></td>
       </tr>
     <?php endforeach; ?>
   </tbody>

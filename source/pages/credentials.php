@@ -11,7 +11,7 @@
  * A connection that wants to authenticate with one of these keys references it
  * by id via the KEY auth method on the SEPARATE Connections tab
  * (pages/connections.php). Most setups do NOT need this keychain at all: if a key
- * already lives on this server, a connection's "Existing key file on this server"
+ * already lives on this server, a connection's "Key file on disk"
  * option is simpler.
  *
  * Native webGui styling: dl/dt/dd forms, orange buttons, csrf_token on every
@@ -60,6 +60,7 @@ $handlerUrl = PageHelpers::HANDLER_URL;
    unavailable): a readonly, selectable rendering of the key the user can copy
    by hand. */
 .ur-copy-pub-fallback { display: block; width: 100%; margin-top: 6px; font-family: monospace; font-size: 0.85em; }
+.ur-subhead { margin: 14px 0 4px; font-size: 1.05em; }
 </style>
 <div class="title">
   <span class="left">
@@ -79,15 +80,16 @@ $handlerUrl = PageHelpers::HANDLER_URL;
 </p>
 
 <!-- ============================== SSH KEYS ============================== -->
-<div class="title"><span class="left"><?=_('SSH Keys (managed keychain)')?></span></div>
+<div class="title"><span class="left"><?=_('Managed keys')?></span></div>
+
+<div class="ur-notice">
+  <strong><?=_('Only needed if you do NOT already have an SSH key on this server')?>.</strong>
+  <?=_('This generates or imports a key that the plugin manages and stores in credentials.json on the USB flash. '
+      . 'If you already have /root/.ssh/id_ed25519 (or any key on this server), DO NOT generate one here — instead, '
+      . 'on a connection (Connections tab) choose "Key file on disk" and point it at your key')?>.
+</div>
 
 <blockquote class="inline_help">
-  <p>
-    <strong><?=_('Only needed if you do NOT already have an SSH key on this server')?>.</strong>
-    <?=_('This generates or imports a key that the plugin manages and stores in credentials.json on the USB flash. '
-        . 'If you already have /root/.ssh/id_ed25519 (or any key on this server), DO NOT generate one here — instead, '
-        . 'on a connection (Connections tab) choose "Existing key file on this server" and point it at your key')?>.
-  </p>
   <p>
     <?=_('How SSH keys work: the PRIVATE key is what authenticates you and stays on this server (it is never sent to the remote). '
         . 'The PUBLIC key is what you put in the remote\'s ~/.ssh/authorized_keys so it will accept your private key. '
@@ -101,7 +103,7 @@ $handlerUrl = PageHelpers::HANDLER_URL;
     <tr>
       <th><?=_('Name')?></th>
       <th><?=_('Fingerprint')?></th>
-      <th><?=_('Private key')?></th>
+      <th><?=_('Private key stored')?></th>
       <th><?=_('Actions')?></th>
     </tr>
   </thead>
@@ -118,7 +120,7 @@ $handlerUrl = PageHelpers::HANDLER_URL;
       <tr data-key-id="<?=htmlspecialchars($kid, ENT_QUOTES, 'UTF-8')?>">
         <td><?=htmlspecialchars($kn, ENT_QUOTES, 'UTF-8')?></td>
         <td><code><?=htmlspecialchars($kfp !== '' ? $kfp : '—', ENT_QUOTES, 'UTF-8')?></code></td>
-        <td><?=$hasPriv ? _('set') : _('not set')?></td>
+        <td><?=$hasPriv ? _('Yes') : _('No')?></td>
         <td>
           <?php if ($kpub !== ''): ?>
             <button type="button" class="ur-copy-pub" data-pub="<?=htmlspecialchars($kpub, ENT_QUOTES, 'UTF-8')?>"><?=_('Copy public key')?></button>
@@ -132,11 +134,13 @@ $handlerUrl = PageHelpers::HANDLER_URL;
 
 <!-- Generate / import a key. These POST immediately (a key has secret material
      that must be produced server-side); the saveCredentials form below only
-     renames/reorders existing keys. -->
+     renames existing keys. -->
+<div id="ur-key-new">
+<h3 class="ur-subhead"><?=_('Generate a new key')?></h3>
 <dl>
-  <dt><label for="ur_key_name"><?=_('New key name')?></label><?=ur_required_mark()?>:</dt>
-  <dd><input type="text" id="ur_key_name" placeholder="<?=_('e.g. backup-ed25519')?>" required></dd>
-  <dt><label for="ur_key_type"><?=_('Type (generate)')?></label>:</dt>
+  <dt><label for="ur_key_name"><?=_('Key name')?></label><?=ur_required_mark()?>:</dt>
+  <dd><input type="text" id="ur_key_name" placeholder="<?=ur_h(ur_t_text('e.g. backup-ed25519'))?>" required></dd>
+  <dt><label for="ur_key_type"><?=_('Type')?></label>:</dt>
   <dd>
     <select id="ur_key_type">
       <option value="ed25519">ed25519</option>
@@ -144,19 +148,25 @@ $handlerUrl = PageHelpers::HANDLER_URL;
     </select>
     <div><button type="button" id="ur-key-generate"><?=_('Generate key')?></button></div>
   </dd>
-  <dt><label for="ur_key_import_priv"><?=_('Import private key')?></label>:</dt>
+</dl>
+<h3 class="ur-subhead"><?=_('Import an existing key')?></h3>
+<dl>
+  <dt><label for="ur_key_import_name"><?=_('Key name')?></label><?=ur_required_mark()?>:</dt>
+  <dd><input type="text" id="ur_key_import_name" placeholder="<?=ur_h(ur_t_text('e.g. nas-backup'))?>"></dd>
+  <dt><label for="ur_key_import_priv"><?=_('Private key')?></label>:</dt>
   <dd>
     <textarea id="ur_key_import_priv" rows="4" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" autocomplete="off"></textarea>
-    <blockquote class="inline_help"><p><?=_('Importing is secondary — prefer "Generate key", or skip this section entirely and use a connection\'s "Existing key file on this server" option if your key already lives on this box. '
+    <blockquote class="inline_help"><p><?=_('Importing is secondary — prefer "Generate key", or skip this section entirely and use a connection\'s "Key file on disk" option if your key already lives on this box. '
         . 'A private key must have an EMPTY passphrase (jobs run unattended); its public key and fingerprint are derived automatically. '
         . 'Provide at least ONE of the private or public key fields — the server enforces this either/or rule')?>.</p></blockquote>
   </dd>
-  <dt><label for="ur_key_import_pub"><?=_('Import public key (optional)')?></label>:</dt>
+  <dt><label for="ur_key_import_pub"><?=_('Public key (optional)')?></label>:</dt>
   <dd>
     <textarea id="ur_key_import_pub" rows="2" placeholder="ssh-ed25519 AAAA..."></textarea>
     <div><button type="button" id="ur-key-import"><?=_('Import key')?></button></div>
   </dd>
 </dl>
+</div>
 <div id="ur-key-result" class="ur-result"></div>
 <?php
 /* Re-enable the plugin's own submit buttons once a form is edited. Unraid's
@@ -170,7 +180,8 @@ ur_emit_ajax_helpers();
 ur_emit_page_assets();
 ?>
 
-<!-- Rename/reorder existing keys (no secret material in this form). -->
+<?php if (!empty($keys)): ?>
+<!-- Rename existing keys (no secret material in this form). -->
 <form method="POST" action="<?=htmlspecialchars($handlerUrl, ENT_QUOTES, 'UTF-8')?>" id="ur-keys-form" data-ur-action="saveCredentials">
   <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf, ENT_QUOTES, 'UTF-8')?>">
   <input type="hidden" name="keys_present" value="1">
@@ -190,6 +201,7 @@ ur_emit_page_assets();
   </div>
 </form>
 <div id="ur-keys-save-result" class="ur-result"></div>
+<?php endif; ?>
 
 <script type="text/javascript">
 (function () {
@@ -254,7 +266,7 @@ ur_emit_page_assets();
   var impBtn = document.getElementById('ur-key-import');
   if (impBtn) {
     impBtn.addEventListener('click', function () {
-      var name = (document.getElementById('ur_key_name').value || '').trim();
+      var name = (document.getElementById('ur_key_import_name').value || '').trim();
       var priv = document.getElementById('ur_key_import_priv').value || '';
       var pub  = document.getElementById('ur_key_import_pub').value || '';
       if (!name) { window.urAjax.show(keyResult, false, 'Enter a key name first.'); return; }

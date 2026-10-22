@@ -652,6 +652,36 @@ final class HandlerStatusTest extends TestCase
         }
     }
 
+    public function testListRunsCarriesFinishTimeStateAndDryRunFromHistory(): void
+    {
+        $id = $this->seedJob('Runs');
+        $old = basename(Logger::openRun($id, 1750000000));
+        $new = basename(Logger::openRun($id, 1750000600));
+        History::append($id, ['startedAt' => '2025-06-15T15:06:40Z', 'finishedAt' => '2025-06-15T15:09:40Z',
+            'state' => 'FAILED', 'dryRun' => true, 'logRef' => $old]);
+        $_GET = ['id' => $id];
+        [$body, $code] = $this->runCapture('ur_action_list_runs');
+        $this->assertSame(200, $code);
+
+        $this->assertSame($new, $body['runs'][0]['id']);
+        $this->assertArrayNotHasKey('finishedTs', $body['runs'][0], 'no History record yet (still running)');
+        $this->assertSame($old, $body['runs'][1]['id']);
+        $this->assertSame(1750000180, $body['runs'][1]['finishedTs']);
+        $this->assertSame('FAILED', $body['runs'][1]['state']);
+        $this->assertTrue($body['runs'][1]['dryRun']);
+    }
+
+    public function testListRunsKeepsTheSummaryStateOverHistory(): void
+    {
+        $runs = ur_runs_with_history(
+            [['id' => 'run-a.log', 'ts' => 1, 'state' => 'RUNNING'], ['id' => 'run-b.log', 'ts' => 0, 'state' => '']],
+            [['logRef' => 'run-a.log', 'state' => 'SUCCESS', 'finishedAt' => 'bad', 'dryRun' => false]]
+        );
+        $this->assertSame('RUNNING', $runs[0]['state']);
+        $this->assertArrayNotHasKey('finishedTs', $runs[0], 'an unparseable finishedAt is left out');
+        $this->assertSame(['id' => 'run-b.log', 'ts' => 0, 'state' => ''], $runs[1]);
+    }
+
     public function testListRunsRejectsBadJobId(): void
     {
         $_GET = ['id' => 'j/../x'];

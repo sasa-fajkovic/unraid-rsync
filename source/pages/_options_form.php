@@ -418,131 +418,38 @@ if (!function_exists('ur_render_rsync_options')) {
         // script having to know which page it is on.
         echo '<div class="ur-rsync-options" data-prefix="' . ur_h($prefix) . '">';
 
-        // --- archive + the options it implies ------------------------------
-        // Archive first, then its implied options indented beneath it, so the
-        // relationship is visible instead of a footgun: -a silently turns all
-        // seven on, and the only way to turn one back off is the --no-* that
-        // Rsync::optionTokens() emits for an unticked box. The note is marked
-        // active by JS while Archive is ticked.
-        $archiveOn = !empty($opts['archive']);
-        echo '<dl>';
-        ur_render_bool_row($prefix, $idBase, 'archive', 'Archive', '-a', $archiveOn);
-        echo '</dl>';
-        echo '<div class="ur-implied' . ($archiveOn ? ' ur-implied-active' : '') . '"'
-            . ' data-archive="' . ur_h($idBase . '_archive') . '">';
-        echo '<p class="ur-implied-note">'
-            . ur_h(ur_t_text('Implied by Archive (-a): ticking Archive turns all of these on. Untick one while Archive is on and the plugin adds the matching --no- flag to genuinely turn it off. Each also works on its own with Archive off.'))
-            . '</p>';
-        echo '<dl>';
-        foreach ($archiveImplied as $key => [$label, $flag]) {
-            ur_render_bool_row($prefix, $idBase, $key, $label, $flag, !empty($opts[$key]));
-        }
-        echo '</dl>';
-        echo '</div>';
-
-        // --- boolean flags -------------------------------------------------
-        // One native dl row per flag: label on the left (<dt>), the checkbox
-        // control on the right (<dd>) with its "?" + collapsible help box.
-        echo '<dl>';
-        foreach ($bools as $key => [$label, $flag]) {
-            ur_render_bool_row($prefix, $idBase, $key, $label, $flag, !empty($opts[$key]));
-        }
-        echo '</dl>';
-
-        // --- destructive flags ---------------------------------------------
-        // Same native rows as the booleans above; the deletion caution lives in
-        // each option's own inline help (the delete / deleteExcluded descriptions
-        // open with a capitalised "DELETE … Destructive:" warning, which
-        // OptionsFormHelpTest::testDestructiveDescriptionsWarn enforces), so no
-        // separate always-on warning element is emitted here.
-        echo '<dl>';
-        foreach ($destructive as $key => [$label, $flag]) {
-            ur_render_bool_row($prefix, $idBase, $key, $label, $flag, !empty($opts[$key]));
-        }
-        echo '</dl>';
-
-        // --- filter rules (ONE ordered, reorderable list) ------------------
-        // Deliberately a single list rather than separate Excludes/Includes
-        // boxes: rsync builds one ordered filter list and acts on the FIRST rule
-        // that matches, so the interleaving IS the ruleset. Two boxes could only
-        // ever emit one fixed grouping, which is what made every include inert
-        // behind a broad exclude (issue #128).
-        $filters  = (isset($opts['filters']) && is_array($opts['filters'])) ? $opts['filters'] : [];
-        $rowsId   = $idBase . '_filters_rows';
-        $helpId   = $idBase . '_filters_help';
-        $typeName = $prefix . '[filters][type][]';
-        $patName  = $prefix . '[filters][pattern][]';
-        echo '<dl>';
-        echo '<dt class="ur-dt">' . ur_h(ur_t_text('Filters')) . ' <code>--include= / --exclude=</code>'
-            . ur_option_help_affordance('filters', $helpId) . '</dt>';
-        echo '<dd>';
-        echo '<p class="ur-implied-note">'
-            . ur_h(ur_t_text('Evaluated top to bottom; the first rule that matches a file wins. Put an include ABOVE the exclude it is meant to override.'))
-            . '</p>';
-        // data-type-name / data-pattern-name let the client-side row builder add
-        // rows without duplicating the prefix logic.
-        echo '<div class="ur-rows ur-filter-rows" id="' . ur_h($rowsId) . '"'
-            . ' data-type-name="' . ur_h($typeName) . '"'
-            . ' data-pattern-name="' . ur_h($patName) . '">';
-        if (empty($filters)) {
-            echo ur_render_filter_row($typeName, $patName, 'exclude', '');   // one empty starter row
-        } else {
-            foreach ($filters as $entry) {
-                $type    = (is_array($entry) && isset($entry['type'])) ? (string) $entry['type'] : 'exclude';
-                $pattern = (is_array($entry) && isset($entry['pattern'])) ? (string) $entry['pattern'] : '';
-                echo ur_render_filter_row($typeName, $patName, $type, $pattern);
-            }
-        }
-        echo '</div>';
-        echo '<div><button type="button" class="ur-row-add" data-rows="' . ur_h($rowsId) . '">'
-            . ur_h(ur_t_text('Add')) . '</button></div>';
-        echo ur_option_help_block('filters', $helpId);
-        echo '</dd>';
-        echo '</dl>';
-
-        // --- scalar value inputs -------------------------------------------
-        // Numeric scalars get an inputmode hint mirroring the server-side
-        // validation (Job::INTEGER_SCALAR_KEYS / SIZE_SCALAR_KEYS): integers use
-        // a numeric keypad, sizes (which accept "1.5m" etc.) a decimal one. The
-        // server remains the source of truth - this is purely a UX hint.
-        $inputModes = [
-            'maxDelete' => 'numeric', 'timeout' => 'numeric', 'contimeout' => 'numeric',
-            'compressLevel' => 'numeric', 'modifyWindow' => 'numeric',
-            'bwlimit' => 'decimal', 'maxSize' => 'decimal', 'minSize' => 'decimal',
-            'protocol' => 'numeric',
+        // Display grouping only: the argv comes from Rsync::optionTokens(), whose
+        // order this does not touch, and the filter rows stay one ordered list.
+        $groups = [
+            'Preserve' => ['xattrs', 'acls', 'hardlinks', 'sparse', 'numericIds', 'omitDirTimes', 'omitLinkTimes'],
+            'Transfer' => ['compress', 'compressLevel', 'humanReadable', 'partial', 'inplace', 'checksum', 'update', 'wholeFile', 'sizeOnly', 'ignoreExisting', 'mkpath'],
+            'Deletion' => ['delete', 'deleteExcluded', 'maxDelete', 'backupDir'],
+            'Limits'   => ['bwlimit', 'timeout', 'contimeout', 'maxSize', 'minSize', 'modifyWindow'],
+            'Advanced' => ['chmod', 'tempDir', 'remoteRsyncPath', 'protocol'],
         ];
-        echo '<dl>';
-        foreach ($scalars as $key => [$label, $flag]) {
-            $name   = $prefix . '[' . $key . ']';
-            $id     = $idBase . '_' . $key;
-            $helpId = $id . '_help';
-            $val    = isset($opts[$key]) ? (string) $opts[$key] : '';
-            $imAttr = isset($inputModes[$key]) ? ' inputmode="' . $inputModes[$key] . '"' : '';
-            echo '<dt class="ur-dt"><label for="' . ur_h($id) . '">' . ur_h(ur_t_text($label)) . ' <code>' . ur_h($flag) . '</code></label>'
-                . ur_option_help_affordance($key, $helpId) . '</dt>';
-            echo '<dd><input type="text"' . $imAttr . ' id="' . ur_h($id) . '" name="' . ur_h($name) . '" value="' . ur_h($val) . '">';
-            echo ur_option_help_block($key, $helpId);
-            echo '</dd>';
+        $boolRows = $bools + $destructive;
+        foreach ($groups as $legend => $keys) {
+            echo '<fieldset class="ur-opt-group"><legend>' . ur_h(ur_t_text($legend)) . '</legend>';
+            if ($legend === 'Preserve') {
+                ur_render_archive_group($prefix, $idBase, $opts, $archiveImplied);
+            }
+            echo '<dl>';
+            foreach ($keys as $key) {
+                if (isset($boolRows[$key])) {
+                    ur_render_bool_row($prefix, $idBase, $key, $boolRows[$key][0], $boolRows[$key][1], !empty($opts[$key]));
+                } else {
+                    ur_render_scalar_row($prefix, $idBase, $key, $scalars[$key][0], $scalars[$key][1], isset($opts[$key]) ? (string) $opts[$key] : '');
+                }
+            }
+            echo '</dl>';
+            if ($legend === 'Transfer') {
+                ur_render_filter_block($prefix, $idBase, $opts);
+            }
+            if ($legend === 'Advanced') {
+                ur_render_stats_row($prefix, $idBase, $opts);
+            }
+            echo '</fieldset>';
         }
-        echo '</dl>';
-
-        $statsId = $idBase . '_statsMode';
-        $statsHelpId = $statsId . '_help';
-        $statsMode = Config::normalizeStatsMode($opts['statsMode'] ?? null);
-        echo '<dl>';
-        echo '<dt class="ur-dt"><label for="' . ur_h($statsId) . '">' . ur_h(ur_t_text('Detailed statistics')) . '</label>'
-            . ur_option_help_affordance('statsMode', $statsHelpId) . '</dt>';
-        echo '<dd><select id="' . ur_h($statsId) . '" name="' . ur_h($prefix . '[statsMode]') . '">';
-        foreach ([
-            'current' => 'Current (--info=stats2)',
-            'legacy' => 'Older rsync (--stats)',
-            'none' => 'No explicit detailed stats',
-        ] as $mode => $label) {
-            echo '<option value="' . ur_h($mode) . '"' . ($statsMode === $mode ? ' selected' : '') . '>'
-                . ur_h(ur_t_text($label)) . '</option>';
-        }
-        echo '</select>' . ur_option_help_block('statsMode', $statsHelpId) . '</dd>';
-        echo '</dl>';
 
         // --- live command preview ------------------------------------------
         // Shows the flags these controls actually produce. It matters most for
@@ -577,6 +484,133 @@ if (!function_exists('ur_render_rsync_options')) {
     }
 }
 
+if (!function_exists('ur_render_archive_group')) {
+    /**
+     * Archive, then the options it implies indented beneath it: -a turns all
+     * seven on, and the only way to turn one back off is the --no-* that
+     * Rsync::optionTokens() emits for an unticked box. The note is marked
+     * active by JS while Archive is ticked.
+     *
+     * @param array<string,mixed>                    $opts
+     * @param array<string,array{0:string,1:string}> $archiveImplied
+     */
+    function ur_render_archive_group(string $prefix, string $idBase, array $opts, array $archiveImplied): void
+    {
+        $archiveOn = !empty($opts['archive']);
+        echo '<dl>';
+        ur_render_bool_row($prefix, $idBase, 'archive', 'Archive', '-a', $archiveOn);
+        echo '</dl>';
+        echo '<div class="ur-implied' . ($archiveOn ? ' ur-implied-active' : '') . '"'
+            . ' data-archive="' . ur_h($idBase . '_archive') . '">';
+        echo '<p class="ur-implied-note">'
+            . ur_h(ur_t_text('Implied by Archive (-a): ticking Archive turns all of these on. Untick one while Archive is on and the plugin adds the matching --no- flag to genuinely turn it off. Each also works on its own with Archive off.'))
+            . '</p>';
+        echo '<dl>';
+        foreach ($archiveImplied as $key => [$label, $flag]) {
+            ur_render_bool_row($prefix, $idBase, $key, $label, $flag, !empty($opts[$key]));
+        }
+        echo '</dl>';
+        echo '</div>';
+    }
+}
+
+if (!function_exists('ur_render_filter_block')) {
+    /**
+     * The filter rules as ONE ordered, reorderable list: rsync acts on the
+     * FIRST rule that matches, so the interleaving IS the ruleset; separate
+     * Excludes/Includes boxes made every include inert behind a broad exclude
+     * (issue #128).
+     *
+     * @param array<string,mixed> $opts
+     */
+    function ur_render_filter_block(string $prefix, string $idBase, array $opts): void
+    {
+        $filters  = (isset($opts['filters']) && is_array($opts['filters'])) ? $opts['filters'] : [];
+        $rowsId   = $idBase . '_filters_rows';
+        $helpId   = $idBase . '_filters_help';
+        $typeName = $prefix . '[filters][type][]';
+        $patName  = $prefix . '[filters][pattern][]';
+        echo '<dl>';
+        echo '<dt class="ur-dt">' . ur_h(ur_t_text('Filters')) . ' <code>--include= / --exclude=</code>'
+            . ur_option_help_affordance('filters', $helpId) . '</dt>';
+        echo '<dd>';
+        echo '<p class="ur-implied-note">'
+            . ur_h(ur_t_text('Evaluated top to bottom; the first rule that matches a file wins. Put an include ABOVE the exclude it is meant to override.'))
+            . '</p>';
+        // data-type-name / data-pattern-name let the client-side row builder add
+        // rows without duplicating the prefix logic.
+        echo '<div class="ur-rows ur-filter-rows" id="' . ur_h($rowsId) . '"'
+            . ' data-type-name="' . ur_h($typeName) . '"'
+            . ' data-pattern-name="' . ur_h($patName) . '">';
+        if (empty($filters)) {
+            echo ur_render_filter_row($typeName, $patName, 'exclude', '');   // one empty starter row
+        } else {
+            foreach ($filters as $entry) {
+                $type    = (is_array($entry) && isset($entry['type'])) ? (string) $entry['type'] : 'exclude';
+                $pattern = (is_array($entry) && isset($entry['pattern'])) ? (string) $entry['pattern'] : '';
+                echo ur_render_filter_row($typeName, $patName, $type, $pattern);
+            }
+        }
+        echo '</div>';
+        echo '<div><button type="button" class="ur-row-add" data-ur-edit data-rows="' . ur_h($rowsId) . '">'
+            . ur_h(ur_t_text('Add')) . '</button></div>';
+        echo ur_option_help_block('filters', $helpId);
+        echo '</dd>';
+        echo '</dl>';
+    }
+}
+
+if (!function_exists('ur_render_scalar_row')) {
+    /**
+     * One value option as a native dl row. Numeric scalars get an inputmode
+     * hint mirroring Job::INTEGER_SCALAR_KEYS / SIZE_SCALAR_KEYS (integers a
+     * numeric keypad, sizes such as "1.5m" a decimal one); the server stays
+     * the source of truth.
+     */
+    function ur_render_scalar_row(string $prefix, string $idBase, string $key, string $label, string $flag, string $val): void
+    {
+        $inputModes = [
+            'maxDelete' => 'numeric', 'timeout' => 'numeric', 'contimeout' => 'numeric',
+            'compressLevel' => 'numeric', 'modifyWindow' => 'numeric',
+            'bwlimit' => 'decimal', 'maxSize' => 'decimal', 'minSize' => 'decimal',
+            'protocol' => 'numeric',
+        ];
+        $name   = $prefix . '[' . $key . ']';
+        $id     = $idBase . '_' . $key;
+        $helpId = $id . '_help';
+        $imAttr = isset($inputModes[$key]) ? ' inputmode="' . $inputModes[$key] . '"' : '';
+        echo '<dt class="ur-dt"><label for="' . ur_h($id) . '">' . ur_h(ur_t_text($label)) . ' <code>' . ur_h($flag) . '</code></label>'
+            . ur_option_help_affordance($key, $helpId) . '</dt>';
+        echo '<dd><input type="text"' . $imAttr . ' id="' . ur_h($id) . '" name="' . ur_h($name) . '" value="' . ur_h($val) . '">';
+        echo ur_option_help_block($key, $helpId);
+        echo '</dd>';
+    }
+}
+
+if (!function_exists('ur_render_stats_row')) {
+    /** @param array<string,mixed> $opts */
+    function ur_render_stats_row(string $prefix, string $idBase, array $opts): void
+    {
+        $statsId = $idBase . '_statsMode';
+        $statsHelpId = $statsId . '_help';
+        $statsMode = Config::normalizeStatsMode($opts['statsMode'] ?? null);
+        echo '<dl>';
+        echo '<dt class="ur-dt"><label for="' . ur_h($statsId) . '">' . ur_h(ur_t_text('Detailed statistics')) . '</label>'
+            . ur_option_help_affordance('statsMode', $statsHelpId) . '</dt>';
+        echo '<dd><select id="' . ur_h($statsId) . '" name="' . ur_h($prefix . '[statsMode]') . '">';
+        foreach ([
+            'current' => 'Current (--info=stats2)',
+            'legacy' => 'Older rsync (--stats)',
+            'none' => 'No explicit detailed stats',
+        ] as $mode => $label) {
+            echo '<option value="' . ur_h($mode) . '"' . ($statsMode === $mode ? ' selected' : '') . '>'
+                . ur_h(ur_t_text($label)) . '</option>';
+        }
+        echo '</select>' . ur_option_help_block('statsMode', $statsHelpId) . '</dd>';
+        echo '</dl>';
+    }
+}
+
 if (!function_exists('ur_render_filter_row')) {
     /**
      * Render one filter-rule row: an include/exclude select, the pattern input,
@@ -608,11 +642,11 @@ if (!function_exists('ur_render_filter_row')) {
         $html .= '<input type="text" name="' . ur_h($patternName) . '" value="' . ur_h($pattern) . '"'
             . ' placeholder="' . ur_h(ur_t_text('pattern, e.g. *.tmp')) . '"'
             . ' aria-label="' . ur_h(ur_t_text('Pattern')) . '"> ';
-        $html .= '<button type="button" class="ur-row-up" title="' . ur_h(ur_t_text('Move up')) . '"'
+        $html .= '<button type="button" class="ur-row-up" data-ur-edit title="' . ur_h(ur_t_text('Move up')) . '"'
             . ' aria-label="' . ur_h(ur_t_text('Move up')) . '">&uarr;</button>';
-        $html .= '<button type="button" class="ur-row-down" title="' . ur_h(ur_t_text('Move down')) . '"'
+        $html .= '<button type="button" class="ur-row-down" data-ur-edit title="' . ur_h(ur_t_text('Move down')) . '"'
             . ' aria-label="' . ur_h(ur_t_text('Move down')) . '">&darr;</button>';
-        $html .= '<button type="button" class="ur-row-del" title="' . ur_h(ur_t_text('Remove')) . '"'
+        $html .= '<button type="button" class="ur-row-del" data-ur-edit title="' . ur_h(ur_t_text('Remove')) . '"'
             . ' aria-label="' . ur_h(ur_t_text('Remove')) . '">&minus;</button>';
         $html .= '</div>';
         return $html;
@@ -690,6 +724,8 @@ if (!function_exists('ur_emit_option_help_assets')) {
   white-space: nowrap;
 }
 .ur-rsync-options .ur-dt { position: relative; }
+.ur-opt-group { border: 0; border-top: 1px solid rgba(127, 127, 127, 0.30); margin: .8rem 0 0; padding: 0; min-width: 0; }
+.ur-opt-group > legend { padding: 0 .5rem 0 0; font-weight: 600; font-size: .95em; }
 
 /* The "?" help affordance. A small circular icon in the native help-blue, kept
    subtle (opacity:0) until the row is hovered or the icon focused — mirroring how
@@ -705,12 +741,13 @@ if (!function_exists('ur_emit_option_help_assets')) {
   color: var(--blockquote-text-color, #31708f);
   font-size: 11px; font-weight: bold; line-height: 1;
   text-align: center; cursor: help; vertical-align: middle;
-  opacity: 0; transition: opacity .12s ease-in-out;
+  opacity: .5; transition: opacity .12s ease-in-out;
   -webkit-user-select: none; -moz-user-select: none; user-select: none;
 }
 /* Reveal on hover or keyboard focus, and keep it visible while open. :focus-visible,
    not :focus: a mouse click leaves focus on the span, which kept a closed "?" shown. */
 .ur-dt:hover .ur-help,
+.ur-help:hover,
 .ur-help:focus-visible,
 .ur-help[aria-expanded="true"] { opacity: 1; }
 .ur-help:focus-visible { outline: 1px solid var(--blue-200, #bce8f1); outline-offset: 1px; }
@@ -878,6 +915,7 @@ if (!function_exists('ur_emit_option_help_assets')) {
     var sel = document.createElement('select');
     sel.name = typeName;
     sel.className = 'ur-filter-type';
+    sel.setAttribute('aria-label', 'Rule type');
     [['include', '+ include'], ['exclude', '- exclude']].forEach(function (pair) {
       var o = document.createElement('option');
       o.value = pair[0];
@@ -891,6 +929,7 @@ if (!function_exists('ur_emit_option_help_assets')) {
     input.name = patName;
     input.value = '';
     input.placeholder = 'pattern, e.g. *.tmp';
+    input.setAttribute('aria-label', 'Pattern');
 
     row.appendChild(sel);
     row.appendChild(document.createTextNode(' '));
@@ -904,6 +943,7 @@ if (!function_exists('ur_emit_option_help_assets')) {
       b.textContent = spec[1];
       b.title = spec[2];
       b.setAttribute('aria-label', spec[2]);
+      b.setAttribute('data-ur-edit', '');
       row.appendChild(b);
     });
     return row;
@@ -1421,12 +1461,13 @@ if (!function_exists('ur_emit_badge_assets')) {
   white-space: nowrap;
 }
 .ur-badge-success  { background: #1c7d3f; }                 /* green  */
-/* Warning badge: dark text on a darkened orange. White-on-#ff8c2f was ~2.4:1,
-   below WCAG AA for small bold text; #b15c00 with near-black text clears AA. */
-.ur-badge-warning  { background: #b15c00; color: #1a1a1a; }
+/* White text on every badge, each background >= 4.5:1 against it (WCAG AA for
+   11px text): warning #b15c00 4.8:1, pending #5f6368 6.0:1, aborted #6b6b6b 5.3:1.
+   UR.Dashboard.page carries the same values. */
+.ur-badge-warning  { background: #b15c00; }
 .ur-badge-failed   { background: var(--red-800, #b71c1c); } /* red    */
 .ur-badge-aborted  { background: #6b6b6b; }                 /* grey   */
-.ur-badge-pending  { background: #9aa0a6; }                 /* grey   */
+.ur-badge-pending  { background: #5f6368; }                 /* grey   */
 .ur-badge-running  { background: #1565c0; animation: ur-pulse 1.3s ease-in-out infinite; }
 /* Not part of the run-state vocabulary: the Status tab's "nothing running"
    indicator. Neutral grey, so idle never reads as a success. */
@@ -1606,11 +1647,11 @@ if (!function_exists('ur_emit_form_enable_assets')) {
       enableSubmit(pluginForm(ev.target));
     }, true);
   });
-  /* Add/remove controls (real <button>s; the "?" help affordance is a role=button
-   * <span>, so it is intentionally ignored) also make a form dirty. */
+  /* Add/remove controls make a form dirty too. A type=button that only acts
+   * (Run, Logs, Test connection) does not: those carry no data-ur-edit. */
   document.addEventListener('click', function (ev) {
     var btn = (ev.target && ev.target.closest) ? ev.target.closest('button') : null;
-    if (btn) { enableSubmit(pluginForm(btn)); }
+    if (btn && (btn.type !== 'button' || btn.hasAttribute('data-ur-edit'))) { enableSubmit(pluginForm(btn)); }
   }, true);
 })();
 </script>
@@ -1671,7 +1712,56 @@ if (!function_exists('ur_emit_page_assets')) {
 }
 .ur-notice-warn { background: rgba(177,92,0,0.12); border-color: #b15c00; }
 /* The dry-run line under Last run: neutral, it never sets the badge. */
-.ur-dry-run { font-size: 0.9em; color: var(--color-text-secondary, #888); }
+.ur-dry-run { font-size: 0.9em; color: var(--color-text-secondary, #666); }
+/* Placeholders read as hints, not as configured values. */
+.ur-jobs-page input::placeholder, .ur-jobs-page textarea::placeholder,
+.ur-settings-page input::placeholder,
+#ur-conns-form input::placeholder, #ur-conns-form textarea::placeholder,
+#ur-key-new input::placeholder, #ur-key-new textarea::placeholder { color: var(--color-text-secondary, #8a8a8a); opacity: 1; font-style: italic; }
+/* A short always-visible hint under a control (inline_help is hidden until the page Help toggle). */
+.ur-hint { margin: 4px 0 0; font-size: 12px; line-height: 1.45; color: var(--color-text-secondary, #666); }
+/* Long help, collapsed until asked for. */
+.ur-details { margin: 6px 0 0; font-size: .9em; }
+.ur-details > summary { cursor: pointer; color: var(--blockquote-text-color, #31708f); }
+.ur-details > p { margin: 6px 0 0; }
+/* Destructive action: outlined red, pushed to the right edge of its (flex) row. */
+.ur-btn-danger, .ur-btn-danger:hover {
+  margin-left: auto !important; background: transparent !important; background-image: none !important;
+  color: var(--red-800, #b71c1c) !important; border: 1px solid var(--red-800, #b71c1c) !important;
+}
+.ur-dirty-note { font-size: 12px; font-weight: bold; color: #b15c00; }
+/* Collapsible cards (jobs and connections): a one-line header, body hidden by default. */
+.ur-job-card { border: 1px solid var(--border-color, #444); border-radius: 6px; margin: 8px 0; padding: 6px 8px; }
+.ur-job-head {
+  display: flex; align-items: center; gap: 8px; cursor: pointer;
+  padding: 6px 4px; border-radius: 4px; -webkit-user-select: none; user-select: none;
+}
+.ur-job-head:hover { background: var(--color-tablebody, rgba(127,127,127,0.12)); }
+.ur-job-head:focus { outline: 1px solid var(--blue-200, #bce8f1); outline-offset: 1px; }
+.ur-job-caret { display: inline-block; font-size: 11px; transition: transform .12s ease-in-out; opacity: 0.8; }
+.ur-job-card.ur-open .ur-job-caret { transform: rotate(90deg); }
+.ur-job-title { font-weight: bold; }
+.ur-job-sub { margin-left: auto; color: var(--color-text-secondary, #666); font-size: 12px; white-space: nowrap; }
+/* Slider switch for boolean rows (a restyled checkbox; the hidden "0" before it
+   still posts an unchecked value). */
+input.ur-switch {
+  -webkit-appearance: none; -moz-appearance: none; appearance: none;
+  position: relative; display: inline-block; vertical-align: middle;
+  width: 40px; height: 20px; margin: 0; padding: 0;
+  border-radius: 20px; cursor: pointer;
+  background: var(--color-tablebody, #b0b0b0);
+  transition: background .15s ease-in-out;
+}
+input.ur-switch::before {
+  content: ""; position: absolute; top: 2px; left: 2px;
+  width: 16px; height: 16px; border-radius: 50%;
+  background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,0.3);
+  transition: transform .15s ease-in-out;
+}
+input.ur-switch:checked { background: var(--green, #1c7d3f); }
+input.ur-switch:checked::before { transform: translateX(20px); }
+input.ur-switch:focus-visible { outline: 2px solid var(--blue-500, #2196f3); outline-offset: 2px; }
+input.ur-switch:disabled { opacity: 0.5; cursor: default; }
 </style>
 <script type="text/javascript">
 (function () {
@@ -1789,8 +1879,87 @@ if (!function_exists('ur_emit_page_assets')) {
     }
   }
 
+  /* ---- collapsible cards (Jobs + Connections) ---- */
+  function setCardOpen(card, open) {
+    if (!card) { return; }
+    var body = card.querySelector('.ur-job-body');
+    var head = card.querySelector('.ur-job-head');
+    card.classList.toggle('ur-open', open);
+    if (body) { body.hidden = !open; }
+    if (head) { head.setAttribute('aria-expanded', open ? 'true' : 'false'); }
+  }
+  document.addEventListener('click', function (ev) {
+    var head = ev.target && ev.target.closest ? ev.target.closest('.ur-job-head') : null;
+    if (head) { var c = head.closest('.ur-job-card'); setCardOpen(c, !c.classList.contains('ur-open')); }
+  });
+  document.addEventListener('keydown', function (ev) {
+    if (ev.key !== 'Enter' && ev.key !== ' ' && ev.key !== 'Spacebar') { return; }
+    var head = ev.target && ev.target.classList && ev.target.classList.contains('ur-job-head') ? ev.target : null;
+    if (!head) { return; }
+    ev.preventDefault();
+    var c = head.closest('.ur-job-card');
+    setCardOpen(c, !c.classList.contains('ur-open'));
+  });
+  /* The header title follows the card's Name field. */
+  document.addEventListener('input', function (ev) {
+    var t = ev.target;
+    if (!t || !t.name || !/\[name\]$/.test(t.name) || !t.closest) { return; }
+    var card = t.closest('.ur-job-card');
+    var title = card ? card.querySelector('.ur-job-title') : null;
+    if (title) { title.textContent = (t.value || '').trim() || title.getAttribute('data-untitled') || ''; }
+  });
+  /* Before the browser validates an Apply, open every collapsed card holding an
+   * invalid field: a required control in a hidden region is "not focusable",
+   * so the submit would be blocked with no visible bubble. */
+  document.addEventListener('click', function (ev) {
+    var b = ev.target && ev.target.closest ? ev.target.closest('input[type=submit], button[type=submit]') : null;
+    if (!b || !b.form) { return; }
+    Array.prototype.forEach.call(b.form.querySelectorAll('.ur-job-card'), function (card) {
+      var body = card.querySelector('.ur-job-body');
+      if (!card.classList.contains('ur-open') && body && body.querySelector(':invalid')) { setCardOpen(card, true); }
+    });
+  }, true);
+
+  /* All tabs live in one document; show the tab that holds el. Unraid's tab
+   * markup differs by release (a radio inside div.tab, or role=tab buttons
+   * driving role=tabpanel), so look for either around el. */
+  function showTabOf(el) {
+    for (var p = el.parentElement; p && p !== document.body; p = p.parentElement) {
+      var ctl = null;
+      if (p.getAttribute('role') === 'tabpanel') {
+        ctl = document.getElementById(p.getAttribute('aria-labelledby') || '')
+          || (p.id ? document.querySelector('[aria-controls="' + cssEsc(p.id) + '"]') : null);
+      } else if (p.classList.contains('tab')) {
+        ctl = p.querySelector('input[type=radio]');
+      }
+      if (ctl) { if (!ctl.checked && ctl.getAttribute('aria-selected') !== 'true') { ctl.click(); } return true; }
+    }
+    return false;
+  }
+  /* a.ur-goto[href="#id"]: switch to that element's tab, open it when it is a
+   * card, and scroll it into view. false when no tab control was found: the
+   * caller then leaves the native #anchor navigation alone. */
+  function reveal(id) {
+    var el = id ? document.getElementById(id) : null;
+    if (!el) { return false; }
+    if (el.classList.contains('ur-job-card')) { setCardOpen(el, true); }
+    if (!showTabOf(el)) { return false; }
+    setTimeout(function () {
+      el.scrollIntoView({ block: 'start' });
+      var f = el.querySelector('.ur-job-head') || el;
+      if (f.focus) { f.focus({ preventScroll: true }); }
+    }, 0);
+    return true;
+  }
+  document.addEventListener('click', function (ev) {
+    var a = ev.target && ev.target.closest ? ev.target.closest('a.ur-goto') : null;
+    if (a && reveal((a.getAttribute('href') || '').replace(/^#/, ''))) { ev.preventDefault(); }
+  });
+
   window.urUtil = {
     HANDLER_URL: <?=ur_js(PageHelpers::HANDLER_URL)?>,
+    setCardOpen: setCardOpen,
+    reveal: reveal,
     relativeTime: relativeTime,
     formatDuration: formatDuration,
     isoToEpoch: isoToEpoch,

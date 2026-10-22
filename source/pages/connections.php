@@ -106,23 +106,32 @@ function ur_render_connection_card($conn, $index, array $keys): void
         $keyFilePath = Credentials::DEFAULT_KEY_FILE_PATH;
     }
 
-    echo '<div class="ur-conn-card" data-index="' . ur_h($index) . '" data-conn-id="' . ur_h($id) . '">';
+    $untitled = ur_t_text('(unnamed connection)');
+    echo '<div class="ur-conn-card ur-job-card" data-index="' . ur_h($index) . '" data-conn-id="' . ur_h($id) . '">';
+    echo '<div class="ur-job-head" role="button" tabindex="0" aria-expanded="false" aria-controls="' . ur_h($idb . '_body') . '">';
+    echo '<span class="ur-job-caret" aria-hidden="true">&#9654;</span>';
+    echo '<span class="ur-job-title" data-untitled="' . ur_h($untitled) . '">' . ur_h($name !== '' ? $name : $untitled) . '</span>';
+    echo '<span class="ur-job-sub">' . ur_h(implode(' · ', array_filter([
+        ur_t_text(PageHelpers::TRANSPORT_LABELS[$transport] ?? $transport),
+        $host !== '' ? $host . ':' . $port : '',
+    ]))) . '</span>';
+    echo '</div>';
+    echo '<div class="ur-job-body" id="' . ur_h($idb . '_body') . '" hidden>';
     echo '<input type="hidden" name="' . ur_h($p . '[id]') . '" value="' . ur_h($id) . '">';
     echo '<dl>';
 
-    // transport. FIRST field on the card because it decides which of the fields
-    // below even apply: SSH builds an `ssh` command line, DAEMON speaks the
-    // rsyncd wire protocol directly on a TCP port, so auth method, keys and
-    // host-key pinning have no meaning there at all. The handler clears the
-    // stale keyId / keyFilePath / remoteHostKey when a card is saved as DAEMON.
+    // name (required)
+    echo '<dt><label for="' . ur_h($idb . '_name') . '">' . ur_h(ur_t_text('Name')) . '</label>' . ur_required_mark() . ':</dt>';
+    echo '<dd><input type="text" id="' . ur_h($idb . '_name') . '" name="' . ur_h($p . '[name]') . '" value="' . ur_h($name) . '" required></dd>';
+
+    // transport decides which of the fields below apply: DAEMON speaks the
+    // rsyncd protocol on a TCP port, so auth, keys and host-key pinning do not.
+    // The handler clears the stale keyId / keyFilePath / remoteHostKey on DAEMON.
     echo '<dt><label for="' . ur_h($idb . '_transport') . '">' . ur_h(ur_t_text('Transport')) . '</label>:</dt>';
     echo '<dd><select id="' . ur_h($idb . '_transport') . '" class="ur-conn-transport" name="' . ur_h($p . '[transport]') . '" data-idb="' . ur_h($idb) . '">';
-    foreach ([
-        'SSH'    => 'SSH (rsync over SSH)',
-        'DAEMON' => 'rsync daemon (rsyncd, port 873)',
-    ] as $val => $lbl) {
+    foreach (['SSH', 'DAEMON'] as $val) {
         $sel = ($transport === $val) ? ' selected' : '';
-        echo '<option value="' . ur_h($val) . '"' . $sel . '>' . ur_h(ur_t_text($lbl)) . '</option>';
+        echo '<option value="' . ur_h($val) . '"' . $sel . '>' . ur_h(ur_t_text(PageHelpers::TRANSPORT_LABELS[$val])) . '</option>';
     }
     echo '</select>';
     // display:block, NOT the usual empty style: the base stylesheet ships
@@ -133,10 +142,6 @@ function ur_render_connection_card($conn, $index, array $keys): void
             . 'and file names and file contents travel in clear over the network. Use SSH transport on any untrusted network.'))
         . '</p></blockquote>';
     echo '</dd>';
-
-    // name (required)
-    echo '<dt><label for="' . ur_h($idb . '_name') . '">' . ur_h(ur_t_text('Name')) . '</label>' . ur_required_mark() . ':</dt>';
-    echo '<dd><input type="text" id="' . ur_h($idb . '_name') . '" name="' . ur_h($p . '[name]') . '" value="' . ur_h($name) . '" required></dd>';
 
     // host (required)
     echo '<dt><label for="' . ur_h($idb . '_host') . '">' . ur_h(ur_t_text('Host')) . '</label>' . ur_required_mark() . ':</dt>';
@@ -163,11 +168,7 @@ function ur_render_connection_card($conn, $index, array $keys): void
     // password.
     echo '<dt class="ur-ssh-only"' . $sshOnlyStyle . '><label for="' . ur_h($idb . '_auth') . '">' . ur_h(ur_t_text('Auth method')) . '</label>:</dt>';
     echo '<dd class="ur-ssh-only"' . $sshOnlyStyle . '><select id="' . ur_h($idb . '_auth') . '" class="ur-conn-auth" name="' . ur_h($p . '[authMethod]') . '" data-idb="' . ur_h($idb) . '">';
-    foreach ([
-        'KEYFILE'  => 'Existing key file on this server',
-        'KEY'      => 'Managed key (from the Credentials tab)',
-        'PASSWORD' => 'Password',
-    ] as $val => $lbl) {
+    foreach (PageHelpers::AUTH_LABELS as $val => $lbl) {
         $sel = ($auth === $val) ? ' selected' : '';
         echo '<option value="' . ur_h($val) . '"' . $sel . '>' . ur_h(ur_t_text($lbl)) . '</option>';
     }
@@ -215,7 +216,7 @@ function ur_render_connection_card($conn, $index, array $keys): void
     }
     echo '</select>';
     echo '<blockquote class="inline_help"><p>' . ur_h(ur_t_text('Uses a key the plugin manages (generated or imported on the Credentials tab). '
-        . 'If you already have a key on this server, prefer the "Existing key file on this server" option instead.')) . '</p></blockquote>';
+        . 'If you already have a key on this server, prefer the "Key file on disk" option instead.')) . '</p></blockquote>';
     echo '</dd>';
 
     // PASSWORD: write-only field + recoverable-secret warning (shown when
@@ -255,11 +256,13 @@ function ur_render_connection_card($conn, $index, array $keys): void
     // strict host key
     echo '<dt class="ur-ssh-only"' . $sshOnlyStyle . '><label for="' . ur_h($idb . '_strict') . '">' . ur_h(ur_t_text('Strict host key checking')) . '</label>:</dt>';
     echo '<dd class="ur-ssh-only"' . $sshOnlyStyle . '><select id="' . ur_h($idb . '_strict') . '" name="' . ur_h($p . '[strictHostKey]') . '">';
-    foreach (['accept-new' => 'accept-new (pin the host key on first connect; reject a changed key)', 'yes' => 'yes (require a host key pinned below)', 'no' => 'no (do not verify - insecure)'] as $val => $lbl) {
+    foreach (['accept-new' => 'accept-new (pin on first connect)', 'yes' => 'yes (pinned key required)', 'no' => 'no (insecure)'] as $val => $lbl) {
         $sel = ($strict === $val) ? ' selected' : '';
         echo '<option value="' . ur_h($val) . '"' . $sel . '>' . ur_h(ur_t_text($lbl)) . '</option>';
     }
-    echo '</select></dd>';
+    echo '</select>';
+    echo '<blockquote class="inline_help"><p>' . ur_h(ur_t_text('accept-new pins the host key on the first connection and then refuses a changed key. yes connects only to a host whose key is already pinned below. no never verifies the host - anyone on the network path can impersonate it.')) . '</p></blockquote>';
+    echo '</dd>';
 
     // connect timeout. SSH-ONLY: connectTimeout is read at exactly one site,
     // Ssh::buildSshArgv's `-o ConnectTimeout=N`, so on a daemon card it
@@ -274,29 +277,49 @@ function ur_render_connection_card($conn, $index, array $keys): void
     echo '<dt class="ur-ssh-only"' . $sshOnlyStyle . '><label for="' . ur_h($idb . '_sudo') . '">' . ur_h(ur_t_text('Use sudo on the receiver')) . '</label>:</dt>';
     echo '<dd class="ur-ssh-only"' . $sshOnlyStyle . '>';
     echo '<input type="hidden" name="' . ur_h($p . '[useSudo]') . '" value="0">';
-    echo '<input type="checkbox" id="' . ur_h($idb . '_sudo') . '" name="' . ur_h($p . '[useSudo]') . '" value="1"' . (($conn['useSudo'] ?? false) === true ? ' checked' : '') . '>';
+    echo '<input type="checkbox" class="ur-switch" id="' . ur_h($idb . '_sudo') . '" name="' . ur_h($p . '[useSudo]') . '" value="1"' . (($conn['useSudo'] ?? false) === true ? ' checked' : '') . '>';
     echo '<blockquote class="inline_help"><p>' . ur_h(ur_t_text('For snapshot-mode jobs whose SSH login is not root: the snapshot helper then runs through sudo -n sh, so that user needs passwordless sudo for sh on the receiver. Only the snapshot helper uses it; transfers and mirror jobs are unaffected. Leave OFF when the login is root.')) . '</p></blockquote>';
     echo '</dd>';
 
-    // host key (discover) - textarea holds the pinned key; button fills it
+    // Pinned host key: shown as type + fingerprint. The textarea still posts the
+    // pin unchanged (blank keeps it, handler side); "Replace…" reveals it.
+    $fps = PageHelpers::hostKeyFingerprints($hostKey);
     echo '<dt class="ur-ssh-only"' . $sshOnlyStyle . '><label for="' . ur_h($idb . '_hostkey') . '">' . ur_h(ur_t_text('Pinned host key')) . '</label>:</dt>';
     echo '<dd class="ur-ssh-only"' . $sshOnlyStyle . '>';
-    echo '<textarea id="' . ur_h($idb . '_hostkey') . '" name="' . ur_h($p . '[remoteHostKey]') . '" rows="2" placeholder="' . ur_h(ur_t_text('Use "Discover host key" to fetch this from the host')) . '">' . ur_h($hostKey) . '</textarea>';
-    echo '<div><button type="button" class="ur-discover-hostkey" data-idb="' . ur_h($idb) . '">' . ur_h(ur_t_text('Discover host key')) . '</button></div>';
+    if ($fps !== []) {
+        echo '<ul class="ur-hostkey-fps">';
+        foreach ($fps as $fp) {
+            echo '<li><code>' . ur_h($fp['type']) . '</code> <code>' . ur_h($fp['fingerprint']) . '</code></li>';
+        }
+        echo '</ul>';
+        echo '<div class="ur-hostkey-actions">';
+        echo '<label><input type="checkbox" class="ur-hostkey-clear" name="' . ur_h($p . '[clearHostKey]') . '" value="1"> ' . ur_h(ur_t_text('Clear pin on Apply')) . '</label>';
+        echo '<button type="button" class="ur-hostkey-replace" data-idb="' . ur_h($idb) . '">' . ur_h(ur_t_text('Replace…')) . '</button>';
+        echo '</div>';
+    } elseif (trim($hostKey) === '') {
+        echo '<div class="ur-hint">' . ur_h(ur_t_text('Not pinned yet. With accept-new, the first run or Test connection pins it.')) . '</div>';
+    }
+    echo '<textarea id="' . ur_h($idb . '_hostkey') . '" class="ur-hostkey-ta" name="' . ur_h($p . '[remoteHostKey]') . '" rows="2" spellcheck="false"'
+        . ' placeholder="' . ur_h(ur_t_text('Paste a known_hosts line, or use "Discover host key"')) . '"' . ($fps !== [] ? ' hidden' : '') . '>' . ur_h($hostKey) . '</textarea>';
+    echo '<div><button type="button" class="ur-discover-hostkey" data-ur-edit data-idb="' . ur_h($idb) . '">' . ur_h(ur_t_text('Discover host key')) . '</button></div>';
     echo '</dd>';
 
-    echo '</dl>';
-
-    // per-card actions: test connection (saved connections only) + remove
+    // Actions sit in the value column, aligned with the fields above.
+    echo '<dt>&nbsp;</dt><dd>';
     echo '<div class="ur-conn-card-actions">';
     if ($id !== '') {
-        echo '<button type="button" class="ur-test-conn" data-conn-id="' . ur_h($id) . '">' . ur_h(ur_t_text('Test connection')) . '</button> ';
-        echo '<span class="ur-test-result" id="' . ur_h($idb . '_test') . '"></span> ';
-        echo '<blockquote class="inline_help"><p>' . ur_h(ur_t_text('Test uses the last SAVED settings - apply your changes first.')) . '</p></blockquote>';
+        echo '<button type="button" class="ur-test-conn" data-conn-id="' . ur_h($id) . '">' . ur_h(ur_t_text('Test connection')) . '</button>';
+        echo '<span class="ur-test-result" id="' . ur_h($idb . '_test') . '"></span>';
     }
-    echo '<button type="button" class="ur-conn-del">' . ur_h(ur_t_text('Remove connection')) . '</button>';
+    echo '<button type="button" class="ur-conn-del ur-btn-danger">' . ur_h(ur_t_text('Remove connection')) . '</button>';
     echo '</div>';
+    if ($id !== '') {
+        echo '<div class="ur-hint">' . ur_h(ur_t_text('Test uses the last SAVED settings - apply your changes first.')) . '</div>';
+    }
+    echo '</dd>';
+    echo '</dl>';
 
+    echo '</div>'; // .ur-job-body
     echo '</div>'; // .ur-conn-card
 }
 ?>
@@ -324,6 +347,12 @@ function ur_render_connection_card($conn, $index, array $keys): void
    required-asterisk red so the destructive intent reads clearly, and the
    consequence warning is shown inline next to it (never in a popup). */
 .ur-armed-delete { color: var(--red-800, #b71c1c); border-color: var(--red-800, #b71c1c); font-weight: bold; }
+.ur-conn-card-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.ur-conn-card-actions button { margin: 0; }
+.ur-hostkey-fps { list-style: none; margin: 4px 0; padding: 0; }
+.ur-hostkey-fps code { word-break: break-all; }
+.ur-hostkey-actions { display: flex; align-items: center; gap: 12px; margin: 4px 0; }
+.ur-hostkey-actions button { margin: 0; }
 </style>
 <div class="title">
   <span class="left">
@@ -347,7 +376,7 @@ function ur_render_connection_card($conn, $index, array $keys): void
     <strong><?=_('Most common setup')?>:</strong>
     <?=_('if you already have an SSH key on this server (e.g. /root/.ssh/id_ed25519) and have copied its public key to the '
         . 'remote\'s authorized_keys, you do NOT need the managed keychain on the Credentials tab. Just add a connection here and choose '
-        . '"Existing key file on this server" — the plugin runs ssh -i with your key, nothing is uploaded or stored')?>.
+        . '"Key file on disk" — the plugin runs ssh -i with your key, nothing is uploaded or stored')?>.
   </p>
 </blockquote>
 
@@ -376,13 +405,10 @@ function ur_render_connection_card($conn, $index, array $keys): void
     ?>
       <tr>
         <td><?=htmlspecialchars((string)$cc['name'], ENT_QUOTES, 'UTF-8')?></td>
-        <td><?=htmlspecialchars((string)$cc['transport'], ENT_QUOTES, 'UTF-8')?></td>
+        <td><?=ur_h(ur_t_text(PageHelpers::TRANSPORT_LABELS[(string) $cc['transport']] ?? (string) $cc['transport']))?></td>
         <td><?=htmlspecialchars((string)$cc['host'] . ':' . (string)$cc['port'], ENT_QUOTES, 'UTF-8')?></td>
         <td><?=htmlspecialchars((string)$cc['username'], ENT_QUOTES, 'UTF-8')?></td>
-        <?php /* A daemon connection has no SSH auth method; its stored authMethod
-                 is whatever the hidden select happened to post, so showing it
-                 would be a lie. */ ?>
-        <td><?=htmlspecialchars((string)$cc['transport'] === 'DAEMON' ? 'rsyncd' : (string)$cc['authMethod'], ENT_QUOTES, 'UTF-8')?></td>
+        <td><?=ur_h(ur_t_text(PageHelpers::authLabel($cc)))?></td>
       </tr>
     <?php endforeach; endif; ?>
   </tbody>
@@ -411,7 +437,7 @@ ur_emit_page_assets();
   </div>
 
   <div class="ur-actions">
-    <button type="button" id="ur-add-conn"><?=_('Add connection')?></button>
+    <button type="button" id="ur-add-conn" data-ur-edit><?=_('Add connection')?></button>
     <input type="submit" value="<?=_('Apply')?>">
   </div>
 </form>
@@ -466,6 +492,9 @@ ur_emit_page_assets();
       }
     } else if (t.classList.contains('ur-discover-hostkey')) {
       discoverHostKey(t);
+    } else if (t.classList.contains('ur-hostkey-replace')) {
+      var hk = document.getElementById(t.getAttribute('data-idb') + '_hostkey');
+      if (hk) { hk.hidden = false; hk.focus(); hk.select(); }
     } else if (t.classList.contains('ur-test-conn')) {
       testConnection(t);
     }
@@ -735,7 +764,9 @@ ur_emit_page_assets();
       { timeoutMs: DISCOVER_CLIENT_ABORT_MS }
     ).then(function (res) {
       if (res.ok && res.body && res.body.ok) {
-        if (ta) { ta.value = res.body.hostKey || ''; }
+        if (ta) { ta.value = res.body.hostKey || ''; ta.hidden = false; }
+        var clr = ta && ta.closest ? ta.closest('dd').querySelector('.ur-hostkey-clear') : null;
+        if (clr) { clr.checked = false; }
         finishSuccess();
       } else {
         finishFail(window.urAjax.errText(res, 'Host key discovery failed.'));
@@ -794,6 +825,7 @@ ur_emit_page_assets();
       wrap.innerHTML = html.trim();
       var card = wrap.firstElementChild;
       document.getElementById('ur-conns-container').appendChild(card);
+      window.urUtil.setCardOpen(card, true);
       /* A new card defaults to SSH transport + KEYFILE auth (the template
        * defaults); seed its required/visibility state to match. Transport LAST:
        * it re-applies the auth-specific hiding on its SSH branch. */
