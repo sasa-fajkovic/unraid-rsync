@@ -46,7 +46,7 @@ final class SnapshotRunnerTest extends TestCase
     private array $failOp = [];
     /** @var array<string,int> sub => rsync exit */
     private array $pairExit = [];
-    /** @var array<string,array{0:int,1:int}> sub => [regular files, bytes] */
+    /** @var array<string,array{0:int,1:int|string}> sub => [regular files, bytes as rsync prints them] */
     private array $srcStats = [];
     /** @var array<string,array<int,string>|false> local path => scandir() */
     private array $sources = [];
@@ -1358,5 +1358,18 @@ final class SnapshotRunnerTest extends TestCase
         $meta = json_decode((string) $this->rx['dirs'][$this->stamp()]['meta'], true);
         $this->assertSame(['exit' => 0, 'files' => 7, 'bytes' => 70], $meta['subs']['a']);
         $this->assertSame(['exit' => 0, 'files' => 8, 'bytes' => 80], $meta['subs']['b']);
+    }
+
+    public function testPairStatsLogRsyncsOwnFigureForAUnitAndThePlainNumberOtherwise(): void
+    {
+        $this->saveJob();
+        $this->seedSnapshot($this->stamp(1));
+        $this->srcStats = ['a' => [45896, '408.63G'], 'b' => [8, '1,234']];
+        $res = $this->runJob();
+        $this->assertSame(Rsync::STATE_SUCCESS, $res['state'], $this->log($res));
+        $this->assertStringContainsString('Pair #1 (a): 45896 regular files, 408.63G bytes.', $this->log($res));
+        $this->assertStringContainsString('Pair #2 (b): 8 regular files, 1234 bytes.', $this->log($res));
+        $meta = json_decode((string) $this->rx['dirs'][$this->stamp()]['meta'], true);
+        $this->assertSame(408630000000, $meta['subs']['a']['bytes']);
     }
 }

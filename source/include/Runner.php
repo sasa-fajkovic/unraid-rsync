@@ -2166,12 +2166,15 @@ class Runner
             'bytes'        => $stats['totalSize'],
             'basisMissing' => !empty($sn['basis'][$i]) && in_array($basis, $missing, true),
         ];
+        // -h figures are rounded: log rsync's own text, not a fake-precise int.
+        $shown = static fn(?int $n, ?string $text): string => $n === null ? 'unknown'
+            : ($text !== null && preg_match('/[KMGTPE]$/', $text) ? $text : (string) $n);
         Logger::event($runLog, $jobId, sprintf(
             'Pair #%d (%s): %s regular files, %s bytes.',
             (int) $i + 1,
             $sub,
-            $result['files'] ?? 'unknown',
-            $result['bytes'] ?? 'unknown'
+            $shown($stats['regFiles'], $stats['regFilesText']),
+            $shown($stats['totalSize'], $stats['totalSizeText'])
         ));
         return $result;
     }
