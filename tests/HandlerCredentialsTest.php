@@ -627,9 +627,6 @@ final class HandlerCredentialsTest extends TestCase
 
     public function testCsrfValidatesAgainstVarIniTokenOnDirectPost(): void
     {
-        if (!defined('UR_VAR_INI_PATHS')) {
-            $this->markTestSkipped('UR_VAR_INI_PATHS not overridable in this build');
-        }
         $path = UR_VAR_INI_PATHS[0];
         @mkdir(dirname($path), 0777, true);
         file_put_contents($path, "csrf_token=\"direct-token\"\n");
@@ -655,9 +652,6 @@ final class HandlerCredentialsTest extends TestCase
      */
     public function testCsrfMatchesVarIniEvenWhenVarAndSessionDiffer(): void
     {
-        if (!defined('UR_VAR_INI_PATHS')) {
-            $this->markTestSkipped('UR_VAR_INI_PATHS not overridable in this build');
-        }
         $path = UR_VAR_INI_PATHS[0];
         @mkdir(dirname($path), 0777, true);
         file_put_contents($path, "csrf_token=\"canonical-token\"\n");
@@ -682,9 +676,6 @@ final class HandlerCredentialsTest extends TestCase
     /** A token matching ONLY $_SESSION (var + var.ini differ) must pass. */
     public function testCsrfMatchesSessionOnly(): void
     {
-        if (!defined('UR_VAR_INI_PATHS')) {
-            $this->markTestSkipped('UR_VAR_INI_PATHS not overridable in this build');
-        }
         $path = UR_VAR_INI_PATHS[0];
         @mkdir(dirname($path), 0777, true);
         file_put_contents($path, "csrf_token=\"other-ini-token\"\n");
@@ -709,9 +700,6 @@ final class HandlerCredentialsTest extends TestCase
     /** A token matching NO candidate must 403. */
     public function testCsrfMismatchEverywhereRejected(): void
     {
-        if (!defined('UR_VAR_INI_PATHS')) {
-            $this->markTestSkipped('UR_VAR_INI_PATHS not overridable in this build');
-        }
         $path = UR_VAR_INI_PATHS[0];
         @mkdir(dirname($path), 0777, true);
         file_put_contents($path, "csrf_token=\"ini-token\"\n");
@@ -736,9 +724,6 @@ final class HandlerCredentialsTest extends TestCase
     /** With NO candidates available at all, any supplied token 403s. */
     public function testCsrfNoCandidatesRejected(): void
     {
-        if (!defined('UR_VAR_INI_PATHS')) {
-            $this->markTestSkipped('UR_VAR_INI_PATHS not overridable in this build');
-        }
         $path = UR_VAR_INI_PATHS[0];
         @unlink($path); // ensure no var.ini candidate
         $prevSession = $_SESSION ?? null;
@@ -770,9 +755,6 @@ final class HandlerCredentialsTest extends TestCase
     /** ur_csrf_token_candidates() returns all non-empty sources, de-duplicated. */
     public function testCsrfCandidatesAreCollectedAndDeduped(): void
     {
-        if (!defined('UR_VAR_INI_PATHS')) {
-            $this->markTestSkipped('UR_VAR_INI_PATHS not overridable in this build');
-        }
         $path = UR_VAR_INI_PATHS[0];
         @mkdir(dirname($path), 0777, true);
         // var.ini token DUPLICATES the $var token -> must appear once.
@@ -842,9 +824,6 @@ final class HandlerCredentialsTest extends TestCase
      */
     public function testCsrfAcceptedWhenStrippedFromPostButInRawBody(): void
     {
-        if (!defined('UR_VAR_INI_PATHS')) {
-            $this->markTestSkipped('UR_VAR_INI_PATHS not overridable in this build');
-        }
         $path = UR_VAR_INI_PATHS[0];
         @mkdir(dirname($path), 0777, true);
         file_put_contents($path, "csrf_token=\"raw-only-token\"\n");
@@ -880,9 +859,6 @@ final class HandlerCredentialsTest extends TestCase
      */
     public function testCsrfTokensFromIniRecoversWhenParseIniFails(): void
     {
-        if (!defined('UR_VAR_INI_PATHS')) {
-            $this->markTestSkipped('UR_VAR_INI_PATHS not overridable in this build');
-        }
         $path = UR_VAR_INI_PATHS[0];
         @mkdir(dirname($path), 0777, true);
         // The trailing ']' is a syntax error that makes parse_ini_file() bail on
@@ -906,9 +882,6 @@ final class HandlerCredentialsTest extends TestCase
      */
     public function testCsrfAcceptedFromUnparseableVarIniOnDirectPost(): void
     {
-        if (!defined('UR_VAR_INI_PATHS')) {
-            $this->markTestSkipped('UR_VAR_INI_PATHS not overridable in this build');
-        }
         $path = UR_VAR_INI_PATHS[0];
         @mkdir(dirname($path), 0777, true);
         file_put_contents($path, "csrf_token=\"live-token\"\n]\n");
@@ -933,9 +906,6 @@ final class HandlerCredentialsTest extends TestCase
     /** Unquoted and whitespace-padded token forms are both recovered. */
     public function testCsrfTokensFromIniHandlesUnquotedAndPadding(): void
     {
-        if (!defined('UR_VAR_INI_PATHS')) {
-            $this->markTestSkipped('UR_VAR_INI_PATHS not overridable in this build');
-        }
         $path = UR_VAR_INI_PATHS[0];
         @mkdir(dirname($path), 0777, true);
         file_put_contents($path, "csrf_token = ABC123DEF\n]\n");

@@ -1521,9 +1521,6 @@ final class HandlerTest extends TestCase
      */
     public function testDaemonTestConnectionAcceptsACsrfTokenThatOnlyVarIniKnows(): void
     {
-        if (!defined('UR_VAR_INI_PATHS')) {
-            $this->markTestSkipped('UR_VAR_INI_PATHS not overridable in this build');
-        }
         $this->seedConnections([$this->daemonConnection()]);
 
         $probed = 0;

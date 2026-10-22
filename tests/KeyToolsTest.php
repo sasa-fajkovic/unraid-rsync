@@ -580,7 +580,7 @@ final class KeyToolsTest extends TestCase
      * detached/orphaned and only POLLED, so the worker returns at the deadline
      * without waiting on the child - sub-second, so the suite never hangs.
      */
-    public function testRunArgvKillsChildPastDeadline(): void
+    public function testRunKeyscanReturnsAtTheDeadline(): void
     {
         $sleeper = [PHP_BINARY, '-r', 'usleep(5000000);']; // 5s
         $start = microtime(true);
@@ -598,7 +598,7 @@ final class KeyToolsTest extends TestCase
      * timedOut=false (the deadline path must not false-positive on quick exits)
      * and its full stdout/stderr are captured from the detached run's temp files.
      */
-    public function testRunArgvWithDeadlineDoesNotFalseTimeoutFastChild(): void
+    public function testRunKeyscanWithDeadlineDoesNotFalseTimeoutFastChild(): void
     {
         [$code, $stdout, $stderr, $timedOut] = RealRunKeyTools::publicRunKeyscan(self::emitArgv(3, 1), 10.0);
         $this->assertFalse($timedOut);
@@ -616,12 +616,12 @@ final class KeyToolsTest extends TestCase
      * open via a blocking proc_close()/waitpid(). We assert the call returns well
      * before the child's own (long) sleep would have ended.
      */
-    public function testRunArgvForceKillsChildThatIgnoresSigterm(): void
+    public function testRunKeyscanReturnsAtTheDeadlineForAChildIgnoringSigterm(): void
     {
         if (!function_exists('pcntl_signal')) {
             // The child relies on pcntl to trap SIGTERM. Skip cleanly if the CLI
             // build under test lacks it; the plain-child timeout is still covered
-            // by testRunArgvKillsChildPastDeadline.
+            // by testRunKeyscanReturnsAtTheDeadline.
             $this->markTestSkipped('pcntl unavailable in this PHP build');
         }
         // The child installs a SIGTERM handler that does nothing (so SIGTERM is
