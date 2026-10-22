@@ -126,8 +126,8 @@ on, forked from, or derived from any other plugin.
   rename) and first keep the replaced file as `<name>.last-good` when it parses.
   The parent directory is never fsynced after the rename (PHP cannot fsync a
   directory handle), so a power cut can still lose the rename itself; the
-  recovery story is the ordering (destination copy → config pointer → source
-  unlink) plus `.last-good`.
+  recovery story is the ordering (destination copy → move record → config
+  pointer → source unlink) plus `.last-good`.
 - **Every load-modify-save holds a lock.** `config.json` under
   `Config::withLock` (`config.lock`), `credentials.json` under
   `Credentials::withLock` (`credentials.lock`); both locks live in
@@ -135,9 +135,17 @@ on, forked from, or derived from any other plugin.
   writer contend on one file. Order: config, then credentials. Handler
   credential actions and `Ssh::pinHostKey` re-read the `secretsDir` pointer
   once they hold the lock (`Credentials::refreshSecretsDir`, which never takes
-  the config lock), and the handler then removes a /boot copy an interrupted
-  move left behind if it is byte-identical. `sanitizeMntDir` canonicalises
-  (`Config::canonicalPath`), so two spellings of one dir never look like a move.
+  the config lock). Every `Credentials::withLock` scope first settles a move a
+  crash interrupted (`reconcilePendingMove`, from the `credentials.move.json`
+  record in `UR_CONFIG_BASE`): pointer at the destination → remove the source's
+  `.last-good`, then the source, then the record, only while both files still
+  hash to the record; pointer still at the source → drop the record and the
+  uncommitted copy; anything else → keep it all and log once.
+  `sanitizeMntDir` canonicalises (`Config::canonicalPath`), and the move itself
+  probes for one directory under two names (`ur_dirs_alias`: a marker made in
+  the destination, looked for in the source - shfs `/mnt/user` vs `/mnt/cache`
+  has different inodes and realpath cannot see it), so an alias only moves the
+  pointer and never unlinks.
   `config.json` carries a `revision` (absent = 0) that `Config::save()` bumps on
   every change; the Jobs/Settings forms post it as `configRevision` and
   `saveConfig` answers 409 when it is stale (absent field = old client, allowed).
@@ -155,8 +163,9 @@ on, forked from, or derived from any other plugin.
   `Logger::$logsDirOverride`); empty = `/boot`. Changing it migrates the file
   as one transaction, only after every validation passed
   (`ur_migrate_credentials`: private 0600 copy into a 0700 dir + sha256 verify,
-  then the `Config::save` of the new pointer, then unlink the source and its
-  `.last-good`; a failed save removes the copy; never clobbers a DIFFERENT
+  then the move record, then the `Config::save` of the new pointer, then
+  `Credentials::completeMove`; a failed save removes the copy and the record;
+  a migration with no source file writes no record; never clobbers a DIFFERENT
   existing dest, never `rename` across the FAT32↔ext4 device boundary). The
   **tmpfs materialisation is NOT removed** by this (still needed for a discrete
   `ssh -i` key file + per-run isolation + redaction). Per-run tmpfs secrets +
