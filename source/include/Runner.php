@@ -2587,7 +2587,9 @@ class Runner
             return Util::withLock(self::summaryPath($jobId, 'lock'), static function () use ($jobId, $path, $out, $keepNewer): bool {
                 $prev     = self::readSummary($jobId);
                 $prevReal = self::lastRealFor($jobId, $prev, false);
-                if (array_key_exists('snapshot', $out)) {
+                // A crash record carries no snapshot fields, so the summary it
+                // replaces also marks a snapshot job (a mirror skips History).
+                if (array_key_exists('snapshot', $out) || array_key_exists('snapshot', $prev ?? [])) {
                     $prevReal = self::withSnapshotFields($jobId, $prev, $prevReal);
                 }
                 $newer    = static fn(?array $old): bool => $keepNewer && $old !== null

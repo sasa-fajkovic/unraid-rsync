@@ -1421,4 +1421,31 @@ final class SnapshotRunnerTest extends TestCase
         $this->assertTrue($last['committed']);
         @unlink($path);
     }
+
+    /** The first run after the upgrade is a dry run that crashes: its crash record carries no snapshot fields. */
+    public function testACrashedFirstDryRunAfterTheUpgradeKeepsTheSnapshotLineAtRetentionOne(): void
+    {
+        $this->saveJob();
+        $config = Config::load();
+        $config['global']['retention'] = 1;
+        Config::save($config);
+        $stamp = '2026-10-20T030005Z';
+        $path  = UR_CONFIG_BASE . '/runs/' . self::JOB . '.summary.json';
+        @mkdir(dirname($path), 0755, true);
+        file_put_contents($path, (string) json_encode([
+            'state' => 'SUCCESS', 'startedAt' => '2026-10-20T03:00:00Z', 'finishedAt' => '2026-10-20T03:10:00Z',
+            'exitCode' => 0, 'dryRun' => false, 'snapshot' => $stamp, 'committed' => true,
+            'lastReal' => ['state' => 'SUCCESS', 'startedAt' => '2026-10-20T03:00:00Z', 'finishedAt' => '2026-10-20T03:10:00Z', 'exitCode' => 0, 'reason' => ''],
+        ]));
+        History::append(self::JOB, ['startedAt' => '2026-10-20T03:00:00Z', 'state' => 'SUCCESS', 'snapshot' => $stamp, 'committed' => true]);
+        RunState::write(self::JOB, ['pid' => 2147483647, 'running' => true, 'dryRun' => true, 'startedAt' => '2026-10-21T03:00:00Z']);
+
+        $this->assertFalse(RunState::isRunning(self::JOB));
+        $summary = Runner::readSummary(self::JOB);
+        $this->assertSame('CRASHED', $summary['state']);
+        $this->assertSame(['FAILED'], array_column(History::list(self::JOB)['runs'], 'state'), 'retention 1 pruned the real run');
+        $this->assertSame($stamp, Snapshot::lastSnapshot($summary)['stamp'] ?? null);
+        RunState::clear(self::JOB);
+        @unlink($path);
+    }
 }
