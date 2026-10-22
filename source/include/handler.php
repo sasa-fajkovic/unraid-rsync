@@ -539,9 +539,10 @@ function ur_validate_jobs(array $jobs, array $global, ?array $creds): array
         $ancestry = Job::ancestryErrors(
             $job,
             Rsync::effectiveOptions($job, $global),
-            Job::protectedTargets($jobs, (string) ($job['id'] ?? ''))
+            Job::protectedTargets($jobs, (string) ($job['id'] ?? ''), $creds),
+            $creds
         );
-        foreach (array_merge($result['errors'], $ancestry, Job::snapshotRootErrors($job, $jobs)) as $e) {
+        foreach (array_merge($result['errors'], $ancestry, Job::snapshotRootErrors($job, $jobs, $creds)) as $e) {
             $errors[] = "Job \"$label\": $e";
         }
         foreach ($result['warnings'] as $w) {

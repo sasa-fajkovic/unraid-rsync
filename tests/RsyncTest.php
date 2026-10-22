@@ -1570,6 +1570,27 @@ PHPSTUB);
         $this->assertSame(['keepmod'], $res['modules']);
         $this->assertLessThan(5.0, $elapsed, 'the poll must not add measurable latency');
     }
+
+    /** Rsync::run's optional deadline (the daemon --delete probe) kills a hung child. */
+    public function testRunWithADeadlineStopsAChildThatOutlivesIt(): void
+    {
+        $stub = $this->fakeRsync('fwrite(STDOUT, "listing\n"); sleep(45); exit(0);');
+        $out  = '';
+
+        $started = microtime(true);
+        $exit    = Rsync::run([$stub], static function (string $c) use (&$out): void {
+            $out .= $c;
+        }, null, 1);
+        $elapsed = microtime(true) - $started;
+
+        $this->assertSame(35, $exit);
+        $this->assertSame("listing\nrsync did not finish within 1 seconds and was stopped.\n", $out);
+        $this->assertGreaterThanOrEqual(0.9, $elapsed);
+        $this->assertLessThan(10.0, $elapsed);
+
+        // No deadline: the child's own exit code, as before.
+        $this->assertSame(3, Rsync::run([$this->fakeRsync('exit(3);')]));
+    }
 }
 
 /**

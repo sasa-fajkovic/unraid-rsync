@@ -2174,4 +2174,122 @@ final class JobTest extends TestCase
             $this->assertSame(Job::validate($job), Job::validate(array_merge($job, ['snapshot' => ['enabled' => false]])));
         }
     }
+
+    // --- pairs of one --delete job, and endpoint scopes ------------------------
+
+    /** @return array<string,array{0:string,1:string,2:bool}> */
+    public static function pairOverlapProvider(): array
+    {
+        return [
+            'equal'          => ['/srv/backup/a', '/srv/backup/a/', false],
+            'nested'         => ['/srv/backup', '/srv/backup/a', false],
+            'nested, after'  => ['/srv/backup/a/photos', '/srv/backup/a', false],
+            'disjoint'       => ['/srv/backup/a', '/srv/backup/b', true],
+            'prefix only'    => ['/srv/backup/a', '/srv/backup/ab', true],
+        ];
+    }
+
+    #[DataProvider('pairOverlapProvider')]
+    public function testTwoPairsOfADeleteJobMustNotShareADestination(string $first, string $second, bool $ok): void
+    {
+        $job = $this->sshDeleteJob('', ['pairs' => [
+            ['local' => '/mnt/user/a/', 'remote' => $first],
+            ['local' => '/mnt/user/b/', 'remote' => $second],
+        ]]);
+        $res = Job::validate($job);
+        $this->assertSame($ok, $res['valid'], implode(' | ', $res['errors']));
+        if (!$ok) {
+            $this->assertSame([
+                'Pair #1 and pair #2: a delete option is enabled, so their destinations must not be the same '
+                . "directory or lie inside one another ('$first', '$second').",
+            ], $res['errors']);
+        }
+
+        // Without delete the same pairs are fine: nothing is removed.
+        $this->assertTrue(Job::validate(array_merge($job, ['rsyncOptions' => Config::mergeRsyncOptions([])]))['valid']);
+    }
+
+    public function testPairOverlapFollowsTheEffectiveDeleteOptionAndTheDestinationSide(): void
+    {
+        $pairs = [['local' => '/mnt/user/a/', 'remote' => '/srv/x'], ['local' => '/mnt/user/b/', 'remote' => '/srv/x']];
+        // Own options say no delete, but the job runs on the global options.
+        $job = $this->sshDeleteJob('', ['pairs' => $pairs, 'useGlobalDefaults' => true, 'rsyncOptions' => []]);
+        $this->assertTrue(Job::validate($job)['valid']);
+        $global = ['defaultRsyncOptions' => Config::mergeRsyncOptions(['delete' => true, 'maxDelete' => '9'])];
+        $this->assertFalse(Job::validate($job, null, $global)['valid']);
+
+        // A pull writes to the `local` side; two pulls into one local directory collide.
+        $pull = $this->sshDeleteJob('', ['direction' => 'PULL', 'pairs' => [
+            ['local' => '/mnt/disks/usb/backup', 'remote' => '/srv/a'],
+            ['local' => '/mnt/disks/usb/backup/b', 'remote' => '/srv/b'],
+        ]]);
+        $this->assertCount(1, Job::pairOverlapErrors($pull, $pull['rsyncOptions']));
+        // A LOCAL job's destination is the `remote` field.
+        $local = $this->validLocalJob(['rsyncOptions' => ['delete' => true], 'pairs' => [
+            ['local' => '/mnt/user/a/', 'remote' => '/mnt/disk1/dst'],
+            ['local' => '/mnt/user/b/', 'remote' => '/mnt/disk1/dst'],
+        ]]);
+        $this->assertCount(1, Job::pairOverlapErrors($local, $local['rsyncOptions']));
+    }
+
+    /** Two Connections to one host, a third to another, and a daemon pair. */
+    private function endpointCreds(): array
+    {
+        $creds = Credentials::defaults();
+        $creds['connections'][] = ['id' => 'c-1', 'name' => 'nas', 'host' => 'nas.lan', 'username' => 'root'];
+        $creds['connections'][] = ['id' => 'c-2', 'name' => 'nas again', 'host' => 'NAS.lan', 'port' => 22, 'username' => 'backup'];
+        $creds['connections'][] = ['id' => 'c-3', 'name' => 'other', 'host' => 'other.lan', 'username' => 'root'];
+        $creds['connections'][] = ['id' => 'd-1', 'name' => 'mod', 'transport' => 'DAEMON', 'host' => 'nas.lan', 'username' => 'u1'];
+        $creds['connections'][] = ['id' => 'd-2', 'name' => 'mod2', 'transport' => 'DAEMON', 'host' => 'nas.lan', 'username' => 'u2'];
+        return $creds;
+    }
+
+    public function testAncestryComparesTheResolvedEndpointNotTheConnectionId(): void
+    {
+        $creds = $this->endpointCreds();
+        $inner = $this->sshDeleteJob('/srv/backup/a', ['id' => 'j-inner', 'name' => 'inner', 'rsyncOptions' => []]);
+        $outer = $this->sshDeleteJob('/srv/backup', ['connectionId' => 'c-2']);
+        $jobs  = [$inner, $outer];
+
+        $errors = Job::ancestryErrors($outer, $outer['rsyncOptions'], Job::protectedTargets($jobs, 'j-mirror', $creds), $creds);
+        $this->assertSame([
+            'Pair #1: a delete option is enabled, so the destination must not be, contain, or lie inside '
+            . 'the destination of job "inner" (\'/srv/backup/a\').',
+        ], $errors);
+
+        // Another host is another filesystem.
+        $elsewhere = $this->sshDeleteJob('/srv/backup', ['connectionId' => 'c-3']);
+        $this->assertSame([], Job::ancestryErrors($elsewhere, $elsewhere['rsyncOptions'], Job::protectedTargets([$inner, $elsewhere], 'j-mirror', $creds), $creds));
+
+        // Unresolvable connection: the id is the scope, as before.
+        $ghost = $this->sshDeleteJob('/srv/backup', ['connectionId' => 'c-gone']);
+        $this->assertSame([], Job::ancestryErrors($ghost, $ghost['rsyncOptions'], Job::protectedTargets([$inner, $ghost], 'j-mirror', $creds), $creds));
+        $this->assertSame('SSH:c-gone', Job::destinations($ghost, $creds)['scope']);
+        // Another login to the same host writes to the same directories.
+        $this->assertSame('SSH@nas.lan:22', Job::destinations($outer, $creds)['scope']);
+
+        // Daemon: two logins to one daemon see the same module.
+        $mod = static fn(string $id, string $conn, string $ref, bool $delete): array => Job::normalize([
+            'id' => $id, 'name' => $id, 'schedule' => '0 3 * * *', 'transport' => 'DAEMON', 'connectionId' => $conn,
+            'pairs' => [['local' => '/mnt/user/a/', 'remote' => $ref]], 'rsyncOptions' => ['delete' => $delete],
+        ]);
+        $a = $mod('j-a', 'd-1', 'rsync_bkp/photos', false);
+        $b = $mod('j-b', 'd-2', 'rsync_bkp', true);
+        $this->assertCount(1, Job::ancestryErrors($b, $b['rsyncOptions'], Job::protectedTargets([$a, $b], 'j-b', $creds), $creds));
+        $c = $mod('j-c', 'd-2', 'other_mod', true);
+        $this->assertSame([], Job::ancestryErrors($c, $c['rsyncOptions'], Job::protectedTargets([$a, $c], 'j-c', $creds), $creds));
+    }
+
+    public function testSnapshotRootsCompareTheResolvedEndpoint(): void
+    {
+        $creds = $this->endpointCreds();
+        $a     = $this->snapJob();
+        $other = fn(string $conn) => $this->snapJob(['id' => 'j-b', 'name' => 'b', 'connectionId' => $conn], ['root' => '/srv/backup/snapshots']);
+
+        $this->assertCount(1, Job::snapshotRootErrors($a, [$a, $other('c-2')], $creds), 'same host via another connection');
+        $this->assertSame([], Job::snapshotRootErrors($a, [$a, $other('c-3')], $creds), 'another host');
+
+        $mirror = $this->sshDeleteJob('/srv/backup/snapshots/a/stray', ['connectionId' => 'c-2', 'rsyncOptions' => []]);
+        $this->assertCount(1, Job::snapshotRootErrors($mirror, [$a, $mirror], $creds));
+    }
 }
