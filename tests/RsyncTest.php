@@ -1431,6 +1431,7 @@ final class RsyncTest extends TestCase
     protected function tearDown(): void
     {
         Rsync::$daemonProbeRunner = null;
+        Rsync::$daemonProbeTimeout = Rsync::DAEMON_PROBE_TIMEOUT;
         Rsync::$rsyncPathOverride = null;
         foreach ($this->fakeBins as $path) {
             @unlink($path);
@@ -1481,11 +1482,12 @@ PHPSTUB);
      * hold the php-fpm worker: the probe's HARD wall-clock deadline
      * (DAEMON_PROBE_TIMEOUT, a fixed constant - never the connection's stored
      * connectTimeout, which clamps to 600) breaks the drain loop and kills the
-     * child. Costs ~20s of wall clock; it is the only end-to-end proof that the
-     * deadline is plumbed through to ProcIO::drainPipes.
+     * child. The seam lowers it to 1s; this is the only end-to-end proof that
+     * the deadline is plumbed through to ProcIO::drainPipes.
      */
     public function testListDaemonModulesHonoursItsHardWallClockDeadline(): void
     {
+        Rsync::$daemonProbeTimeout = 1;
         // Sleeps well past the deadline and would exit 0 (reason 'ok') if the
         // deadline were dropped, so this fails on both the clock and the reason.
         Rsync::$rsyncPathOverride = $this->fakeRsync('sleep(45); exit(0);');
@@ -1498,13 +1500,13 @@ PHPSTUB);
             [
                 'ok'      => false,
                 'reason'  => 'timeout',
-                'message' => 'The rsync daemon did not answer within 20 seconds.',
+                'message' => 'The rsync daemon did not answer within 1 seconds.',
                 'modules' => [],
             ],
             $res
         );
-        $this->assertGreaterThanOrEqual(15.0, $elapsed, 'it must actually wait for the deadline');
-        $this->assertLessThan(30.0, $elapsed, 'it must not wait for the child to exit on its own');
+        $this->assertGreaterThanOrEqual(0.9, $elapsed, 'it must actually wait for the deadline');
+        $this->assertLessThan(10.0, $elapsed, 'it must not wait for the child to exit on its own');
     }
 
     /**
@@ -1520,6 +1522,7 @@ PHPSTUB);
      */
     public function testListDaemonModulesKillsAChildThatClosesItsPipesAndLingers(): void
     {
+        Rsync::$daemonProbeTimeout = 1;
         Rsync::$rsyncPathOverride = $this->fakeRsync(<<<'PHPSTUB'
 fwrite(STDOUT, "keepmod	comment
 ");
@@ -1538,13 +1541,13 @@ PHPSTUB);
             [
                 'ok'      => false,
                 'reason'  => 'timeout',
-                'message' => 'The rsync daemon did not answer within 20 seconds.',
+                'message' => 'The rsync daemon did not answer within 1 seconds.',
                 'modules' => [],
             ],
             $res
         );
-        $this->assertGreaterThanOrEqual(15.0, $elapsed, 'it must wait for its own deadline, not EOF');
-        $this->assertLessThan(30.0, $elapsed, 'proc_close() must never wait out a lingering child');
+        $this->assertGreaterThanOrEqual(0.9, $elapsed, 'it must wait for its own deadline, not EOF');
+        $this->assertLessThan(10.0, $elapsed, 'proc_close() must never wait out a lingering child');
     }
 
     /**

@@ -843,6 +843,9 @@ class Rsync
      */
     const DAEMON_PROBE_TIMEOUT = 20;
 
+    /** Effective probe deadline; tests lower it so the deadline tests do not wait 20 s each. */
+    public static int $daemonProbeTimeout = self::DAEMON_PROBE_TIMEOUT;
+
     /** Hard cap on bytes captured from a probe (a hostile or huge daemon MOTD). */
     const DAEMON_PROBE_MAX_BYTES = 65536;
 
@@ -901,8 +904,8 @@ class Rsync
         // says nothing; --contimeout guards one that never accepts it.
         $argv = [
             self::rsyncPath(),
-            '--contimeout=' . self::DAEMON_PROBE_TIMEOUT,
-            '--timeout=' . self::DAEMON_PROBE_TIMEOUT,
+            '--contimeout=' . self::$daemonProbeTimeout,
+            '--timeout=' . self::$daemonProbeTimeout,
             '--port=' . (int) ($conn['port'] ?? Credentials::RSYNCD_PORT),
             '--',
             $username . '@' . $host . '::',
@@ -932,7 +935,7 @@ class Rsync
 
             $out      = '';
             $captured = 0;
-            $deadline = microtime(true) + self::DAEMON_PROBE_TIMEOUT;
+            $deadline = microtime(true) + self::$daemonProbeTimeout;
             ProcIO::drainPipes(
                 [1 => $pipes[1], 2 => $pipes[2]],
                 static function (int $fd, string $chunk) use (&$out, &$captured): void {
@@ -1008,7 +1011,7 @@ class Rsync
         if ($reason !== 'ok') {
             $messages = [
                 'unreachable' => 'Could not reach the rsync daemon. Check the host, the port and the network.',
-                'timeout'     => 'The rsync daemon did not answer within ' . self::DAEMON_PROBE_TIMEOUT . ' seconds.',
+                'timeout'     => 'The rsync daemon did not answer within ' . self::$daemonProbeTimeout . ' seconds.',
                 'refused'     => 'The rsync daemon answered but refused the request (rsync exit ' . $exit . ').'
                     . ' Check that the daemon is really rsyncd and not an SSH server.',
                 'error'       => 'The rsync daemon probe failed (rsync exit ' . $exit . ').',
