@@ -820,6 +820,7 @@ ur_emit_status_poller();
       <span id="ur-log-live" class="ur-badge ur-badge-running" style="display:none"><?=_('Live')?></span>
       <button type="button" id="ur-log-close"><?=_('Close')?></button>
     </div>
+    <div id="ur-log-progress" class="ur-notice" hidden><?=_('Overall progress (--info=progress2) can read 0% for most of a run: rsync keeps growing the total while it scans, so only the final line is reliable')?>.</div>
     <pre id="ur-log-pre" class="ur-log-pre"></pre>
   </div>
 </div>
@@ -1525,6 +1526,7 @@ ur_emit_status_poller();
   var modalSel   = document.getElementById('ur-log-run-select');
   var modalLive  = document.getElementById('ur-log-live');
   var modalClose = document.getElementById('ur-log-close');
+  var modalProg  = document.getElementById('ur-log-progress');
   /* Element focused before the dialog opened, so focus can be restored on close
    * (basic focus management for the role="dialog" log viewer). */
   var modalReturnFocus = null;
@@ -1535,6 +1537,7 @@ ur_emit_status_poller();
     viewer.run = '';
     if (modalTitle) { modalTitle.textContent = modalTitle.title = urI18n('jobs.logTitle', 'Run log — %s', jobName); }
     if (modalPre) { modalPre.textContent = urI18n('loading', 'Loading…'); }
+    if (modalProg) { modalProg.hidden = true; }
     /* Remember what to restore focus to, then move focus into the dialog (the
      * Close button) so keyboard users land inside it. */
     modalReturnFocus = (document.activeElement && document.activeElement.focus)
@@ -1554,6 +1557,7 @@ ur_emit_status_poller();
     }
     stopLogTail();
     viewer.jobId = '';
+    if (modalProg) { modalProg.hidden = true; }
     /* Restore focus to the control that opened the dialog. */
     if (modalReturnFocus && modalReturnFocus.focus) { modalReturnFocus.focus(); }
     modalReturnFocus = null;
@@ -1608,7 +1612,7 @@ ur_emit_status_poller();
     return fetch(url, { credentials: 'same-origin' })
       .then(function (r) { return r.json(); })
       .then(function (body) {
-        if (!body || !body.ok) { return; }
+        if (!body || !body.ok) { if (modalProg) { modalProg.hidden = true; } return; }
         viewer.running = !!body.running;
         if (modalLive) { modalLive.style.display = body.running ? '' : 'none'; }
         if (modalPre) {
@@ -1619,8 +1623,11 @@ ur_emit_status_poller();
           modalPre.innerHTML = body.log || '';
           if (atBottom) { modalPre.scrollTop = modalPre.scrollHeight; }
         }
+        /* Only a whole progress2 tail "(xfr#N, to-chk=N/M)" counts, never a
+         * file name that happens to contain to-chk=. */
+        if (modalProg) { modalProg.hidden = !/\(xfr#\d+, (?:to|ir)-chk=\d+\/\d+\)/.test(body.log || ''); }
       })
-      .catch(function () { /* transient */ });
+      .catch(function () { if (modalProg) { modalProg.hidden = true; } });
   }
 
   function startLogTail() {
@@ -1648,6 +1655,7 @@ ur_emit_status_poller();
     modalSel.addEventListener('change', function () {
       viewer.run = (modalSel.selectedIndex > 0) ? modalSel.value : '';
       if (modalPre) { modalPre.textContent = urI18n('loading', 'Loading…'); }
+      if (modalProg) { modalProg.hidden = true; }
       fetchJobLog().then(function () {
         /* Re-arm tailing only when viewing a running run (the latest). */
         if (viewer.running) { startLogTail(); } else { stopLogTail(); }

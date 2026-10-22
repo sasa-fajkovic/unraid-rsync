@@ -254,6 +254,11 @@ final class OptionsFormHelpTest extends TestCase
     {
         $html = $this->renderPageBody(__DIR__ . '/../source/pages/jobs.php');
 
+        // The log viewer carries the progress2 note, shown only for logs with to-chk lines.
+        $this->assertStringContainsString('<div id="ur-log-progress" class="ur-notice" hidden>', $html);
+        $this->assertStringContainsString("if (modalProg) { modalProg.hidden = !/\\(xfr#\\d+, (?:to|ir)-chk=\\d+\\/\\d+\\)/.test(body.log || ''); }", $html);
+        $this->assertSame(5, substr_count($html, 'if (modalProg) { modalProg.hidden = true; }'), 'hidden again on open, run change, a non-ok body, a failed fetch and close');
+
         // The help JS marker must be present at all...
         $this->assertSame(
             1,
@@ -1860,6 +1865,10 @@ final class OptionsFormHelpTest extends TestCase
         $this->assertStringContainsString("' · ' + typeLabel(r) + ' · ' + fmtWhen(r.startedAt)", $html);
         $this->assertStringContainsString('<div id="ur-hist-trunc" class="ur-notice" hidden>', $html);
         $this->assertStringContainsString('truncEl.hidden = !body.truncated;', $html);
+        $this->assertStringContainsString('<div id="ur-hist-progress" class="ur-notice" hidden>', $html);
+        $this->assertStringContainsString('progEl.hidden = !/\(xfr#\d+, (?:to|ir)-chk=\d+\/\d+\)/.test(body.log);', $html);
+        $this->assertSame(3, substr_count($html, 'progEl.hidden = true;'), 'hidden again on open, on a failed fetch and on close');
+        $this->assertMatchesRegularExpression('/\.ur-hist-table th, \.ur-hist-table td \{ padding: 3px 8px; line-height: 1\.4;/', $html);
         $this->assertStringNotContainsString('blockquote class="inline_help"', $html);
         // UXB-10: View and Download are one compact pair.
         $this->assertStringContainsString("btn.className = 'ur-btn ur-btn-plain ur-btn-sm';", $html);
