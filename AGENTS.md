@@ -273,6 +273,32 @@ on, forked from, or derived from any other plugin.
   RESETS the per-path state, so a flush placed after the hook would find nothing
   left to rescue. Anything feeding the sink a string with no trailing newline
   and reading the file back immediately needs that flush.
+- **Log bounds (all RAM by default).** One run log: `UR_MAX_RUN_LOG_BYTES`
+  (16 MiB). The sink stops appending once the file is over it (one marker), and
+  because rsync's `--log-file` bypasses the sink, the Runner also calls
+  `Logger::enforceRunLogCap` every `Runner::$logCapCheckSec` (2 s) WHILE a pair
+  runs (`Rsync::run`'s `$stopWhen`), not only after it. Trimming a live log is
+  safe because rsync opens `--log-file` with `fopen("a")` (O_APPEND): its next
+  line lands at the new end, not past it. Hard ceiling: a log still over
+  `LOG_CEILING_FACTOR` (4) × the cap right AFTER a trim means trimming failed;
+  that pair is stopped, the run ends WARNING with reason `log-cap-exceeded`, and
+  the next pair still runs. It is measured after the trim on purpose: measured
+  before, a healthy big backup at `normal` (one `--log-file` line per file) would
+  trip it. One job: `UR_MAX_JOB_LOG_BYTES` (256 MiB) - `pruneRuns` deletes the
+  oldest logs past it after the count prune, never the newest or the current
+  run's. `plugin.log` rotates to `plugin.log.1` (one generation) past 1 MiB,
+  under the sibling `plugin.log.lock` (a lock on plugin.log itself is renamed
+  away with it). Run-log names are unique: a second run in the same second gets
+  `run-<UTCts>-2.log` (`openRun` creates with `fopen('x')`, past the highest
+  suffix in use), and `RUN_FILE_REGEX` / `compareRunNames` accept and order it.
+- **History** (`runs/<jobid>.history.jsonl`): `append` and `prune` hold the
+  sibling `<jobid>.history.lock` (`Util::withLock`), never the data file: prune
+  replaces it by rename. `append` first ends a partial last line with `\n`.
+  `writeSummary` / `History::append` return false on failure and the Runner logs
+  ONE `plugin.log` line (falling back to `error_log`). A scheduled run that finds
+  the job still running is recorded as state `SKIPPED` (History only, no
+  summary, so `getStatus` keeps the last real outcome), notifies at normal
+  importance and never under success-only.
 - **A manual-only job has NO next run, and `getStatus` must say so.** `enabled`
   + `manualOnly` is exactly how "run on demand" is stored, and such a job keeps
   whatever `schedule` string it was last saved with — so anything that computes
