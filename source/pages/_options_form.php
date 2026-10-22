@@ -53,6 +53,7 @@ require_once __DIR__ . '/../include/Credentials.php';
 // many job cards costs zero requests on load (the script only re-previews a
 // block the user actually edits).
 require_once __DIR__ . '/../include/Rsync.php';
+require_once __DIR__ . '/../include/PageHelpers.php';
 
 if (!function_exists('ur_push_secrets_dir_override')) {
     /**
@@ -75,15 +76,35 @@ if (!function_exists('ur_push_secrets_dir_override')) {
 
 if (!function_exists('ur_t')) {
     /**
-     * Translation wrapper. On a live webGui the global _() is provided; under a
-     * bare PHP lint/preview it may not be, so fall back to identity. (The .page
-     * bodies still call the webGui translation function directly as _('...');
-     * this wrapper is only for the shared partial, which may be previewed in
-     * isolation without the webGui environment.)
+     * Translation wrapper. Returns HTML, NOT text: Unraid's _()
+     * (dynamix/include/Translations.php) ends with a markup pass that turns
+     * ' into &apos;, **x** into <b>x</b> and *x* into <i>x</i>.
+     *
+     * The rule: emit ur_t() / _() output directly into element content, never
+     * through ur_h() (that double-encodes: "rsync&apos;s" on screen). Anything
+     * that needs escaping - an attribute, a JS string, a mix with user data -
+     * takes ur_t_text() and escapes that.
+     *
+     * Literal asterisks are pre-encoded, so the filter help (a pattern of * in
+     * one sentence, A* in another) is not italicised between them. Off the webGui, _() is either missing or
+     * PHP's gettext (which Unraid's userland _() cannot coexist with), so the
+     * apostrophe pass is reproduced to keep one contract everywhere.
      */
     function ur_t(string $s): string
     {
-        return function_exists('_') ? _($s) : $s;
+        $s = str_replace('*', '&#42;', $s);
+        if (function_exists('_') && !extension_loaded('gettext')) {
+            return _($s);
+        }
+        return str_replace("'", '&apos;', $s);
+    }
+}
+
+if (!function_exists('ur_t_text')) {
+    /** ur_t() decoded back to plain text, for callers that escape it themselves. */
+    function ur_t_text(string $s): string
+    {
+        return html_entity_decode(ur_t($s), ENT_QUOTES | ENT_HTML5, 'UTF-8');
     }
 }
 
@@ -141,7 +162,7 @@ if (!function_exists('ur_required_mark')) {
      */
     function ur_required_mark(): string
     {
-        return ' <abbr class="ur-required" title="' . ur_h(ur_t('Required')) . '">*</abbr>';
+        return ' <abbr class="ur-required" title="' . ur_h(ur_t_text('Required')) . '">*</abbr>';
     }
 }
 
@@ -158,7 +179,7 @@ if (!function_exists('ur_option_help')) {
      * added without a description fails CI.
      *
      * Kept as a pure function (no output, no webGui dependency) so it is unit
-     * testable in isolation. Wrap the returned strings with ur_t() at render time
+     * testable in isolation. Wrap the returned strings with ur_t_text() at render time
      * for translation; they are stored untranslated here.
      *
      * @return array<string,string> key => description (never empty per key)
@@ -218,13 +239,13 @@ if (!function_exists('ur_option_help')) {
 
 if (!function_exists('ur_option_help_for')) {
     /**
-     * The translated help string for a single option key, or '' when the key has
-     * no description. Centralises the ur_t() wrap so the renderer stays terse.
+     * The translated help string (plain text - callers escape it) for a single
+     * option key, or '' when the key has no description.
      *
      * The renderer calls this twice per option (affordance + block) and the Jobs
      * tab renders many cards, so the (immutable) help map is built once per
      * request and cached in a static rather than rebuilt on every call; only the
-     * cheap ur_t() lookup runs per call.
+     * cheap ur_t_text() lookup runs per call.
      */
     function ur_option_help_for(string $key): string
     {
@@ -232,7 +253,7 @@ if (!function_exists('ur_option_help_for')) {
         if ($map === null) {
             $map = ur_option_help();
         }
-        return isset($map[$key]) ? ur_t($map[$key]) : '';
+        return isset($map[$key]) ? ur_t_text($map[$key]) : '';
     }
 }
 
@@ -271,7 +292,7 @@ if (!function_exists('ur_option_help_affordance')) {
         }
         return ' <span class="ur-help" role="button" tabindex="0" aria-expanded="false"'
             . ' aria-controls="' . ur_h($helpId) . '"'
-            . ' aria-label="' . ur_h(ur_t('Help')) . '"'
+            . ' aria-label="' . ur_h(ur_t_text('Help')) . '"'
             . ' title="' . ur_h($text) . '">?</span>';
     }
 }
@@ -400,7 +421,7 @@ if (!function_exists('ur_render_rsync_options')) {
         echo '<div class="ur-implied' . ($archiveOn ? ' ur-implied-active' : '') . '"'
             . ' data-archive="' . ur_h($idBase . '_archive') . '">';
         echo '<p class="ur-implied-note">'
-            . ur_h(ur_t('Implied by Archive (-a): ticking Archive turns all of these on. Untick one while Archive is on and the plugin adds the matching --no- flag to genuinely turn it off. Each also works on its own with Archive off.'))
+            . ur_h(ur_t_text('Implied by Archive (-a): ticking Archive turns all of these on. Untick one while Archive is on and the plugin adds the matching --no- flag to genuinely turn it off. Each also works on its own with Archive off.'))
             . '</p>';
         echo '<dl>';
         foreach ($archiveImplied as $key => [$label, $flag]) {
@@ -442,11 +463,11 @@ if (!function_exists('ur_render_rsync_options')) {
         $typeName = $prefix . '[filters][type][]';
         $patName  = $prefix . '[filters][pattern][]';
         echo '<dl>';
-        echo '<dt class="ur-dt">' . ur_h(ur_t('Filters')) . ' <code>--include= / --exclude=</code>'
+        echo '<dt class="ur-dt">' . ur_h(ur_t_text('Filters')) . ' <code>--include= / --exclude=</code>'
             . ur_option_help_affordance('filters', $helpId) . '</dt>';
         echo '<dd>';
         echo '<p class="ur-implied-note">'
-            . ur_h(ur_t('Evaluated top to bottom; the first rule that matches a file wins. Put an include ABOVE the exclude it is meant to override.'))
+            . ur_h(ur_t_text('Evaluated top to bottom; the first rule that matches a file wins. Put an include ABOVE the exclude it is meant to override.'))
             . '</p>';
         // data-type-name / data-pattern-name let the client-side row builder add
         // rows without duplicating the prefix logic.
@@ -464,7 +485,7 @@ if (!function_exists('ur_render_rsync_options')) {
         }
         echo '</div>';
         echo '<div><button type="button" class="ur-row-add" data-rows="' . ur_h($rowsId) . '">'
-            . ur_h(ur_t('Add')) . '</button></div>';
+            . ur_h(ur_t_text('Add')) . '</button></div>';
         echo ur_option_help_block('filters', $helpId);
         echo '</dd>';
         echo '</dl>';
@@ -487,7 +508,7 @@ if (!function_exists('ur_render_rsync_options')) {
             $helpId = $id . '_help';
             $val    = isset($opts[$key]) ? (string) $opts[$key] : '';
             $imAttr = isset($inputModes[$key]) ? ' inputmode="' . $inputModes[$key] . '"' : '';
-            echo '<dt class="ur-dt"><label for="' . ur_h($id) . '">' . ur_h(ur_t($label)) . ' <code>' . ur_h($flag) . '</code></label>'
+            echo '<dt class="ur-dt"><label for="' . ur_h($id) . '">' . ur_h(ur_t_text($label)) . ' <code>' . ur_h($flag) . '</code></label>'
                 . ur_option_help_affordance($key, $helpId) . '</dt>';
             echo '<dd><input type="text"' . $imAttr . ' id="' . ur_h($id) . '" name="' . ur_h($name) . '" value="' . ur_h($val) . '">';
             echo ur_option_help_block($key, $helpId);
@@ -499,7 +520,7 @@ if (!function_exists('ur_render_rsync_options')) {
         $statsHelpId = $statsId . '_help';
         $statsMode = Config::normalizeStatsMode($opts['statsMode'] ?? null);
         echo '<dl>';
-        echo '<dt class="ur-dt"><label for="' . ur_h($statsId) . '">' . ur_h(ur_t('Detailed statistics')) . '</label>'
+        echo '<dt class="ur-dt"><label for="' . ur_h($statsId) . '">' . ur_h(ur_t_text('Detailed statistics')) . '</label>'
             . ur_option_help_affordance('statsMode', $statsHelpId) . '</dt>';
         echo '<dd><select id="' . ur_h($statsId) . '" name="' . ur_h($prefix . '[statsMode]') . '">';
         foreach ([
@@ -508,7 +529,7 @@ if (!function_exists('ur_render_rsync_options')) {
             'none' => 'No explicit detailed stats',
         ] as $mode => $label) {
             echo '<option value="' . ur_h($mode) . '"' . ($statsMode === $mode ? ' selected' : '') . '>'
-                . ur_h(ur_t($label)) . '</option>';
+                . ur_h(ur_t_text($label)) . '</option>';
         }
         echo '</select>' . ur_option_help_block('statsMode', $statsHelpId) . '</dd>';
         echo '</dl>';
@@ -533,12 +554,12 @@ if (!function_exists('ur_render_rsync_options')) {
         // would promise a flag the run drops.
         $previewTokens = Rsync::optionTokens(Config::mergeRsyncOptions($opts), $transport);
         echo '<div class="ur-preview">';
-        echo '<div class="ur-preview-label">' . ur_h(ur_t('rsync options preview')) . '</div>';
+        echo '<div class="ur-preview-label">' . ur_h(ur_t_text('rsync options preview')) . '</div>';
         echo '<code class="ur-preview-out" aria-live="polite">'
-            . ur_h($previewTokens ? implode(' ', $previewTokens) : ur_t('(no options set)'))
+            . ur_h($previewTokens ? implode(' ', $previewTokens) : ur_t_text('(no options set)'))
             . '</code>';
         echo '<div class="ur-preview-note">'
-            . ur_h(ur_t('These option flags only. The log-level flags, --log-file, the transport flags and the source/destination paths are added when the job runs.'))
+            . ur_h(ur_t_text('These option flags only. The log-level flags, --log-file, the transport flags and the source/destination paths are added when the job runs.'))
             . '</div>';
         echo '</div>';
 
@@ -568,21 +589,21 @@ if (!function_exists('ur_render_filter_row')) {
     {
         $type = ($type === 'include') ? 'include' : 'exclude';
         $html = '<div class="ur-row ur-filter-row">';
-        $html .= '<select name="' . ur_h($typeName) . '" class="ur-filter-type" aria-label="' . ur_h(ur_t('Rule type')) . '">';
+        $html .= '<select name="' . ur_h($typeName) . '" class="ur-filter-type" aria-label="' . ur_h(ur_t_text('Rule type')) . '">';
         foreach (['include' => '+ include', 'exclude' => '- exclude'] as $val => $label) {
             $html .= '<option value="' . ur_h($val) . '"' . ($type === $val ? ' selected' : '') . '>'
-                . ur_h(ur_t($label)) . '</option>';
+                . ur_h(ur_t_text($label)) . '</option>';
         }
         $html .= '</select> ';
         $html .= '<input type="text" name="' . ur_h($patternName) . '" value="' . ur_h($pattern) . '"'
-            . ' placeholder="' . ur_h(ur_t('pattern, e.g. *.tmp')) . '"'
-            . ' aria-label="' . ur_h(ur_t('Pattern')) . '"> ';
-        $html .= '<button type="button" class="ur-row-up" title="' . ur_h(ur_t('Move up')) . '"'
-            . ' aria-label="' . ur_h(ur_t('Move up')) . '">&uarr;</button>';
-        $html .= '<button type="button" class="ur-row-down" title="' . ur_h(ur_t('Move down')) . '"'
-            . ' aria-label="' . ur_h(ur_t('Move down')) . '">&darr;</button>';
-        $html .= '<button type="button" class="ur-row-del" title="' . ur_h(ur_t('Remove')) . '"'
-            . ' aria-label="' . ur_h(ur_t('Remove')) . '">&minus;</button>';
+            . ' placeholder="' . ur_h(ur_t_text('pattern, e.g. *.tmp')) . '"'
+            . ' aria-label="' . ur_h(ur_t_text('Pattern')) . '"> ';
+        $html .= '<button type="button" class="ur-row-up" title="' . ur_h(ur_t_text('Move up')) . '"'
+            . ' aria-label="' . ur_h(ur_t_text('Move up')) . '">&uarr;</button>';
+        $html .= '<button type="button" class="ur-row-down" title="' . ur_h(ur_t_text('Move down')) . '"'
+            . ' aria-label="' . ur_h(ur_t_text('Move down')) . '">&darr;</button>';
+        $html .= '<button type="button" class="ur-row-del" title="' . ur_h(ur_t_text('Remove')) . '"'
+            . ' aria-label="' . ur_h(ur_t_text('Remove')) . '">&minus;</button>';
         $html .= '</div>';
         return $html;
     }
@@ -603,7 +624,7 @@ if (!function_exists('ur_render_bool_row')) {
         $name   = $prefix . '[' . $key . ']';
         $id     = $idBase . '_' . $key;
         $helpId = $id . '_help';
-        echo '<dt class="ur-dt"><label for="' . ur_h($id) . '">' . ur_h(ur_t($label)) . ' <code>' . ur_h($flag) . '</code></label>'
+        echo '<dt class="ur-dt"><label for="' . ur_h($id) . '">' . ur_h(ur_t_text($label)) . ' <code>' . ur_h($flag) . '</code></label>'
             . ur_option_help_affordance($key, $helpId) . '</dt>';
         echo '<dd>';
         echo '<input type="hidden" name="' . ur_h($name) . '" value="0">';
@@ -958,7 +979,7 @@ if (!function_exists('ur_emit_option_help_assets')) {
    * Field names are rewritten from this block's prefix (jobs[3][rsyncOptions]
    * or global[defaultRsyncOptions]) to the plain rsyncOptions[...] the action
    * reads, so one implementation serves both pages. */
-  var PREVIEW_URL  = <?=ur_js('/plugins/unraid.rsync/include/handler.php')?>;
+  var PREVIEW_URL  = <?=ur_js(PageHelpers::HANDLER_URL)?>;
   var PREVIEW_CSRF = <?=ur_js(ur_render_csrf_token())?>;
 
   /* The preview depends on the job's transport: --contimeout is emitted only on
@@ -995,11 +1016,21 @@ if (!function_exists('ur_emit_option_help_assets')) {
   }
 
   /* One in-flight request per block, and a trailing debounce so typing a
-   * pattern does not fire a request per keystroke. */
+   * pattern does not fire a request per keystroke. An edit made while a request
+   * is in flight marks the block dirty and re-runs it once that one lands, so
+   * the preview never settles on a stale answer. */
+  function previewDone(box) {
+    box._urPreviewPending = false;
+    if (box._urPreviewDirty) {
+      box._urPreviewDirty = false;
+      refreshPreview(box);
+    }
+  }
+
   function refreshPreview(box) {
     var out = box.querySelector('.ur-preview-out');
     if (!out) { return; }
-    if (box._urPreviewPending) { return; }
+    if (box._urPreviewPending) { box._urPreviewDirty = true; return; }
     box._urPreviewPending = true;
 
     fetch(PREVIEW_URL, {
@@ -1009,7 +1040,6 @@ if (!function_exists('ur_emit_option_help_assets')) {
     })
       .then(window.urAjax.parseResponse)
       .then(function (res) {
-        box._urPreviewPending = false;
         if (res.ok && res.body && res.body.ok && res.body.tokens) {
           out.classList.remove('ur-preview-err');
           out.textContent = res.body.tokens.length ? res.body.tokens.join(' ') : '(no options set)';
@@ -1017,11 +1047,12 @@ if (!function_exists('ur_emit_option_help_assets')) {
           out.classList.add('ur-preview-err');
           out.textContent = window.urAjax.errText(res, 'Preview failed');
         }
+        previewDone(box);
       })
       .catch(function () {
-        box._urPreviewPending = false;
         out.classList.add('ur-preview-err');
         out.textContent = 'Preview failed: could not reach the server.';
+        previewDone(box);
       });
   }
 
@@ -1227,8 +1258,10 @@ if (!function_exists('ur_emit_ajax_helpers')) {
     if (res.body && res.body.errors && res.body.errors.length) {
       return res.body.errors.join('; ') + warn + ' (HTTP ' + res.status + ')';
     }
-    if (res.body && res.body.error) {
-      return res.body.error + warn + ' (HTTP ' + res.status + ')';
+    /* A probe failure (testConnection) explains itself in `message`; every
+     * failure envelope also carries the shorter `error`. */
+    if (res.body && (res.body.message || res.body.error)) {
+      return (res.body.message || res.body.error) + warn + ' (HTTP ' + res.status + ')';
     }
     if (res.parseError) {
       return fallback + ': the server returned a non-JSON response (HTTP ' + res.status + ').';
@@ -1312,50 +1345,20 @@ if (!function_exists('ur_emit_ajax_helpers')) {
 
 if (!function_exists('ur_state_badge_class')) {
     /**
-     * The CSS modifier class for a state badge. Kept in PHP so the initial
-     * server-rendered badge and the JS-updated one (window.urBadge.classFor,
-     * emitted by ur_emit_badge_assets()) use the SAME vocabulary - the two had
-     * drifted while each tab carried its own copy.
-     *
-     * RUNNING is animated (blue); SUCCESS green; WARNING/PARTIAL/TIMEOUT orange
-     * (TIMEOUT is a warning, matching Runner::notifyImportance); FAILED red;
-     * ABORTED grey; PENDING/unknown grey.
+     * The CSS modifier class for a state badge, from PageHelpers::STATES - the
+     * one vocabulary window.urBadge and the Dashboard tile also render from.
      */
     function ur_state_badge_class(string $state): string
     {
-        switch (strtoupper($state)) {
-            case 'RUNNING': return 'ur-badge-running';
-            case 'SUCCESS': return 'ur-badge-success';
-            case 'WARNING':
-            case 'PARTIAL':
-            case 'TIMEOUT': return 'ur-badge-warning';
-            case 'FAILED':  return 'ur-badge-failed';
-            case 'ABORTED': return 'ur-badge-aborted';
-            case 'PENDING':
-            default:        return 'ur-badge-pending';
-        }
+        return 'ur-badge-' . PageHelpers::state($state)['cls'];
     }
 }
 
 if (!function_exists('ur_state_label')) {
-    /**
-     * Human label for a state badge (Running / Success / ... ). Pending reads as
-     * "Never run", which is friendlier than the vocabulary token. Mirrored by
-     * window.urBadge.labelFor.
-     */
+    /** Plain-text badge label (PENDING reads "Never run"); callers escape it. */
     function ur_state_label(string $state): string
     {
-        switch (strtoupper($state)) {
-            case 'RUNNING': return ur_t('Running');
-            case 'SUCCESS': return ur_t('Success');
-            case 'WARNING': return ur_t('Warning');
-            case 'PARTIAL': return ur_t('Partial');
-            case 'TIMEOUT': return ur_t('Timeout');
-            case 'FAILED':  return ur_t('Failed');
-            case 'ABORTED': return ur_t('Aborted');
-            case 'PENDING':
-            default:        return ur_t('Never run');
-        }
+        return PageHelpers::state($state)['label'];
     }
 }
 
@@ -1415,45 +1418,22 @@ if (!function_exists('ur_emit_badge_assets')) {
 @keyframes ur-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.55; } }
 </style>
 <script type="text/javascript">
-/* The ONE client-side state-badge vocabulary, kept in lockstep with
- * ur_state_badge_class() / ur_state_label() so a JS-updated badge always matches
- * a server-rendered one. */
+/* The ONE client-side state-badge vocabulary: PageHelpers::STATES, the same map
+ * ur_state_badge_class() / ur_state_label() render from. */
 (function () {
   'use strict';
   if (window.urBadge) { return; }
 
-  var CLASSES = [
-    'ur-badge-running', 'ur-badge-success', 'ur-badge-warning',
-    'ur-badge-failed', 'ur-badge-aborted', 'ur-badge-pending'
-  ];
+  var STATES = <?=ur_js(PageHelpers::STATES)?>;
+  var CLASSES = [];
+  Object.keys(STATES).forEach(function (k) {
+    var c = 'ur-badge-' + STATES[k].cls;
+    if (CLASSES.indexOf(c) === -1) { CLASSES.push(c); }
+  });
 
-  function classFor(state) {
-    switch ((state || '').toUpperCase()) {
-      case 'RUNNING': return 'ur-badge-running';
-      case 'SUCCESS': return 'ur-badge-success';
-      case 'WARNING':
-      case 'PARTIAL':
-      /* TIMEOUT is a WARNING, not a failure - it matches the server's own
-         severity map (Runner::notifyImportance). */
-      case 'TIMEOUT': return 'ur-badge-warning';
-      case 'FAILED':  return 'ur-badge-failed';
-      case 'ABORTED': return 'ur-badge-aborted';
-      default:        return 'ur-badge-pending';
-    }
-  }
-
-  function labelFor(state) {
-    switch ((state || '').toUpperCase()) {
-      case 'RUNNING': return 'Running';
-      case 'SUCCESS': return 'Success';
-      case 'WARNING': return 'Warning';
-      case 'PARTIAL': return 'Partial';
-      case 'TIMEOUT': return 'Timeout';
-      case 'FAILED':  return 'Failed';
-      case 'ABORTED': return 'Aborted';
-      default:        return 'Never run';
-    }
-  }
+  function entry(state) { return STATES[String(state || '').toUpperCase()] || STATES.PENDING; }
+  function classFor(state) { return 'ur-badge-' + entry(state).cls; }
+  function labelFor(state) { return entry(state).label; }
 
   /* Repaint a badge element: drop whatever modifier it had, apply this state's
    * class and label. textContent, never innerHTML. */
@@ -1465,6 +1445,7 @@ if (!function_exists('ur_emit_badge_assets')) {
   }
 
   window.urBadge = {
+    STATES: STATES,
     CLASSES: CLASSES,
     classFor: classFor,
     labelFor: labelFor,
@@ -1491,7 +1472,7 @@ if (!function_exists('ur_tz_note')) {
      */
     function ur_tz_note(): string
     {
-        return ur_h(sprintf(ur_t('Times are shown in the server timezone (%s).'), Config::systemTimezone()));
+        return ur_h(sprintf(ur_t_text('Times are shown in the server timezone (%s).'), Config::systemTimezone()));
     }
 }
 
@@ -1615,6 +1596,214 @@ if (!function_exists('ur_emit_form_enable_assets')) {
     var btn = (ev.target && ev.target.closest) ? ev.target.closest('button') : null;
     if (btn) { enableSubmit(pluginForm(btn)); }
   }, true);
+})();
+</script>
+        <?php
+    }
+}
+
+if (!function_exists('ur_emit_page_assets')) {
+    /**
+     * Emit (once per document) the CSS and JS every tab shares. The webGui
+     * renders all seven tabs into ONE document (Tabs="true"), so per-tab copies
+     * of these rules and helpers were redefined up to seven times and had
+     * drifted: relative times disagreed between Overview and Jobs, and the
+     * ur-ok / ur-err classes urAjax.show() assigns had no rule at all, so a
+     * failure looked exactly like a success.
+     *
+     * window.urUtil mirrors PageHelpers (relativeTime, nextRunLabel, lastRunLabel)
+     * and Runner::formatDuration; times render in UR_TZ via window.urFmtLocal.
+     */
+    function ur_emit_page_assets(): void
+    {
+        static $done = false;
+        if ($done) {
+            return;
+        }
+        $done = true;
+        ur_emit_time_helpers();
+        ?>
+<style>
+/* Paired with the HTML5 `required` attribute; no <abbr> underline. */
+.ur-required { color: var(--red-800, #b71c1c); font-weight: bold; text-decoration: none; cursor: help; }
+/* NOT blockquote.inline_help: the dynamix base CSS hides that unless help mode is on. */
+.ur-empty-state {
+  margin: 10px 0; padding: 10px 12px; border-radius: 4px;
+  background: var(--blue-100, #d9edf7); border: 1px solid var(--blue-200, #bce8f1);
+  color: var(--blockquote-text-color, #31708f);
+}
+.ur-result { margin: 6px 0; white-space: pre-wrap; }
+.ur-ok { color: var(--green-800, #1c7d3f); }
+.ur-err { color: var(--red-800, #b71c1c); font-weight: bold; }
+</style>
+<script type="text/javascript">
+(function () {
+  'use strict';
+  if (window.urUtil) { return; }
+
+  var UNITS = [['d', 86400], ['h', 3600], ['m', 60], ['s', 1]];
+
+  /* PageHelpers::relativeTime: two largest adjacent units, the second dropped
+   * when zero ("in 1h 36m", "6d 7h ago", "45s ago"). */
+  function relativeTime(epoch, now) {
+    var delta = Math.round(epoch - now), abs = Math.abs(delta), text = '';
+    if (abs < 1) { return 'now'; }
+    for (var i = 0; i < UNITS.length; i++) {
+      if (abs < UNITS[i][1]) { continue; }
+      text = Math.floor(abs / UNITS[i][1]) + UNITS[i][0];
+      if (i + 1 < UNITS.length) {
+        var n = Math.floor((abs % UNITS[i][1]) / UNITS[i + 1][1]);
+        if (n > 0) { text += ' ' + n + UNITS[i + 1][0]; }
+      }
+      break;
+    }
+    return delta > 0 ? 'in ' + text : text + ' ago';
+  }
+
+  /* Runner::formatDuration: "1h 2m 3s", "2m 5s", "45s". */
+  function formatDuration(sec) {
+    sec = Math.max(0, parseInt(sec, 10) || 0);
+    var h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+    if (h > 0) { return h + 'h ' + m + 'm ' + s + 's'; }
+    if (m > 0) { return m + 'm ' + s + 's'; }
+    return s + 's';
+  }
+
+  function isoToEpoch(iso) {
+    if (!iso) { return 0; }
+    var t = Date.parse(iso);
+    return isNaN(t) ? 0 : Math.floor(t / 1000);
+  }
+
+  /* Attribute-selector escaper for our slug-shaped ids. */
+  function cssEsc(v) { return String(v).replace(/["\\]/g, '\\$&'); }
+
+  /* PageHelpers::nextRunLabel, clause for clause: manual-only, disabled,
+   * em-dash, time. A getStatus entry carries manualOnly, enabled, nextRun. */
+  function nextRunLabel(s, now) {
+    if (s && s.manualOnly) { return 'manual (on demand)'; }
+    if (s && s.enabled === false) { return 'disabled'; }
+    if (!s || !s.nextRun) { return '\u2014'; }
+    return window.urFmtLocal(s.nextRun) + ' (' + relativeTime(s.nextRun, now) + ')';
+  }
+
+  /* PageHelpers::lastRunLabel for a getStatus lastRun object. */
+  function lastRunLabel(lastRun, now) {
+    var fin = lastRun ? isoToEpoch(lastRun.finishedAt) : 0;
+    if (!fin) { return '\u2014'; }
+    return window.urFmtLocal(fin) + ' (' + relativeTime(Math.min(fin, now), now) + ')';
+  }
+
+  /* Reload after a successful save so the server-rendered state is current.
+   * Held longer when the save came back with warnings, so they can be read. */
+  var RELOAD_MS = 800, RELOAD_WARN_MS = 6000;
+  function reloadSoon(hasWarnings) {
+    setTimeout(function () { window.location.reload(); }, hasWarnings ? RELOAD_WARN_MS : RELOAD_MS);
+  }
+
+  window.urUtil = {
+    HANDLER_URL: <?=ur_js(PageHelpers::HANDLER_URL)?>,
+    relativeTime: relativeTime,
+    formatDuration: formatDuration,
+    isoToEpoch: isoToEpoch,
+    cssEsc: cssEsc,
+    nextRunLabel: nextRunLabel,
+    lastRunLabel: lastRunLabel,
+    reloadSoon: reloadSoon
+  };
+})();
+</script>
+        <?php
+    }
+}
+
+if (!function_exists('ur_emit_status_poller')) {
+    /**
+     * Emit (once per document) window.urStatus, the ONE getStatus poller that
+     * Overview, Jobs and Status subscribe to. Each tab used to run its own loop
+     * in the shared document whichever tab was visible - Status at 1 s forever -
+     * while the Jobs loop stopped when idle and missed scheduled runs.
+     *
+     * Cadence: 2 s while any job runs (or for 10 s after refresh(), so a launch
+     * shows before its runner registers), else 15 s. One request in flight at a
+     * time; nothing is fetched while the document is hidden, and it polls at
+     * once when it becomes visible again.
+     *
+     *   subscribe(fn)  fn(payload) after every successful poll (and at once with
+     *                  the last payload); the first subscriber starts polling.
+     *   refresh()      poll now and stay fast for a while.
+     *   last() / now() the last payload / the server clock estimated from it.
+     *   anyRunning()
+     */
+    function ur_emit_status_poller(): void
+    {
+        static $done = false;
+        if ($done) {
+            return;
+        }
+        $done = true;
+        ur_emit_page_assets();
+        ?>
+<script type="text/javascript">
+(function () {
+  'use strict';
+  if (window.urStatus) { return; }
+
+  var FAST_MS = 2000, IDLE_MS = 15000, KICK_MS = 10000;
+  var subs = [], last = null, lastAt = 0, inflight = false, again = false, timer = null, fastUntil = 0;
+
+  function anyRunning() {
+    var jobs = (last && last.jobs) || {};
+    return Object.keys(jobs).some(function (k) { return !!(jobs[k] && jobs[k].running); });
+  }
+
+  function schedule() {
+    if (timer) { clearTimeout(timer); timer = null; }
+    if (document.hidden || !subs.length) { return; }
+    timer = setTimeout(poll, (anyRunning() || Date.now() < fastUntil) ? FAST_MS : IDLE_MS);
+  }
+
+  function poll() {
+    if (inflight) { again = true; return; }
+    inflight = true;
+    fetch(window.urUtil.HANDLER_URL + '?action=getStatus', { credentials: 'same-origin', cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (body) {
+        if (!body || !body.ok || !body.jobs) { return; }
+        last = body;
+        lastAt = Date.now();
+        subs.forEach(function (fn) {
+          try { fn(body); } catch (e) { if (window.console) { window.console.error(e); } }
+        });
+      })
+      .catch(function () { /* transient; the next tick retries */ })
+      .then(function () {
+        inflight = false;
+        if (again) { again = false; poll(); } else { schedule(); }
+      });
+  }
+
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden) {
+      if (timer) { clearTimeout(timer); timer = null; }
+    } else if (subs.length) {
+      poll();
+    }
+  });
+
+  window.urStatus = {
+    subscribe: function (fn) {
+      subs.push(fn);
+      if (last) { fn(last); }
+      if (subs.length === 1) { poll(); }
+    },
+    refresh: function () { fastUntil = Date.now() + KICK_MS; poll(); },
+    last: function () { return last; },
+    now: function () {
+      return last ? (parseInt(last.now, 10) + Math.floor((Date.now() - lastAt) / 1000)) : Math.floor(Date.now() / 1000);
+    },
+    anyRunning: anyRunning
+  };
 })();
 </script>
         <?php

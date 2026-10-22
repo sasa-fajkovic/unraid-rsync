@@ -24,7 +24,7 @@ require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Config.php';
 require_once '/usr/local/emhttp/plugins/unraid.rsync/pages/_options_form.php';
 
 $csrf       = ur_render_csrf_token();
-$handlerUrl = '/plugins/unraid.rsync/include/handler.php';
+$handlerUrl = PageHelpers::HANDLER_URL;
 
 // Job id => name for the filter select. A config read error just leaves the list
 // empty (the empty state then points the user at the Jobs tab).
@@ -44,6 +44,7 @@ try {
     $jobs = [];
 }
 ur_emit_badge_assets(); /* the ONE badge palette + window.urBadge */
+ur_emit_page_assets();  /* shared CSS (.ur-empty-state, .ur-result) + window.urUtil */
 ?>
 <style>
 .ur-hist-controls { margin: 8px 0; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
@@ -54,12 +55,8 @@ ur_emit_badge_assets(); /* the ONE badge palette + window.urBadge */
 .ur-hist-pager button[disabled] { opacity: 0.5; cursor: default; }
 .ur-trigger-icon { opacity: 0.8; margin-right: 4px; }
 .ur-hist-snap { margin-top: 3px; font-size: 0.85em; color: var(--color-text-secondary, #888); }
-.ur-empty-state {
-  margin: 10px 0; padding: 10px 12px; border-radius: 4px;
-  background: var(--blue-100, #d9edf7); border: 1px solid var(--blue-200, #bce8f1);
-  color: var(--blockquote-text-color, #31708f);
-}
-/* Log modal (self-contained; the Jobs tab has its own). */
+/* Log modal (self-contained; the Jobs tab has its own, with a run picker and a
+   live tail this one does not need, so the two are deliberately not merged). */
 .ur-hist-modal { position: fixed; inset: 0; z-index: 11000; background: rgba(0,0,0,0.5); display: none; }
 .ur-hist-modal.ur-open { display: block; }
 .ur-hist-modal-box {
@@ -190,18 +187,8 @@ ur_emit_ajax_helpers();  /* window.urAjax.show, for the inline download error */
    * the SERVER's timezone, not the browser's - see ur_emit_time_helpers(). */
   function fmtWhen(iso) {
     if (!iso) { return '—'; }
-    var t = Date.parse(iso);
-    if (isNaN(t)) { return iso; }
-    return window.urFmtLocal(Math.floor(t / 1000), true);
-  }
-
-  function fmtDuration(sec) {
-    sec = parseInt(sec, 10) || 0;
-    if (sec < 60) { return sec + 's'; }
-    var m = Math.floor(sec / 60), s = sec % 60;
-    if (m < 60) { return m + 'm ' + s + 's'; }
-    var h = Math.floor(m / 60); m = m % 60;
-    return h + 'h ' + m + 'm';
+    var e = window.urUtil.isoToEpoch(iso);
+    return e ? window.urFmtLocal(e, true) : iso;
   }
 
   /* A snapshot record's line under the status badge: its stamp in the SERVER's
@@ -268,7 +255,7 @@ ur_emit_ajax_helpers();  /* window.urAjax.show, for the inline download error */
       // A still-running row has no final exit code or duration yet.
       var isRunning = (r.state === 'RUNNING');
       tr.appendChild(td(isRunning ? '—' : String(r.exitCode)));
-      tr.appendChild(td(isRunning ? '—' : fmtDuration(r.durationSec)));
+      tr.appendChild(td(isRunning ? '—' : window.urUtil.formatDuration(r.durationSec)));
 
       // Logs: View (modal) + Download (full file) when a log ref was recorded.
       var logTd = document.createElement('td');

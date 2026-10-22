@@ -1473,6 +1473,7 @@ final class HandlerTest extends TestCase
             'reason'  => 'config',
             'message' => 'Host and username are required to test a connection.',
             'modules' => [],
+            'error'   => 'Host and username are required to test a connection.',
         ], $body);
     }
 

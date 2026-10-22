@@ -27,8 +27,9 @@
  *
  * Per-job Run / Dry-run / Abort buttons POST to the handler (CSRF-checked) to
  * launch / stop the detached runner; Run/Dry-run are disabled while a job is
- * running (RunState::isRunning), Abort while it is idle. After a click the 1s
- * getStatus poll refreshes the badges and button state in place (no reload).
+ * running (RunState::isRunning), Abort while it is idle. After a click the
+ * shared getStatus poller (window.urStatus) refreshes the badges and button
+ * state in place (no reload).
  */
 
 require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Config.php';
@@ -54,7 +55,7 @@ try {
 }
 $jobs        = (isset($config['jobs']) && is_array($config['jobs'])) ? $config['jobs'] : [];
 $globalOpts  = $config['global']['defaultRsyncOptions'] ?? Config::defaultRsyncOptions();
-$handlerUrl  = '/plugins/unraid.rsync/include/handler.php';
+$handlerUrl  = PageHelpers::HANDLER_URL;
 
 // Load the saved connections so the per-job Connection select can be populated.
 // Point Credentials at the configured secrets dir (if any) BEFORE loading, so
@@ -113,13 +114,13 @@ function ur_render_job_card($job, $index): void
     // many jobs is not a wall of forms. Click / Enter / Space toggles the editable
     // body below (delegated in JS; works for server-rendered AND cloned cards).
     $summaryBits = [];
-    $summaryBits[] = $enabled ? ur_t('enabled') : ur_t('disabled');
+    $summaryBits[] = $enabled ? ur_t_text('enabled') : ur_t_text('disabled');
     if ($schedule !== '') {
         $summaryBits[] = $schedule;
     }
     echo '<div class="ur-job-head" role="button" tabindex="0" aria-expanded="false">';
     echo '<span class="ur-job-caret" aria-hidden="true">&#9654;</span>';
-    echo '<span class="ur-job-title">' . ur_h($name !== '' ? $name : ur_t('(unnamed job)')) . '</span>';
+    echo '<span class="ur-job-title">' . ur_h($name !== '' ? $name : ur_t_text('(unnamed job)')) . '</span>';
     echo '<span class="ur-job-sub">' . ur_h(implode(' · ', $summaryBits)) . '</span>';
     echo '</div>';
 
@@ -135,34 +136,34 @@ function ur_render_job_card($job, $index): void
     echo '<dl>';
 
     // name (required)
-    echo '<dt><label for="' . ur_h($idb . '_name') . '">' . ur_h(ur_t('Name')) . '</label>' . ur_required_mark() . ':</dt>';
+    echo '<dt><label for="' . ur_h($idb . '_name') . '">' . ur_h(ur_t_text('Name')) . '</label>' . ur_required_mark() . ':</dt>';
     echo '<dd><input type="text" id="' . ur_h($idb . '_name') . '" name="' . ur_h($p . '[name]') . '" value="' . ur_h($name) . '" required></dd>';
 
     // enabled (checkbox; styled as a switch by webGui where available)
-    echo '<dt>' . ur_h(ur_t('Enabled')) . ':</dt>';
+    echo '<dt>' . ur_h(ur_t_text('Enabled')) . ':</dt>';
     echo '<dd>';
     echo '<input type="hidden" name="' . ur_h($p . '[enabled]') . '" value="0">';
     echo '<input type="checkbox" class="ur-switch" name="' . ur_h($p . '[enabled]') . '" value="1"' . ($enabled ? ' checked' : '') . '>';
     echo '</dd>';
 
     // transport (drives whether Connection is required - see the JS toggle)
-    echo '<dt><label for="' . ur_h($idb . '_transport') . '">' . ur_h(ur_t('Transport')) . '</label>:</dt>';
+    echo '<dt><label for="' . ur_h($idb . '_transport') . '">' . ur_h(ur_t_text('Transport')) . '</label>:</dt>';
     echo '<dd><select id="' . ur_h($idb . '_transport') . '" class="ur-transport-select" data-conn="' . ur_h($idb . '_conn') . '" name="' . ur_h($p . '[transport]') . '">';
     foreach (['SSH' => 'SSH (remote host)', 'LOCAL' => 'Local (this server)', 'DAEMON' => 'rsync daemon (host::module)'] as $val => $lbl) {
         $sel = ($transport === $val) ? ' selected' : '';
-        echo '<option value="' . ur_h($val) . '"' . $sel . '>' . ur_h(ur_t($lbl)) . '</option>';
+        echo '<option value="' . ur_h($val) . '"' . $sel . '>' . ur_h(ur_t_text($lbl)) . '</option>';
     }
     echo '</select></dd>';
 
     // direction
-    echo '<dt><label for="' . ur_h($idb . '_direction') . '">' . ur_h(ur_t('Direction')) . '</label>:</dt>';
+    echo '<dt><label for="' . ur_h($idb . '_direction') . '">' . ur_h(ur_t_text('Direction')) . '</label>:</dt>';
     echo '<dd><select id="' . ur_h($idb . '_direction') . '" name="' . ur_h($p . '[direction]') . '">';
     foreach (['PUSH' => 'Push (local -> remote)', 'PULL' => 'Pull (remote -> local)'] as $val => $lbl) {
         $sel = ($direction === $val) ? ' selected' : '';
-        echo '<option value="' . ur_h($val) . '"' . $sel . '>' . ur_h(ur_t($lbl)) . '</option>';
+        echo '<option value="' . ur_h($val) . '"' . $sel . '>' . ur_h(ur_t_text($lbl)) . '</option>';
     }
     echo '</select>';
-    echo '<blockquote class="inline_help"><p>' . ur_h(ur_t('Direction applies to SSH and rsync daemon transports; a Local job always copies left to right.')) . '</p></blockquote>';
+    echo '<blockquote class="inline_help"><p>' . ur_h(ur_t_text('Direction applies to SSH and rsync daemon transports; a Local job always copies left to right.')) . '</p></blockquote>';
     echo '</dd>';
 
     // connection (populated from the saved Credentials connections). REQUIRED
@@ -175,11 +176,11 @@ function ur_render_job_card($job, $index): void
     global $urConnections;
     $conns = is_array($urConnections) ? $urConnections : [];
     $connRequired = ($transport !== 'LOCAL');
-    echo '<dt><label for="' . ur_h($idb . '_conn') . '">' . ur_h(ur_t('Connection')) . '</label>'
-        . '<abbr class="ur-required ur-conn-required" title="' . ur_h(ur_t('Required')) . '"'
+    echo '<dt><label for="' . ur_h($idb . '_conn') . '">' . ur_h(ur_t_text('Connection')) . '</label>'
+        . '<abbr class="ur-required ur-conn-required" title="' . ur_h(ur_t_text('Required')) . '"'
         . ($connRequired ? '' : ' style="display:none"') . '>*</abbr>:</dt>';
     echo '<dd><select id="' . ur_h($idb . '_conn') . '" class="ur-conn-select" data-transport="' . ur_h($idb . '_transport') . '" name="' . ur_h($p . '[connectionId]') . '"' . ($connRequired ? ' required' : '') . '>';
-    echo '<option value=""' . ($connId === '' ? ' selected' : '') . '>' . ur_h(ur_t('(none)')) . '</option>';
+    echo '<option value=""' . ($connId === '' ? ' selected' : '') . '>' . ur_h(ur_t_text('(none)')) . '</option>';
     $connFound = false;
     foreach ($conns as $conn) {
         if (!is_array($conn)) {
@@ -207,24 +208,24 @@ function ur_render_job_card($job, $index): void
     // connection (e.g. the connection was deleted) so editing doesn't silently
     // drop the reference; flag it as missing.
     if ($connId !== '' && !$connFound) {
-        echo '<option value="' . ur_h($connId) . '" selected>' . ur_h($connId) . ' ' . ur_h(ur_t('(missing)')) . '</option>';
+        echo '<option value="' . ur_h($connId) . '" selected>' . ur_h($connId) . ' ' . ur_h(ur_t_text('(missing)')) . '</option>';
     }
     echo '</select>';
     if (empty($conns)) {
-        echo '<blockquote class="inline_help"><p>' . ur_h(ur_t('Add connections in the Connections tab.')) . '</p></blockquote>';
+        echo '<blockquote class="inline_help"><p>' . ur_h(ur_t_text('Add connections in the Connections tab.')) . '</p></blockquote>';
     } else {
-        echo '<blockquote class="inline_help"><p>' . ur_h(ur_t('Used for SSH and rsync daemon transports. Manage connections in the Connections tab.')) . '</p></blockquote>';
+        echo '<blockquote class="inline_help"><p>' . ur_h(ur_t_text('Used for SSH and rsync daemon transports. Manage connections in the Connections tab.')) . '</p></blockquote>';
     }
     echo '</dd>';
 
     // manual-only toggle: when ON the job is never scheduled (no cron line) and
     // the schedule field is hidden + not required; it runs only on demand.
-    echo '<dt>' . ur_h(ur_t('Manual only (no schedule)')) . ':</dt>';
+    echo '<dt>' . ur_h(ur_t_text('Manual only (no schedule)')) . ':</dt>';
     echo '<dd>';
     echo '<input type="hidden" name="' . ur_h($p . '[manualOnly]') . '" value="0">';
     echo '<input type="checkbox" class="ur-switch ur-manual-only" name="' . ur_h($p . '[manualOnly]') . '" value="1"'
         . ($manualOnly ? ' checked' : '') . ' data-idb="' . ur_h($idb) . '">';
-    echo '<blockquote class="inline_help"><p>' . ur_h(ur_t('When ON, this job is never scheduled — it runs only when you click Run or Dry-run, and the schedule below is ignored.')) . '</p></blockquote>';
+    echo '<blockquote class="inline_help"><p>' . ur_h(ur_t_text('When ON, this job is never scheduled — it runs only when you click Run or Dry-run, and the schedule below is ignored.')) . '</p></blockquote>';
     echo '</dd>';
 
     // schedule (5-field cron). Required UNLESS manual-only (then hidden); a hidden
@@ -232,22 +233,22 @@ function ur_render_job_card($job, $index): void
     // attribute + visual marker track the manual-only toggle (seeded here, kept in
     // sync by JS).
     $schedRowStyle = $manualOnly ? ' style="display:none"' : '';
-    echo '<dt class="ur-sched-row" id="' . ur_h($idb . '_schedrow_dt') . '"' . $schedRowStyle . '><label for="' . ur_h($idb . '_schedule') . '">' . ur_h(ur_t('Schedule (cron)')) . '</label>'
-        . '<abbr class="ur-required ur-sched-required" title="' . ur_h(ur_t('Required')) . '"' . ($manualOnly ? ' style="display:none"' : '') . '>*</abbr>:</dt>';
+    echo '<dt class="ur-sched-row" id="' . ur_h($idb . '_schedrow_dt') . '"' . $schedRowStyle . '><label for="' . ur_h($idb . '_schedule') . '">' . ur_h(ur_t_text('Schedule (cron)')) . '</label>'
+        . '<abbr class="ur-required ur-sched-required" title="' . ur_h(ur_t_text('Required')) . '"' . ($manualOnly ? ' style="display:none"' : '') . '>*</abbr>:</dt>';
     echo '<dd class="ur-sched-row" id="' . ur_h($idb . '_schedrow_dd') . '"' . $schedRowStyle . '>';
     echo '<input type="text" class="ur-cron-input" id="' . ur_h($idb . '_schedule') . '" name="' . ur_h($p . '[schedule]') . '" value="' . ur_h($schedule) . '" placeholder="0 3 * * *"' . ($manualOnly ? '' : ' required') . '>';
     // Live, plain-English reading of the cron expression (filled by JS on input)
     // plus a field-order legend so the digit order is never guesswork.
     echo '<div class="ur-cron-human" id="' . ur_h($idb . '_cronhuman') . '" aria-live="polite"></div>';
     echo '<div class="ur-cron-legend"><code>* * * * *</code> = '
-        . ur_h(ur_t('minute(0-59) hour(0-23) day-of-month(1-31) month(1-12) day-of-week(0-6, Sun=0)'))
-        . ' &nbsp;·&nbsp; ' . ur_h(ur_t('e.g.')) . ' <code>0 3 * * *</code> = ' . ur_h(ur_t('03:00 daily'))
-        . ', <code>*/15 * * * *</code> = ' . ur_h(ur_t('every 15 min')) . '</div>';
+        . ur_h(ur_t_text('minute(0-59) hour(0-23) day-of-month(1-31) month(1-12) day-of-week(0-6, Sun=0)'))
+        . ' &nbsp;·&nbsp; ' . ur_h(ur_t_text('e.g.')) . ' <code>0 3 * * *</code> = ' . ur_h(ur_t_text('03:00 daily'))
+        . ', <code>*/15 * * * *</code> = ' . ur_h(ur_t_text('every 15 min')) . '</div>';
     echo '</dd>';
 
     // pairs
     $pairsRowsId = $idb . '_pairs';
-    echo '<dt>' . ur_h(ur_t('Source -> destination pairs')) . ':</dt>';
+    echo '<dt>' . ur_h(ur_t_text('Source -> destination pairs')) . ':</dt>';
     echo '<dd>';
     echo '<div class="ur-pairs" id="' . ur_h($pairsRowsId) . '" data-prefix="' . ur_h($p . '[pairs]') . '">';
     if (empty($pairs)) {
@@ -258,7 +259,7 @@ function ur_render_job_card($job, $index): void
         }
     }
     echo '</div>';
-    echo '<div><button type="button" class="ur-pair-add" data-rows="' . ur_h($pairsRowsId) . '">' . ur_h(ur_t('Add pair')) . '</button></div>';
+    echo '<div><button type="button" class="ur-pair-add" data-rows="' . ur_h($pairsRowsId) . '">' . ur_h(ur_t_text('Add pair')) . '</button></div>';
     // The pairs row was the only major field with no help at all, and its boxes
     // are local|remote by POSITION - not source|destination, which Direction
     // decides. Spell that out, plus the rsync-daemon module trap that reaches
@@ -268,105 +269,105 @@ function ur_render_job_card($job, $index): void
     // until the page Help toggle is on - and the module trap below is the one
     // sentence that has to be readable without hunting for that toggle.
     echo '<blockquote class="inline_help" style="display:block;margin:6px 0 0"><p>'
-        . ur_h(ur_t('The LEFT box is always a path on this server; the RIGHT box is the path on the other host (SSH transport) or a second path on this server (Local transport). Which one is the source is set by Direction above: Push reads from the left, Pull reads from the right.'))
+        . ur_h(ur_t_text('The LEFT box is always a path on this server; the RIGHT box is the path on the other host (SSH transport) or a second path on this server (Local transport). Which one is the source is set by Direction above: Push reads from the left, Pull reads from the right.'))
         . '</p><p>'
-        . ur_h(ur_t('For an SSH job the right box must be an absolute filesystem path on the remote host - NOT an rsync daemon module name. If your NAS "Rsync Server" page shows only a module such as "backup", use the folder that module points at (for example /volume1/Backup/data).'))
+        . ur_h(ur_t_text('For an SSH job the right box must be an absolute filesystem path on the remote host - NOT an rsync daemon module name. If your NAS "Rsync Server" page shows only a module such as "backup", use the folder that module points at (for example /volume1/Backup/data).'))
         . '</p><p>'
-        . ur_h(ur_t('For an rsync daemon job the right box is a MODULE reference on the daemon - just "rsync_bkp", or "rsync_bkp/photos" for a folder inside it. No host and no leading slash: the host, port, username and module secret all come from the Connection.'))
+        . ur_h(ur_t_text('For an rsync daemon job the right box is a MODULE reference on the daemon - just "rsync_bkp", or "rsync_bkp/photos" for a folder inside it. No host and no leading slash: the host, port, username and module secret all come from the Connection.'))
         . '</p></blockquote>';
     echo '<div class="ur-snap-only"' . ur_snap_style($snapOn) . '><blockquote class="inline_help" style="display:block;margin:6px 0 0"><p>'
-        . ur_h(ur_t('In snapshot mode the right box is a sub-directory NAME instead of a path: each snapshot holds this pair under <root>/<stamp>/<name>/. Use 1 to 64 letters, digits, "_" or "-", starting with a letter or digit; "latest" is reserved, and each pair of the job needs its own name (compared ignoring case).'))
+        . ur_h(ur_t_text('In snapshot mode the right box is a sub-directory NAME instead of a path: each snapshot holds this pair under <root>/<stamp>/<name>/. Use 1 to 64 letters, digits, "_" or "-", starting with a letter or digit; "latest" is reserved, and each pair of the job needs its own name (compared ignoring case).'))
         . '</p><p>'
-        . ur_h(ur_t('Seed: allow this pair\'s first copy without a previous snapshot to link against: a full copy. Every pair needs it on the job\'s first snapshot, and so does a pair added later. Once the pair is in a snapshot the flag has no effect and can be cleared.'))
+        . ur_h(ur_t_text('Seed: allow this pair\'s first copy without a previous snapshot to link against: a full copy. Every pair needs it on the job\'s first snapshot, and so does a pair added later. Once the pair is in a snapshot the flag has no effect and can be cleared.'))
         . '</p></blockquote></div>';
     echo '</dd>';
 
     // use global config toggle
-    echo '<dt>' . ur_h(ur_t('Use global config')) . ':</dt>';
+    echo '<dt>' . ur_h(ur_t_text('Use global config')) . ':</dt>';
     echo '<dd>';
     echo '<input type="hidden" name="' . ur_h($p . '[useGlobalDefaults]') . '" value="0">';
     echo '<input type="checkbox" class="ur-switch ur-use-global" name="' . ur_h($p . '[useGlobalDefaults]') . '" value="1"'
         . ($useGlobal ? ' checked' : '') . ' data-target="' . ur_h($idb . '_opts') . '">';
-    echo '<blockquote class="inline_help"><p>' . ur_h(ur_t('When ON, this job uses the rsync options you set on the Global Settings tab (and follows any change you make there). Turn it OFF to give this job its own options below.')) . '</p></blockquote>';
+    echo '<blockquote class="inline_help"><p>' . ur_h(ur_t_text('When ON, this job uses the rsync options you set on the Global Settings tab (and follows any change you make there). Turn it OFF to give this job its own options below.')) . '</p></blockquote>';
     echo '</dd>';
 
     // log level
-    echo '<dt><label for="' . ur_h($idb . '_log') . '">' . ur_h(ur_t('Log level')) . '</label>:</dt>';
+    echo '<dt><label for="' . ur_h($idb . '_log') . '">' . ur_h(ur_t_text('Log level')) . '</label>:</dt>';
     echo '<dd><select id="' . ur_h($idb . '_log') . '" name="' . ur_h($p . '[logLevel]') . '">';
     foreach (Job::LOG_LEVELS as $lvl) {
         $sel = ($logLevel === $lvl) ? ' selected' : '';
-        echo '<option value="' . ur_h($lvl) . '"' . $sel . '>' . ur_h(ur_t(ucfirst($lvl))) . '</option>';
+        echo '<option value="' . ur_h($lvl) . '"' . $sel . '>' . ur_h(ur_t_text(ucfirst($lvl))) . '</option>';
     }
     echo '</select>';
     echo '<blockquote class="inline_help"><p>'
-        . ur_h(ur_t('Quiet: errors, every deletion, and the end-of-run summary. Summary: adds one overall progress line every 5% or 30 seconds - no per-file lines, so a big backup stays readable. Normal: a line per transferred file. Verbose/Debug: add itemised changes and rsync protocol debugging - for troubleshooting, and they can make the log very large. Errors and deletions are logged at every level, and a Dry-run is never quieter than Normal so the preview always names what it would change.'))
+        . ur_h(ur_t_text('Quiet: errors, every deletion, and the end-of-run summary. Summary: adds one overall progress line every 5% or 30 seconds - no per-file lines, so a big backup stays readable. Normal: a line per transferred file. Verbose/Debug: add itemised changes and rsync protocol debugging - for troubleshooting, and they can make the log very large. Errors and deletions are logged at every level, and a Dry-run is never quieter than Normal so the preview always names what it would change.'))
         . '</p></blockquote>';
     echo '</dd>';
 
     // notify mode
-    echo '<dt><label for="' . ur_h($idb . '_notify') . '">' . ur_h(ur_t('Notify')) . '</label>:</dt>';
+    echo '<dt><label for="' . ur_h($idb . '_notify') . '">' . ur_h(ur_t_text('Notify')) . '</label>:</dt>';
     echo '<dd><select id="' . ur_h($idb . '_notify') . '" name="' . ur_h($p . '[notifyMode]') . '">';
     foreach (['off' => 'Off', 'success-only' => 'Success only', 'failure-only' => 'Failure only', 'always' => 'Always'] as $val => $lbl) {
         $sel = ($notifyMode === $val) ? ' selected' : '';
-        echo '<option value="' . ur_h($val) . '"' . $sel . '>' . ur_h(ur_t($lbl)) . '</option>';
+        echo '<option value="' . ur_h($val) . '"' . $sel . '>' . ur_h(ur_t_text($lbl)) . '</option>';
     }
     echo '</select></dd>';
 
     // optional target marker (empty = off)
-    echo '<dt><label for="' . ur_h($idb . '_marker') . '">' . ur_h(ur_t('Target marker')) . '</label>:</dt>';
+    echo '<dt><label for="' . ur_h($idb . '_marker') . '">' . ur_h(ur_t_text('Target marker')) . '</label>:</dt>';
     echo '<dd><input type="text" id="' . ur_h($idb . '_marker') . '" name="' . ur_h($p . '[targetMarker]')
         . '" value="' . ur_h($marker) . '" placeholder="/mnt/disks/backup/.unraid-rsync-target" spellcheck="false">';
     echo ' <input type="text" id="' . ur_h($idb . '_marker_content') . '" name="' . ur_h($p . '[targetMarkerContent]')
-        . '" value="' . ur_h($markerText) . '" placeholder="' . ur_h(ur_t('expected content (optional)')) . '" spellcheck="false"'
-        . ' aria-label="' . ur_h(ur_t('Target marker expected content')) . '">';
+        . '" value="' . ur_h($markerText) . '" placeholder="' . ur_h(ur_t_text('expected content (optional)')) . '" spellcheck="false"'
+        . ' aria-label="' . ur_h(ur_t_text('Target marker expected content')) . '">';
     echo '<blockquote class="inline_help"><p>'
-        . ur_h(ur_t('Protects against writing to an unmounted drive. Optional: the path of a small file on the DESTINATION side (on the remote host for a push, on this server for a pull or a local job) that must exist before the run starts - for example a .unraid-rsync-target file in the root of the backup drive. If it is missing, cannot be read, or does not contain the expected content (when one is set, e.g. a UUID), the run fails before the pre-run hook and before anything is copied. Leave empty to turn the check off.'))
+        . ur_h(ur_t_text('Protects against writing to an unmounted drive. Optional: the path of a small file on the DESTINATION side (on the remote host for a push, on this server for a pull or a local job) that must exist before the run starts - for example a .unraid-rsync-target file in the root of the backup drive. If it is missing, cannot be read, or does not contain the expected content (when one is set, e.g. a UUID), the run fails before the pre-run hook and before anything is copied. Leave empty to turn the check off.'))
         . '</p></blockquote></dd>';
 
     // snapshot mode. Every field is always rendered (the JS template is this
     // same card) and only shown and enabled while the switch is on: a disabled
     // field is not posted, so a mirror job posts just snapshot[enabled]=0.
     $sp = $p . '[snapshot]';
-    echo '<dt>' . ur_h(ur_t('Snapshot mode')) . ':</dt>';
+    echo '<dt>' . ur_h(ur_t_text('Snapshot mode')) . ':</dt>';
     echo '<dd>';
     echo '<input type="hidden" name="' . ur_h($sp . '[enabled]') . '" value="0">';
     echo '<input type="checkbox" class="ur-switch ur-snap-toggle" name="' . ur_h($sp . '[enabled]') . '" value="1"' . ($snapOn ? ' checked' : '') . '>';
-    echo '<blockquote class="inline_help"><p>' . ur_h(ur_t('When ON, every run writes a new dated copy (a snapshot) on the receiver instead of updating one mirror. SSH transport and Push only.')) . '</p></blockquote>';
+    echo '<blockquote class="inline_help"><p>' . ur_h(ur_t_text('When ON, every run writes a new dated copy (a snapshot) on the receiver instead of updating one mirror. SSH transport and Push only.')) . '</p></blockquote>';
     echo '<div class="ur-snap-only"' . ur_snap_style($snapOn) . '><blockquote class="inline_help" style="display:block;margin:6px 0 0"><p>'
-        . ur_h(ur_t('A snapshot is a complete, dated copy of every pair under <root>/<stamp>/ on the receiver. Files that did not change since the previous snapshot are hard links to it (rsync --link-dest), so each snapshot only costs the space of what changed. A snapshot counts only once its run finished cleanly; old ones are pruned by the retention below.'))
+        . ur_h(ur_t_text('A snapshot is a complete, dated copy of every pair under <root>/<stamp>/ on the receiver. Files that did not change since the previous snapshot are hard links to it (rsync --link-dest), so each snapshot only costs the space of what changed. A snapshot counts only once its run finished cleanly; old ones are pruned by the retention below.'))
         . '</p><p>'
-        . ur_h(ur_t('The target marker and its expected content above become mandatory, and the snapshot root must be the marker\'s directory or lie inside it. You create the root (mode 0700) and its .ur-snapshot-root file holding this job\'s id; the plugin never creates them.'))
+        . ur_h(ur_t_text('The target marker and its expected content above become mandatory, and the snapshot root must be the marker\'s directory or lie inside it. You create the root (mode 0700) and its .ur-snapshot-root file holding this job\'s id; the plugin never creates them.'))
         . '</p><p>'
-        . ur_h(ur_t('The transfer\'s SSH login must be able to read the root as root: either log in as root, or point Remote rsync path at a wrapper on the receiver that runs rsync through sudo, and turn on "Use sudo on the receiver" on the connection.'))
+        . ur_h(ur_t_text('The transfer\'s SSH login must be able to read the root as root: either log in as root, or point Remote rsync path at a wrapper on the receiver that runs rsync through sudo, and turn on "Use sudo on the receiver" on the connection.'))
         . '</p><p>'
-        . ur_h(ur_t('Pruning starts as a dry run: it logs which snapshots it would delete and deletes none until you turn "Prune dry run" off. Unfinished copies left by failed runs are still cleaned up.'))
-        . '</p><p><a href="' . ur_h('https://github.com/sasa-fajkovic/unraid-rsync/blob/main/docs/snapshot-mode.md') . '" target="_blank" rel="noopener noreferrer">' . ur_h(ur_t('Full guide')) . '</a>'
+        . ur_h(ur_t_text('Pruning starts as a dry run: it logs which snapshots it would delete and deletes none until you turn "Prune dry run" off. Unfinished copies left by failed runs are still cleaned up.'))
+        . '</p><p><a href="' . ur_h('https://github.com/sasa-fajkovic/unraid-rsync/blob/main/docs/snapshot-mode.md') . '" target="_blank" rel="noopener noreferrer">' . ur_h(ur_t_text('Full guide')) . '</a>'
         . '</p></blockquote></div>';
     echo '</dd>';
 
-    echo '<dt class="ur-snap-only"' . ur_snap_style($snapOn) . '><label for="' . ur_h($idb . '_snaproot') . '">' . ur_h(ur_t('Snapshot root')) . '</label>' . ur_required_mark() . ':</dt>';
+    echo '<dt class="ur-snap-only"' . ur_snap_style($snapOn) . '><label for="' . ur_h($idb . '_snaproot') . '">' . ur_h(ur_t_text('Snapshot root')) . '</label>' . ur_required_mark() . ':</dt>';
     echo '<dd class="ur-snap-only"' . ur_snap_style($snapOn) . '><input type="text" class="ur-snap-field" id="' . ur_h($idb . '_snaproot') . '" name="' . ur_h($sp . '[root]')
         . '" value="' . ur_h($snapshot['root']) . '" placeholder="/mnt/backup/snapshots/appdata" spellcheck="false"' . ur_snap_disabled($snapOn) . '>';
-    echo '<blockquote class="inline_help"><p>' . ur_h(ur_t('Absolute path on the receiver that holds this job\'s snapshots and nothing else; no other job may write into it. At least two directories deep, three under /mnt.')) . '</p></blockquote></dd>';
+    echo '<blockquote class="inline_help"><p>' . ur_h(ur_t_text('Absolute path on the receiver that holds this job\'s snapshots and nothing else; no other job may write into it. At least two directories deep, three under /mnt.')) . '</p></blockquote></dd>';
 
-    echo '<dt class="ur-snap-only"' . ur_snap_style($snapOn) . '>' . ur_h(ur_t('Keep snapshots')) . ':</dt>';
+    echo '<dt class="ur-snap-only"' . ur_snap_style($snapOn) . '>' . ur_h(ur_t_text('Keep snapshots')) . ':</dt>';
     echo '<dd class="ur-snap-only"' . ur_snap_style($snapOn) . '>';
     foreach (['keepDaily' => 'daily', 'keepWeekly' => 'weekly', 'keepMonthly' => 'monthly'] as $key => $lbl) {
-        echo '<label>' . ur_h(ur_t($lbl)) . ' <input type="text" class="ur-snap-field" inputmode="numeric" size="4" name="' . ur_h($sp . '[' . $key . ']')
+        echo '<label>' . ur_h(ur_t_text($lbl)) . ' <input type="text" class="ur-snap-field" inputmode="numeric" size="4" name="' . ur_h($sp . '[' . $key . ']')
             . '" value="' . ur_h((string) $snapshot[$key]) . '"' . ur_snap_disabled($snapOn) . '></label> ';
     }
-    echo '<blockquote class="inline_help"><p>' . ur_h(ur_t('Keeps the newest snapshot of each of the last N days (0-366), ISO weeks (0-260) and months (0-120) that have one; at least one in total. The newest snapshot is always kept.')) . '</p></blockquote></dd>';
+    echo '<blockquote class="inline_help"><p>' . ur_h(ur_t_text('Keeps the newest snapshot of each of the last N days (0-366), ISO weeks (0-260) and months (0-120) that have one; at least one in total. The newest snapshot is always kept.')) . '</p></blockquote></dd>';
 
-    echo '<dt class="ur-snap-only"' . ur_snap_style($snapOn) . '><label for="' . ur_h($idb . '_snapmax') . '">' . ur_h(ur_t('Max deletions per run')) . '</label>:</dt>';
+    echo '<dt class="ur-snap-only"' . ur_snap_style($snapOn) . '><label for="' . ur_h($idb . '_snapmax') . '">' . ur_h(ur_t_text('Max deletions per run')) . '</label>:</dt>';
     echo '<dd class="ur-snap-only"' . ur_snap_style($snapOn) . '><input type="text" class="ur-snap-field" inputmode="numeric" size="4" id="' . ur_h($idb . '_snapmax') . '" name="' . ur_h($sp . '[maxPrunePerRun]')
         . '" value="' . ur_h((string) $snapshot['maxPrunePerRun']) . '"' . ur_snap_disabled($snapOn) . '>';
-    echo '<blockquote class="inline_help"><p>' . ur_h(ur_t('At most this many old snapshots (1-20) are deleted per run; the rest wait for the next run.')) . '</p></blockquote></dd>';
+    echo '<blockquote class="inline_help"><p>' . ur_h(ur_t_text('At most this many old snapshots (1-20) are deleted per run; the rest wait for the next run.')) . '</p></blockquote></dd>';
 
-    echo '<dt class="ur-snap-only"' . ur_snap_style($snapOn) . '>' . ur_h(ur_t('Prune dry run')) . ':</dt>';
+    echo '<dt class="ur-snap-only"' . ur_snap_style($snapOn) . '>' . ur_h(ur_t_text('Prune dry run')) . ':</dt>';
     echo '<dd class="ur-snap-only"' . ur_snap_style($snapOn) . '>';
     echo '<input type="hidden" class="ur-snap-field" name="' . ur_h($sp . '[pruneDryRun]') . '" value="0"' . ur_snap_disabled($snapOn) . '>';
     echo '<input type="checkbox" class="ur-switch ur-snap-field" name="' . ur_h($sp . '[pruneDryRun]') . '" value="1"' . ($snapshot['pruneDryRun'] ? ' checked' : '') . ur_snap_disabled($snapOn) . '>';
-    echo '<blockquote class="inline_help"><p>' . ur_h(ur_t('When ON, each run only logs which snapshots it would delete. Review those plans for a while, then turn it OFF to let pruning delete. Older unfinished .inprogress copies are cleaned up either way.')) . '</p></blockquote></dd>';
+    echo '<blockquote class="inline_help"><p>' . ur_h(ur_t_text('When ON, each run only logs which snapshots it would delete. Review those plans for a while, then turn it OFF to let pruning delete. Older unfinished .inprogress copies are cleaned up either way.')) . '</p></blockquote></dd>';
 
     // pre/post hooks. Both run as ROOT via a SINGLE `bash -c "$hook"` call
     // (Runner::runHook) — the whole textarea value is one bash script, so
@@ -380,27 +381,27 @@ function ur_render_job_card($job, $index): void
     // is hidden by default unless help mode is on, so the explanation would
     // otherwise be invisible.)
     $hookEnvVars = 'UR_JOB_ID, UR_JOB_NAME, UR_DRY_RUN, UR_TRIGGER, UR_JOB_STATUS, UR_EXIT_CODE';
-    echo '<dt>' . ur_h(ur_t('Pre / post-run hooks')) . ':</dt>';
+    echo '<dt>' . ur_h(ur_t_text('Pre / post-run hooks')) . ':</dt>';
     echo '<dd><div class="ur-hook-help">';
-    echo '<p>' . ur_h(ur_t('Optional shell commands run on THIS server as root (via bash -c) around the transfer: the pre-run hook just before rsync starts, the post-run hook just after it finishes. The post-run hook ALWAYS runs — even when the transfer fails or is aborted.')) . '</p>';
-    echo '<p>' . ur_h(ur_t('A hook that runs longer than the pre-/post-run hook timeout on the Global Settings tab (30 and 60 minutes by default) is killed: a timed-out pre-run hook fails the run, a timed-out post-run hook turns a successful run into a warning.')) . '</p>';
-    echo '<p>' . ur_h(ur_t('Use them to prepare or clean up around a backup — e.g. mount/unmount a share, spin a disk up or down, or send a custom notification. Write it like a small bash script: one command per line, or a single long one-liner — no shebang needed.')) . '</p>';
-    echo '<p>' . ur_h(ur_t('The whole box runs as ONE shell session, top to bottom, in order: line 1 finishes before line 2 starts, and a variable or `cd` from an earlier line still applies later — just like running a saved .sh file. The numbers on the left mark each line so you can see exactly what runs and in what order.')) . '</p>';
-    echo '<p>' . ur_h(ur_t('Available to both hooks as environment variables')) . ': <code>' . ur_h($hookEnvVars) . '</code>. '
-        . ur_h(ur_t('UR_DRY_RUN is 0/1, UR_TRIGGER is manual/schedule; UR_JOB_STATUS and UR_EXIT_CODE hold the run outcome (post-run hook).')) . '</p>';
-    echo '<p class="ur-hook-warn">' . ur_h(ur_t('Hooks run with full root privileges — be careful what you put here. Their output is captured into the run log (visible in the UI), so do not echo passwords or keys.')) . '</p>';
+    echo '<p>' . ur_h(ur_t_text('Optional shell commands run on THIS server as root (via bash -c) around the transfer: the pre-run hook just before rsync starts, the post-run hook just after it finishes. The post-run hook ALWAYS runs — even when the transfer fails or is aborted.')) . '</p>';
+    echo '<p>' . ur_h(ur_t_text('A hook that runs longer than the pre-/post-run hook timeout on the Global Settings tab (30 and 60 minutes by default) is killed: a timed-out pre-run hook fails the run, a timed-out post-run hook turns a successful run into a warning.')) . '</p>';
+    echo '<p>' . ur_h(ur_t_text('Use them to prepare or clean up around a backup — e.g. mount/unmount a share, spin a disk up or down, or send a custom notification. Write it like a small bash script: one command per line, or a single long one-liner — no shebang needed.')) . '</p>';
+    echo '<p>' . ur_h(ur_t_text('The whole box runs as ONE shell session, top to bottom, in order: line 1 finishes before line 2 starts, and a variable or `cd` from an earlier line still applies later — just like running a saved .sh file. The numbers on the left mark each line so you can see exactly what runs and in what order.')) . '</p>';
+    echo '<p>' . ur_h(ur_t_text('Available to both hooks as environment variables')) . ': <code>' . ur_h($hookEnvVars) . '</code>. '
+        . ur_h(ur_t_text('UR_DRY_RUN is 0/1, UR_TRIGGER is manual/schedule; UR_JOB_STATUS and UR_EXIT_CODE hold the run outcome (post-run hook).')) . '</p>';
+    echo '<p class="ur-hook-warn">' . ur_h(ur_t_text('Hooks run with full root privileges — be careful what you put here. Their output is captured into the run log (visible in the UI), so do not echo passwords or keys.')) . '</p>';
     echo '</div></dd>';
 
-    $preExample  = ur_t("# Runs before the transfer. Example:\n# mount /mnt/remotes/nas-backup");
-    $postExample = ur_t("# Runs after the transfer (always). Example:\n# [ \"\$UR_JOB_STATUS\" = SUCCESS ] && logger \"backup finished ok\"");
-    $preLines    = ur_hook_line_count($preHook, $preExample);
-    $postLines   = ur_hook_line_count($postHook, $postExample);
-    echo '<dt class="ur-hook-dt"><label for="' . ur_h($idb . '_pre') . '">' . ur_h(ur_t('Pre-run hook')) . '</label>:</dt>';
+    $preExample  = ur_t_text("# Runs before the transfer. Example:\n# mount /mnt/remotes/nas-backup");
+    $postExample = ur_t_text("# Runs after the transfer (always). Example:\n# [ \"\$UR_JOB_STATUS\" = SUCCESS ] && logger \"backup finished ok\"");
+    $preLines    = PageHelpers::hookLineCount($preHook, $preExample);
+    $postLines   = PageHelpers::hookLineCount($postHook, $postExample);
+    echo '<dt class="ur-hook-dt"><label for="' . ur_h($idb . '_pre') . '">' . ur_h(ur_t_text('Pre-run hook')) . '</label>:</dt>';
     echo '<dd class="ur-hook-dd"><div class="ur-hook-editor">'
         . ur_hook_gutter_html($preLines)
         . '<textarea class="ur-hook-ta" id="' . ur_h($idb . '_pre') . '" name="' . ur_h($p . '[preHook]')
         . '" rows="' . ur_h((string) ($preLines + 1)) . '" spellcheck="false" autocapitalize="off" autocomplete="off" wrap="off" placeholder="' . ur_h($preExample) . '">' . ur_h($preHook) . '</textarea></div></dd>';
-    echo '<dt class="ur-hook-dt"><label for="' . ur_h($idb . '_post') . '">' . ur_h(ur_t('Post-run hook')) . '</label>:</dt>';
+    echo '<dt class="ur-hook-dt"><label for="' . ur_h($idb . '_post') . '">' . ur_h(ur_t_text('Post-run hook')) . '</label>:</dt>';
     echo '<dd class="ur-hook-dd"><div class="ur-hook-editor">'
         . ur_hook_gutter_html($postLines)
         . '<textarea class="ur-hook-ta" id="' . ur_h($idb . '_post') . '" name="' . ur_h($p . '[postHook]')
@@ -425,40 +426,18 @@ function ur_render_job_card($job, $index): void
     $abortDis = (!$hasId || !$running) ? ' disabled' : '';
     echo '<div class="ur-job-card-actions">';
     $jobNameAttr = ' data-jobname="' . ur_h($name !== '' ? $name : $id) . '"';
-    echo '<button type="button" class="ur-job-run" data-jobid="' . ur_h($id) . '"' . $jobNameAttr . $runDis . '>' . ur_h(ur_t('Run')) . '</button> ';
-    echo '<button type="button" class="ur-job-dry" data-jobid="' . ur_h($id) . '"' . $jobNameAttr . $runDis . '>' . ur_h(ur_t('Dry-run')) . '</button> ';
-    echo '<button type="button" class="ur-job-abort" data-jobid="' . ur_h($id) . '"' . $abortDis . '>' . ur_h(ur_t('Abort')) . '</button> ';
-    echo '<button type="button" class="ur-job-del">' . ur_h(ur_t('Remove job')) . '</button>';
+    echo '<button type="button" class="ur-job-run" data-jobid="' . ur_h($id) . '"' . $jobNameAttr . $runDis . '>' . ur_h(ur_t_text('Run')) . '</button> ';
+    echo '<button type="button" class="ur-job-dry" data-jobid="' . ur_h($id) . '"' . $jobNameAttr . $runDis . '>' . ur_h(ur_t_text('Dry-run')) . '</button> ';
+    echo '<button type="button" class="ur-job-abort" data-jobid="' . ur_h($id) . '"' . $abortDis . '>' . ur_h(ur_t_text('Abort')) . '</button> ';
+    echo '<button type="button" class="ur-job-del">' . ur_h(ur_t_text('Remove job')) . '</button>';
     echo '</div>';
     if (!$hasId) {
-        echo '<blockquote class="inline_help"><p>' . ur_h(ur_t('Save the job before running it.')) . '</p></blockquote>';
+        echo '<blockquote class="inline_help"><p>' . ur_h(ur_t_text('Save the job before running it.')) . '</p></blockquote>';
     }
     echo '<div class="ur-job-run-result ur-result" data-jobid="' . ur_h($id) . '"></div>';
 
     echo '</div>'; // .ur-job-body
     echo '</div>'; // .ur-job-card
-}
-
-/**
- * Line count of a hook textarea's SAVED value, or of the placeholder text
- * when the value is empty (so an untouched field still sizes sensibly instead
- * of collapsing to 1 line). Shared by the gutter and the `rows` attribute so
- * they always agree pre-JS-load; client-side JS keeps both in sync with what
- * the user actually types (see syncHookGutter()).
- *
- * Trailing blank lines in the SAVED value (e.g. a stray Enter left at the end
- * from before the box auto-sized) are trimmed before counting: the caller
- * already adds one buffer row on top of this count, so a value ending in "\n"
- * would otherwise double up on blank space - one row for the saved trailing
- * blank line, another for the buffer - which is exactly what looked like the
- * box being "half empty".
- */
-function ur_hook_line_count(string $value, string $placeholder): int
-{
-    $basis = ($value !== '') ? $value : $placeholder;
-    $basis = rtrim($basis, "\n");
-
-    return max(1, substr_count($basis, "\n") + 1);
 }
 
 /**
@@ -492,10 +471,10 @@ function ur_render_pair_row(string $prefix, $k, array $pair, bool $snapOn): void
     echo '<input type="text" class="ur-pair-remote" name="' . ur_h($base . '[remote]') . '" value="' . ur_h((string) ($pair['remote'] ?? ''))
         . '" placeholder="/mnt/disk/backup/ or /remote/path/on/host/"' . ($snapOn ? ' disabled style="display:none"' : ' required') . '>';
     echo '<input type="text" class="ur-snap-field ur-snap-only ur-pair-sub" name="' . ur_h($base . '[sub]') . '" value="' . ur_h((string) ($pair['sub'] ?? ''))
-        . '" placeholder="' . ur_h(ur_t('sub-directory name, e.g. appdata')) . '" spellcheck="false" aria-label="' . ur_h(ur_t('Snapshot sub-directory name')) . '"'
+        . '" placeholder="' . ur_h(ur_t_text('sub-directory name, e.g. appdata')) . '" spellcheck="false" aria-label="' . ur_h(ur_t_text('Snapshot sub-directory name')) . '"'
         . ($snapOn ? ' required' : ' disabled style="display:none"') . '>';
     echo '<label class="ur-snap-only"' . ur_snap_style($snapOn) . '> <input type="checkbox" class="ur-snap-field" name="' . ur_h($base . '[seed]') . '" value="1"'
-        . (!empty($pair['seed']) ? ' checked' : '') . ur_snap_disabled($snapOn) . '> ' . ur_h(ur_t('seed')) . '</label>';
+        . (!empty($pair['seed']) ? ' checked' : '') . ur_snap_disabled($snapOn) . '> ' . ur_h(ur_t_text('seed')) . '</label>';
     echo ' <button type="button" class="ur-pair-del">&minus;</button>';
     echo '</div>';
 }
@@ -512,139 +491,6 @@ function ur_snap_disabled(bool $snapOn): string
     return $snapOn ? '' : ' disabled';
 }
 
-/**
- * Build the "Next run" cell label for one job. Returns a plain string (the
- * caller escapes it).
- *
- *   - manual-only job               -> "manual (on demand)"
- *   - disabled job                  -> "disabled"
- *   - enabled, schedule uncomputable-> "—"   (malformed expr; save validation
- *                                             normally blocks this, but a stored
- *                                             config could predate validation)
- *   - enabled, computable           -> absolute local time + relative ("in ...")
- *
- * @param array<string,mixed> $job
- * @param int                 $now reference timestamp (seconds)
- */
-function ur_next_run_label(array $job, int $now): string
-{
-    if (!empty($job['manualOnly'])) {
-        return ur_t('manual (on demand)');
-    }
-    if (empty($job['enabled'])) {
-        return ur_t('disabled');
-    }
-    $schedule = trim((string) ($job['schedule'] ?? ''));
-    if ($schedule === '') {
-        return '—';
-    }
-    $next = Cron::nextRun($schedule, $now);
-    if ($next === null) {
-        return '—';
-    }
-    // Absolute local time (matches the timezone crond fires in) + a compact
-    // relative hint so the list reads at a glance.
-    $absolute = date('Y-m-d H:i', $next);
-    $relative = ur_relative_time($next - $now);
-    return $absolute . ' (' . $relative . ')';
-}
-
-/**
- * Render a small "in 3h 5m" / "in 2d 4h" style relative string for a forward
- * delta in seconds. Coarse on purpose (two largest non-zero units); used only
- * for the at-a-glance next-run hint.
- */
-function ur_relative_time(int $deltaSec): string
-{
-    if ($deltaSec <= 0) {
-        return ur_t('due now');
-    }
-    $units = [
-        ['d', 86400],
-        ['h', 3600],
-        ['m', 60],
-    ];
-    $parts = [];
-    $remaining = $deltaSec;
-    foreach ($units as [$suffix, $size]) {
-        $count = intdiv($remaining, $size);
-        if ($count > 0) {
-            $parts[] = $count . $suffix;
-            $remaining -= $count * $size;
-        }
-        if (count($parts) === 2) {
-            break;
-        }
-    }
-    if (empty($parts)) {
-        // Under a minute away.
-        return ur_t('in less than a minute');
-    }
-    return ur_t('in') . ' ' . implode(' ', $parts);
-}
-
-/**
- * Derive a job's display state from its live running flag + last-run summary.
- * RUNNING (live) overrides the summary; otherwise the summary state; PENDING
- * when there is no summary (never run). Mirrors the handler's ur_derive_state.
- *
- * @param array<string,mixed>|null $summary
- */
-function ur_job_state(bool $running, $summary): string
-{
-    if ($running) {
-        return 'RUNNING';
-    }
-    if (is_array($summary) && !empty($summary['state'])) {
-        return (string) $summary['state'];
-    }
-    return 'PENDING';
-}
-
-/**
- * The "Last run" cell label: a relative "x ago" using the summary finishedAt,
- * or an em-dash when there is no summary. Returns plain text (caller escapes).
- *
- * @param array<string,mixed>|null $summary
- */
-function ur_last_run_label($summary, int $now): string
-{
-    if (!is_array($summary) || empty($summary['finishedAt'])) {
-        return '—';
-    }
-    $dt = DateTime::createFromFormat('Y-m-d\TH:i:s\Z', (string) $summary['finishedAt'], new DateTimeZone('UTC'));
-    if ($dt === false) {
-        return '—';
-    }
-    $ts    = (int) $dt->getTimestamp();
-    $delta = $now - $ts;
-    if ($delta < 0) {
-        $delta = 0;
-    }
-    return date('Y-m-d H:i', $ts) . ' (' . ur_ago($delta) . ')';
-}
-
-/** "x ago" coarse relative string for a past delta in seconds. */
-function ur_ago(int $deltaSec): string
-{
-    if ($deltaSec < 60) {
-        return ur_t('just now');
-    }
-    $units = [['d', 86400], ['h', 3600], ['m', 60]];
-    $parts = [];
-    $remaining = $deltaSec;
-    foreach ($units as [$suffix, $size]) {
-        $count = intdiv($remaining, $size);
-        if ($count > 0) {
-            $parts[] = $count . $suffix;
-            $remaining -= $count * $size;
-        }
-        if (count($parts) === 2) {
-            break;
-        }
-    }
-    return implode(' ', $parts) . ' ' . ur_t('ago');
-}
 ?>
 
 <style>
@@ -671,16 +517,10 @@ function ur_ago(int $deltaSec): string
 .ur-job-title { font-weight: bold; }
 .ur-job-sub { margin-left: auto; color: var(--color-text-secondary, #888); font-size: 0.85em; white-space: nowrap; }
 
-/* The "required" field marker: a red asterisk paired with the HTML5 `required`
-   attribute on the mandatory inputs. text-decoration:none drops the dotted
-   <abbr> underline so it reads as a clean asterisk. */
-.ur-required { color: var(--red-800, #b71c1c); font-weight: bold; text-decoration: none; cursor: help; }
-
 .ur-snap-status { font-size: 0.85em; color: var(--color-text-secondary, #888); }
 
 /* Live cron reading + field-order legend under the schedule input. */
 .ur-cron-human { margin-top: 4px; font-size: 0.9em; font-weight: bold; color: var(--blue-800, #1565c0); min-height: 1.1em; }
-.ur-cron-human.ur-cron-bad { color: var(--red-800, #b71c1c); }
 .ur-cron-legend { margin-top: 3px; font-size: 0.8em; color: var(--color-text-secondary, #888); }
 .ur-cron-legend code { font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
   background: rgba(127,127,127,0.15); border-radius: 3px; padding: 0 4px; }
@@ -906,6 +746,9 @@ ur_emit_form_enable_assets();
 /* UR_TZ + window.urFmtLocal, so the JS-updated cells render in the SERVER's
  * timezone and agree with the PHP-rendered ones above them. */
 ur_emit_time_helpers();
+/* Shared CSS + window.urUtil, and the ONE getStatus poller (window.urStatus)
+ * this tab subscribes to alongside Overview and Status. */
+ur_emit_status_poller();
 ?>
 <div class="ur-jobs-page">
 <div class="title">
@@ -949,7 +792,7 @@ ur_emit_time_helpers();
         $jid     = (string) ($job['id'] ?? '');
         $running = ($jid !== '') ? RunState::isRunning($jid) : false;
         $summary = ($jid !== '') ? Runner::readSummary($jid) : null;
-        $state   = ur_job_state($running, $summary);
+        $state   = PageHelpers::deriveState($running, $summary);
         $snapLast = Config::normalizeSnapshot($job['snapshot'] ?? null) !== null ? Snapshot::lastSnapshot($summary) : null;
     ?>
       <tr data-jobid="<?=htmlspecialchars($jid, ENT_QUOTES, 'UTF-8')?>">
@@ -964,8 +807,8 @@ ur_emit_time_helpers();
         <td><?=!empty($job['enabled']) ? _('Yes') : _('No')?></td>
         <td><?=htmlspecialchars((string)($job['transport'] ?? ''), ENT_QUOTES, 'UTF-8')?></td>
         <td><?=!empty($job['manualOnly']) ? _('Manual') : htmlspecialchars((string)($job['schedule'] ?? ''), ENT_QUOTES, 'UTF-8')?></td>
-        <td class="ur-last-run-cell"><?=htmlspecialchars(ur_last_run_label($summary, $urNow), ENT_QUOTES, 'UTF-8')?><?php if ($snapLast !== null): ?><div class="ur-snap-status" title="<?=htmlspecialchars($snapLast['stamp'], ENT_QUOTES, 'UTF-8')?>"><?=htmlspecialchars($snapLast['label'], ENT_QUOTES, 'UTF-8')?></div><?php endif; ?></td>
-        <td class="ur-next-run-cell"><?=htmlspecialchars(ur_next_run_label($job, $urNow), ENT_QUOTES, 'UTF-8')?></td>
+        <td class="ur-last-run-cell"><?=htmlspecialchars(PageHelpers::lastRunLabel($summary, $urNow), ENT_QUOTES, 'UTF-8')?><?php if ($snapLast !== null): ?><div class="ur-snap-status" title="<?=htmlspecialchars($snapLast['stamp'], ENT_QUOTES, 'UTF-8')?>"><?=htmlspecialchars($snapLast['label'], ENT_QUOTES, 'UTF-8')?></div><?php endif; ?></td>
+        <td class="ur-next-run-cell"><?=htmlspecialchars(PageHelpers::nextRunLabel($job, $urNow), ENT_QUOTES, 'UTF-8')?></td>
       </tr>
     <?php endforeach; endif; ?>
   </tbody>
@@ -1129,8 +972,8 @@ ur_emit_time_helpers();
 
   /* Fire a run/dry-run/abort action for a job and show the result inline next
    * to its card. Fire-and-confirm: the response just acknowledges the launch.
-   * Instead of a full page reload, we kick the 1s status poll so badges and the
-   * Run/Dry/Abort enable state update live. */
+   * Instead of a full page reload, we kick the shared status poll so badges and
+   * the Run/Dry/Abort enable state update live. */
   /* Lightweight transient toast (no dependency). Auto-removes after ~3.5s. */
   function urToast(msg, ok) {
     var t = document.createElement('div');
@@ -1148,11 +991,10 @@ ur_emit_time_helpers();
     }, 3500);
   }
 
-  /* Optimistically paint a job's badge RUNNING the instant a launch is accepted,
-   * reusing the exact same badge code as the 1s status poll (which then
-   * confirms/corrects it). */
+  /* Optimistically paint a job's badge RUNNING the instant a launch is accepted;
+   * the shared status poll then confirms or corrects it. */
   function setBadgeRunning(jobId) {
-    var badges = document.querySelectorAll('.ur-state-badge[data-jobid="' + cssEsc(jobId) + '"]');
+    var badges = document.querySelectorAll('.ur-state-badge[data-jobid="' + window.urUtil.cssEsc(jobId) + '"]');
     badges.forEach(function (b) { window.urBadge.apply(b, 'RUNNING'); });
   }
 
@@ -1162,12 +1004,16 @@ ur_emit_time_helpers();
     var card = btn && btn.closest ? btn.closest('.ur-job-card') : null;
     var result = card ? card.querySelector('.ur-job-run-result') : null;
     /* Immediate, obvious feedback that the click was picked up: spinner on the
-     * clicked button (its label cached so we can restore it), button disabled. */
-    var prevHtml = null;
+     * clicked button (its label cached so we can restore it), button disabled.
+     * Built as nodes - the label is never re-parsed as HTML. */
+    var prevLabel = null;
     if (btn) {
-      prevHtml = btn.innerHTML;
+      prevLabel = btn.textContent;
       btn.disabled = true;
-      btn.innerHTML = '<span class="ur-spin" aria-hidden="true"></span>' + btn.textContent;
+      var spin = document.createElement('span');
+      spin.className = 'ur-spin';
+      spin.setAttribute('aria-hidden', 'true');
+      btn.insertBefore(spin, btn.firstChild);
     }
     /* Uses the shared robust text->JSON parse (window.urAjax) so a non-JSON
      * 403/500 from the front controller surfaces WITH its HTTP status instead of
@@ -1189,7 +1035,7 @@ ur_emit_time_helpers();
          * (the job didn't start); on success the status poll re-derives the
          * enable state. */
         if (btn) {
-          if (prevHtml !== null) { btn.innerHTML = prevHtml; }
+          if (prevLabel !== null) { btn.textContent = prevLabel; }
           if (!okLaunch) { btn.disabled = false; }
         }
         if (okLaunch) {
@@ -1206,10 +1052,9 @@ ur_emit_time_helpers();
         } else {
           urToast(window.urAjax.errText(res, 'Action failed.'), false);
         }
-        /* Resume polling so the badge + buttons reflect the new running state
-         * immediately (poll re-derives the enable state from getStatus). */
-        ensurePolling();
-        pollStatusOnce();
+        /* Poll now, and fast for a while, so the badge + buttons pick up the
+         * new running state before the runner has even registered. */
+        window.urStatus.refresh();
       });
   }
 
@@ -1411,8 +1256,8 @@ ur_emit_time_helpers();
   function syncHookGutter(ta) {
     var gutter = urHookGutterFor(ta);
     var basis = ta.value !== '' ? ta.value : (ta.getAttribute('placeholder') || '');
-    /* Trim trailing blank lines before counting - see ur_hook_line_count() in
-     * jobs.php for why: the +1 buffer row below already covers that space, so
+    /* Trim trailing blank lines before counting - see PageHelpers::hookLineCount()
+     * for why: the +1 buffer row below already covers that space, so
      * counting a saved trailing "\n" too would double up on blank rows. */
     var trimmed = basis.replace(/\n+$/, '');
     var n = trimmed === '' ? 1 : trimmed.split('\n').length;
@@ -1472,32 +1317,18 @@ ur_emit_time_helpers();
   });
 
   /* Translate a 5-field cron expression into a short plain-English phrase. Covers
-   * the common shapes (numbers, asterisk, step values, ranges, lists) and falls back to a
-   * field-by-field reading; a hint, not an authoritative scheduler. */
+   * the common shapes (numbers, asterisk, step values, ranges, lists) and falls
+   * back to a field-by-field reading. A reading only, never a verdict: whether
+   * the expression is valid is Cron::parseExpression's call on save. */
   function describeCron(expr) {
     expr = (expr || '').trim().replace(/\s+/g, ' ');
-    if (expr === '') { return { ok: true, text: '' }; }
     var f = expr.split(' ');
-    if (f.length !== 5) { return { ok: false, text: 'Needs 5 fields: minute hour day-of-month month day-of-week.' }; }
+    if (expr === '' || f.length !== 5) { return ''; }
     var DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
     var MON = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
     var min = f[0], hour = f[1], dom = f[2], mon = f[3], dow = f[4];
     var isNum = function (x) { return /^\d+$/.test(x); };
     var pad = function (n) { n = parseInt(n, 10); return (n < 10 ? '0' : '') + n; };
-
-    function fieldOk(v, lo, hi) {
-      return v.split(',').every(function (part) {
-        var m;
-        if (part === '*') { return true; }
-        if ((m = part.match(/^\*\/(\d+)$/))) { return +m[1] >= 1; }
-        if ((m = part.match(/^(\d+)-(\d+)(?:\/(\d+))?$/))) { return +m[1] >= lo && +m[2] <= hi && +m[1] <= +m[2]; }
-        if ((m = part.match(/^(\d+)(?:\/(\d+))?$/))) { return +m[1] >= lo && +m[1] <= hi; }
-        return false;
-      });
-    }
-    if (!(fieldOk(min, 0, 59) && fieldOk(hour, 0, 23) && fieldOk(dom, 1, 31) && fieldOk(mon, 1, 12) && fieldOk(dow, 0, 7))) {
-      return { ok: false, text: 'Not a valid 5-field cron expression.' };
-    }
 
     var timeStr;
     if (isNum(min) && isNum(hour)) { timeStr = 'at ' + pad(hour) + ':' + pad(min); }
@@ -1510,8 +1341,8 @@ ur_emit_time_helpers();
     function names(field, arr) {
       return field.split(',').map(function (part) {
         var m;
-        if ((m = part.match(/^(\d+)-(\d+)$/))) { return arr[+m[1]] + '–' + arr[+m[2]]; }
-        if (isNum(part)) { return arr[+part]; }
+        if ((m = part.match(/^(\d+)-(\d+)$/))) { return (arr[+m[1]] || m[1]) + '–' + (arr[+m[2]] || m[2]); }
+        if (isNum(part)) { return arr[+part] || part; }
         return part;
       }).join(', ');
     }
@@ -1529,16 +1360,14 @@ ur_emit_time_helpers();
     if (/^every /.test(timeStr) && everyDay) { text = timeStr; }
     else if (everyDay) { text = timeStr + ' every day'; }
     else { text = timeStr + ' ' + parts.join(' '); }
-    return { ok: true, text: text.charAt(0).toUpperCase() + text.slice(1) + '.' };
+    return text.charAt(0).toUpperCase() + text.slice(1) + '.';
   }
 
   function updateCronHuman(input) {
     var idb = input.id.replace(/_schedule$/, '');
     var out = document.getElementById(idb + '_cronhuman');
     if (!out) { return; }
-    var r = describeCron(input.value);
-    out.textContent = r.text;
-    out.className = 'ur-cron-human' + ((!r.ok && r.text !== '') ? ' ur-cron-bad' : '');
+    out.textContent = describeCron(input.value);
   }
   function syncAllCronHuman() {
     var ins = document.querySelectorAll('.ur-cron-input');
@@ -1588,12 +1417,10 @@ ur_emit_time_helpers();
             msg += ' (' + res.body.warnings.join('; ') + ')';
           }
           window.urAjax.show(result, true, msg);
-          /* Reload so the summary table reflects the saved state. Hold it longer
-           * when there is a warning to read - suppressing the reload entirely
-           * would leave the table stale on every save of a job whose remote path
-           * legitimately warns (/data, /backup, ...). */
-          var delay = (res.body.warnings && res.body.warnings.length) ? 6000 : 600;
-          setTimeout(function () { window.location.reload(); }, delay);
+          /* Reload so the summary table reflects the saved state; suppressing it
+           * on a warning would leave the table stale on every save of a job
+           * whose remote path legitimately warns (/data, /backup, ...). */
+          window.urUtil.reloadSoon(!!(res.body.warnings && res.body.warnings.length));
         } else {
           window.urAjax.show(result, false, window.urAjax.errText(res, 'Save failed.'));
         }
@@ -1605,144 +1432,60 @@ ur_emit_time_helpers();
    * Live status polling + per-run log viewer.
    * =================================================================== */
 
-  var STATUS_URL = HANDLER_URL + '?action=getStatus';
+  var U = window.urUtil;
 
-  /* Coarse "x ago" relative label for a past epoch (seconds). */
-  function agoLabel(finishedEpoch, nowEpoch) {
-    if (!finishedEpoch) { return '—'; }
-    var delta = Math.max(0, nowEpoch - finishedEpoch);
-    if (delta < 60) { return 'just now'; }
-    var units = [['d', 86400], ['h', 3600], ['m', 60]];
-    var parts = [];
-    var rem = delta;
-    for (var i = 0; i < units.length && parts.length < 2; i++) {
-      var c = Math.floor(rem / units[i][1]);
-      if (c > 0) { parts.push(c + units[i][0]); rem -= c * units[i][1]; }
+  /* The Last-run / Next-run cells of one summary row, from a getStatus entry. */
+  function renderTimes(jobId, s, now) {
+    var row = document.querySelector('tr[data-jobid="' + U.cssEsc(jobId) + '"]');
+    if (!row) { return; }
+    var cell = row.querySelector('.ur-last-run-cell');
+    if (cell) {
+      cell.textContent = U.lastRunLabel(s.lastRun, now);
+      /* Snapshot jobs only: the label is built server-side in the system
+       * timezone, with the UTC stamp on hover. */
+      if (s.snapshot) {
+        var snapLine = document.createElement('div');
+        snapLine.className = 'ur-snap-status';
+        snapLine.title = s.snapshot.stamp;
+        snapLine.textContent = s.snapshot.label;
+        cell.appendChild(snapLine);
+      }
     }
-    return parts.join(' ') + ' ago';
-  }
-  /* Formats in the SERVER's timezone so a live-polled cell matches the
-   * PHP-rendered one it replaces - see ur_emit_time_helpers(). */
-  /* Late-bound: never capture window.urFmtLocal by value, so a page that emits
-   * the helper AFTER its own script still works. */
-  function fmtLocal(e, s) { return window.urFmtLocal(e, s); }
-
-  /* Coarse forward "in 3h 5m" label for a future epoch (seconds) — mirrors
-   * jobs.php ur_relative_time() so a JS-updated next-run cell reads like the
-   * server-rendered one. */
-  function inLabel(nextEpoch, nowEpoch) {
-    var delta = nextEpoch - nowEpoch;
-    if (delta <= 0) { return 'due now'; }
-    var units = [['d', 86400], ['h', 3600], ['m', 60]];
-    var parts = [];
-    var rem = delta;
-    for (var i = 0; i < units.length && parts.length < 2; i++) {
-      var c = Math.floor(rem / units[i][1]);
-      if (c > 0) { parts.push(c + units[i][0]); rem -= c * units[i][1]; }
-    }
-    return parts.length ? ('in ' + parts.join(' ')) : 'in less than a minute';
+    var nextCell = row.querySelector('.ur-next-run-cell');
+    if (nextCell) { nextCell.textContent = U.nextRunLabel(s, now); }
   }
 
-  /* The next-run cell label from a getStatus entry, mirroring jobs.php
-   * ur_next_run_label() CLAUSE FOR CLAUSE: manual-only first, then disabled,
-   * then an enabled job with no computable next fire (em-dash), otherwise
-   * absolute local time + an "in …" hint. getStatus carries `manualOnly`,
-   * `enabled` (bools) and `nextRun` (epoch|null). The manualOnly clause is not
-   * decoration: without it this poller overwrote the correct server-rendered
-   * "manual (on demand)" cell every second with a cron time that never fires. */
-  function nextRunLabel(s, nowEpoch) {
-    if (s && s.manualOnly) { return 'manual (on demand)'; }
-    if (s && s.enabled === false) { return 'disabled'; }
-    if (!s || !s.nextRun) { return '—'; }
-    return fmtLocal(s.nextRun) + ' (' + inLabel(s.nextRun, nowEpoch) + ')';
+  function renderAllTimes(payload, now) {
+    if (!payload || !payload.jobs) { return; }
+    Object.keys(payload.jobs).forEach(function (jobId) {
+      if (payload.jobs[jobId]) { renderTimes(jobId, payload.jobs[jobId], now); }
+    });
   }
 
-  /* Apply a getStatus payload: update each job's badge, last-run cell, and the
-   * Run/Dry/Abort enable state on its card. Returns true if ANY job is running
-   * (so the caller can decide whether to keep polling). */
+  /* Apply a getStatus payload: badge, time cells and the Run/Dry/Abort enable
+   * state on each job's card. */
   function applyStatus(payload) {
-    if (!payload || !payload.jobs) { return false; }
-    var now = payload.now || Math.floor(Date.now() / 1000);
-    var anyRunning = false;
-
+    var now = window.urStatus.now();
     Object.keys(payload.jobs).forEach(function (jobId) {
       var s = payload.jobs[jobId];
       if (!s) { return; }
-      if (s.running) { anyRunning = true; }
-
-      /* Badge (there can be one in the table row + nowhere else; update all
-       * badges carrying this job id). */
-      var badges = document.querySelectorAll('.ur-state-badge[data-jobid="' + cssEsc(jobId) + '"]');
-      badges.forEach(function (b) { window.urBadge.apply(b, s.state); });
-
-      /* Last-run + next-run cells in the summary row. */
-      var row = document.querySelector('tr[data-jobid="' + cssEsc(jobId) + '"]');
-      if (row) {
-        var cell = row.querySelector('.ur-last-run-cell');
-        if (cell) {
-          if (s.lastRun && s.lastRun.finishedAt) {
-            var fin = isoToEpoch(s.lastRun.finishedAt);
-            cell.textContent = fin ? (fmtLocal(fin) + ' (' + agoLabel(fin, now) + ')') : '—';
-          } else {
-            cell.textContent = '—';
-          }
-          /* Snapshot jobs only: the label is built server-side in the system
-           * timezone, with the UTC stamp on hover. */
-          if (s.snapshot) {
-            var snapLine = document.createElement('div');
-            snapLine.className = 'ur-snap-status';
-            snapLine.title = s.snapshot.stamp;
-            snapLine.textContent = s.snapshot.label;
-            cell.appendChild(snapLine);
-          }
-        }
-        /* Keep the Next-run cell live too (it would otherwise go stale after a
-         * run); mirrors the server-rendered ur_next_run_label vocabulary. */
-        var nextCell = row.querySelector('.ur-next-run-cell');
-        if (nextCell) { nextCell.textContent = nextRunLabel(s, now); }
-      }
-
-      /* Run/Dry/Abort enable state on the edit card (if present). */
-      var run   = document.querySelector('.ur-job-run[data-jobid="' + cssEsc(jobId) + '"]');
-      var dry   = document.querySelector('.ur-job-dry[data-jobid="' + cssEsc(jobId) + '"]');
-      var abort = document.querySelector('.ur-job-abort[data-jobid="' + cssEsc(jobId) + '"]');
+      var sel = '[data-jobid="' + U.cssEsc(jobId) + '"]';
+      document.querySelectorAll('.ur-state-badge' + sel).forEach(function (b) { window.urBadge.apply(b, s.state); });
+      renderTimes(jobId, s, now);
+      var run   = document.querySelector('.ur-job-run' + sel);
+      var dry   = document.querySelector('.ur-job-dry' + sel);
+      var abort = document.querySelector('.ur-job-abort' + sel);
       if (run)   { run.disabled = !!s.running; }
       if (dry)   { dry.disabled = !!s.running; }
       if (abort) { abort.disabled = !s.running; }
     });
-
-    return anyRunning;
   }
 
-  /* Minimal CSS attribute-value escaper for our slug-shaped ids. */
-  function cssEsc(v) { return String(v).replace(/["\\]/g, '\\$&'); }
-
-  /* Parse an ISO-8601 UTC "Y-m-dTH:i:sZ" string to an epoch (0 on failure). */
-  function isoToEpoch(iso) {
-    var t = Date.parse(iso);
-    return isNaN(t) ? 0 : Math.floor(t / 1000);
-  }
-
-  var statusTimer = null;
-  function pollStatusOnce() {
-    return fetch(STATUS_URL, { credentials: 'same-origin' })
-      .then(function (r) { return r.json(); })
-      .then(function (body) {
-        var anyRunning = applyStatus(body);
-        /* Stop polling once nothing is running (and the viewer isn't tailing a
-         * running job); a user action re-arms it via ensurePolling(). */
-        if (!anyRunning && !viewerTailing()) { stopPolling(); }
-      })
-      .catch(function () { /* transient; keep the timer */ });
-  }
-  function ensurePolling() {
-    if (statusTimer === null) {
-      statusTimer = setInterval(pollStatusOnce, 1000);
-    }
-  }
-  function stopPolling() {
-    if (statusTimer !== null) { clearInterval(statusTimer); statusTimer = null; }
-  }
+  window.urStatus.subscribe(applyStatus);
+  /* Relative times move every second from the last payload, without a request. */
+  setInterval(function () {
+    if (!document.hidden) { renderAllTimes(window.urStatus.last(), window.urStatus.now()); }
+  }, 1000);
 
   /* ---- per-run log viewer ---- */
   var viewer = {
@@ -1757,8 +1500,6 @@ ur_emit_time_helpers();
   /* Element focused before the dialog opened, so focus can be restored on close
    * (basic focus management for the role="dialog" log viewer). */
   var modalReturnFocus = null;
-
-  function viewerTailing() { return viewer.timer !== null && viewer.running; }
 
   function openLogViewer(jobId, jobName) {
     if (!jobId || !modal) { return; }
@@ -1805,7 +1546,7 @@ ur_emit_time_helpers();
           /* Label from run.ts (a UTC epoch listRuns() already returns) rendered
            * in the server timezone. The run.id stamp is UTC by design, so
            * showing it raw put a third timezone in front of the user. */
-          var lbl = run.ts ? fmtLocal(run.ts, true)
+          var lbl = run.ts ? window.urFmtLocal(run.ts, true)
                            : run.id.replace(/^run-/, '').replace(/\.log$/, '');
           if (run.state) { lbl += '  [' + run.state + ']'; }
           if (idx === 0) { lbl += '  (latest)'; }
@@ -1903,11 +1644,5 @@ ur_emit_time_helpers();
   syncAllCronHuman();
   syncAllHookGutters();
   syncAllSnapshot();
-
-  /* Kick off polling on load only when something is already running (the
-   * server-rendered badges tell us, but a cheap initial poll is simplest and
-   * self-stops if everything is idle). */
-  ensurePolling();
-  pollStatusOnce();
 })();
 </script>

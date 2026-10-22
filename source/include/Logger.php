@@ -889,6 +889,71 @@ class Logger
     }
 
     /**
+     * Incremental companion to tail(): the COMPLETE lines appended after byte
+     * offset $since, scrubbed and escaped exactly like tail(). `offset` is where
+     * the next call should start.
+     *
+     * Only whole lines are returned, so a multi-byte character is never split
+     * across two escapes (ENT_SUBSTITUTE would turn both halves into U+FFFD).
+     * A $since past the end means the file was cleared or replaced: `reset` is
+     * set and the read starts again from 0. A gap larger than $maxBytes is
+     * skipped like tail() does, with `truncated` set. A file that is replaced
+     * and regrows past $since before the next call is not detected.
+     *
+     * @return array{size:int,offset:int,text:string,truncated:bool,reset:bool}
+     */
+    public static function readFrom(string $path, int $since, int $maxBytes = self::TAIL_MAX_BYTES): array
+    {
+        if ($maxBytes <= 0) {
+            $maxBytes = self::TAIL_MAX_BYTES;
+        }
+        clearstatcache(true, $path);
+        $size  = is_file($path) ? (int) @filesize($path) : 0;
+        $reset = ($since < 0 || $since > $size);
+        if ($reset) {
+            $since = 0;
+        }
+        $out = ['size' => $size, 'offset' => $since, 'text' => '', 'truncated' => false, 'reset' => $reset];
+        if ($since >= $size) {
+            return $out;
+        }
+
+        $start     = $since;
+        $truncated = ($size - $since) > $maxBytes;
+        if ($truncated) {
+            $start = $size - $maxBytes;
+        }
+        $fh = @fopen($path, 'rb');
+        if ($fh === false) {
+            return $out;
+        }
+        @fseek($fh, $start);
+        $data = @stream_get_contents($fh, $size - $start);
+        @fclose($fh);
+        if ($data === false || $data === '') {
+            return $out;
+        }
+
+        $end = strrpos($data, "\n");
+        if ($end === false) {
+            // A truncated read with no newline in it would otherwise never advance.
+            if ($truncated) {
+                $out['offset'] = $start + strlen($data);
+            }
+            return $out;
+        }
+        $data = substr($data, 0, $end + 1);
+        $out['offset'] = $start + $end + 1;
+        if ($truncated) {
+            $nl = strpos($data, "\n");
+            $data = "[... earlier output truncated ...]\n" . substr($data, (int) $nl + 1);
+            $out['truncated'] = true;
+        }
+        $out['text'] = htmlspecialchars(self::scrubSecretPaths($data), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+        return $out;
+    }
+
+    /**
      * The effective retention count (how many per-job run logs to keep).
      * Clamped to a minimum of 1 so a run never prunes the log it just opened.
      */

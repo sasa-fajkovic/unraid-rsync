@@ -42,11 +42,13 @@ register_shutdown_function(static function () use ($urTestBase) {
 });
 
 // --- minimal webGui stubs --------------------------------------------------
-// _() translation passthrough (the real webGui defines this).
+// _() as Unraid's dynamix/include/Translations.php defines it: it returns HTML,
+// not text (' -> &apos;, **x** -> <b>x</b>, *x* -> <i>x</i>). Only defined where
+// PHP's gettext is absent; where it is loaded, ur_t() reproduces the same pass.
 if (!function_exists('_')) {
     function _(string $s): string
     {
-        return $s;
+        return (string) preg_replace(['/\*\*(.+?)\*\*/', '/\*(.+?)\*/', "/'/"], ['<b>$1</b>', '<i>$1</i>', '&apos;'], $s);
     }
 }
 
@@ -113,6 +115,7 @@ require_once __DIR__ . '/../source/include/Logger.php';
 require_once __DIR__ . '/../source/include/Runner.php';
 require_once __DIR__ . '/../source/include/Cron.php';
 require_once __DIR__ . '/../source/include/Snapshot.php';
+require_once __DIR__ . '/../source/include/PageHelpers.php';
 
 // Notify::send() spaces sends one unix second apart; real sleeps would add ~25 s
 // to the suite. NotifyTest drives the spacing with its own clock and sleep.

@@ -7,17 +7,15 @@
  * single place to see the health of every job at a glance.
  *
  * The page renders a skeleton row per job (id + name from config) and then polls
- * the read-only getStatus GET endpoint to fill in state/last-run/next-run live
- * (the same data the Jobs and Status tabs use), so the badge vocabulary and
- * formatting stay in lockstep with those tabs without duplicating the PHP state
- * helpers here. No state-changing actions live on this tab.
+ * the shared getStatus poller (window.urStatus, also feeding the Jobs and Status
+ * tabs) to fill in state/last-run/next-run live, rendered through the same
+ * window.urUtil / urBadge helpers as the Jobs tab. No state-changing actions
+ * live on this tab.
  */
 
 require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Config.php';
 // ur_js helper:
 require_once '/usr/local/emhttp/plugins/unraid.rsync/pages/_options_form.php';
-
-$handlerUrl = '/plugins/unraid.rsync/include/handler.php';
 
 $jobs = [];
 try {
@@ -35,17 +33,13 @@ try {
     $jobs = [];
 }
 ur_emit_badge_assets(); /* the ONE badge palette + window.urBadge */
+ur_emit_page_assets();  /* shared CSS (.ur-empty-state) + window.urUtil */
 ?>
 <style>
 .ur-ov-table { width: 100%; border-collapse: collapse; margin-top: 8px; }
 .ur-ov-table th, .ur-ov-table td { padding: 7px 10px; text-align: left; border-bottom: 1px solid var(--border-color, #444); }
 .ur-ov-table td.ur-ov-name { font-weight: bold; word-break: break-word; }
 .ur-ov-muted { color: var(--color-text-secondary, #888); }
-.ur-empty-state {
-  margin: 10px 0; padding: 10px 12px; border-radius: 4px;
-  background: var(--blue-100, #d9edf7); border: 1px solid var(--blue-200, #bce8f1);
-  color: var(--blockquote-text-color, #31708f);
-}
 </style>
 
 <div class="title">
@@ -79,55 +73,26 @@ ur_emit_badge_assets(); /* the ONE badge palette + window.urBadge */
   </tbody>
 </table>
 
-<?php ur_emit_time_helpers(); /* UR_TZ + window.urFmtLocal (server timezone) */ ?>
+<?php ur_emit_status_poller(); /* window.urStatus, shared with Jobs + Status */ ?>
 <script type="text/javascript">
 (function () {
   'use strict';
-  var STATUS_URL = <?=ur_js($handlerUrl)?> + '?action=getStatus';
-
-  /* Formats in the SERVER's timezone, not the browser's - see
-   * ur_emit_time_helpers() in _options_form.php. */
-  /* Late-bound: never capture window.urFmtLocal by value, so a page that emits
-   * the helper AFTER its own script still works. */
-  function fmtLocal(e, s) { return window.urFmtLocal(e, s); }
-  function isoToEpoch(iso) {
-    if (!iso) { return 0; }
-    var t = Date.parse(iso);
-    return isNaN(t) ? 0 : Math.floor(t / 1000);
-  }
-  function rel(deltaSec) {
-    var s = Math.abs(deltaSec), suffix = deltaSec < 0 ? ' ago' : '';
-    var pre = deltaSec < 0 ? '' : 'in ';
-    if (s < 60) { return pre + s + 's' + suffix; }
-    var m = Math.floor(s / 60); if (m < 60) { return pre + m + 'm' + suffix; }
-    var h = Math.floor(m / 60); if (h < 24) { return pre + h + 'h' + suffix; }
-    var dd = Math.floor(h / 24); return pre + dd + 'd' + suffix;
-  }
-
+  var U = window.urUtil;
   var rowsEl = document.getElementById('ur-ov-rows');
-  var anyRunning = false;
-  var timer = null;
 
+  /* Same labels as the Jobs tab: both render through window.urUtil, the mirror
+   * of PageHelpers. Times are in the SERVER's timezone (urFmtLocal). */
   function applyStatus(body) {
-    if (!body || !body.ok || !body.jobs) { return; }
-    var now = parseInt(body.now, 10) || Math.floor(Date.now() / 1000);
-    anyRunning = false;
+    if (!body || !body.jobs) { return; }
+    var now = window.urStatus.now();
     Array.prototype.forEach.call(rowsEl.querySelectorAll('tr[data-jobid]'), function (tr) {
       var s = body.jobs[tr.getAttribute('data-jobid')];
       if (!s) { return; }
-      if (s.running) { anyRunning = true; }
-      // state badge
       var b = tr.querySelector('.ur-ov-state .ur-badge');
       if (b) { window.urBadge.apply(b, s.running ? 'RUNNING' : s.state); }
-      // last run
       var lc = tr.querySelector('.ur-ov-last');
       if (lc) {
-        if (s.lastRun && s.lastRun.finishedAt) {
-          var fin = isoToEpoch(s.lastRun.finishedAt);
-          lc.textContent = fin ? (fmtLocal(fin) + ' (' + rel(fin - now) + ')' + (s.lastRun.dryRun ? ' · dry-run' : '')) : '—';
-        } else {
-          lc.textContent = '—';
-        }
+        lc.textContent = U.lastRunLabel(s.lastRun, now) + (s.lastRun && s.lastRun.dryRun ? ' · dry-run' : '');
         /* Snapshot jobs only; label in the system timezone, UTC stamp on hover. */
         if (s.snapshot) {
           var sl = document.createElement('div');
@@ -137,32 +102,13 @@ ur_emit_badge_assets(); /* the ONE badge palette + window.urBadge */
           lc.appendChild(sl);
         }
       }
-      // next run
       var nc = tr.querySelector('.ur-ov-next');
-      if (nc) {
-        /* Same vocabulary as the Jobs tab (ur_next_run_label / nextRunLabel):
-         * manual-only first, since such a job IS enabled and keeps a stale
-         * schedule string. */
-        if (s.manualOnly) { nc.textContent = 'manual (on demand)'; }
-        else if (!s.enabled) { nc.textContent = 'disabled'; }
-        else if (s.nextRun) { nc.textContent = fmtLocal(s.nextRun) + ' (' + rel(s.nextRun - now) + ')'; }
-        else { nc.textContent = '—'; }
-      }
+      if (nc) { nc.textContent = U.nextRunLabel(s, now); }
     });
   }
 
-  function poll() {
-    fetch(STATUS_URL, { credentials: 'same-origin', cache: 'no-store' })
-      .then(function (r) { return r.json(); })
-      .then(applyStatus)
-      .catch(function () { /* transient; next tick retries */ })
-      .then(function () {
-        // Poll fast (2s) while something runs, slow (15s) when idle.
-        if (timer) { clearTimeout(timer); }
-        timer = setTimeout(poll, anyRunning ? 2000 : 15000);
-      });
-  }
-  poll();
+  window.urStatus.subscribe(applyStatus);
+  setInterval(function () { if (!document.hidden) { applyStatus(window.urStatus.last()); } }, 1000);
 })();
 </script>
 <?php endif; ?>
