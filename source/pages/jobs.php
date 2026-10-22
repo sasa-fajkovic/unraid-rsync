@@ -1557,6 +1557,7 @@ ur_emit_status_poller();
     }
     stopLogTail();
     viewer.jobId = '';
+    if (modalProg) { modalProg.hidden = true; }
     /* Restore focus to the control that opened the dialog. */
     if (modalReturnFocus && modalReturnFocus.focus) { modalReturnFocus.focus(); }
     modalReturnFocus = null;
@@ -1611,7 +1612,7 @@ ur_emit_status_poller();
     return fetch(url, { credentials: 'same-origin' })
       .then(function (r) { return r.json(); })
       .then(function (body) {
-        if (!body || !body.ok) { return; }
+        if (!body || !body.ok) { if (modalProg) { modalProg.hidden = true; } return; }
         viewer.running = !!body.running;
         if (modalLive) { modalLive.style.display = body.running ? '' : 'none'; }
         if (modalPre) {
@@ -1626,7 +1627,7 @@ ur_emit_status_poller();
          * file name that happens to contain to-chk=. */
         if (modalProg) { modalProg.hidden = !/\(xfr#\d+, (?:to|ir)-chk=\d+\/\d+\)/.test(body.log || ''); }
       })
-      .catch(function () { /* transient */ });
+      .catch(function () { if (modalProg) { modalProg.hidden = true; } });
   }
 
   function startLogTail() {
@@ -1654,6 +1655,7 @@ ur_emit_status_poller();
     modalSel.addEventListener('change', function () {
       viewer.run = (modalSel.selectedIndex > 0) ? modalSel.value : '';
       if (modalPre) { modalPre.textContent = urI18n('loading', 'Loading…'); }
+      if (modalProg) { modalProg.hidden = true; }
       fetchJobLog().then(function () {
         /* Re-arm tailing only when viewing a running run (the latest). */
         if (viewer.running) { startLogTail(); } else { stopLogTail(); }
