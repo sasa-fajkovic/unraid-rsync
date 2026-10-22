@@ -388,6 +388,10 @@ final class HandlerTest extends TestCase
             array_search('-a', $tokens, true),
             array_search('--no-perms', $tokens, true)
         );
+        // The display copy drops what -a implies and keeps every other token in order.
+        $this->assertSame(PageHelpers::previewTokens($tokens), $body['display']);
+        $this->assertContains('--no-perms', $body['display']);
+        $this->assertSame(array_values(array_intersect($tokens, $body['display'])), $body['display']);
     }
 
     /**

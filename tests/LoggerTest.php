@@ -1149,4 +1149,15 @@ final class LoggerTest extends TestCase
         fclose($rsync);
         $this->assertSame($trimmed, filesize($path), 'later lines past the marker are cut again');
     }
+
+    public function testLastRsyncErrorIsTheLastErrorLineScrubbedAndAscii(): void
+    {
+        $path = Logger::openRun('j-lasterr', 1750000000);
+        $this->assertSame('', Logger::lastRsyncError($path), 'no error line yet');
+        Logger::append($path, '2026/10/19 12:52:26 [77] rsync error: some files/attrs were not transferred (code 23)');
+        Logger::append($path, "2026/10/19 12:52:27 [77] rsync error: error in file IO (code 11) at receiver.c(871) \xff");
+        Logger::append($path, 'sent 10 bytes  received 20 bytes');
+        $this->assertSame('rsync error: error in file IO (code 11) at receiver.c(871) ', Logger::lastRsyncError($path));
+        $this->assertSame('', Logger::lastRsyncError($path . '.missing'));
+    }
 }

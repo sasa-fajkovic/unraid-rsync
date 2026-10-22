@@ -965,6 +965,25 @@ class Logger
     }
 
     /**
+     * The last "rsync error: ..." line in the final 64 KiB of a run log, or ''.
+     * Printable ASCII only (rsync writes that message in ASCII), so the History
+     * record it lands in always JSON-encodes.
+     */
+    public static function lastRsyncError(string $path): string
+    {
+        clearstatcache(true, $path);
+        $size = is_file($path) ? (int) @filesize($path) : 0;
+        if ($size === 0) {
+            return '';
+        }
+        $data = @file_get_contents($path, false, null, max(0, $size - 65536));
+        if (!is_string($data) || !preg_match_all('/rsync error: [\x20-\x7e]*/', $data, $m)) {
+            return '';
+        }
+        return substr(self::scrubSecretPaths((string) end($m[0])), 0, 300);
+    }
+
+    /**
      * Incremental companion to tail(): the COMPLETE lines appended after byte
      * offset $since, scrubbed and escaped exactly like tail(). `offset` is where
      * the next call should start.

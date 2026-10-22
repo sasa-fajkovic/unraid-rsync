@@ -861,6 +861,7 @@ class Runner
                 'durationSec' => $durationSec,
                 'logRef'      => Logger::runIdFromPath($runLog),
                 'reason'      => $reason,
+                'lastError'   => $exitCode !== 0 ? Logger::lastRsyncError($runLog) : '',
             ] + $snapFields);
             self::reportPersistFailure($jobId, array_keys(array_filter([
                 'last-run summary' => !$summaryOk,

@@ -87,6 +87,9 @@ class History
                 $out['growthKB'] = (int) $r['growthKB'];
             }
         }
+        if ((string) ($r['lastError'] ?? '') !== '') {
+            $out['lastError'] = (string) $r['lastError'];
+        }
         return $out;
     }
 
@@ -156,32 +159,48 @@ class History
      */
     public static function list(string $jobId, int $offset = 0, int $limit = 25): array
     {
-        $offset = max(0, $offset);
-        $limit  = max(1, min(100, $limit));
-
-        $records = [];
-        $path = self::path($jobId);
-        if (is_file($path)) {
-            $lines = @file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
-            if (is_array($lines)) {
-                foreach ($lines as $line) {
-                    $d = json_decode($line, true);
-                    if (is_array($d)) {
-                        $records[] = self::normalizeRecord($d);
-                    }
-                }
-            }
-        }
-
-        $total   = count($records);
-        $newest  = array_reverse($records); // newest-first
-        $page    = array_slice($newest, $offset, $limit);
+        $offset  = max(0, $offset);
+        $limit   = max(1, min(100, $limit));
+        $records = self::records($jobId);
         return [
-            'total'  => $total,
+            'total'  => count($records),
             'offset' => $offset,
             'limit'  => $limit,
-            'runs'   => array_values($page),
+            'runs'   => array_values(array_slice($records, $offset, $limit)),
         ];
+    }
+
+    /**
+     * Every record of one job, NEWEST-FIRST (records are stored in append
+     * order). Unparseable lines are skipped.
+     *
+     * @return array<int,array<string,mixed>>
+     */
+    public static function records(string $jobId): array
+    {
+        $records = [];
+        $path = self::path($jobId);
+        $lines = is_file($path) ? @file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) : false;
+        foreach (is_array($lines) ? $lines : [] as $line) {
+            $d = json_decode($line, true);
+            if (is_array($d)) {
+                $records[] = self::normalizeRecord($d);
+            }
+        }
+        return array_reverse($records);
+    }
+
+    /**
+     * The job ids that have a history file, including jobs since deleted.
+     *
+     * @return array<int,string>
+     */
+    public static function jobIds(): array
+    {
+        return array_map(
+            static fn(string $f): string => basename($f, '.history.jsonl'),
+            @glob(self::dir() . '/*.history.jsonl') ?: []
+        );
     }
 
     /**

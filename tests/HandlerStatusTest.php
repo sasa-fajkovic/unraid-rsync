@@ -974,4 +974,115 @@ final class HandlerStatusTest extends TestCase
             RunState::clearAbort($orphan);
         }
     }
+
+    // ---- P6: History filters, truncation flag, plugin-log download, tz ------
+
+    /** Seed $n records cycling SUCCESS/FAILED/PARTIAL and alternating real/dry, oldest first. */
+    private function seedHistory(string $id, int $n): void
+    {
+        @unlink(History::path($id));
+        for ($i = 0; $i < $n; $i++) {
+            History::append($id, [
+                'startedAt' => sprintf('2026-10-01T%02d:00:00Z', $i),
+                'state'     => ['SUCCESS', 'FAILED', 'PARTIAL'][$i % 3],
+                'exitCode'  => [0, 11, 23][$i % 3],
+                'dryRun'    => $i % 2 === 1,
+                'logRef'    => "run-$i.log",
+            ]);
+        }
+    }
+
+    public function testListHistoryFiltersByStateAndTypeAndPagesTheFilteredList(): void
+    {
+        $id = $this->seedJob('HistFilter');
+        $this->seedHistory($id, 12);
+        try {
+            $_GET = ['id' => $id, 'state' => 'problems', 'offset' => 0, 'limit' => 5];
+            [$body, $code] = $this->runCapture('ur_action_list_history');
+            $this->assertSame(200, $code);
+            $this->assertSame(8, $body['total'], 'FAILED + PARTIAL of 12');
+            $this->assertCount(5, $body['runs']);
+            $_GET['offset'] = 5;
+            [$body] = $this->runCapture('ur_action_list_history');
+            $this->assertCount(3, $body['runs'], 'the last page of the FILTERED list');
+            $this->assertNotContains('SUCCESS', array_column($body['runs'], 'state'));
+
+            $_GET = ['id' => $id, 'state' => 'success', 'dryRun' => '0', 'limit' => 25];
+            [$body] = $this->runCapture('ur_action_list_history');
+            // i % 3 == 0 and i even: 0, 6.
+            $this->assertSame(['run-6.log', 'run-0.log'], array_column($body['runs'], 'logRef'));
+            $this->assertSame([$id, $id], array_column($body['runs'], 'jobId'));
+
+            $_GET = ['id' => '', 'dryRun' => '1', 'limit' => 100];
+            [$body] = $this->runCapture('ur_action_list_history');
+            $mine = array_values(array_filter($body['runs'], static fn(array $r): bool => $r['jobId'] === $id));
+            $this->assertCount(6, $mine);
+            $this->assertSame([true], array_values(array_unique(array_column($body['runs'], 'dryRun'))));
+
+            // Absent or unknown filters change nothing (old clients).
+            $_GET = ['id' => $id, 'state' => 'bogus', 'dryRun' => 'x', 'limit' => 25];
+            [$body] = $this->runCapture('ur_action_list_history');
+            $this->assertSame(12, $body['total']);
+        } finally {
+            @unlink(History::path($id));
+        }
+    }
+
+    public function testHistoryFilterHelperTreatsARunningRowLikeAnyOther(): void
+    {
+        $rows = [
+            ['state' => 'RUNNING', 'dryRun' => true],
+            ['state' => 'TIMEOUT', 'dryRun' => false],
+            ['state' => 'ABORTED', 'dryRun' => true],
+            ['state' => 'WARNING', 'dryRun' => false],
+            ['state' => 'SKIPPED', 'dryRun' => false],
+            ['state' => 'SUCCESS', 'dryRun' => false],
+        ];
+        $this->assertSame(['TIMEOUT', 'ABORTED', 'WARNING'], array_column(ur_filter_history($rows, 'problems', ''), 'state'));
+        $this->assertSame(['RUNNING', 'ABORTED'], array_column(ur_filter_history($rows, '', '1'), 'state'));
+        $this->assertSame($rows, ur_filter_history($rows, '', ''));
+    }
+
+    public function testGetJobLogSaysWhetherTheTailWasTruncated(): void
+    {
+        $id   = $this->seedJob('Trunc');
+        $path = Logger::openRun($id, 1750000000);
+        Logger::append($path, 'short');
+        $_GET = ['id' => $id];
+        [$body] = $this->runCapture('ur_action_get_job_log');
+        $this->assertFalse($body['truncated']);
+
+        file_put_contents($path, str_repeat(str_repeat('x', 99) . "\n", intdiv(UR_GET_LOG_TAIL_BYTES, 100) + 10), FILE_APPEND);
+        [$body] = $this->runCapture('ur_action_get_job_log');
+        $this->assertTrue($body['truncated']);
+    }
+
+    public function testDownloadPluginLogStreamsTheWholeLogAnd404sWhenEmpty(): void
+    {
+        $GLOBALS['ur_last_download'] = null;
+        [$json, $code] = $this->runCapture('ur_action_download_plugin_log');
+        $this->assertSame(404, $code);
+        $this->assertArrayHasKey('error', $json);
+
+        $path = $this->writePluginLog("[t] [j-a] one\n[t] [j-b] two\n");
+        $_GET = ['action' => 'downloadPluginLog'];
+        $_SERVER['REQUEST_METHOD'] = 'GET';
+        [, $code] = $this->runCapture('ur_handle_request');
+        $this->assertSame(200, $code);
+        $this->assertSame($path, $GLOBALS['ur_last_download']['path']);
+        $this->assertSame('unraid.rsync-plugin.log', $GLOBALS['ur_last_download']['filename']);
+        $this->assertSame("[t] [j-a] one\n[t] [j-b] two\n", $GLOBALS['ur_last_download']['body'], 'streamed through ur_stream_scrubbed');
+
+        $_POST = ['action' => 'downloadPluginLog'];
+        $_SERVER['REQUEST_METHOD'] = 'POST';
+        [, $code] = $this->runCapture('ur_handle_request');
+        $this->assertSame(405, $code, 'a read: GET only');
+    }
+
+    public function testGetStatusCarriesTheServerTimezone(): void
+    {
+        $this->seedJob('Tz');
+        [$body] = $this->runCapture('ur_action_get_status');
+        $this->assertSame(Config::systemTimezone(), $body['tz']);
+    }
 }
