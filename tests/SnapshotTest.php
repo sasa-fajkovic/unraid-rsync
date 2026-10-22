@@ -271,30 +271,45 @@ final class SnapshotTest extends TestCase
     #[DataProvider('statsFixtures')]
     public function testParseStatsReadsRealRsyncOutput(string $file, ?int $files, ?int $size): void
     {
-        $this->assertSame(['regFiles' => $files, 'totalSize' => $size], Snapshot::parseStats(self::fixture($file)));
+        $stats = Snapshot::parseStats(self::fixture($file));
+        $this->assertSame(['regFiles' => $files, 'totalSize' => $size], array_intersect_key($stats, ['regFiles' => 1, 'totalSize' => 1]));
+        $this->assertSame($files === null, $stats['regFilesText'] === null);
+        $this->assertSame($size === null, $stats['totalSizeText'] === null);
     }
 
     public function testParseStatsTakesTheLastBlockAndHandlesBigUnits(): void
     {
         $out = "Number of files: 9 (reg: 9)\nTotal file size: 9 bytes\n"
             . "Number of files: 2.50M (reg: 2.40M, dir: 100.00K)\r\nTotal file size: 1.50T bytes\r\n";
-        $this->assertSame(['regFiles' => 2400000, 'totalSize' => 1500000000000], Snapshot::parseStats($out));
+        $this->assertSame(
+            ['regFiles' => 2400000, 'totalSize' => 1500000000000, 'regFilesText' => '2.40M', 'totalSizeText' => '1.50T'],
+            Snapshot::parseStats($out)
+        );
     }
 
     public function testParseStatsWithoutStatsOrWithGarbageGivesNulls(): void
     {
-        $this->assertSame(['regFiles' => null, 'totalSize' => null], Snapshot::parseStats(''));
-        $this->assertSame(['regFiles' => null, 'totalSize' => null], Snapshot::parseStats("sent 10 bytes\n"));
-        $this->assertSame(
-            ['regFiles' => null, 'totalSize' => null],
-            Snapshot::parseStats("Number of files: 1,2,3 (reg: x)\nTotal file size: 12,34 bytes\n")
-        );
-        $this->assertSame(['regFiles' => null, 'totalSize' => null], Snapshot::parseStats("Number of files: lots\n"));
+        $none = ['regFiles' => null, 'totalSize' => null, 'regFilesText' => null, 'totalSizeText' => null];
+        $this->assertSame($none, Snapshot::parseStats(''));
+        $this->assertSame($none, Snapshot::parseStats("sent 10 bytes\n"));
+        $this->assertSame($none, Snapshot::parseStats("Number of files: 1,2,3 (reg: x)\nTotal file size: 12,34 bytes\n"));
+        $this->assertSame($none, Snapshot::parseStats("Number of files: lots\n"));
     }
 
     public function testParseStatsZeroFilesHasNoParenthesis(): void
     {
-        $this->assertSame(['regFiles' => 0, 'totalSize' => 0], Snapshot::parseStats("Number of files: 0\nTotal file size: 0 bytes\n"));
+        $this->assertSame(
+            ['regFiles' => 0, 'totalSize' => 0, 'regFilesText' => '0', 'totalSizeText' => '0'],
+            Snapshot::parseStats("Number of files: 0\nTotal file size: 0 bytes\n")
+        );
+    }
+
+    public function testParseStatsKeepsRsyncsOwnText(): void
+    {
+        $this->assertSame(
+            ['regFiles' => 45896, 'totalSize' => 408630000000, 'regFilesText' => '45,896', 'totalSizeText' => '408.63G'],
+            Snapshot::parseStats("Number of files: 45,897 (reg: 45,896, dir: 1)\nTotal file size: 408.63G bytes\n")
+        );
     }
 
     /** @return array<string,array{0:string,1:?int}> */
@@ -896,5 +911,21 @@ final class SnapshotTest extends TestCase
     {
         $r = Snapshot::runRemote(self::pieces(['/nonexistent/ssh']), 'root@nas', 'probe', [], false, 30);
         $this->assertNotSame(0, $r['exit']);
+    }
+
+    public function testLastSnapshotFollowsTheLastRealRunAndStillReadsOlderSummaries(): void
+    {
+        $real = ['state' => 'SUCCESS', 'dryRun' => false, 'snapshot' => '2026-10-01T030000Z', 'committed' => true];
+        $dry  = ['state' => 'SUCCESS', 'dryRun' => true, 'snapshot' => '', 'committed' => false];
+        $this->assertSame('2026-10-01T030000Z', Snapshot::lastSnapshot($dry + ['lastReal' => $real])['stamp']);
+        $this->assertSame('2026-10-01T030000Z', Snapshot::lastSnapshot($real)['stamp'], 'before lastReal existed');
+        $preFix = ['state' => 'SUCCESS', 'startedAt' => '', 'finishedAt' => '', 'exitCode' => 0, 'reason' => ''];
+        $this->assertSame('2026-10-01T030000Z', Snapshot::lastSnapshot($real + ['lastReal' => $preFix])['stamp'], 'a lastReal with no snapshot fields');
+        $this->assertNull(Snapshot::lastSnapshot($dry + ['lastReal' => null]));
+        $this->assertSame(
+            ['snapshot' => '2026-10-01T030000Z', 'committed' => true],
+            array_intersect_key(Runner::lastReal($real), ['snapshot' => 1, 'committed' => 1])
+        );
+        $this->assertArrayNotHasKey('snapshot', Runner::lastReal(['state' => 'SUCCESS']), 'a mirror keeps its shape');
     }
 }

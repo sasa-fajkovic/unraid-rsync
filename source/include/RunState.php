@@ -60,6 +60,25 @@ class RunState
      */
     public static ?\Closure $afterStaleAbortRead = null;
 
+    /**
+     * Test seam: fn(int $pid, int $sig): bool in place of posix_kill for
+     * signalRun. null => posix_kill.
+     *
+     * @var (\Closure(int,int):bool)|null
+     */
+    public static ?\Closure $kill = null;
+
+    /**
+     * Test seam: fn(int $pgid, string $lockPath): bool in place of the /proc
+     * scan in groupHoldsLock. null => the scan.
+     *
+     * @var (\Closure(int,string):bool)|null
+     */
+    public static ?\Closure $groupHoldsLock = null;
+
+    /** Seconds Abort waits for a dead run's group to let go of the lock before SIGKILL. */
+    public static float $abortKillGraceSec = 5.0;
+
     /** The runtime base dir actually in effect. */
     public static function base(): string
     {
@@ -184,6 +203,9 @@ class RunState
         if (is_string($state['gen'] ?? null) && $state['gen'] !== '') {
             $out['gen'] = $state['gen'];
         }
+        if ((int) ($state['hookPgid'] ?? 0) > 0) {
+            $out['hookPgid'] = (int) $state['hookPgid'];
+        }
 
         $json = json_encode($out, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
         if ($json === false) {
@@ -197,7 +219,7 @@ class RunState
      * unreadable/corrupt (a missing/garbage state file just means "not
      * running"). The returned array is always the canonical shape.
      *
-     * @return array{jobId:string,pid:int,running:bool,dryRun:bool,trigger:string,startedAt:string,currentLog:string,token?:string,gen?:string}|null
+     * @return array{jobId:string,pid:int,running:bool,dryRun:bool,trigger:string,startedAt:string,currentLog:string,token?:string,gen?:string,hookPgid?:int}|null
      */
     public static function read(string $jobId): ?array
     {
@@ -222,7 +244,8 @@ class RunState
             'startedAt'  => (string) ($data['startedAt'] ?? ''),
             'currentLog' => (string) ($data['currentLog'] ?? ''),
         ] + (is_string($data['token'] ?? null) && $data['token'] !== '' ? ['token' => $data['token']] : [])
-          + (is_string($data['gen'] ?? null) && $data['gen'] !== '' ? ['gen' => $data['gen']] : []);
+          + (is_string($data['gen'] ?? null) && $data['gen'] !== '' ? ['gen' => $data['gen']] : [])
+          + ((int) ($data['hookPgid'] ?? 0) > 0 ? ['hookPgid' => (int) $data['hookPgid']] : []);
     }
 
     /** A fresh launch generation. */
@@ -266,14 +289,32 @@ class RunState
         }
         $state['running'] = false;
         $state['pid']     = 0;
+        unset($state['hookPgid']);
         self::write($jobId, $state);
+    }
+
+    /**
+     * Record (pgid > 0) or clear the process group of the hook the runner is
+     * running: a hook has its own session, so a runner that dies during it
+     * leaves a group only this record can name.
+     */
+    public static function setHookPgid(string $jobId, int $pgid): void
+    {
+        $state = self::read($jobId);
+        if ($state === null) {
+            return;
+        }
+        unset($state['hookPgid']);
+        self::write($jobId, $state + ($pgid > 0 ? ['hookPgid' => $pgid] : []));
     }
 
     /**
      * Is this job currently running? PID-reuse-safe (see the class docblock):
      * requires running=true AND the pid alive AND the pid's cmdline to be our
      * runner for THIS job. A state that claims running but fails the liveness or
-     * cmdline check is STALE - we clear it and report false.
+     * cmdline check is STALE - we clear it and report false, unless another
+     * holder still has the run lock: a SIGKILLed runner's rsync inherits it and
+     * keeps transferring, so the job stays busy until that child exits.
      */
     public static function isRunning(string $jobId): bool
     {
@@ -289,28 +330,109 @@ class RunState
         // A dead pid, or one REUSED by an unrelated process: the worker died
         // without clearing state.
         if ($pid <= 0 || !static::pidAlive($pid) || !self::cmdlineMatchesJob(static::pidCmdline($pid), $jobId)) {
-            self::reapStale($jobId);
-            return false;
+            return !self::reapStale($jobId);
         }
         return true;
+    }
+
+    /**
+     * Send $sig to this job's run: the live runner's group (else its pid; it
+     * stops its own hook). Once the runner is dead: its group (an orphaned
+     * rsync) and the recorded hook's session, each only while a member holds
+     * this job's run lock open - a dead leader's pid can be reused by an
+     * unrelated group - and SIGKILLed if it still holds it after
+     * $abortKillGraceSec. A pid reused by another process is never signalled,
+     * but the hook it left is still checked.
+     */
+    public static function signalRun(string $jobId, int $sig): bool
+    {
+        $state = self::read($jobId);
+        $pid   = (int) ($state['pid'] ?? 0);
+        if ($pid > 0 && static::pidAlive($pid)) {
+            if (self::cmdlineMatchesJob(static::pidCmdline($pid), $jobId)) {
+                return self::kill(-$pid, $sig) || self::kill($pid, $sig);
+            }
+            $pid = 0; // reused by another process: neither it nor its group is ours
+        }
+        $signalled = false;
+        foreach (array_unique([$pid, (int) ($state['hookPgid'] ?? 0)]) as $pgid) {
+            if ($pgid > 0 && self::stopGroup($pgid, $sig, self::lockPath($jobId))) {
+                $signalled = true;
+            }
+        }
+        return $signalled;
+    }
+
+    private static function stopGroup(int $pgid, int $sig, string $lockPath): bool
+    {
+        if (!self::groupHoldsLock($pgid, $lockPath) || !self::kill(-$pgid, $sig)) {
+            return false;
+        }
+        $deadline = microtime(true) + self::$abortKillGraceSec;
+        while (self::groupHoldsLock($pgid, $lockPath)) {
+            if (microtime(true) >= $deadline) {
+                self::kill(-$pgid, defined('SIGKILL') ? SIGKILL : 9);
+                break;
+            }
+            usleep(50000);
+        }
+        return true;
+    }
+
+    /**
+     * Does a process in group $pgid have $lockPath open? Linux /proc only (no
+     * /proc => false, so nothing is signalled).
+     */
+    public static function groupHoldsLock(int $pgid, string $lockPath): bool
+    {
+        if (self::$groupHoldsLock !== null) {
+            return (self::$groupHoldsLock)($pgid, $lockPath);
+        }
+        $target = realpath($lockPath);
+        if ($pgid <= 0 || $target === false) {
+            return false;
+        }
+        foreach (glob('/proc/[0-9]*', GLOB_ONLYDIR) ?: [] as $dir) {
+            $stat = @file_get_contents($dir . '/stat');
+            // "pid (comm) state ppid pgrp ...": comm may hold spaces and ")".
+            $end = is_string($stat) ? strrpos($stat, ')') : false;
+            if ($end === false || (int) (explode(' ', substr((string) $stat, $end + 2))[2] ?? 0) !== $pgid) {
+                continue;
+            }
+            foreach (glob($dir . '/fd/*') ?: [] as $fd) {
+                if (@readlink($fd) === $target) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static function kill(int $pid, int $sig): bool
+    {
+        if (self::$kill !== null) {
+            return (self::$kill)($pid, $sig);
+        }
+        return function_exists('posix_kill') && @posix_kill($pid, $sig);
     }
 
     /**
      * Report a dead runner's leftover state exactly once. A live runner holds
      * the run lock from before it writes running=true until after markStopped,
      * so running=true under a lock WE hold can only be a dead one; a lock we
-     * cannot get belongs to a starting runner (which reaps it itself) or to a
-     * concurrent detector.
+     * cannot get belongs to a starting runner (which reaps it itself), to a
+     * concurrent detector, or to an orphaned child of a SIGKILLed runner.
+     * False only when another holder has the lock.
      */
-    private static function reapStale(string $jobId): void
+    private static function reapStale(string $jobId): bool
     {
         try {
             $lock = self::acquireLock($jobId);
         } catch (Throwable $e) {
-            return; // a status poll must not fail on it; the next run reports it
+            return true; // a status poll must not fail on it; the next run reports it
         }
         if ($lock === null) {
-            return;
+            return false;
         }
         try {
             $stale = self::takeStale($jobId);
@@ -323,6 +445,7 @@ class RunState
         } finally {
             self::releaseLock($lock);
         }
+        return true;
     }
 
     /**

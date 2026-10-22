@@ -517,6 +517,9 @@ class Rsync
         // reason. The same proof covers --rsync-path, which is simply inert on
         // daemon transport rather than an error.
         $argv[] = '--log-file=' . $runLog;
+        // A fixed plugin flag, not an option: stdout otherwise escapes UTF-8
+        // names as \#ooo while the --log-file lines beside them do not.
+        $argv[] = '--8-bit-output';
 
         if ($dryRun) {
             $argv[] = '--dry-run';

@@ -32,6 +32,9 @@ final class TestSeams
 
         RunState::$baseOverride        = null;
         RunState::$afterStaleAbortRead = null;
+        RunState::$kill                = null;
+        RunState::$groupHoldsLock      = null;
+        RunState::$abortKillGraceSec   = 5.0;
 
         Rsync::$rsyncPathOverride   = null;
         Rsync::$versionProbeTimeout = 10;

@@ -176,6 +176,10 @@ class Snapshot
      */
     public static function lastSnapshot(?array $summary): ?array
     {
+        $real = $summary['lastReal'] ?? null;
+        if (is_array($real) && array_key_exists('snapshot', $real)) {
+            $summary = $real;
+        }
         $stamp = is_string($summary['snapshot'] ?? null) ? $summary['snapshot'] : '';
         if (!self::isStamp($stamp)) {
             return null;
@@ -521,31 +525,34 @@ class Snapshot
 
     /**
      * Regular-file count and total file size from rsync --info=stats2 output
-     * (the last block wins). A field that cannot be read is null; this never
-     * throws.
+     * (the last block wins), each also as rsync printed it (`408.63G` under
+     * -h). A field that cannot be read is null; this never throws.
      *
-     * @return array{regFiles:?int,totalSize:?int}
+     * @return array{regFiles:?int,totalSize:?int,regFilesText:?string,totalSizeText:?string}
      */
     public static function parseStats(string $output): array
     {
-        $files = null;
+        $files = $filesText = null;
         if (preg_match_all('/^Number of files: ([^\r\n]*)/m', $output, $m)) {
             $line = (string) end($m[1]);
             if (preg_match('/\((.*)\)/', $line, $p)) {
                 if (preg_match('/(?:^|, )reg: (\d+(?:[.,]\d+)*[KMGTPE]?)(?:,|$)/', $p[1], $r)) {
-                    $files = self::parseNumber($r[1]);
+                    $files     = self::parseNumber($r[1]);
+                    $filesText = $files === null ? null : $r[1];
                 } elseif (!str_contains($p[1], 'reg:')) {
-                    $files = 0;
+                    [$files, $filesText] = [0, '0'];
                 }
             } elseif (self::parseNumber(trim($line)) === 0) {
-                $files = 0;
+                [$files, $filesText] = [0, '0'];
             }
         }
-        $size = null;
+        $size = $sizeText = null;
         if (preg_match_all('/^Total file size: (\S+) bytes\r?$/m', $output, $m)) {
-            $size = self::parseNumber((string) end($m[1]));
+            $sizeText = (string) end($m[1]);
+            $size     = self::parseNumber($sizeText);
+            $sizeText = $size === null ? null : $sizeText;
         }
-        return ['regFiles' => $files, 'totalSize' => $size];
+        return ['regFiles' => $files, 'totalSize' => $size, 'regFilesText' => $filesText, 'totalSizeText' => $sizeText];
     }
 
     /**

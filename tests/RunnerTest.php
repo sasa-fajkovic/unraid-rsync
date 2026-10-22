@@ -1859,6 +1859,7 @@ final class RunnerTest extends TestCase
             '--info=progress2',
             '--log-file-format=',
             '--log-file=' . $res['runLog'],
+            '--8-bit-output',
             '--port=873',
             '--password-file=' . $passDuringRun,
             '--',
@@ -1920,6 +1921,7 @@ final class RunnerTest extends TestCase
             '--info=progress2',
             '--log-file-format=',
             '--log-file=' . $res['runLog'],
+            '--8-bit-output',
             '--port=873',
             '--',
             '/mnt/user/src/',
@@ -2197,6 +2199,7 @@ final class RunnerTest extends TestCase
             '--info=progress2',
             '--log-file-format=',
             '--log-file=' . $res['runLog'],
+            '--8-bit-output',
             '--',
             '/mnt/user/src/',
             '/mnt/disk1/dst/',
@@ -2426,7 +2429,7 @@ final class RunnerTest extends TestCase
             $this->assertMatchesRegularExpression("#^'ssh' '-i' '[^']+' .* '-p' '22'\$#", $e);
             $this->assertSame([
                 PHP_BINARY, '-r', '-h', '-t', '--partial', '--delete', '--mkpath', '--max-delete=50', '--rsync-path=/usr/bin/rsync',
-                '--info=progress2', '--log-file-format=', '--log-file=' . $log, '-e', $e, '--', '/mnt/user/src/', 'root@h.example:/srv/backup/a',
+                '--info=progress2', '--log-file-format=', '--log-file=' . $log, '--8-bit-output', '-e', $e, '--', '/mnt/user/src/', 'root@h.example:/srv/backup/a',
             ], $argv);
             $base = ['UR_JOB_ID' => 'j-golden', 'UR_JOB_NAME' => 'golden', 'UR_DRY_RUN' => '0', 'UR_TRIGGER' => 'schedule'];
             $this->assertSame($base + ['UR_JOB_STATUS' => '', 'UR_EXIT_CODE' => ''], $envs['PRE']);
@@ -2707,6 +2710,41 @@ final class RunnerTest extends TestCase
         } finally {
             @unlink($pidFile);
         }
+    }
+
+    public function testRunHookProcessReportsTheHooksOwnSessionLeader(): void
+    {
+        if (!is_executable('/usr/bin/setsid') && !is_executable('/bin/setsid')) {
+            $this->markTestSkipped('needs util-linux setsid (present on Unraid and in CI)');
+        }
+        $started = [];
+        $out = '';
+        $code = Runner::runHookProcess('read -r _ _ _ _ pgid _ < /proc/$$/stat; echo "$pgid"', [], static function (string $c) use (&$out): void {
+            $out .= $c;
+        }, 10, null, static function (int $pgid) use (&$started): void {
+            $started[] = $pgid;
+        });
+        $this->assertSame(0, $code, $out);
+        $this->assertCount(1, $started);
+        $this->assertSame((string) $started[0], trim($out), 'bash leads its own group');
+    }
+
+    /** While a hook runs its group is in the run state, so Abort can reach it if the runner dies. */
+    public function testTheRunStateCarriesTheHooksGroupOnlyWhileItRuns(): void
+    {
+        $seen = [];
+        Runner::$hookRunner = function (string $hook, array $env, $onOutput, int $timeoutSec = 0, ?callable $onStart = null) use (&$seen): int {
+            $this->assertNotNull($onStart);
+            $onStart($hook === 'PRE' ? 4242 : 4343);
+            $seen[$hook] = RunState::read('j-pre')['hookPgid'] ?? null;
+            return 0;
+        };
+        $this->fakeRsync();
+        $id  = $this->saveLocalJob('j-pre', ['preHook' => 'PRE', 'postHook' => 'POST']);
+        $res = Runner::run($id, false);
+        $this->assertSame(Rsync::STATE_SUCCESS, $res['state']);
+        $this->assertSame(['PRE' => 4242, 'POST' => 4343], $seen);
+        $this->assertArrayNotHasKey('hookPgid', RunState::read($id));
     }
 
     public function testRunHookProcessStopsOnAbortAndPassesExitCodesThrough(): void

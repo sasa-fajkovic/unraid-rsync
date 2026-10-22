@@ -272,7 +272,11 @@ on, forked from, or derived from any other plugin.
   rsync's own log-file line and captured stderr) or `deleting <path>` lines:
   the empty format only kills the `%i %n` per-file format, and rsync's delete
   path falls back to a plain `deleting <path>`. So there is no data-safety
-  regression on `--delete`.
+  regression on `--delete`. `buildArgv` always emits `--8-bit-output` (every
+  level, real and dry, never in `optionTokens` or the whitelist): without it
+  rsync's stdout escapes UTF-8 names (`Kvr\#305\#276ica`) while the
+  `--log-file` lines beside them stay readable; control characters are still
+  escaped and the log viewer HTML-escapes.
 - **`Logger::sink()` is line-aware and throttles progress.** `--info=progress2`
   redraws one status line with a bare `\r` several times a second and the
   capture path is byte-oriented (`ProcIO` hands raw 8 KiB `fread`s), so the old
@@ -347,7 +351,12 @@ on, forked from, or derived from any other plugin.
   level is the LAST EXECUTION of any kind, in the shape older readers know
   (`state, startedAt, finishedAt, exitCode, durationSec, dryRun, trigger`, plus
   `reason` when set and the snapshot fields); `lastReal` is the last NON-dry
-  run's `{state, startedAt, finishedAt, exitCode, reason}` (null: none yet). A
+  run's `{state, startedAt, finishedAt, exitCode, reason}`, plus `snapshot` /
+  `committed` for a snapshot job (null: none yet). `Snapshot::lastSnapshot`
+  reads those, so a dry run no longer hides the "last snapshot" line; a
+  `lastReal` without them (written before) falls back to the top level, and a
+  snapshot job's next `writeSummary` (a crash record too) fills them in from that same run's top
+  level or History record (`withSnapshotFields`) before a dry run replaces it. A
   dry run rewrites only the top level; a real run both. A summary written
   before `lastReal` existed reads as its own last real run, or, when it was a
   dry run, as the newest non-dry, non-SKIPPED History record - the real
@@ -483,7 +492,15 @@ on, forked from, or derived from any other plugin.
   `Runner::reportCrashed` records a dead runner exactly once (appends a
   `crashed` History record, writes the `CRASHED` summary unless a later run
   already wrote one, notifies, deletes the in-flight record) - plus, once per
-  job after the upgrade, the `lastReal` write-through above. The check
+  job after the upgrade, the `lastReal` write-through above. Not while another
+  holder has the run lock: a SIGKILLed runner's orphaned rsync inherits it, so
+  `isRunning` stays true and Abort (`RunState::signalRun`) signals the dead
+  runner's process group only while a member of it has that job's lock file
+  open (`RunState::groupHoldsLock`, a `/proc` scan): a dead leader's pid can
+  be reused by an unrelated group. A hook runs in its own session, so the run
+  state carries its `hookPgid` while it runs (`RunState::setHookPgid`, dropped
+  by `markStopped`) and Abort stops that group the same way, SIGKILL after
+  `RunState::$abortKillGraceSec`. The check
   is **match-ANY** across all server-side-trusted token sources (`$GLOBALS['var']['csrf_token']`,
   `$_SESSION['csrf_token']`, and `var.ini`) — `ur_csrf_token_candidates()` /
   `ur_check_csrf()`. **Do NOT revert to "first non-empty source wins":** on the

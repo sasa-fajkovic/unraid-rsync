@@ -46,7 +46,7 @@ final class SnapshotRunnerTest extends TestCase
     private array $failOp = [];
     /** @var array<string,int> sub => rsync exit */
     private array $pairExit = [];
-    /** @var array<string,array{0:int,1:int}> sub => [regular files, bytes] */
+    /** @var array<string,array{0:int,1:int|string}> sub => [regular files, bytes as rsync prints them] */
     private array $srcStats = [];
     /** @var array<string,array<int,string>|false> local path => scandir() */
     private array $sources = [];
@@ -1358,5 +1358,94 @@ final class SnapshotRunnerTest extends TestCase
         $meta = json_decode((string) $this->rx['dirs'][$this->stamp()]['meta'], true);
         $this->assertSame(['exit' => 0, 'files' => 7, 'bytes' => 70], $meta['subs']['a']);
         $this->assertSame(['exit' => 0, 'files' => 8, 'bytes' => 80], $meta['subs']['b']);
+    }
+
+    public function testPairStatsLogRsyncsOwnFigureForAUnitAndThePlainNumberOtherwise(): void
+    {
+        $this->saveJob();
+        $this->seedSnapshot($this->stamp(1));
+        $this->srcStats = ['a' => [45896, '408.63G'], 'b' => [8, '1,234']];
+        $res = $this->runJob();
+        $this->assertSame(Rsync::STATE_SUCCESS, $res['state'], $this->log($res));
+        $this->assertStringContainsString('Pair #1 (a): 45896 regular files, 408.63G bytes.', $this->log($res));
+        $this->assertStringContainsString('Pair #2 (b): 8 regular files, 1234 bytes.', $this->log($res));
+        $meta = json_decode((string) $this->rx['dirs'][$this->stamp()]['meta'], true);
+        $this->assertSame(408630000000, $meta['subs']['a']['bytes']);
+    }
+
+    /** The snapshot line follows the last REAL run, like the badge: a dry run must not hide it. */
+    public function testADryRunKeepsTheLastRealRunsSnapshotLine(): void
+    {
+        $this->saveJob();
+        $this->seedSnapshot($this->stamp(1));
+        $stamp = $this->stamp();
+        $this->assertSame(Rsync::STATE_SUCCESS, $this->runJob()['state']);
+        $this->clock += 3600;
+        $res = $this->runJob(true);
+        $this->assertSame(Rsync::STATE_SUCCESS, $res['state'], $this->log($res));
+
+        $summary = Runner::readSummary(self::JOB);
+        $this->assertTrue($summary['dryRun']);
+        $this->assertSame('', $summary['snapshot'], 'the top level is still the dry run');
+        $last = Snapshot::lastSnapshot($summary);
+        $this->assertNotNull($last);
+        $this->assertSame($stamp, $last['stamp']);
+        $this->assertTrue($last['committed']);
+        $this->assertStringEndsWith('(committed)', $last['label']);
+    }
+
+    /** A summary from before lastReal carried snapshot fields, then the first dry run after the upgrade. */
+    public function testTheFirstDryRunAfterTheUpgradeKeepsTheSnapshotLine(): void
+    {
+        $stamp = '2026-10-20T030005Z';
+        $old = static fn(array $top): string => (string) json_encode($top + ['lastReal' => [
+            'state' => 'SUCCESS', 'startedAt' => '2026-10-20T03:00:00Z', 'finishedAt' => '2026-10-20T03:10:00Z', 'exitCode' => 0, 'reason' => '',
+        ]]);
+        $dry = ['state' => 'SUCCESS', 'startedAt' => '2026-10-21T03:00:00Z', 'finishedAt' => '2026-10-21T03:01:00Z', 'exitCode' => 0, 'dryRun' => true, 'snapshot' => '', 'committed' => false];
+        $path = UR_CONFIG_BASE . '/runs/' . self::JOB . '.summary.json';
+        @mkdir(dirname($path), 0755, true);
+
+        // Its top level is that same real run.
+        file_put_contents($path, $old(['state' => 'SUCCESS', 'startedAt' => '2026-10-20T03:00:00Z', 'finishedAt' => '2026-10-20T03:10:00Z',
+            'exitCode' => 0, 'dryRun' => false, 'snapshot' => $stamp, 'committed' => true]));
+        $this->assertTrue(Runner::writeSummary(self::JOB, $dry));
+        $this->assertSame($stamp, Snapshot::lastSnapshot(Runner::readSummary(self::JOB))['stamp'] ?? null);
+
+        // Its top level was already a dry run: the real run's History record has it.
+        file_put_contents($path, $old(['state' => 'SUCCESS', 'startedAt' => '2026-10-20T04:00:00Z', 'finishedAt' => '2026-10-20T04:01:00Z',
+            'exitCode' => 0, 'dryRun' => true, 'snapshot' => '', 'committed' => false]));
+        History::append(self::JOB, ['startedAt' => '2026-10-20T03:00:00Z', 'state' => 'SUCCESS', 'snapshot' => $stamp, 'committed' => true]);
+        $this->assertTrue(Runner::writeSummary(self::JOB, $dry));
+        $last = Snapshot::lastSnapshot(Runner::readSummary(self::JOB));
+        $this->assertSame($stamp, $last['stamp'] ?? null);
+        $this->assertTrue($last['committed']);
+        @unlink($path);
+    }
+
+    /** The first run after the upgrade is a dry run that crashes: its crash record carries no snapshot fields. */
+    public function testACrashedFirstDryRunAfterTheUpgradeKeepsTheSnapshotLineAtRetentionOne(): void
+    {
+        $this->saveJob();
+        $config = Config::load();
+        $config['global']['retention'] = 1;
+        Config::save($config);
+        $stamp = '2026-10-20T030005Z';
+        $path  = UR_CONFIG_BASE . '/runs/' . self::JOB . '.summary.json';
+        @mkdir(dirname($path), 0755, true);
+        file_put_contents($path, (string) json_encode([
+            'state' => 'SUCCESS', 'startedAt' => '2026-10-20T03:00:00Z', 'finishedAt' => '2026-10-20T03:10:00Z',
+            'exitCode' => 0, 'dryRun' => false, 'snapshot' => $stamp, 'committed' => true,
+            'lastReal' => ['state' => 'SUCCESS', 'startedAt' => '2026-10-20T03:00:00Z', 'finishedAt' => '2026-10-20T03:10:00Z', 'exitCode' => 0, 'reason' => ''],
+        ]));
+        History::append(self::JOB, ['startedAt' => '2026-10-20T03:00:00Z', 'state' => 'SUCCESS', 'snapshot' => $stamp, 'committed' => true]);
+        RunState::write(self::JOB, ['pid' => 2147483647, 'running' => true, 'dryRun' => true, 'startedAt' => '2026-10-21T03:00:00Z']);
+
+        $this->assertFalse(RunState::isRunning(self::JOB));
+        $summary = Runner::readSummary(self::JOB);
+        $this->assertSame('CRASHED', $summary['state']);
+        $this->assertSame(['FAILED'], array_column(History::list(self::JOB)['runs'], 'state'), 'retention 1 pruned the real run');
+        $this->assertSame($stamp, Snapshot::lastSnapshot($summary)['stamp'] ?? null);
+        RunState::clear(self::JOB);
+        @unlink($path);
     }
 }

@@ -307,9 +307,14 @@ final class HandlerStatusTest extends TestCase
         $this->assertSame('last snapshot 2026-10-21 03:00:05 (not committed)', $body['jobs'][$id]['snapshot']['label']);
         $this->assertFalse($body['jobs'][$id]['snapshot']['committed']);
 
-        // A dry run, or a failure before the stamp was created, records ''.
+        // A dry run records '' but the line follows the last real run.
+        Runner::writeSummary($id, ['state' => 'SUCCESS', 'dryRun' => true, 'snapshot' => '', 'committed' => false]);
+        [$body] = $this->runCapture('ur_action_get_status');
+        $this->assertSame('last snapshot 2026-10-21 03:00:05 (not committed)', $body['jobs'][$id]['snapshot']['label']);
+
+        // A failure before the stamp was created records ''.
         foreach (['', '2026-02-30T030005Z', 'x'] as $none) {
-            Runner::writeSummary($id, ['state' => 'SUCCESS', 'dryRun' => true, 'snapshot' => $none, 'committed' => false]);
+            Runner::writeSummary($id, ['state' => 'FAILED', 'snapshot' => $none, 'committed' => false]);
             [$body] = $this->runCapture('ur_action_get_status');
             $this->assertNull($body['jobs'][$id]['snapshot'], var_export($none, true));
         }
@@ -977,6 +982,36 @@ final class HandlerStatusTest extends TestCase
         $this->assertTrue(RunState::abortRequested($id), 'the abort flag is set even when not signalling');
 
         RunState::clearAbort($id);
+    }
+
+    /** A SIGKILLed runner: its orphaned rsync holds the run lock, Abort must reach its group. */
+    public function testAbortSignalsTheOrphanGroupOfASigkilledRunner(): void
+    {
+        $id  = $this->seedJob('orphan-rsync');
+        $pid = 2147483647;
+        RunState::write($id, ['pid' => $pid, 'running' => true, 'currentLog' => '/x']);
+        RunState::clearAbort($id);
+        $sent = [];
+        RunState::$kill = static function (int $p, int $sig) use (&$sent): bool {
+            $sent[] = $p;
+            return true;
+        };
+        RunState::$groupHoldsLock = static function (int $pgid, string $lock) use (&$sent, $pid, $id): bool {
+            return $pgid === $pid && $lock === RunState::lockPath($id) && $sent === [];
+        };
+        $orphan = RunState::acquireLock($id);
+        try {
+            $_POST = ['id' => $id];
+            [$body, $code] = $this->runCapture('ur_action_abort_job');
+            $this->assertSame(200, $code, json_encode($body));
+            $this->assertTrue($body['signalled']);
+            $this->assertSame([-$pid], $sent);
+            $this->assertTrue(RunState::read($id)['running'], 'not reaped while the orphan holds the lock');
+        } finally {
+            RunState::releaseLock($orphan);
+            RunState::clear($id);
+            RunState::clearAbort($id);
+        }
     }
 
     public function testAbortUnknownIdWithLiveStateIsAccepted(): void
