@@ -880,6 +880,8 @@ class Snapshot
         if (!preg_match('/^[^\s\x00-\x1f\x7f@-][^\s\x00-\x1f\x7f@]*@[^\s\x00-\x1f\x7f@-][^\s\x00-\x1f\x7f@]*$/D', $userHost)) {
             throw new InvalidArgumentException('The ssh destination must be user@host.');
         }
+        // ssh takes an IPv6 literal unbracketed; the [] form is for rsync operands.
+        $userHost = preg_replace('/@\[([^\]]*)\]$/D', '@$1', $userHost) ?? $userHost;
         $argv = array_merge($ssh, ['-o', 'LogLevel=ERROR', '--', $userHost, self::remoteCommand(self::helperScript(), $op, $args, $useSudo)]);
         $env  = Ssh::childEnv(is_array($sshPieces['sshEnv'] ?? null) ? $sshPieces['sshEnv'] : []);
 

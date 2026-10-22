@@ -399,6 +399,15 @@ class Runner
                 }
             }
 
+            if ($token !== '') {
+                // A SIGKILLed runner never reaches cleanupRuntime(); reportCrashed
+                // sweeps this run's tmpfs secrets by the token recorded here.
+                try {
+                    RunState::write($jobId, $runState + ['token' => $token]);
+                } catch (Throwable $e) {
+                }
+            }
+
             $global   = (isset($config['global']) && is_array($config['global'])) ? $config['global'] : [];
             $opts     = Rsync::effectiveOptions($job, $global);
             $pairs    = (isset($job['pairs']) && is_array($job['pairs'])) ? $job['pairs'] : [];
@@ -789,7 +798,9 @@ class Runner
             if (is_array($sshMat)) {
                 $connId  = (string) ($sshMat['conn']['id'] ?? '');
                 $hostKey = Ssh::harvestHostKey($sshMat);
-                if (Ssh::pinHostKey($connId, $hostKey)) {
+                // The endpoint the key came from, not the one stored now: the
+                // connection may have been edited while this run was going.
+                if (Ssh::pinHostKey($connId, $hostKey, (string) ($sshMat['conn']['host'] ?? ''), (int) ($sshMat['conn']['port'] ?? 0))) {
                     // No key material and no tmpfs path in the message.
                     Logger::event($runLog, $jobId, 'Pinned host key for connection ' . $connId . ' on first use.');
                 }
@@ -2614,6 +2625,7 @@ class Runner
     public static function reportCrashed(array $state): void
     {
         try {
+            Ssh::sweepRuntime((string) ($state['token'] ?? ''));
             $jobId  = (string) ($state['jobId'] ?? '');
             $config = null;
             $job    = null;

@@ -418,6 +418,17 @@ class Ssh
             ];
         }
 
+        // credentials.json is hand-editable, so re-check what validateConnection
+        // enforced at save time: a ':' or '/' in either half re-splits the rsync
+        // operand into another host or a LOCAL path. Empty halves are the
+        // caller's "incomplete connection" error.
+        if ($conn['host'] !== '' && !Credentials::isSafeSshHost($conn['host'])) {
+            return ['ok' => false, 'error' => 'The Connection host is not valid for SSH. ' . Credentials::SSH_HOST_RULE];
+        }
+        if ($conn['username'] !== '' && !Credentials::isSafeSshUser($conn['username'])) {
+            return ['ok' => false, 'error' => 'The Connection username is not valid for SSH. ' . Credentials::SSH_USER_RULE];
+        }
+
         self::ensureRuntimeDirs();
 
         // Unique per-run token: isolates concurrent runs even of the same conn.
@@ -631,6 +642,26 @@ class Ssh
     }
 
     /**
+     * cleanupRuntime() for a run whose runner died before reaching its own
+     * (Runner::reportCrashed). Only through the private 0700 runtime dirs: a
+     * symlinked dir, or one another uid owns or can write, is left alone.
+     */
+    public static function sweepRuntime(string $token): void
+    {
+        if ($token === '') {
+            return;
+        }
+        try {
+            foreach ([rtrim(static::$runtimeBase, '/'), static::keysDir(), dirname(static::knownHostsPath($token)), dirname(static::passFilePath($token))] as $dir) {
+                Util::assertPrivateDir($dir);
+            }
+        } catch (RuntimeException $e) {
+            return;
+        }
+        self::cleanupRuntime($token);
+    }
+
+    /**
      * Ensure the tmpfs runtime dirs exist with restrictive (700) modes.
      *
      * The runtime base lives under world-writable /tmp, so we defend against a
@@ -802,17 +833,20 @@ class Ssh
      * structure loaded before the run), under Credentials::withLock so a
      * concurrent save is neither clobbered nor clobbers the pin, and only when
      * the stored pin is STILL empty - so an explicit "Discover host key" or
-     * another run's pin always wins. Never throws: a completed run must not fail
-     * because pinning did.
+     * another run's pin always wins - and the stored host and port are STILL
+     * the $host:$port the key was harvested from: a run that started before the
+     * connection was pointed at another machine must not pin the old machine's
+     * key onto the new one. Never throws: a completed run must not fail because
+     * pinning did.
      */
-    public static function pinHostKey(string $connId, string $hostKey): bool
+    public static function pinHostKey(string $connId, string $hostKey, string $host, int $port): bool
     {
         $hostKey = trim($hostKey);
         if ($connId === '' || $hostKey === '') {
             return false;
         }
         try {
-            return Credentials::withLock(static function () use ($connId, $hostKey): bool {
+            return Credentials::withLock(static function () use ($connId, $hostKey, $host, $port): bool {
                 // The run resolved secretsDir at its start; it may have moved since.
                 Credentials::refreshSecretsDir();
                 $creds = Credentials::load();
@@ -821,7 +855,8 @@ class Ssh
                     if (!is_array($conn) || (string) ($conn['id'] ?? '') !== $connId) {
                         continue;
                     }
-                    if (trim((string) ($conn['remoteHostKey'] ?? '')) !== '') {
+                    $now = Credentials::mergeConnection($conn);
+                    if (trim($now['remoteHostKey']) !== '' || $now['host'] !== $host || $now['port'] !== $port) {
                         return false;
                     }
                     $creds['connections'][$i]['remoteHostKey'] = $hostKey;
@@ -923,7 +958,7 @@ class Ssh
         } finally {
             self::cleanupRuntime((string) $mat['token']);
         }
-        self::pinHostKey($connId, $hostKey);
+        self::pinHostKey($connId, $hostKey, $conn['host'], $conn['port']);
 
         return self::classifyProbe($conn, (int) $exitCode, (string) $stderr);
     }

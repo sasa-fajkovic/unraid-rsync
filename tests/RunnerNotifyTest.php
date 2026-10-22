@@ -736,6 +736,42 @@ final class RunnerNotifyTest extends TestCase
         $this->assertSame('crashed', History::list($id)['runs'][0]['reason']);
     }
 
+    /**
+     * A SIGKILLed runner never reaches cleanupRuntime(), so its key, passfile
+     * and known_hosts sat in tmpfs until reboot. The run state names the token;
+     * reaping the dead run removes that run's files and nobody else's.
+     */
+    public function testReapingADeadRunRemovesItsTmpfsSecrets(): void
+    {
+        $id       = $this->saveJob('always');
+        $prevBase = Ssh::$runtimeBase;
+        Ssh::$runtimeBase = UR_RUNTIME_BASE . '/sweep-' . bin2hex(random_bytes(4));
+        try {
+            $creds = Credentials::defaults();
+            $creds['keys'][] = ['id' => 'k-1', 'name' => 'k', 'privateKey' => "KEY\n"];
+            $creds['connections'][] = ['id' => 'c-1', 'name' => 'c', 'host' => 'h', 'username' => 'u', 'authMethod' => 'KEY', 'keyId' => 'k-1'];
+            $dead  = (string) Ssh::materialize($creds, 'c-1')['token'];
+            $live  = (string) Ssh::materialize($creds, 'c-1')['token'];
+            touch(Ssh::passFilePath($dead));
+            $files = [Ssh::keyPath($dead), Ssh::knownHostsPath($dead), Ssh::passFilePath($dead)];
+            foreach ($files as $f) {
+                $this->assertFileExists($f);
+            }
+            RunState::write($id, ['pid' => 999999, 'running' => true, 'trigger' => 'schedule', 'startedAt' => '2026-10-20T03:00:00Z', 'token' => $dead]);
+
+            $this->assertFalse(RunState::isRunning($id));
+
+            foreach ($files as $f) {
+                $this->assertFileDoesNotExist($f);
+            }
+            $this->assertFileExists(Ssh::keyPath($live), "another run's secrets are untouched");
+            $this->assertSame('crashed', History::list($id)['runs'][0]['reason']);
+        } finally {
+            Ssh::cleanupRuntime($live ?? '');
+            Ssh::$runtimeBase = $prevBase;
+        }
+    }
+
     public function testDeadRunnerHonoursNotifyModeOffButIsStillRecorded(): void
     {
         $id = $this->saveJob('off');

@@ -760,6 +760,35 @@ final class SshTest extends TestCase
         $this->assertSame('ssh', $argv[0]);
     }
 
+    /**
+     * credentials.json is hand-editable: a ':' or '/' that never went through
+     * validateConnection must still be refused at run time, before any secret
+     * is written.
+     */
+    public function testMaterializeRefusesAHostOrUsernameThatReSplitsTheOperand(): void
+    {
+        foreach ([['host' => 'a:b'], ['host' => 'nas/evil'], ['username' => 'a:b'], ['username' => 'u/x']] as $over) {
+            $creds = Credentials::defaults();
+            // Raw records, as a hand edit leaves them (no mergeConnection).
+            $creds['connections'][] = array_merge(['id' => 'c-pw', 'host' => 'h.example', 'username' => 'sasa',
+                'authMethod' => 'PASSWORD', 'password' => Credentials::obfuscate('pw')], $over);
+            $res = FakeSsh::materialize($creds, 'c-pw');
+            $this->assertFalse($res['ok'], json_encode($over));
+            $this->assertStringContainsString('not valid for SSH', (string) $res['error']);
+        }
+        $this->assertSame(0, FakeSsh::$tokenMints, 'refused before any token or secret exists');
+    }
+
+    public function testTestConnectionHandsSshAnUnbracketedIpv6Host(): void
+    {
+        $creds = Credentials::defaults();
+        $creds['connections'][] = $this->passConn(['host' => '2001:db8::1', 'password' => Credentials::obfuscate('pw')]);
+        $this->assertSame('[2001:db8::1]', $creds['connections'][0]['host']);
+
+        FakeSsh::testConnection($creds, 'c-pw');
+        $this->assertContains('sasa@2001:db8::1', (array) FakeSsh::$lastProbeArgv);
+    }
+
     public function testTestConnectionProbeDeadlineFollowsTheConnectTimeout(): void
     {
         $creds = Credentials::defaults();

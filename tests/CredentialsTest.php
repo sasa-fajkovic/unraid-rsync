@@ -245,7 +245,7 @@ final class CredentialsTest extends TestCase
             Credentials::save($creds);
 
             Credentials::$secretsDirOverride = $root . '/pool/old';
-            $this->assertTrue(Ssh::pinHostKey('c-1', 'h ssh-ed25519 AAAAPIN'));
+            $this->assertTrue(Ssh::pinHostKey('c-1', 'h ssh-ed25519 AAAAPIN', 'h', 22));
 
             $this->assertSame($root . '/pool/new', Credentials::$secretsDirOverride);
             $this->assertSame('h ssh-ed25519 AAAAPIN', Credentials::load()['connections'][0]['remoteHostKey']);
@@ -254,6 +254,25 @@ final class CredentialsTest extends TestCase
             Config::$mntRoot = '/mnt';
             @unlink(Config::path());
             exec('rm -rf ' . escapeshellarg($root));
+        }
+    }
+
+    /** The pin is a compare-and-set on host:port as well as on the empty pin. */
+    public function testAPinIsRefusedOnceTheConnectionPointsAtAnotherEndpoint(): void
+    {
+        $creds = Credentials::defaults();
+        $creds['connections'][] = ['id' => 'c-1', 'name' => 'n', 'host' => 'new.example', 'username' => 'u', 'port' => 22];
+        Credentials::save($creds);
+        try {
+            $this->assertFalse(Ssh::pinHostKey('c-1', 'old ssh-ed25519 AAAAOLD', 'old.example', 22));
+            $this->assertFalse(Ssh::pinHostKey('c-1', 'old ssh-ed25519 AAAAOLD', 'new.example', 2222));
+            $this->assertSame('', Credentials::load()['connections'][0]['remoteHostKey']);
+            $this->assertTrue(Ssh::pinHostKey('c-1', 'new ssh-ed25519 AAAANEW', 'new.example', 22));
+            $this->assertFalse(Ssh::pinHostKey('c-1', 'new ssh-ed25519 AAAAOTHER', 'new.example', 22), 'an existing pin always wins');
+            $this->assertSame('new ssh-ed25519 AAAANEW', Credentials::load()['connections'][0]['remoteHostKey']);
+        } finally {
+            @unlink(Credentials::path());
+            @unlink(Credentials::path() . '.last-good');
         }
     }
 
@@ -271,7 +290,7 @@ final class CredentialsTest extends TestCase
 
         $child = sprintf(
             'define("UR_CONFIG_BASE", %s); define("UR_RUNTIME_BASE", %s); require %s;'
-            . ' echo "ready\n"; exit(Ssh::pinHostKey("c-b", "hb ssh-ed25519 AAAAPIN") ? 0 : 1);',
+            . ' echo "ready\n"; exit(Ssh::pinHostKey("c-b", "hb ssh-ed25519 AAAAPIN", "hb", 22) ? 0 : 1);',
             var_export(UR_CONFIG_BASE, true),
             var_export(UR_RUNTIME_BASE, true),
             var_export(realpath(__DIR__ . '/../source/include/Ssh.php'), true)
@@ -391,6 +410,71 @@ final class CredentialsTest extends TestCase
         $this->assertFalse(Credentials::isSafeSshToken(''));
         // '@' is rejected: the destination is built as user@host.
         $this->assertFalse(Credentials::isSafeSshToken('user@host'));
+    }
+
+    public function testIsSafeSshHostAcceptsHostNamesIpv4AndBracketedIpv6(): void
+    {
+        foreach (['100.102.1.36', 'nas.local', 'my-nas.sub.example.net', 'NAS', 'host_1', 'nas.', '[2001:db8::1]', '[fe80::1]', '[::1]'] as $h) {
+            $this->assertTrue(Credentials::isSafeSshHost($h), "'$h' must be accepted");
+        }
+    }
+
+    /**
+     * Each of these re-splits "user@host:path": a ':' ends the host early
+     * ("fe80::1" connects to "fe80"), a '/' makes the operand a local path.
+     */
+    public function testIsSafeSshHostRejectsShapesThatReSplitTheOperand(): void
+    {
+        foreach (['fe80::1', 'nas:2222', 'a:b', 'nas/evil', '/nas', 'user@nas', '-oProxyCommand=x', '.nas',
+            '[nas]', '[2001:db8::1', '2001:db8::1]', '[2001:db8::1]:22', 'a b', "a
+b", 'h;id', 'h$(id)', '', '   '] as $h) {
+            $this->assertFalse(Credentials::isSafeSshHost($h), "'$h' must be rejected");
+        }
+    }
+
+    public function testIsSafeSshUserAcceptsPosixStyleNames(): void
+    {
+        foreach (['sasa', 'root', 'backup-user', 'first.last', 'u_1', 'Administrator', '_svc'] as $u) {
+            $this->assertTrue(Credentials::isSafeSshUser($u), "'$u' must be accepted");
+        }
+    }
+
+    public function testIsSafeSshUserRejectsSeparatorsWhitespaceAndControlCharacters(): void
+    {
+        foreach (['a:b', 'a/b', 'a@b', '-x', '.x', 'a b', "a	b", "ab", '', 'h$(id)', 'DOMAIN\\user'] as $u) {
+            $this->assertFalse(Credentials::isSafeSshUser($u), "'$u' must be rejected");
+        }
+    }
+
+    public function testMergeConnectionBracketsABareIpv6Host(): void
+    {
+        $this->assertSame('[2001:db8::1]', Credentials::mergeConnection(['host' => ' 2001:db8::1 '])['host']);
+        $this->assertSame('[2001:db8::1]', Credentials::mergeConnection(['host' => '[2001:db8::1]'])['host']);
+        $this->assertSame('100.102.1.36', Credentials::mergeConnection(['host' => '100.102.1.36'])['host']);
+        $this->assertSame('nas.local', Credentials::mergeConnection(['host' => 'nas.local'])['host']);
+    }
+
+    public function testValidateConnectionAcceptsAnIpv6HostAndRejectsAColonInTheUsername(): void
+    {
+        $conn = Credentials::mergeConnection([
+            'id' => 'c', 'name' => 'n', 'host' => 'fe80::1', 'username' => 'sasa',
+            'authMethod' => 'PASSWORD', 'password' => 'x',
+        ]);
+        $this->assertSame(['valid' => true, 'errors' => []], Credentials::validateConnection($conn, Credentials::defaults()));
+
+        $conn['username'] = 'a:b';
+        $this->assertSame([Credentials::SSH_USER_RULE], Credentials::validateConnection($conn, Credentials::defaults())['errors']);
+    }
+
+    /** The live box's connection shape must stay valid. */
+    public function testValidateConnectionAcceptsTheLiveBoxConnection(): void
+    {
+        $conn = Credentials::mergeConnection([
+            'id' => 'c', 'name' => 'n', 'host' => '100.102.1.36', 'port' => 22, 'username' => 'sasa',
+            'authMethod' => 'KEYFILE', 'keyFilePath' => '/root/.ssh/id_ed25519',
+            'strictHostKey' => 'accept-new', 'remoteHostKey' => '100.102.1.36 ssh-ed25519 AAAA',
+        ]);
+        $this->assertSame(['valid' => true, 'errors' => []], Credentials::validateConnection($conn, Credentials::defaults()));
     }
 
     public function testUsedByConnectionWithNullConfigReturnsNoJobs(): void
@@ -1226,10 +1310,7 @@ final class CredentialsTest extends TestCase
             'unsafe host and username' => [
                 ['name' => 'n', 'host' => '-oProxyCommand=evil', 'username' => 'a b', 'port' => 22,
                  'authMethod' => 'PASSWORD', 'password' => 'x', 'strictHostKey' => 'accept-new'],
-                [
-                    'Host contains unsafe characters or begins with "-".',
-                    'Username contains unsafe characters or begins with "-".',
-                ],
+                [Credentials::SSH_HOST_RULE, Credentials::SSH_USER_RULE],
             ],
             'keyfile without a path' => [
                 $ok + ['authMethod' => 'KEYFILE', 'keyFilePath' => '   '],
@@ -1275,10 +1356,11 @@ final class CredentialsTest extends TestCase
     }
 
     /**
-     * ':' and '/' remain LEGAL in an SSH host/username - they are only fatal for
-     * the daemon operand. Tightening the SSH rule would break existing saves.
+     * ':' and '/' are fatal in an SSH host/username too: "user@host:path" is
+     * split by rsync just like the daemon operand, so "a:b" as a host or user
+     * retargets the transfer and a '/' makes it a local path.
      */
-    public function testSshHostAndUsernameStillAcceptColonAndSlash(): void
+    public function testSshHostAndUsernameRejectColonAndSlash(): void
     {
         $creds = Credentials::defaults();
         foreach ([['a:b', 'u'], ['nas/evil', 'u'], ['nas.local', 'a:b'], ['nas.local', 'u/x']] as [$host, $user]) {
@@ -1287,7 +1369,7 @@ final class CredentialsTest extends TestCase
                 'authMethod' => 'KEYFILE', 'keyFilePath' => '/root/.ssh/id_ed25519',
                 'strictHostKey' => 'accept-new',
             ], $creds);
-            $this->assertSame([], $res['errors'], "SSH '$user@$host' must still validate");
+            $this->assertNotSame([], $res['errors'], "SSH '$user@$host' must be rejected");
         }
     }
 

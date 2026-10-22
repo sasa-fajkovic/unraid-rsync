@@ -1143,13 +1143,29 @@ function ur_normalize_connection_for_save(array $raw, array $existing): array
         // that no key file is in use.
         $conn['keyFilePath'] = '';
     }
-    // A tab opened before a run pinned the host key on first use posts the field
-    // empty; that must not wipe the pin while it still belongs to the same host.
-    if ($prev !== null && trim((string) $conn['remoteHostKey']) === ''
-        && trim((string) ($prev['remoteHostKey'] ?? '')) !== ''
-        && $conn['host'] === (string) ($prev['host'] ?? '')
-        && (int) $conn['port'] === (int) ($prev['port'] ?? 0)) {
-        $conn['remoteHostKey'] = (string) $prev['remoteHostKey'];
+    if ($prev !== null && $conn['transport'] !== 'DAEMON') {
+        $old = Credentials::mergeConnection($prev);
+        // A textarea posts CRLF, so "unchanged" cannot mean byte-equal.
+        $norm      = static fn(string $k): string => (string) preg_replace('/\R/', "\n", trim($k));
+        $oldPin    = $norm($old['remoteHostKey']);
+        $submitted = $norm($conn['remoteHostKey']);
+        if ($conn['host'] === $old['host'] && $conn['port'] === $old['port']) {
+            // A tab opened before a run pinned the host key on first use posts the
+            // field empty; that must not wipe the pin while it still belongs to the same host.
+            if ($submitted === '' && $oldPin !== '') {
+                $conn['remoteHostKey'] = $old['remoteHostKey'];
+            }
+        } elseif ($oldPin !== '' && ($submitted === '' || $submitted === $oldPin)) {
+            // The old pin never matches the new endpoint's known_hosts line, so
+            // accept-new would treat every run as first contact and take ANY key.
+            $conn['remoteHostKey'] = '';
+            try {
+                Logger::event('', 'credentials', 'Connection ' . Util::safeFileId($conn['id'])
+                    . ': the host or port changed, so its pinned host key was cleared. The next run or'
+                    . ' Test connection pins the new host\'s key.');
+            } catch (Throwable $e) {
+            }
+        }
     }
     if ($conn['transport'] === 'DAEMON') {
         // Same display:none-still-submits problem as the password above: a card

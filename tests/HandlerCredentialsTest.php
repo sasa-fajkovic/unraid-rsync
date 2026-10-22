@@ -1549,7 +1549,7 @@ final class HandlerCredentialsTest extends TestCase
         [$src, $dst] = $this->interruptedMove($root, $root . '/pool/a', true);
         Credentials::$secretsDirOverride = $src;
 
-        $this->assertTrue(Ssh::pinHostKey('c-1', 'h ssh-ed25519 AAAAPIN'));
+        $this->assertTrue(Ssh::pinHostKey('c-1', 'h ssh-ed25519 AAAAPIN', 'h', 22));
 
         $this->assertFileDoesNotExist($src . '/credentials.json');
         $this->assertFileDoesNotExist($src . '/credentials.json.last-good');
@@ -1646,7 +1646,7 @@ final class HandlerCredentialsTest extends TestCase
     // --- a stale Connections tab must not wipe a first-use host-key pin -----
 
     /** @return array<string,mixed> */
-    private function pinnedConnectionPost(string $host, int $port): array
+    private function pinnedConnectionPost(string $host, int $port, string $postedKey = ''): array
     {
         $seed = Credentials::defaults();
         $seed['connections'][] = Credentials::mergeConnection([
@@ -1660,7 +1660,7 @@ final class HandlerCredentialsTest extends TestCase
             'connections' => [0 => [
                 'id' => 'c-pin', 'name' => 'pin renamed', 'transport' => 'SSH', 'host' => $host,
                 'port' => (string) $port, 'username' => 'u', 'authMethod' => 'KEYFILE',
-                'keyFilePath' => '/root/.ssh/id_ed25519', 'remoteHostKey' => '', 'strictHostKey' => 'accept-new',
+                'keyFilePath' => '/root/.ssh/id_ed25519', 'remoteHostKey' => $postedKey, 'strictHostKey' => 'accept-new',
             ]],
         ];
     }
@@ -1690,6 +1690,43 @@ final class HandlerCredentialsTest extends TestCase
         $this->assertSame(200, $code, json_encode($body));
 
         $this->assertSame('', Credentials::findConnection(Credentials::load(), 'c-pin')['remoteHostKey'] ?? null);
+    }
+
+    /**
+     * The Connections form posts the pinned key back as it shows it (CRLF from
+     * the textarea). Pointed at a new host or port, that old pin never matches
+     * the new known_hosts line, so accept-new would take ANY key on every run.
+     */
+    #[DataProvider('movedTargetProvider')]
+    public function testTheOldPinPostedBackForADifferentTargetIsCleared(string $host, int $port): void
+    {
+        $_POST = $this->pinnedConnectionPost($host, $port, "nas.local ssh-ed25519 AAAAPINNED\r\n");
+        [$body, $code] = $this->runCapture(fn() => ur_action_save_credentials());
+        $this->assertSame(200, $code, json_encode($body));
+
+        $this->assertSame('', Credentials::findConnection(Credentials::load(), 'c-pin')['remoteHostKey'] ?? null);
+        $this->assertStringContainsString(
+            'Connection c-pin: the host or port changed, so its pinned host key was cleared.',
+            (string) file_get_contents(Logger::pluginLogPath())
+        );
+    }
+
+    public function testAnExplicitNewKeyForADifferentTargetIsStored(): void
+    {
+        $_POST = $this->pinnedConnectionPost('nas2.local', 22, 'nas2.local ssh-ed25519 AAAANEW');
+        [$body, $code] = $this->runCapture(fn() => ur_action_save_credentials());
+        $this->assertSame(200, $code, json_encode($body));
+
+        $this->assertSame('nas2.local ssh-ed25519 AAAANEW', Credentials::findConnection(Credentials::load(), 'c-pin')['remoteHostKey'] ?? null);
+    }
+
+    public function testTheOldPinPostedBackForTheSameTargetIsKept(): void
+    {
+        $_POST = $this->pinnedConnectionPost('nas.local', 22, 'nas.local ssh-ed25519 AAAAPINNED');
+        [$body, $code] = $this->runCapture(fn() => ur_action_save_credentials());
+        $this->assertSame(200, $code, json_encode($body));
+
+        $this->assertSame('nas.local ssh-ed25519 AAAAPINNED', Credentials::findConnection(Credentials::load(), 'c-pin')['remoteHostKey'] ?? null);
     }
 
     // =====================================================================

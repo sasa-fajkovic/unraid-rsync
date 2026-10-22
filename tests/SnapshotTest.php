@@ -780,6 +780,17 @@ final class SnapshotTest extends TestCase
         $this->assertSame($stop, $gotStop);
     }
 
+    public function testRunRemoteHandsSshAnUnbracketedIpv6Host(): void
+    {
+        $seen = [];
+        Snapshot::$remoteRunner = static function (array $argv) use (&$seen): array {
+            $seen = $argv;
+            return ['exit' => 0];
+        };
+        Snapshot::runRemote(self::pieces(), 'root@[2001:db8::1]', 'probe', [], false, 120);
+        $this->assertContains('root@2001:db8::1', $seen);
+    }
+
     public function testRunRemoteCapsWhatTheSeamReturns(): void
     {
         Snapshot::$remoteRunner = static fn(): array => ['exit' => '16', 'stdout' => str_repeat('a', Snapshot::STDOUT_MAX_BYTES + 5)];

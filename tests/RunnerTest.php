@@ -1063,6 +1063,81 @@ final class RunnerTest extends TestCase
         }
     }
 
+    /**
+     * Run a one-pair SSH PUSH job over a KEY-auth accept-new connection with
+     * nothing pinned, with $rsync as the fake rsync. Returns [result, argv,
+     * the stored connection afterwards].
+     *
+     * @param array<string,mixed> $conn overrides for connection c-key
+     * @return array{0:array<string,mixed>,1:array<int,string>,2:array<string,mixed>|null}
+     */
+    private function runSshJob(string $jobId, array $conn, callable $rsync): array
+    {
+        $origBase = Ssh::$runtimeBase;
+        Ssh::$runtimeBase = UR_RUNTIME_BASE . '/ssh-' . bin2hex(random_bytes(4));
+        $creds = Credentials::defaults();
+        $creds['keys'][] = ['id' => 'k-1', 'name' => 'k1', 'privateKey' => "KEY\n"];
+        $creds['connections'][] = Credentials::mergeConnection($conn + [
+            'id' => 'c-key', 'name' => 'ckey', 'host' => 'h.example', 'username' => 'root',
+            'authMethod' => 'KEY', 'keyId' => 'k-1', 'strictHostKey' => 'accept-new',
+        ]);
+        Credentials::save($creds);
+        $argv = [];
+        Rsync::$runner = static function (array $a, $onOutput) use (&$argv, $rsync): int {
+            $argv = $a;
+            return $rsync($a);
+        };
+        $this->saveLocalJob($jobId, ['transport' => 'SSH', 'connectionId' => 'c-key',
+            'pairs' => [['local' => '/mnt/user/src/', 'remote' => '/data/dst/']]]);
+        RunState::clear($jobId);
+        try {
+            $res = Runner::run($jobId, false);
+            return [$res, $argv, Credentials::findConnection(Credentials::load(), 'c-key')];
+        } finally {
+            Ssh::$runtimeBase = $origBase;
+            Credentials::save(Credentials::defaults());
+        }
+    }
+
+    public function testAnIpv6HostReachesRsyncBracketed(): void
+    {
+        [$res, $argv] = $this->runSshJob('j-v6', ['host' => '2001:db8::1'], static fn(): int => 0);
+        $this->assertSame(Rsync::STATE_SUCCESS, $res['state']);
+        $this->assertSame('root@[2001:db8::1]:/data/dst/', end($argv));
+    }
+
+    /**
+     * A run that started before the connection was pointed at another machine
+     * must not pin the OLD machine's key (the one it harvested) onto the new one.
+     */
+    public function testAHostEditedDuringTheRunIsNotPinnedWithTheOldHostsKey(): void
+    {
+        [$res, , $stored] = $this->runSshJob('j-moved', [], static function (array $argv): int {
+            $dashE = (string) $argv[(int) array_search('-e', $argv, true) + 1];
+            preg_match("#'UserKnownHostsFile=([^']+)'#", $dashE, $m);
+            file_put_contents($m[1], "h.example ssh-ed25519 AAAAOLDHOST\n", FILE_APPEND);
+            $creds = Credentials::load();
+            $creds['connections'][0]['host'] = 'other.example';
+            Credentials::save($creds);
+            return 0;
+        });
+        $this->assertSame(Rsync::STATE_SUCCESS, $res['state']);
+        $this->assertSame('', $stored['remoteHostKey'] ?? null);
+        $this->assertStringNotContainsString('Pinned host key', (string) file_get_contents($res['runLog']));
+    }
+
+    public function testTheRunStateNamesTheSecretsTokenWhileTheRunIsGoing(): void
+    {
+        $seen = null;
+        [$res, $argv] = $this->runSshJob('j-token', [], static function () use (&$seen): int {
+            $seen = RunState::read('j-token')['token'] ?? null;
+            return 0;
+        });
+        $this->assertSame(Rsync::STATE_SUCCESS, $res['state']);
+        $this->assertIsString($seen);
+        $this->assertStringContainsString('/keys/' . $seen . "'", (string) $argv[(int) array_search('-e', $argv, true) + 1]);
+    }
+
     public function testRunnerCliExitCodeAgreesWithRunnerStateMatrix(): void
     {
         // CLI<->Runner consistency: for every terminal STATE the runner can

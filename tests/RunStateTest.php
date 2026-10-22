@@ -89,6 +89,17 @@ final class RunStateTest extends TestCase
         $this->assertSame('manual', RunState::read('j-bog')['trigger']);
     }
 
+    public function testTheSecretsTokenIsAnOptionalFieldThatSurvivesMarkStopped(): void
+    {
+        RunState::write('j-tok', ['running' => true]);
+        $this->assertArrayNotHasKey('token', RunState::read('j-tok'));
+        RunState::write('j-tok', ['running' => true, 'token' => 'c-1-42-abcdef']);
+        $this->assertSame('c-1-42-abcdef', RunState::read('j-tok')['token']);
+        RunState::markStopped('j-tok');
+        $this->assertSame('c-1-42-abcdef', RunState::read('j-tok')['token'] ?? null);
+        RunState::clear('j-tok');
+    }
+
     public function testReadMissingIsNull(): void
     {
         $this->assertNull(RunState::read('j-nope'));
