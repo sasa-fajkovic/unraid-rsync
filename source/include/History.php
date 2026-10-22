@@ -191,6 +191,39 @@ class History
     }
 
     /**
+     * Overwrite $fields of the newest record when it is the run that started
+     * at $startedAt: a teardown step after the append changed that run's
+     * outcome. Same lock and rename as prune(). false when it could not.
+     *
+     * @param array<string,mixed> $fields
+     */
+    public static function amendLast(string $jobId, string $startedAt, array $fields): bool
+    {
+        $path = self::path($jobId);
+        try {
+            return Util::withLock(self::lockPath($jobId), static function () use ($path, $startedAt, $fields): bool {
+                $lines = is_file($path) ? @file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) : false;
+                if (!is_array($lines) || $lines === []) {
+                    return false;
+                }
+                $last = json_decode((string) end($lines), true);
+                if (!is_array($last) || ($last['startedAt'] ?? null) !== $startedAt) {
+                    return false;
+                }
+                $json = json_encode(self::normalizeRecord(array_merge($last, $fields)), JSON_UNESCAPED_SLASHES);
+                if ($json === false) {
+                    return false;
+                }
+                $lines[count($lines) - 1] = $json;
+                Util::writeAtomic($path, implode("\n", $lines) . "\n", 0644);
+                return true;
+            });
+        } catch (Throwable $e) {
+            return false;
+        }
+    }
+
+    /**
      * A cheap change marker for a job's history file (one stat, no parse):
      * mtime, size and inode, so an append (size) and a prune (rename: inode)
      * both change it. '' when there is no file.

@@ -896,19 +896,19 @@ class Runner
                 'snapshot'  => !empty($sn['mkstamped']) ? $stamp : '',
                 'committed' => !empty($sn['committed']),
             ];
+            $summaryRecord = [
+                'startedAt'   => $startedAt,
+                'finishedAt'  => $finishedAt,
+                'exitCode'    => $exitCode,
+                'durationSec' => $durationSec,
+                'dryRun'      => $dryRun,
+                'trigger'     => $trigger,
+            ] + $snapFields;
             // null = the step threw (already logged), false = it reported failure.
-            $summaryOk = null;
-            $step('summary', static function () use ($jobId, $state, $startedAt, $finishedAt, $exitCode, $durationSec, $dryRun, $trigger, $reason, $snapFields, &$summaryOk): void {
-                $summaryOk = self::writeSummary($jobId, [
-                    'state'       => $state,
-                    'startedAt'   => $startedAt,
-                    'finishedAt'  => $finishedAt,
-                    'exitCode'    => $exitCode,
-                    'durationSec' => $durationSec,
-                    'dryRun'      => $dryRun,
-                    'trigger'     => $trigger,
-                    'reason'      => $reason,
-                ] + $snapFields);
+            $summaryOk  = null;
+            $summarySaid = [$state, $reason];
+            $step('summary', static function () use ($jobId, $state, $reason, $summaryRecord, &$summaryOk): void {
+                $summaryOk = self::writeSummary($jobId, ['state' => $state, 'reason' => $reason] + $summaryRecord);
             });
             if ($summaryOk !== true) {
                 self::teardownFailed($state, $reason);
@@ -924,7 +924,8 @@ class Runner
             // cadence as the summary), then lazily prune to the retention cap.
             // jobName is snapshotted so the record survives a later rename/delete;
             // logRef is the run-log BASENAME only (resolves via getJobLog?run=).
-            $historyOk = null;
+            $historyOk   = null;
+            $historySaid = [$state, $reason];
             $step('history', static function () use ($jobId, $job, $startedAt, $finishedAt, $dryRun, $trigger, $state, $exitCode, $durationSec, $runLog, $reason, $snapFields, &$historyOk): void {
                 $historyOk = History::append($jobId, [
                     'startedAt'   => $startedAt,
@@ -956,6 +957,22 @@ class Runner
             $step('run state', static fn() => RunState::markStopped($jobId));
             if (in_array('run state', $broken, true)) {
                 self::teardownFailed($state, $reason);
+            }
+            // A step after the summary or History write changed the outcome:
+            // bring what was already written into line (the lock is still ours).
+            if ($summaryOk === true && $summarySaid !== [$state, $reason]) {
+                $step('summary update', static function () use ($jobId, $state, $reason, $summaryRecord): void {
+                    if (!self::writeSummary($jobId, ['state' => $state, 'reason' => $reason] + $summaryRecord)) {
+                        throw new RuntimeException('the summary could not be rewritten as ' . $state);
+                    }
+                });
+            }
+            if ($historyOk === true && $historySaid !== [$state, $reason]) {
+                $step('History update', static function () use ($jobId, $startedAt, $state, $reason): void {
+                    if (!History::amendLast($jobId, $startedAt, ['state' => $state, 'reason' => $reason])) {
+                        throw new RuntimeException('the History record could not be rewritten as ' . $state);
+                    }
+                });
             }
             $step('abort flag', static fn() => RunState::clearAbort($jobId));
 
@@ -2561,12 +2578,11 @@ class Runner
      */
     public static function writeSummary(string $jobId, array $summary, bool $keepNewer = false): bool
     {
-        $dir = rtrim(UR_CONFIG_BASE, '/') . '/runs';
+        $path = self::summaryPath($jobId);
+        $dir  = dirname($path);
         if (!is_dir($dir) && !@mkdir($dir, 0755, true) && !is_dir($dir)) {
             return false;
         }
-        $clean = Util::safeFileId($jobId);
-        $path  = $dir . '/' . $clean . '.summary.json';
 
         $trigger = (($summary['trigger'] ?? '') === 'schedule') ? 'schedule' : 'manual';
         $out = [
@@ -2586,9 +2602,9 @@ class Runner
             $out['committed'] = !empty($summary['committed']);
         }
         try {
-            return Util::withLock($dir . '/' . $clean . '.summary.lock', static function () use ($jobId, $path, $out, $keepNewer): bool {
+            return Util::withLock(self::summaryPath($jobId, 'lock'), static function () use ($jobId, $path, $out, $keepNewer): bool {
                 $prev     = self::readSummary($jobId);
-                $prevReal = self::lastRealFor($jobId, $prev);
+                $prevReal = self::lastRealFor($jobId, $prev, false);
                 $newer    = static fn(?array $old): bool => $keepNewer && $old !== null
                     && strcmp((string) ($old['startedAt'] ?? ''), $out['startedAt']) > 0;
                 $real = ($out['dryRun'] || $newer($prevReal)) ? $prevReal : self::lastReal($out);
@@ -2643,25 +2659,48 @@ class Runner
         ];
     }
 
+    /** <UR_CONFIG_BASE>/runs/<jobid>.summary.json, or its sibling .summary.lock. */
+    private static function summaryPath(string $jobId, string $ext = 'json'): string
+    {
+        return rtrim(UR_CONFIG_BASE, '/') . '/runs/' . Util::safeFileId($jobId) . '.summary.' . $ext;
+    }
+
     /**
      * lastReal(), except for a summary written before lastReal existed whose
      * last execution was a dry run: the real outcome it overwrote survives only
-     * in History, so the newest real record there stands in.
+     * in History, so the newest real record there (every retained one is
+     * searched) stands in. The answer, null included, is then written into
+     * summary.json ($writeThrough), so History is read once per job, not on
+     * every poll; never over a summary that changed since $summary was read.
      *
      * @param array<string,mixed>|null $summary
      * @return array{state:string,startedAt:string,finishedAt:string,exitCode:int|null,reason:string}|null
      */
-    public static function lastRealFor(string $jobId, ?array $summary): ?array
+    public static function lastRealFor(string $jobId, ?array $summary, bool $writeThrough = true): ?array
     {
         if (!is_array($summary) || array_key_exists('lastReal', $summary) || empty($summary['dryRun'])) {
             return self::lastReal($summary);
         }
-        foreach (History::list($jobId, 0, 100)['runs'] as $r) {
+        $real = null;
+        foreach (History::records($jobId) as $r) {
             if (empty($r['dryRun']) && ($r['state'] ?? '') !== Rsync::STATE_SKIPPED) {
-                return self::lastReal($r);
+                $real = self::lastReal($r);
+                break;
             }
         }
-        return null;
+        $json = json_encode($summary + ['lastReal' => $real], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+        if ($writeThrough && $json !== false) {
+            try {
+                Util::withLock(self::summaryPath($jobId, 'lock'), static function () use ($jobId, $summary, $json): void {
+                    if (self::readSummary($jobId) === $summary) {
+                        Util::writeAtomic(self::summaryPath($jobId), $json . "\n", 0644);
+                    }
+                });
+            } catch (Throwable $e) {
+                // Still answered; the next read resolves it again.
+            }
+        }
+        return $real;
     }
 
     /**
@@ -2723,8 +2762,7 @@ class Runner
      */
     public static function readSummary(string $jobId): ?array
     {
-        $clean = Util::safeFileId($jobId);
-        $path  = rtrim(UR_CONFIG_BASE, '/') . '/runs/' . $clean . '.summary.json';
+        $path = self::summaryPath($jobId);
         if (!is_file($path)) {
             return null;
         }

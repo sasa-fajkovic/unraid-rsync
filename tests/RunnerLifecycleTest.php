@@ -24,6 +24,24 @@ final class RunnerLifecycleTest extends TestCase
 
     private string $rt = '';
 
+    public static function setUpBeforeClass(): void
+    {
+        if (!defined('UR_HANDLER_TESTING')) {
+            define('UR_HANDLER_TESTING', true);
+        }
+        require_once __DIR__ . '/../source/include/handler.php';
+    }
+
+    /** @return array<string,mixed> the job's getStatus entry, as the UI receives it */
+    private function statusOf(string $id): array
+    {
+        ob_start();
+        ur_action_get_status();
+        $body = json_decode((string) ob_get_clean(), true);
+        $this->assertIsArray($body['jobs'][$id] ?? null);
+        return $body['jobs'][$id];
+    }
+
     protected function setUp(): void
     {
         $this->trace    = [];
@@ -220,9 +238,37 @@ final class RunnerLifecycleTest extends TestCase
         $this->assertSame(Rsync::STATE_FAILED, $res['state']);
         $this->assertSame('teardown-failed', $res['reason'] ?? null);
         $this->assertContains('hook:POST:SUCCESS', $this->trace);
-        $this->assertSame('SUCCESS', Runner::readSummary($id)['state'] ?? null, 'recorded before the state write failed');
         $this->assertCount(1, $this->captured, 'the failure is notified');
+        // Summary and History were written before the state write failed; both
+        // are brought into line with the final outcome, so no badge stays green.
+        $sum = Runner::readSummary($id);
+        $this->assertSame(['FAILED', 'teardown-failed'], [$sum['state'] ?? null, $sum['reason'] ?? null]);
+        $this->assertSame(['FAILED', 'teardown-failed'], [Runner::lastReal($sum)['state'] ?? null, Runner::lastReal($sum)['reason'] ?? null]);
+        $row = History::list($id)['runs'];
+        $this->assertCount(1, $row, 'amended, not a second record');
+        $this->assertSame(['FAILED', 'teardown-failed'], [$row[0]['state'], $row[0]['reason']]);
+        $this->assertSame('FAILED', $this->statusOf($id)['state']);
         RunState::releaseLock($this->assertLockFree($id));
+    }
+
+    public function testAHistoryFailureAfterTheSummaryRewritesTheSummary(): void
+    {
+        $id = $this->saveLocalJob();
+        @mkdir(dirname(History::path($id)), 0755, true);
+        mkdir(History::path($id)); // the append cannot write a file there
+        try {
+            $res = Runner::run($id, false);
+        } finally {
+            rmdir(History::path($id));
+        }
+
+        $this->assertSame(['FAILED', 'teardown-failed'], [$res['state'], $res['reason'] ?? null]);
+        $sum = Runner::readSummary($id);
+        $this->assertSame(['FAILED', 'teardown-failed'], [$sum['state'] ?? null, $sum['reason'] ?? null], 'the persisted summary, not just the result');
+        $this->assertSame('FAILED', Runner::lastReal($sum)['state'] ?? null);
+        $entry = $this->statusOf($id);
+        $this->assertSame('FAILED', $entry['state']);
+        $this->assertSame('FAILED', $entry['lastReal']['state'] ?? null);
     }
 
     /** @return resource */
@@ -425,6 +471,82 @@ final class RunnerLifecycleTest extends TestCase
         @unlink(History::path($id));
     }
 
+
+    /** An old-format summary (no lastReal key) whose last execution was a dry run. */
+    private function seedOldDrySummary(string $id): void
+    {
+        $path = rtrim(UR_CONFIG_BASE, '/') . '/runs/' . $id . '.summary.json';
+        @mkdir(dirname($path), 0755, true);
+        file_put_contents($path, json_encode(['state' => 'SUCCESS', 'startedAt' => '2026-10-21T09:00:00Z', 'finishedAt' => '2026-10-21T09:01:00Z',
+            'exitCode' => 0, 'durationSec' => 60, 'dryRun' => true, 'trigger' => 'manual']));
+    }
+
+    public function testTheLegacyFallbackScansPastTheFirstHundredRecords(): void
+    {
+        $id = 'j-deep-' . bin2hex(random_bytes(3));
+        History::append($id, ['startedAt' => '2026-01-01T03:00:00Z', 'finishedAt' => '2026-01-01T03:30:00Z', 'state' => 'WARNING', 'exitCode' => 24]);
+        for ($i = 0; $i < 150; $i++) {
+            $at = gmdate('Y-m-d\TH:i:s\Z', 1767600000 + $i * 3600);
+            History::append($id, ['startedAt' => $at, 'finishedAt' => $at, 'state' => $i % 2 ? 'SKIPPED' : 'SUCCESS', 'dryRun' => $i % 2 === 0]);
+        }
+        $this->seedOldDrySummary($id);
+
+        $this->assertSame(['WARNING', '2026-01-01T03:00:00Z'], [
+            Runner::lastRealFor($id, Runner::readSummary($id))['state'] ?? null,
+            Runner::lastRealFor($id, Runner::readSummary($id))['startedAt'] ?? null,
+        ]);
+        @unlink(History::path($id));
+    }
+
+    public function testTheLegacyFallbackReadsHistoryOnceAndIsWrittenThrough(): void
+    {
+        $id = $this->saveLocalJob(['notifyMode' => 'off']);
+        History::append($id, ['startedAt' => '2026-10-20T03:00:00Z', 'finishedAt' => '2026-10-20T03:30:00Z', 'state' => 'SUCCESS', 'exitCode' => 0]);
+        History::append($id, ['startedAt' => '2026-10-21T09:00:00Z', 'finishedAt' => '2026-10-21T09:01:00Z', 'state' => 'SUCCESS', 'dryRun' => true]);
+        $this->seedOldDrySummary($id);
+
+        $first = $this->statusOf($id);
+        $this->assertSame(['SUCCESS', '2026-10-20T03:00:00Z'], [$first['state'], $first['lastReal']['startedAt'] ?? null]);
+        $this->assertSame($first['lastReal'], Runner::readSummary($id)['lastReal'] ?? 'missing', 'materialised into summary.json');
+
+        // History is not consulted again: the next poll answers the same without it.
+        rename(History::path($id), History::path($id) . '.away');
+        try {
+            $second = $this->statusOf($id);
+        } finally {
+            rename(History::path($id) . '.away', History::path($id));
+        }
+        $this->assertSame($first['lastReal'], $second['lastReal']);
+        $this->assertSame('SUCCESS', $second['state']);
+
+        // "None found" is remembered too, as null.
+        $none = 'j-none-' . bin2hex(random_bytes(3));
+        $this->seedOldDrySummary($none);
+        $this->assertNull(Runner::lastRealFor($none, Runner::readSummary($none)));
+        $this->assertArrayHasKey('lastReal', (array) Runner::readSummary($none));
+        $this->assertNull(Runner::readSummary($none)['lastReal']);
+
+        // The next real run replaces it.
+        Rsync::$runner = fn(array $argv, $onOutput): int => 23;
+        Runner::run($id, false);
+        $this->assertSame('PARTIAL', $this->statusOf($id)['state']);
+        @unlink(History::path($id));
+    }
+
+    public function testTheWriteThroughNeverOverwritesASummaryThatChangedMeanwhile(): void
+    {
+        $id = 'j-wt-' . bin2hex(random_bytes(3));
+        History::append($id, ['startedAt' => '2026-10-20T03:00:00Z', 'finishedAt' => '2026-10-20T03:30:00Z', 'state' => 'SUCCESS', 'exitCode' => 0]);
+        $this->seedOldDrySummary($id);
+        $stale = Runner::readSummary($id);
+        // A run finishes between this reader's read and its write-through.
+        Runner::writeSummary($id, ['state' => 'FAILED', 'startedAt' => '2026-10-22T03:00:00Z', 'exitCode' => 12]);
+
+        Runner::lastRealFor($id, $stale);
+
+        $this->assertSame('FAILED', Runner::readSummary($id)['lastReal']['state'] ?? null);
+        @unlink(History::path($id));
+    }
     // --- DI-5: crashed runs and scheduled hard failures reach the summary ---
 
     public function testACrashedRunReplacesTheOlderSuccessInTheSummary(): void

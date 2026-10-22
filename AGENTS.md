@@ -340,7 +340,10 @@ on, forked from, or derived from any other plugin.
   dry run rewrites only the top level; a real run both. A summary written
   before `lastReal` existed reads as its own last real run, or, when it was a
   dry run, as the newest non-dry, non-SKIPPED History record - the real
-  outcome that dry run overwrote (`Runner::lastRealFor`). The
+  outcome that dry run overwrote (`Runner::lastRealFor`, every retained record
+  searched). That answer, null included, is written into `summary.json` under
+  the summary lock the first time it is resolved (never over a summary that
+  changed meanwhile), so History is read once per job, not on every poll. The
   badge, `getStatus.state`, the Dashboard and the Last-run time all come from
   `lastReal`, so a successful Dry-run can never paint a failed backup green; a
   dry run shows as a neutral second line (`PageHelpers::lastDryRun` /
@@ -360,7 +363,10 @@ on, forked from, or derived from any other plugin.
   `plugin.log`) and the next step still runs; notify and the lock release
   never throw. A summary, History or run-state failure (thrown or `false`)
   turns a SUCCESS into FAILED with reason `teardown-failed` (other states keep
-  theirs); a post-hook that could not run counts as a failed post-hook. The
+  theirs), and what was already written before that failure is rewritten to
+  match while the run lock is still held: the summary again, the History
+  record in place (`History::amendLast`, only the run that started at
+  `startedAt`). A post-hook that could not run counts as a failed post-hook. The
   flush stays first and the pin stays before cleanup. Test seam:
   `Runner::$teardownFault`.
 - **Only a user's Abort for THIS launch is ABORTED.** The abort flag
@@ -371,7 +377,10 @@ on, forked from, or derived from any other plugin.
   run-state record, before it signals. The runner writes its state, THEN drops
   a flag for any other generation (`clearStaleAbort`), so an Abort clicked
   before it started is honoured (ABORTED before anything transfers) and a
-  stale one is not. Its SIGTERM/SIGINT trap writes `by: signal`, never over an
+  stale one is not. `clearStaleAbort` renames the flag aside and judges only
+  that copy, putting ours back with `link()` (never over a newer flag): a
+  read-then-unlink of the one path deleted an Abort for this launch that
+  landed in between (seam `RunState::$afterStaleAbortRead`). Its SIGTERM/SIGINT trap writes `by: signal`, never over an
   existing flag. A run that ends ABORTED (flag, exit 20, or 143) without a
   user flag for its generation (`RunState::abortedByUser`; a flag with no
   generation counts) is FAILED with reason `terminated`, before the post-hook
@@ -453,7 +462,8 @@ on, forked from, or derived from any other plugin.
   (`getStatus`, `getJobLog`, `listHistory`) → `reapStale` →
   `Runner::reportCrashed` records a dead runner exactly once (appends a
   `crashed` History record, writes the `CRASHED` summary unless a later run
-  already wrote one, notifies, deletes the in-flight record). The check
+  already wrote one, notifies, deletes the in-flight record) - plus, once per
+  job after the upgrade, the `lastReal` write-through above. The check
   is **match-ANY** across all server-side-trusted token sources (`$GLOBALS['var']['csrf_token']`,
   `$_SESSION['csrf_token']`, and `var.ini`) — `ur_csrf_token_candidates()` /
   `ur_check_csrf()`. **Do NOT revert to "first non-empty source wins":** on the
