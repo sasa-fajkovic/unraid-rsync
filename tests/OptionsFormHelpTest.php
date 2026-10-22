@@ -2131,6 +2131,53 @@ final class OptionsFormHelpTest extends TestCase
         $this->assertSame(1, preg_match('/([^{}]*)\{\s*opacity:\s*1;\s*\}/', $css, $m), 'the reveal rule');
         $this->assertStringContainsString('.ur-help:focus-visible', $m[1]);
         $this->assertDoesNotMatchRegularExpression('/\.ur-help:focus(?!-visible)/', $css);
+
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testJobsListBadgeAndLastRunFollowTheLastRealRunWithTheDryRunBelow(): void
+    {
+        $this->seedConnections();
+        $cfg = Config::defaults();
+        $cfg['jobs'] = [$this->mirrorJob()];
+        Config::save($cfg);
+        Runner::writeSummary('j-mirror', ['state' => 'FAILED', 'startedAt' => '2026-10-20T03:00:00Z', 'finishedAt' => '2026-10-20T03:05:00Z', 'exitCode' => 12]);
+        Runner::writeSummary('j-mirror', ['state' => 'SUCCESS', 'startedAt' => '2026-10-21T09:00:00Z', 'finishedAt' => '2026-10-21T09:01:00Z',
+            'exitCode' => 0, 'dryRun' => true]);
+        $page = Dom\HTMLDocument::createFromString('<!doctype html><body>' . $this->renderPageBody(__DIR__ . '/../source/pages/jobs.php'), LIBXML_NOERROR);
+
+        $row = $page->querySelector('table.ur-job-list tr[data-jobid="j-mirror"]');
+        $this->assertNotNull($row);
+        $this->assertSame('Failed', trim((string) $row->querySelector('.ur-state-badge')?->textContent), 'a dry run never sets the badge');
+        $cell = $row->querySelector('.ur-last-run-cell');
+        $this->assertStringStartsWith('2026-10-20 03:05 (', (string) $cell?->textContent, 'Last run is the real run');
+        $this->assertStringStartsWith('Dry-run OK · 2026-10-21 09:01 (', (string) $cell?->querySelector('.ur-dry-run')?->textContent);
+    }
+
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testEveryRendererTakesTheBadgeAndTimeFromTheLastRealRun(): void
+    {
+        // PageHelpers::dryRunLine is label . ' · ' . lastRunLabel; the JS mirror
+        // must compose the same two parts in the same order.
+        $js = $this->emitted('ur_emit_page_assets');
+        $this->assertSame(1, preg_match('/function dryRunLine\(dry, now\) \{(.*?)\n  \}/s', $js, $m));
+        $this->assertStringContainsString("dry ? dry.label + ' \\u00b7 ' + lastRunLabel(dry, now) : ''", $m[1]);
+        $this->assertStringContainsString('dryRunLine: dryRunLine', $js);
+        $dry = ['label' => 'Dry-run OK', 'finishedAt' => '2026-01-01T00:00:00Z'];
+        $this->assertSame('Dry-run OK · ' . PageHelpers::lastRunLabel($dry, 1767225660), PageHelpers::dryRunLine($dry, 1767225660));
+
+        $base = __DIR__ . '/../source/';
+        foreach (['pages/jobs.php', 'pages/overview.php'] as $file) {
+            $src = (string) file_get_contents($base . $file);
+            $this->assertStringContainsString('U.lastRunLabel(s.lastReal, now)', $src, $file);
+            $this->assertStringContainsString('U.dryRunLine(s.lastDryRun, now)', $src, $file);
+            $this->assertStringNotContainsString('lastRunLabel(s.lastRun,', $src, "$file: the time is the real run's");
+            $this->assertStringNotContainsString("' · dry-run'", $src, $file);
+        }
+        $dash = (string) file_get_contents($base . 'UR.Dashboard.page');
+        $this->assertStringContainsString('j.lastDryRun ? ', $dash);
+        $this->assertStringContainsString('esc(j.lastDryRun.label)', $dash);
+        $this->assertStringContainsString("String(j.state || '')", $dash, 'the badge is getStatus state, derived from lastReal');
     }
 
     private function emitted(string $fn): string

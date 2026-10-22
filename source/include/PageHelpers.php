@@ -35,6 +35,7 @@ final class PageHelpers
         'PARTIAL' => ['cls' => 'warning', 'label' => 'Partial'],
         'TIMEOUT' => ['cls' => 'warning', 'label' => 'Timeout'],
         'FAILED'  => ['cls' => 'failed',  'label' => 'Failed'],
+        'CRASHED' => ['cls' => 'failed',  'label' => 'Crashed'],
         'ABORTED' => ['cls' => 'aborted', 'label' => 'Aborted'],
         'SKIPPED' => ['cls' => 'pending', 'label' => 'Skipped'],
         'PENDING' => ['cls' => 'pending', 'label' => 'Never run'],
@@ -47,8 +48,8 @@ final class PageHelpers
     }
 
     /**
-     * RUNNING (live) overrides the last-run summary; otherwise the summary's
-     * state; PENDING when there is none (never run).
+     * RUNNING (live) overrides the last real run (Runner::lastReal: a dry run
+     * never sets the badge); otherwise its state; PENDING when there is none.
      *
      * @param array<string,mixed>|null $summary
      */
@@ -121,6 +122,7 @@ final class PageHelpers
     /**
      * The Last-run cell from a summary's UTC finishedAt, or an em-dash. A
      * finishedAt in the future (clock step) reads as "now", never "in …".
+     * Callers pass the LAST REAL run (Runner::lastReal), never a dry run.
      *
      * @param array<string,mixed>|null $summary
      */
@@ -154,6 +156,37 @@ final class PageHelpers
         }
         $implied = array_intersect_key(Rsync::BOOL_FLAGS, Rsync::ARCHIVE_IMPLIED);
         return array_values(array_filter($tokens, static fn(string $t): bool => !in_array($t, $implied, true)));
+    }
+
+    /**
+     * The last execution, when it was a dry run: {label, finishedAt}, label
+     * "Dry-run OK" for SUCCESS, else "Dry-run <state label>" ("Dry-run
+     * failed"). null otherwise. getStatus sends it as lastDryRun.
+     *
+     * @param array<string,mixed>|null $summary
+     * @return array{label:string,finishedAt:string}|null
+     */
+    public static function lastDryRun(?array $summary): ?array
+    {
+        if (!is_array($summary) || empty($summary['dryRun'])) {
+            return null;
+        }
+        $state = strtoupper((string) ($summary['state'] ?? ''));
+        return [
+            'label'      => 'Dry-run ' . ($state === 'SUCCESS' ? 'OK' : strtolower(self::state($state)['label'])),
+            'finishedAt' => (string) ($summary['finishedAt'] ?? ''),
+        ];
+    }
+
+    /**
+     * The neutral second line under Last run: "Dry-run OK · <time>", or ''.
+     * Mirrored by window.urUtil.dryRunLine.
+     *
+     * @param array{label:string,finishedAt:string}|null $dry lastDryRun()
+     */
+    public static function dryRunLine(?array $dry, int $now): string
+    {
+        return $dry === null ? '' : $dry['label'] . ' · ' . self::lastRunLabel($dry, $now);
     }
 
     /**

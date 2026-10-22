@@ -155,4 +155,23 @@ final class PageHelpersTest extends TestCase
             $this->assertNotSame('', Rsync::EXIT_MEANINGS[$code] ?? '', "exit $code");
         }
     }
+
+    public function testADryRunIsANeutralSecondLineNamedByItsOutcome(): void
+    {
+        $this->assertNull(PageHelpers::lastDryRun(null));
+        $this->assertNull(PageHelpers::lastDryRun(['state' => 'FAILED', 'dryRun' => false]));
+        $cases = ['SUCCESS' => 'Dry-run OK', 'FAILED' => 'Dry-run failed', 'ABORTED' => 'Dry-run aborted',
+            'WARNING' => 'Dry-run warning', 'CRASHED' => 'Dry-run crashed'];
+        foreach ($cases as $state => $label) {
+            $this->assertSame(
+                ['label' => $label, 'finishedAt' => '2026-01-01T01:23:15Z'],
+                PageHelpers::lastDryRun(['state' => $state, 'dryRun' => true, 'finishedAt' => '2026-01-01T01:23:15Z'])
+            );
+        }
+        $this->assertSame('', PageHelpers::dryRunLine(null, self::NOW));
+        $this->assertSame(
+            'Dry-run OK · 2026-01-01 01:23 (45s ago)',
+            PageHelpers::dryRunLine(['label' => 'Dry-run OK', 'finishedAt' => '2026-01-01T01:23:15Z'], self::NOW)
+        );
+    }
 }

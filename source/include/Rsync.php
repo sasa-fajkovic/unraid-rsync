@@ -246,6 +246,7 @@ class Rsync
     const STATE_FAILED  = 'FAILED';
     const STATE_PENDING = 'PENDING';   // never run; represented by NO summary.
     const STATE_SKIPPED = 'SKIPPED';   // a scheduled run that found the job still running; History only.
+    const STATE_CRASHED = 'CRASHED';   // the runner died mid-run; summary only (its History record is FAILED/crashed).
 
     /**
      * Resolve the EFFECTIVE rsync options for a job: when useGlobalDefaults is

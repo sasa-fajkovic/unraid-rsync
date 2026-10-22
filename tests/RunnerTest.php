@@ -630,25 +630,27 @@ final class RunnerTest extends TestCase
 
         // trigger defaults to 'manual'.
         $this->assertSame(
-            ['job' => 'j-music', 'dryRun' => false, 'trigger' => 'manual'],
+            ['job' => 'j-music', 'dryRun' => false, 'trigger' => 'manual', 'gen' => ''],
             ur_runner_parse_args(['runner.php', '--job=j-music'])
         );
         $this->assertSame(
-            ['job' => 'j-music', 'dryRun' => true, 'trigger' => 'manual'],
+            ['job' => 'j-music', 'dryRun' => true, 'trigger' => 'manual', 'gen' => ''],
             ur_runner_parse_args(['runner.php', '--job=j-music', '--dry-run'])
         );
         // --trigger=schedule is parsed; --job <id> (space form) also accepted.
         $this->assertSame(
-            ['job' => 'j-x', 'dryRun' => false, 'trigger' => 'schedule'],
+            ['job' => 'j-x', 'dryRun' => false, 'trigger' => 'schedule', 'gen' => ''],
             ur_runner_parse_args(['runner.php', '--job', 'j-x', '--trigger=schedule'])
         );
         // An unrecognised trigger value is clamped to 'manual'.
         $this->assertSame(
-            ['job' => 'j-x', 'dryRun' => false, 'trigger' => 'manual'],
+            ['job' => 'j-x', 'dryRun' => false, 'trigger' => 'manual', 'gen' => ''],
             ur_runner_parse_args(['runner.php', '--job=j-x', '--trigger=bogus'])
         );
         // No job.
         $this->assertSame('', ur_runner_parse_args(['runner.php'])['job']);
+        // The launch generation handler.php recorded.
+        $this->assertSame('0a1b', ur_runner_parse_args(['runner.php', '--job=j-x', '--trigger=manual', '--gen=0a1b'])['gen']);
     }
 
     public function testRunFailsWhenRsyncMissing(): void
@@ -750,7 +752,8 @@ final class RunnerTest extends TestCase
             'partial-23'   => [23, Rsync::STATE_PARTIAL],
             'iotimeout-30' => [30, Rsync::STATE_TIMEOUT],
             'contimeout-35' => [35, Rsync::STATE_TIMEOUT],
-            'rsyncterm-20' => [20, Rsync::STATE_ABORTED],
+            // No Abort flag: a signal nobody asked for is a failure.
+            'rsyncterm-20' => [20, Rsync::STATE_FAILED],
             'failed-12'    => [12, Rsync::STATE_FAILED],
         ];
     }
@@ -761,7 +764,8 @@ final class RunnerTest extends TestCase
         // (unlike a guardrail/prehook hard-fail): rsync runs for EVERY pair and
         // the run reports the worst-of across them. Here pair #1 fails (12), but
         // pair #2 still runs and pair #3 is ABORTED-coded (20); ABORTED outranks
-        // FAILED, so the aggregate is ABORTED carrying code 20.
+        // FAILED, so the aggregate carries code 20 - and with no Abort flag that
+        // stop is recorded as FAILED, reason terminated.
         $codes = [12, 0, 20]; // FAILED, SUCCESS, ABORTED
         $i = 0;
         $rsyncCalls = 0;
@@ -779,7 +783,8 @@ final class RunnerTest extends TestCase
         $res = Runner::run($id, false);
 
         $this->assertSame(3, $rsyncCalls, 'an early non-zero rsync exit must NOT skip later pairs');
-        $this->assertSame(Rsync::STATE_ABORTED, $res['state'], 'worst-of across pairs (ABORTED > FAILED)');
+        $this->assertSame(Rsync::STATE_FAILED, $res['state'], 'worst-of across pairs (ABORTED > FAILED), not user-aborted');
+        $this->assertSame('terminated', $res['reason'] ?? null);
         $this->assertSame(20, $res['exitCode'], 'the worst pair\'s code is carried');
     }
 
@@ -2445,8 +2450,9 @@ final class RunnerTest extends TestCase
             ]);
             $line = (string) file_get_contents(History::path('j-golden'));
             $this->assertSame(1, preg_match('/^\{"startedAt":"[^"]+","finishedAt":"[^"]+","jobName":"golden","dryRun":false,"trigger":"schedule","state":"SUCCESS","exitCode":0,"durationSec":\d+,"logRef":"run-[^"]+\.log","reason":""\}\n$/D', $line), $line);
+            // The top level keeps its shape; lastReal is the one addition.
             $this->assertSame(
-                ['state', 'startedAt', 'finishedAt', 'exitCode', 'durationSec', 'dryRun', 'trigger'],
+                ['state', 'startedAt', 'finishedAt', 'exitCode', 'durationSec', 'dryRun', 'trigger', 'lastReal'],
                 array_keys((array) Runner::readSummary('j-golden'))
             );
 
@@ -3394,7 +3400,8 @@ final class RunnerTest extends TestCase
             'exitCode' => 0, 'durationSec' => 5, 'dryRun' => false, 'trigger' => 'manual'];
         $this->assertTrue(Runner::writeSummary('j-sumfmt', $sum));
         $path = rtrim(UR_CONFIG_BASE, '/') . '/runs/j-sumfmt.summary.json';
-        $this->assertSame(json_encode($sum, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n", file_get_contents($path));
+        $real = ['state' => 'SUCCESS', 'startedAt' => '2026-01-01T00:00:00Z', 'finishedAt' => '2026-01-01T00:00:05Z', 'exitCode' => 0, 'reason' => ''];
+        $this->assertSame(json_encode($sum + ['lastReal' => $real], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n", file_get_contents($path));
         $this->assertSame([], glob(dirname($path) . '/.j-sumfmt.summary.json.*') ?: [], 'no temp file left behind');
         unlink($path);
     }

@@ -8,7 +8,10 @@ declare(strict_types=1);
  * Invoked detached by handler.php's runJob / dryRunJob actions, and by the
  * per-job cron line (with --trigger=schedule):
  *
- *   php /usr/local/emhttp/plugins/unraid.rsync/scripts/runner.php --job=<id> [--dry-run] [--trigger=<manual|schedule>]
+ *   php /usr/local/emhttp/plugins/unraid.rsync/scripts/runner.php --job=<id> [--dry-run] [--trigger=<manual|schedule>] [--gen=<hex>]
+ *
+ * --gen is the launch generation handler.php recorded before starting us
+ * (RunState::beginLaunch), so an Abort clicked before we start is honoured.
  *
  * It is a THIN shell: it parses --job / --dry-run, then delegates ALL the
  * orchestration (state, logging, SSH transport, preHook -> pairs -> postHook,
@@ -32,19 +35,21 @@ require_once __DIR__ . '/../include/Runner.php';
 
 /**
  * Parse the CLI args into the associative array
- * ['job' => <id>, 'dryRun' => bool, 'trigger' => <manual|schedule>]. Accepts
- * --job=<id> and --job <id>, --dry-run, and --trigger=<manual|schedule>. Unknown args are
+ * ['job' => <id>, 'dryRun' => bool, 'trigger' => <manual|schedule>, 'gen' => string]. Accepts
+ * --job=<id> and --job <id>, --dry-run, --trigger=<manual|schedule> and --gen=<hex>. Unknown args are
  * ignored. `trigger` defaults to 'manual' and is clamped to the closed set
- * (anything unrecognised -> 'manual') so a junk value can never propagate.
+ * (anything unrecognised -> 'manual') so a junk value can never propagate;
+ * Runner::run replaces a malformed gen with a fresh one.
  *
  * @param array<int,string> $argv
- * @return array{job:string,dryRun:bool,trigger:string}
+ * @return array{job:string,dryRun:bool,trigger:string,gen:string}
  */
 function ur_runner_parse_args(array $argv): array
 {
     $job     = '';
     $dryRun  = false;
     $trigger = 'manual';
+    $gen     = '';
     $n       = count($argv);
     for ($i = 1; $i < $n; $i++) {
         $arg = $argv[$i];
@@ -56,12 +61,14 @@ function ur_runner_parse_args(array $argv): array
             $job = $argv[++$i];
         } elseif (strncmp($arg, '--trigger=', 10) === 0) {
             $trigger = substr($arg, 10);
+        } elseif (strncmp($arg, '--gen=', 6) === 0) {
+            $gen = substr($arg, 6);
         }
     }
     if ($trigger !== 'schedule') {
         $trigger = 'manual';
     }
-    return ['job' => trim($job), 'dryRun' => $dryRun, 'trigger' => $trigger];
+    return ['job' => trim($job), 'dryRun' => $dryRun, 'trigger' => $trigger, 'gen' => $gen];
 }
 
 /**
@@ -120,6 +127,6 @@ if (PHP_SAPI === 'cli' && !defined('UR_RUNNER_TESTING')) {
         fwrite(STDERR, "usage: runner.php --job=<id> [--dry-run] [--trigger=manual|schedule]\n");
         exit(2);
     }
-    $result = Runner::run($args['job'], $args['dryRun'], $args['trigger']);
+    $result = Runner::run($args['job'], $args['dryRun'], $args['trigger'], $args['gen']);
     exit(ur_runner_exit_code((string) $result['state']));
 }

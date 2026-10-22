@@ -792,7 +792,9 @@ ur_emit_status_poller();
         $jid     = (string) ($job['id'] ?? '');
         $running = ($jid !== '') ? RunState::isRunning($jid) : false;
         $summary = ($jid !== '') ? Runner::readSummary($jid) : null;
-        $state   = PageHelpers::deriveState($running, $summary);
+        $lastReal = Runner::lastRealFor($jid, $summary);
+        $state   = PageHelpers::deriveState($running, $lastReal);
+        $dryLine = PageHelpers::dryRunLine(PageHelpers::lastDryRun($summary), $urNow);
         $snapLast = Config::normalizeSnapshot($job['snapshot'] ?? null) !== null ? Snapshot::lastSnapshot($summary) : null;
     ?>
       <tr data-jobid="<?=htmlspecialchars($jid, ENT_QUOTES, 'UTF-8')?>">
@@ -807,7 +809,7 @@ ur_emit_status_poller();
         <td><?=!empty($job['enabled']) ? _('Yes') : _('No')?></td>
         <td><?=htmlspecialchars((string)($job['transport'] ?? ''), ENT_QUOTES, 'UTF-8')?></td>
         <td><?=!empty($job['manualOnly']) ? _('Manual') : htmlspecialchars((string)($job['schedule'] ?? ''), ENT_QUOTES, 'UTF-8')?></td>
-        <td class="ur-last-run-cell"><?=htmlspecialchars(PageHelpers::lastRunLabel($summary, $urNow), ENT_QUOTES, 'UTF-8')?><?php if ($snapLast !== null): ?><div class="ur-snap-status" title="<?=htmlspecialchars($snapLast['stamp'], ENT_QUOTES, 'UTF-8')?>"><?=htmlspecialchars($snapLast['label'], ENT_QUOTES, 'UTF-8')?></div><?php endif; ?></td>
+        <td class="ur-last-run-cell"><?=htmlspecialchars(PageHelpers::lastRunLabel($lastReal, $urNow), ENT_QUOTES, 'UTF-8')?><?php if ($dryLine !== ''): ?><div class="ur-dry-run"><?=htmlspecialchars($dryLine, ENT_QUOTES, 'UTF-8')?></div><?php endif; ?><?php if ($snapLast !== null): ?><div class="ur-snap-status" title="<?=htmlspecialchars($snapLast['stamp'], ENT_QUOTES, 'UTF-8')?>"><?=htmlspecialchars($snapLast['label'], ENT_QUOTES, 'UTF-8')?></div><?php endif; ?></td>
         <td class="ur-next-run-cell"><?=htmlspecialchars(PageHelpers::nextRunLabel($job, $urNow), ENT_QUOTES, 'UTF-8')?></td>
       </tr>
     <?php endforeach; endif; ?>
@@ -1440,7 +1442,14 @@ ur_emit_status_poller();
     if (!row) { return; }
     var cell = row.querySelector('.ur-last-run-cell');
     if (cell) {
-      cell.textContent = U.lastRunLabel(s.lastRun, now);
+      /* The badge's run: a dry run is the neutral second line. */
+      cell.textContent = U.lastRunLabel(s.lastReal, now);
+      if (s.lastDryRun) {
+        var dryLine = document.createElement('div');
+        dryLine.className = 'ur-dry-run';
+        dryLine.textContent = U.dryRunLine(s.lastDryRun, now);
+        cell.appendChild(dryLine);
+      }
       /* Snapshot jobs only: the label is built server-side in the system
        * timezone, with the UTC stamp on hover. */
       if (s.snapshot) {

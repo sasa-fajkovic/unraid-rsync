@@ -1965,7 +1965,7 @@ function ur_php_binary(): string
  * failure) is surfaced to the caller so the UI doesn't claim "Run started" when
  * nothing actually detached.
  */
-function ur_launch_runner(string $jobId, bool $dryRun): bool
+function ur_launch_runner(string $jobId, bool $dryRun, string $gen = ''): bool
 {
     $script = ur_runner_script_path();
     // Don't claim a launch when the runner script isn't even present.
@@ -1984,6 +1984,9 @@ function ur_launch_runner(string $jobId, bool $dryRun): bool
     // escaping needed; placed AFTER --job so RunState::cmdlineMatchesJob still
     // matches the --job=<id> token.
     $cmd .= ' --trigger=manual';
+    if ($gen !== '') {
+        $cmd .= ' --gen=' . escapeshellarg($gen);
+    }
     // MANDATORY: redirect both streams to /dev/null and background, else the
     // request hangs waiting on the child. setsid (when available) detaches the
     // runner into its own session/process group so abort can SIGTERM the whole
@@ -2051,7 +2054,29 @@ function ur_action_run_job(bool $dryRun): void
         return;
     }
 
-    if (!ur_launch_runner($jobId, $dryRun)) {
+    // Record this launch's generation before the runner exists, so an Abort
+    // clicked before it starts is kept for it (and only for it). Under the run
+    // lock: a runner that holds it may be writing the same state record.
+    try {
+        $lock = RunState::acquireLock($jobId);
+    } catch (Throwable $e) {
+        sendError('Could not prepare the run: ' . $e->getMessage(), 500, ['running' => false]);
+        return;
+    }
+    if ($lock === null) {
+        sendError('This job is already running.', 409, ['running' => true]);
+        return;
+    }
+    try {
+        $gen = RunState::beginLaunch($jobId);
+    } catch (Throwable $e) {
+        sendError('Could not prepare the run: ' . $e->getMessage(), 500, ['running' => false]);
+        return;
+    } finally {
+        RunState::releaseLock($lock);
+    }
+
+    if (!ur_launch_runner($jobId, $dryRun, $gen)) {
         // The detached launch failed to dispatch (missing runner script / shell
         // failure). Report it rather than misleading the UI into "Run started".
         sendError('Failed to launch the runner process.', 500, ['running' => false]);
@@ -2108,8 +2133,9 @@ function ur_action_abort_job(): void
     }
 
     // Set the flag first - the runner polls it between pairs, so this alone
-    // guarantees a stop even if the pid is gone / signalling fails.
-    RunState::requestAbort($jobId);
+    // guarantees a stop even if the pid is gone / signalling fails. It names
+    // the launch it is for: the running one, or the one runJob just recorded.
+    RunState::requestAbort($jobId, (string) (RunState::read($jobId)['gen'] ?? ''));
 
     // Only signal a pid we have VERIFIED is this job's live runner. isRunning()
     // is PID-reuse-safe (running flag + posix_kill + cmdline match), so this
@@ -2213,10 +2239,11 @@ function ur_derive_state(bool $running, ?array $summary): string
 /**
  * Normalise a last-run summary into the canonical lastRun JSON shape, or null
  * when there is no (valid) summary. Defensive against a partial/corrupt file:
- * any missing field falls back to a safe default.
+ * any missing field falls back to a safe default. exitCode is null for a run
+ * that never produced one (crashed, or failed before it started).
  *
  * @param array<string,mixed>|null $summary
- * @return array{state:string,startedAt:string,finishedAt:string,exitCode:int,durationSec:int,dryRun:bool}|null
+ * @return array{state:string,startedAt:string,finishedAt:string,exitCode:int|null,durationSec:int,dryRun:bool}|null
  */
 function ur_last_run_shape(?array $summary): ?array
 {
@@ -2227,7 +2254,7 @@ function ur_last_run_shape(?array $summary): ?array
         'state'       => (string) ($summary['state'] ?? ''),
         'startedAt'   => (string) ($summary['startedAt'] ?? ''),
         'finishedAt'  => (string) ($summary['finishedAt'] ?? ''),
-        'exitCode'    => (int) ($summary['exitCode'] ?? 0),
+        'exitCode'    => array_key_exists('exitCode', $summary) && $summary['exitCode'] === null ? null : (int) ($summary['exitCode'] ?? 0),
         'durationSec' => (int) ($summary['durationSec'] ?? 0),
         'dryRun'      => !empty($summary['dryRun']),
     ];
@@ -2235,12 +2262,17 @@ function ur_last_run_shape(?array $summary): ?array
 
 /**
  * GET getStatus: a per-job status map for ALL configured jobs. Each entry:
- *   { name, enabled, manualOnly, running, state, lastRun: {...}|null, nextRun: epoch|null }
+ *   { name, enabled, manualOnly, running, state, lastRun: {...}|null,
+ *     lastReal: {...}|null, lastDryRun: {label, finishedAt}|null, nextRun: epoch|null }
  * plus, for a snapshot job only, snapshot: {stamp, committed, label}|null
  * (Snapshot::lastSnapshot of the last run's summary).
  * running  <- RunState::isRunning (PID-reuse-safe, self-heals stale state)
- * lastRun  <- Runner::readSummary (the /boot durable summary)
- * state    <- ur_derive_state (RUNNING overrides summary; PENDING when none)
+ * lastRun  <- Runner::readSummary (the /boot durable summary): the last
+ *             execution of any kind, dry runs included
+ * lastReal <- Runner::lastRealFor: the last NON-dry run, which the badge, state
+ *             and Last-run time come from
+ * lastDryRun <- PageHelpers::lastDryRun: set while the last execution was a dry run
+ * state    <- ur_derive_state over lastReal (RUNNING overrides; PENDING when none)
  * nextRun  <- Cron::nextRun for an enabled job with a valid schedule, else null
  * enabled  <- the job's enabled flag, so the UI can render "disabled" for the
  *             Next-run cell (distinct from an enabled job with no computable next)
@@ -2298,13 +2330,16 @@ function ur_action_get_status(): void
                 }
             }
 
+            $lastReal = Runner::lastRealFor($id, $summary);
             $out[$id] = [
                 'name'       => (string) ($job['name'] ?? $id),
                 'enabled'    => !empty($job['enabled']),
                 'manualOnly' => $manualOnly,
                 'running'    => $running,
-                'state'      => ur_derive_state($running, $summary),
+                'state'      => ur_derive_state($running, $lastReal),
                 'lastRun'    => ur_last_run_shape($summary),
+                'lastReal'   => $lastReal,
+                'lastDryRun' => PageHelpers::lastDryRun($summary),
                 'nextRun'    => $nextRun,
             ];
             // Changes on every History append/prune - including a SKIPPED run
