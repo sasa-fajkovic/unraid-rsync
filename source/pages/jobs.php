@@ -998,7 +998,7 @@ ur_emit_status_poller();
      * card on screen holds unsaved edits. */
     if (isLaunch && isDirty(jobId)) {
       syncRunButtons(jobId, jobRunning(jobId));
-      urToast('Apply changes first.', false);
+      urToast(urI18n('jobs.applyFirst', 'Apply changes first.'), false);
       return;
     }
     var card = btn && btn.closest ? btn.closest('.ur-job-card') : null;
@@ -1025,10 +1025,10 @@ ur_emit_status_poller();
         if (result) {
           if (okLaunch) {
             result.className = 'ur-job-run-result ur-result ur-ok';
-            result.textContent = res.body.message || 'Done.';
+            result.textContent = res.body.message || urI18n('done', 'Done.');
           } else {
             result.className = 'ur-job-run-result ur-result ur-err';
-            result.textContent = window.urAjax.errText(res, 'Action failed.');
+            result.textContent = window.urAjax.errText(res, urI18n('jobs.actionFailed', 'Action failed.'));
           }
         }
         /* Restore the clicked button's label. After a failed launch the
@@ -1043,14 +1043,14 @@ ur_emit_status_poller();
             /* Optimistic RUNNING badge + a toast + jump straight to the live log
              * so the user sees it pick up without hunting for the Logs button. */
             setBadgeRunning(jobId);
-            urToast(action === 'dryRunJob' ? 'Dry-run started.' : 'Run started.', true);
+            urToast(action === 'dryRunJob' ? urI18n('jobs.dryStarted', 'Dry-run started.') : urI18n('jobs.runStarted', 'Run started.'), true);
             var jobName = (btn && btn.getAttribute('data-jobname')) || jobId;
             openLogViewer(jobId, jobName);
           } else {
-            urToast(res.body.message || 'Done.', true);
+            urToast(res.body.message || urI18n('done', 'Done.'), true);
           }
         } else {
-          urToast(window.urAjax.errText(res, 'Action failed.'), false);
+          urToast(window.urAjax.errText(res, urI18n('jobs.actionFailed', 'Action failed.')), false);
         }
         /* Poll now, and fast for a while, so the badge + buttons pick up the
          * new running state before the runner has even registered. */
@@ -1073,8 +1073,8 @@ ur_emit_status_poller();
     var nameInput = card.querySelector('input[name$="[name]"]');
     var name = (nameInput && nameInput.value.trim()) || '';
     confirmMsg.textContent = name
-      ? ('Remove the job "' + name + '"? It is deleted permanently when you click Apply.')
-      : 'Remove this job? It is deleted permanently when you click Apply.';
+      ? urI18n('jobs.removeNamed', 'Remove the job "%s"? It is deleted permanently when you click Apply.', name)
+      : urI18n('jobs.removeUnnamed', 'Remove this job? It is deleted permanently when you click Apply.');
     confirmModal.classList.add('ur-open');
     confirmModal.setAttribute('aria-hidden', 'false');
     var ok = document.getElementById('ur-confirm-ok');
@@ -1191,7 +1191,7 @@ ur_emit_status_poller();
         if (!ot) { return; }
         var other = tr !== 'LOCAL' && ot !== tr;
         o.hidden = other && !o.selected;
-        o.textContent = o.getAttribute('data-label') + ((other && o.selected) ? ' (other transport)' : '');
+        o.textContent = o.getAttribute('data-label') + ((other && o.selected) ? ' ' + urI18n('jobs.otherTransport', '(other transport)') : '');
       });
     }
     Array.prototype.forEach.call(card.querySelectorAll('.ur-for-transport'), function (el) {
@@ -1363,19 +1363,23 @@ ur_emit_status_poller();
     expr = (expr || '').trim().replace(/\s+/g, ' ');
     var f = expr.split(' ');
     if (expr === '' || f.length !== 5) { return ''; }
-    var DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-    var MON = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    var DOW = [urI18n('dow.0', 'Sun'), urI18n('dow.1', 'Mon'), urI18n('dow.2', 'Tue'), urI18n('dow.3', 'Wed'),
+      urI18n('dow.4', 'Thu'), urI18n('dow.5', 'Fri'), urI18n('dow.6', 'Sat')];
+    var MON = ['', urI18n('mon.1', 'Jan'), urI18n('mon.2', 'Feb'), urI18n('mon.3', 'Mar'), urI18n('mon.4', 'Apr'),
+      urI18n('mon.5', 'May'), urI18n('mon.6', 'Jun'), urI18n('mon.7', 'Jul'), urI18n('mon.8', 'Aug'),
+      urI18n('mon.9', 'Sep'), urI18n('mon.10', 'Oct'), urI18n('mon.11', 'Nov'), urI18n('mon.12', 'Dec')];
     var min = f[0], hour = f[1], dom = f[2], mon = f[3], dow = f[4];
     var isNum = function (x) { return /^\d+$/.test(x); };
     var pad = function (n) { n = parseInt(n, 10); return (n < 10 ? '0' : '') + n; };
 
-    var timeStr;
-    if (isNum(min) && isNum(hour)) { timeStr = 'at ' + pad(hour) + ':' + pad(min); }
-    else if (min === '*' && hour === '*') { timeStr = 'every minute'; }
-    else if (/^\*\/\d+$/.test(min) && hour === '*') { timeStr = 'every ' + min.split('/')[1] + ' minutes'; }
-    else if (isNum(min) && hour === '*') { timeStr = 'at minute ' + (+min) + ' of every hour'; }
-    else if ((min === '0') && /^\*\/\d+$/.test(hour)) { timeStr = 'every ' + hour.split('/')[1] + ' hours'; }
-    else { timeStr = 'minute ' + min + ', hour ' + hour; }
+    /* every: an "every …" reading already says it repeats daily. */
+    var timeStr, every = false;
+    if (isNum(min) && isNum(hour)) { timeStr = urI18n('cron.at', 'at %s', pad(hour) + ':' + pad(min)); }
+    else if (min === '*' && hour === '*') { timeStr = urI18n('cron.everyMinute', 'every minute'); every = true; }
+    else if (/^\*\/\d+$/.test(min) && hour === '*') { timeStr = urI18n('cron.everyMinutes', 'every %s minutes', min.split('/')[1]); every = true; }
+    else if (isNum(min) && hour === '*') { timeStr = urI18n('cron.minuteOfHour', 'at minute %s of every hour', +min); }
+    else if ((min === '0') && /^\*\/\d+$/.test(hour)) { timeStr = urI18n('cron.everyHours', 'every %s hours', hour.split('/')[1]); every = true; }
+    else { timeStr = urI18n('cron.minuteHour', 'minute %s, hour %s', min, hour); }
 
     function names(field, arr) {
       return field.split(',').map(function (part) {
@@ -1389,15 +1393,15 @@ ur_emit_status_poller();
     var parts = [];
     if (dow !== '*') {
       var dn = dow.replace(/7/g, '0');
-      parts.push(/^\d+([,-]\d+)*$/.test(dn) ? ('on ' + names(dn, DOW)) : ('on weekday ' + dow));
+      parts.push(/^\d+([,-]\d+)*$/.test(dn) ? urI18n('cron.onDays', 'on %s', names(dn, DOW)) : urI18n('cron.onWeekday', 'on weekday %s', dow));
     }
-    if (dom !== '*') { parts.push(isNum(dom) ? ('on day ' + (+dom)) : ('on day-of-month ' + dom)); }
-    if (mon !== '*') { parts.push(/^\d+([,-]\d+)*$/.test(mon) ? ('in ' + names(mon, MON)) : ('in month ' + mon)); }
+    if (dom !== '*') { parts.push(isNum(dom) ? urI18n('cron.onDay', 'on day %s', +dom) : urI18n('cron.onDayOfMonth', 'on day-of-month %s', dom)); }
+    if (mon !== '*') { parts.push(/^\d+([,-]\d+)*$/.test(mon) ? urI18n('cron.inMonths', 'in %s', names(mon, MON)) : urI18n('cron.inMonth', 'in month %s', mon)); }
 
     var everyDay = (dom === '*' && dow === '*');
     var text;
-    if (/^every /.test(timeStr) && everyDay) { text = timeStr; }
-    else if (everyDay) { text = timeStr + ' every day'; }
+    if (every && everyDay) { text = timeStr; }
+    else if (everyDay) { text = urI18n('cron.everyDay', '%s every day', timeStr); }
     else { text = timeStr + ' ' + parts.join(' '); }
     return text.charAt(0).toUpperCase() + text.slice(1) + '.';
   }
@@ -1430,10 +1434,10 @@ ur_emit_status_poller();
     form.addEventListener('submit', function (ev) {
       ev.preventDefault();
       var result = document.getElementById('ur-jobs-result');
-      window.urAjax.show(result, true, 'Saving…');
+      window.urAjax.show(result, true, urI18n('saving', 'Saving…'));
       window.urAjax.postFormElement(form).then(function (res) {
         if (res.ok && res.body && res.body.ok) {
-          var msg = res.body.message || 'Saved.';
+          var msg = res.body.message || urI18n('saved', 'Saved.');
           if (res.body.warnings && res.body.warnings.length) {
             msg += ' (' + res.body.warnings.join('; ') + ')';
           }
@@ -1443,7 +1447,7 @@ ur_emit_status_poller();
            * whose remote path legitimately warns (/data, /backup, ...). */
           window.urUtil.reloadSoon(!!(res.body.warnings && res.body.warnings.length));
         } else {
-          window.urAjax.show(result, false, window.urAjax.errText(res, 'Save failed.'));
+          window.urAjax.show(result, false, window.urAjax.errText(res, urI18n('saveFailed', 'Save failed.')));
         }
       });
     });
@@ -1529,8 +1533,8 @@ ur_emit_status_poller();
     if (!jobId || !modal) { return; }
     viewer.jobId = jobId;
     viewer.run = '';
-    if (modalTitle) { modalTitle.textContent = modalTitle.title = 'Run log — ' + jobName; }
-    if (modalPre) { modalPre.textContent = 'Loading…'; }
+    if (modalTitle) { modalTitle.textContent = modalTitle.title = urI18n('jobs.logTitle', 'Run log — %s', jobName); }
+    if (modalPre) { modalPre.textContent = urI18n('loading', 'Loading…'); }
     /* Remember what to restore focus to, then move focus into the dialog (the
      * Close button) so keyboard users land inside it. */
     modalReturnFocus = (document.activeElement && document.activeElement.focus)
@@ -1577,8 +1581,8 @@ ur_emit_status_poller();
             lbl += ' \u2192 ' + (fin.slice(0, 10) === lbl.slice(0, 10) ? fin.slice(11) : fin);
           }
           if (run.state) { lbl += '  ' + window.urBadge.labelFor(run.state); }
-          if (run.dryRun) { lbl += ' (dry run)'; }
-          if (idx === 0) { lbl += '  (latest)'; }
+          if (run.dryRun) { lbl += ' ' + urI18n('jobs.dryRunTag', '(dry run)'); }
+          if (idx === 0) { lbl += '  ' + urI18n('jobs.latestTag', '(latest)'); }
           opt.textContent = lbl;          // textContent: never raw innerHTML
           opt.title = run.id;             // raw id still reachable for support
           modalSel.appendChild(opt);
@@ -1643,7 +1647,7 @@ ur_emit_status_poller();
   if (modalSel) {
     modalSel.addEventListener('change', function () {
       viewer.run = (modalSel.selectedIndex > 0) ? modalSel.value : '';
-      if (modalPre) { modalPre.textContent = 'Loading…'; }
+      if (modalPre) { modalPre.textContent = urI18n('loading', 'Loading…'); }
       fetchJobLog().then(function () {
         /* Re-arm tailing only when viewing a running run (the latest). */
         if (viewer.running) { startLogTail(); } else { stopLogTail(); }

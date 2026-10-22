@@ -358,7 +358,8 @@ on, forked from, or derived from any other plugin.
   dry run shows as a neutral second line (`PageHelpers::lastDryRun` /
   `dryRunLine`, "Dry-run OK · <time>", "Dry-run failed · …", JS mirror
   `window.urUtil.dryRunLine`, a muted suffix on the Dashboard). `getStatus`
-  keeps `lastRun` (the top level) and adds `lastReal` and `lastDryRun`.
+  keeps `lastRun` (the top level) and adds `lastReal` and `lastDryRun`
+  (`{label, finishedAt, state}`; the JS translates by `state`).
   `writeSummary` is a load-modify-save under `runs/<jobid>.summary.lock`.
   A runner that died (`reportCrashed`) writes state `CRASHED` (summary only;
   its History record stays `FAILED`/`crashed`) and a scheduled hard failure
@@ -464,7 +465,13 @@ on, forked from, or derived from any other plugin.
   **`_()` and `ur_t()` return HTML, not text**: Unraid's `_()` turns `'` into
   `&apos;` and `*x*` into `<i>x</i>`, so `ur_h(ur_t(...))` printed a literal
   `&apos;`. Emit `_()` output raw; anything that must be escaped (attributes, JS,
-  a mix with user data) takes `ur_t_text()` and then `ur_h()`. Captured run output is also **redacted** of
+  a mix with user data) takes `ur_t_text()` and then `ur_h()`. **A string a
+  script renders goes through `urI18n('key', 'English', ...args)`**, never a bare
+  literal: the key lives in `PageHelpers::I18N` (`i18n()` adds `state.*` /
+  `dryRun.*` from `STATES`), `ur_emit_i18n()` sends it once as `UR_I18N`, and the
+  PHP renderers read the same entries through `PageHelpers::t()`, so on a
+  translated webGui the first poll no longer repaints labels in English.
+  `OptionsFormHelpTest` checks every call site against the map. Captured run output is also **redacted** of
   per-run tmpfs secret paths and **size-capped** before it is written
   (`Logger::setRedaction` / `Logger::sink` / `UR_MAX_RUN_LOG_BYTES`).
 - **CSRF**: every state-changing POST verifies the webGui `csrf_token` via

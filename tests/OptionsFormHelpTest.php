@@ -1023,12 +1023,12 @@ final class OptionsFormHelpTest extends TestCase
         $this->assertIsString($js);
 
         $this->assertSame(0, preg_match_all('/resultEl\.innerHTML/', $js));
-        $this->assertStringContainsString("resultEl.textContent = b.message || 'OK';", $js);
+        $this->assertStringContainsString("resultEl.textContent = b.message || urI18n('ok', 'OK');", $js);
         $this->assertStringContainsString(
             "resultEl.textContent = b.message + (b.reason ? ' [' + b.reason + ']' : '');",
             $js
         );
-        $this->assertStringContainsString("resultEl.textContent = window.urAjax.errText(res, 'Connection test failed.');", $js);
+        $this->assertStringContainsString("resultEl.textContent = window.urAjax.errText(res, urI18n('conn.testFailed', 'Connection test failed.'));", $js);
 
         // Nothing anywhere on the page may put a RESPONSE value into innerHTML.
         // The three innerHTML sites that exist are page-authored markup (the
@@ -1593,9 +1593,9 @@ final class OptionsFormHelpTest extends TestCase
         }
         $hist = (string) file_get_contents($base . 'pages/history.php');
         $this->assertStringContainsString("if ('snapshot' in r) { stTd.appendChild(snapLine(r)); }", $hist);
-        $this->assertStringContainsString("'committed: ' + (r.committed ? 'yes' : 'no')", $hist);
-        $this->assertStringContainsString("'pruned: ' + (parseInt(r.pruned, 10) || 0)", $hist);
-        $this->assertStringContainsString("if (r.suspect) { bits.push('SUSPECT'); }", $hist);
+        $this->assertStringContainsString("urI18n('hist.committed', 'committed: %s', r.committed ? urI18n('hist.yes', 'yes') : urI18n('hist.no', 'no'))", $hist);
+        $this->assertStringContainsString("urI18n('hist.pruned', 'pruned: %s', parseInt(r.pruned, 10) || 0)", $hist);
+        $this->assertStringContainsString("if (r.suspect) { bits.push(urI18n('hist.suspect', 'SUSPECT')); }", $hist);
         $this->assertStringContainsString('window.urFmtLocal(Date.UTC(', $hist, 'system-local, never the browser zone');
         $this->assertStringContainsString('d.title = r.snapshot;', $hist, 'the UTC stamp on hover');
     }
@@ -1854,7 +1854,7 @@ final class OptionsFormHelpTest extends TestCase
 
         // UXB-8: the exit-code meanings and the reason / last rsync error tooltip.
         $this->assertStringContainsString('"11":"error in file I\/O"', $html);
-        $this->assertStringContainsString("'rsync exit ' + r.exitCode + ': ' + EXIT_MEANINGS[r.exitCode]", $html);
+        $this->assertStringContainsString("urI18n('hist.exitTitle', 'rsync exit %s: %s', r.exitCode, EXIT_MEANINGS[r.exitCode])", $html);
         $this->assertStringContainsString('b.title = r.reason || r.lastError;', $html);
         // UXB-11 / UXB-16: the modal title and a truncation notice that is not help text.
         $this->assertStringContainsString("' · ' + typeLabel(r) + ' · ' + fmtWhen(r.startedAt)", $html);
@@ -1942,6 +1942,78 @@ final class OptionsFormHelpTest extends TestCase
         $this->assertStringNotContainsString('setInterval(pollStatus', $html);
         $this->assertStringNotContainsString('setInterval(pollPluginLog', $html);
         $this->assertSame(4, substr_count($html, 'window.urStatus.subscribe('), 'Overview, Jobs, Status and History subscribe');
+    }
+
+    /**
+     * Every string a script renders goes through urI18n('key', 'English'): the
+     * key must be in the ONE emitted map, with that same English, and the map
+     * must be defined (once) before any script calls it.
+     */
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testEveryScriptStringIsAnEntryOfTheOneEmittedI18nMap(): void
+    {
+        $html = '';
+        foreach (['overview', 'jobs', 'status', 'history', 'connections', 'credentials', 'settings'] as $tab) {
+            $html .= $this->renderPageBody(__DIR__ . '/../source/pages/' . $tab . '.php');
+        }
+        $map = PageHelpers::i18n();
+
+        $this->assertSame(1, preg_match_all('/window\.UR_I18N = (\{.*?\});\n/', $html, $emitted));
+        $this->assertSame($map, json_decode($emitted[1][0], true), 'English here, so the emitted map is i18n() verbatim');
+        $define = strpos($html, 'window.urI18n = function');
+        $this->assertNotFalse($define);
+
+        $this->assertGreaterThan(100, preg_match_all("/urI18n\('([^']+)', '((?:[^'\\\\]|\\\\.)*)'/", $html, $calls, PREG_OFFSET_CAPTURE));
+        foreach ($calls[1] as $i => [$key, $offset]) {
+            $this->assertGreaterThan($define, $offset, "urI18n('$key') runs before the map is defined");
+            $this->assertArrayHasKey($key, $map, "urI18n('$key') has no map entry");
+            $this->assertSame($map[$key], stripslashes($calls[2][$i][0]), "urI18n('$key') falls back to different English");
+        }
+        $used = array_unique(array_column($calls[1], 0));
+        $helpers = (string) file_get_contents(__DIR__ . '/../source/include/PageHelpers.php');
+        foreach (array_keys(PageHelpers::I18N) as $key) {
+            $this->assertTrue(in_array($key, $used, true) || str_contains($helpers, "'$key'"), "map entry $key is never used");
+        }
+        foreach (array_keys(PageHelpers::STATES) as $state) {
+            $this->assertArrayHasKey('state.' . $state, $map, 'urBadge.labelFor reads state.<STATE>');
+            $this->assertArrayHasKey('dryRun.' . $state, $map, 'urUtil.dryRunLine reads dryRun.<STATE>');
+        }
+        $this->assertStringContainsString("urI18n('state.' + k, STATES[k].label)", $html);
+        $this->assertStringContainsString("urI18n('dryRun.' + dry.state, dry.label)", $html);
+    }
+
+    /**
+     * On a translated webGui the server render and the JS repaint read the same
+     * translations: PageHelpers::t() for the PHP labels (the badge vocabulary
+     * included) and UR_I18N, built from t(), for the scripts.
+     */
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testServerLabelsAndTheScriptMapShareOneTranslation(): void
+    {
+        PageHelpers::$translate = static fn(string $s): string => '«' . $s . '»';
+        try {
+            $this->assertSame('«Failed»', ur_state_label('FAILED'));
+            $this->assertSame('«Never run»', ur_state_label('whatever'));
+            $this->assertSame('«in 5s»', PageHelpers::relativeTime(105, 100));
+            $this->assertSame('«now»', PageHelpers::relativeTime(100, 100));
+            $this->assertSame('«manual (on demand)»', PageHelpers::nextRunLabel(['manualOnly' => true], 100));
+            $this->assertSame('«disabled»', PageHelpers::nextRunLabel(['enabled' => false], 100));
+            $this->assertSame('«Dry-run failed»', PageHelpers::lastDryRun(['state' => 'FAILED', 'dryRun' => true])['label'] ?? null);
+            $this->assertSame('«Key "a" generated. Fingerprint: b»', PageHelpers::t('cred.generated', 'a', 'b'));
+
+            $js = $this->emitted('ur_emit_i18n');
+            $this->assertSame(1, preg_match('/window\.UR_I18N = (\{.*?\});\n/', $js, $m));
+            $map = json_decode($m[1], true);
+            $this->assertIsArray($map);
+            foreach (['state.FAILED', 'state.PENDING', 'dryRun.SUCCESS', 'rel.future', 'next.manual', 'cron.at'] as $key) {
+                $this->assertSame(PageHelpers::t($key), $map[$key], $key);
+            }
+            $this->assertSame('«Failed»', $map['state.FAILED']);
+        } finally {
+            PageHelpers::$translate = null;
+        }
     }
 
     #[RunInSeparateProcess]
@@ -2182,7 +2254,7 @@ final class OptionsFormHelpTest extends TestCase
         // must compose the same two parts in the same order.
         $js = $this->emitted('ur_emit_page_assets');
         $this->assertSame(1, preg_match('/function dryRunLine\(dry, now\) \{(.*?)\n  \}/s', $js, $m));
-        $this->assertStringContainsString("dry ? dry.label + ' \\u00b7 ' + lastRunLabel(dry, now) : ''", $m[1]);
+        $this->assertStringContainsString("dry ? urI18n('dryRun.' + dry.state, dry.label) + ' \\u00b7 ' + lastRunLabel(dry, now) : ''", $m[1]);
         $this->assertStringContainsString('dryRunLine: dryRunLine', $js);
         $dry = ['label' => 'Dry-run OK', 'finishedAt' => '2026-01-01T00:00:00Z'];
         $this->assertSame('Dry-run OK · ' . PageHelpers::lastRunLabel($dry, 1767225660), PageHelpers::dryRunLine($dry, 1767225660));
@@ -2286,7 +2358,7 @@ final class OptionsFormHelpTest extends TestCase
         $guard = strpos($post, 'if (isLaunch && isDirty(jobId)) {');
         $this->assertNotFalse($guard, 'the launch is guarded client-side');
         $this->assertLessThan(strpos($post, 'window.urAjax.postForm('), $guard, 'before anything is posted');
-        $this->assertStringContainsString("urToast('Apply changes first.', false);", $post);
+        $this->assertStringContainsString("urToast(urI18n('jobs.applyFirst', 'Apply changes first.'), false);", $post);
         $this->assertStringContainsString('if (isLaunch) { syncRunButtons(jobId, jobRunning(jobId)); }', $post, 'a failed launch re-syncs');
         $this->assertStringNotContainsString('if (!okLaunch) { btn.disabled = false; }', $post);
 

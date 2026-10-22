@@ -231,7 +231,7 @@ final class PageHelpersTest extends TestCase
             'WARNING' => 'Dry-run warning', 'CRASHED' => 'Dry-run crashed'];
         foreach ($cases as $state => $label) {
             $this->assertSame(
-                ['label' => $label, 'finishedAt' => '2026-01-01T01:23:15Z'],
+                ['label' => $label, 'finishedAt' => '2026-01-01T01:23:15Z', 'state' => $state],
                 PageHelpers::lastDryRun(['state' => $state, 'dryRun' => true, 'finishedAt' => '2026-01-01T01:23:15Z'])
             );
         }

@@ -188,17 +188,17 @@ ur_emit_form_enable_assets();
     form.addEventListener('submit', function (ev) {
       ev.preventDefault();
       var result = document.getElementById('ur-settings-result');
-      window.urAjax.show(result, true, 'Saving…');
+      window.urAjax.show(result, true, urI18n('saving', 'Saving…'));
       window.urAjax.postFormElement(form).then(function (res) {
         if (res.ok && res.body && res.body.ok) {
-          var msg = res.body.message || 'Saved.';
+          var msg = res.body.message || urI18n('saved', 'Saved.');
           if (res.body.warnings && res.body.warnings.length) {
             msg += ' (' + res.body.warnings.join('; ') + ')';
           }
           window.urAjax.show(result, true, msg);
           if (res.body.credentials) { showCredentials(res.body.credentials); }
         } else {
-          window.urAjax.show(result, false, window.urAjax.errText(res, 'Save failed.'));
+          window.urAjax.show(result, false, window.urAjax.errText(res, urI18n('saveFailed', 'Save failed.')));
         }
       });
     });

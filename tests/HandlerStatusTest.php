@@ -1269,7 +1269,7 @@ final class HandlerStatusTest extends TestCase
             'exitCode' => 0, 'durationSec' => 60, 'dryRun' => true], $entry['lastRun'], 'lastRun is unchanged: the last execution');
         $this->assertSame(['state' => 'FAILED', 'startedAt' => '2026-10-20T03:00:00Z', 'finishedAt' => '2026-10-20T03:05:00Z',
             'exitCode' => 12, 'reason' => ''], $entry['lastReal']);
-        $this->assertSame(['label' => 'Dry-run OK', 'finishedAt' => '2026-10-21T09:01:00Z'], $entry['lastDryRun']);
+        $this->assertSame(['label' => 'Dry-run OK', 'finishedAt' => '2026-10-21T09:01:00Z', 'state' => 'SUCCESS'], $entry['lastDryRun']);
     }
 
     public function testGetStatusShowsACrashedRunAndItsMissingExitCode(): void

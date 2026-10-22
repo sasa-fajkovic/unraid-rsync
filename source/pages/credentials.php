@@ -235,11 +235,11 @@ ur_emit_page_assets();
       }
     }
     field.value = pub;
-    field.title = 'Copy manually: select all and copy';
+    field.title = urI18n('cred.copyTitle', 'Copy manually: select all and copy');
     field.focus();
     field.select();
     var old = btn.textContent;
-    btn.textContent = 'Copy manually:';
+    btn.textContent = urI18n('cred.copyManually', 'Copy manually:');
     setTimeout(function () { btn.textContent = old; }, 1600);
   }
 
@@ -251,16 +251,16 @@ ur_emit_page_assets();
     genBtn.addEventListener('click', function () {
       var name = (document.getElementById('ur_key_name').value || '').trim();
       var type = document.getElementById('ur_key_type').value;
-      if (!name) { window.urAjax.show(keyResult, false, 'Enter a key name first.'); return; }
-      window.urAjax.show(keyResult, true, 'Generating…');
+      if (!name) { window.urAjax.show(keyResult, false, urI18n('cred.enterName', 'Enter a key name first.')); return; }
+      window.urAjax.show(keyResult, true, urI18n('cred.generating', 'Generating…'));
       window.urAjax.postForm(HANDLER, { action: 'generateKey', name: name, type: type }, CSRF).then(function (res) {
         if (res.ok && res.body && res.body.ok) {
-          window.urAjax.show(keyResult, true, 'Key "' + res.body.name + '" generated. Fingerprint: ' + (res.body.fingerprint || '?'));
+          window.urAjax.show(keyResult, true, urI18n('cred.generated', 'Key "%s" generated. Fingerprint: %s', res.body.name, res.body.fingerprint || '?'));
           window.urUtil.reloadSoon(false);
         } else {
-          window.urAjax.show(keyResult, false, window.urAjax.errText(res, 'Key generation failed.'));
+          window.urAjax.show(keyResult, false, window.urAjax.errText(res, urI18n('cred.genFailed', 'Key generation failed.')));
         }
-      }).catch(function (e) { window.urAjax.show(keyResult, false, 'Unexpected error: ' + (e && e.message ? e.message : e)); });
+      }).catch(function (e) { window.urAjax.show(keyResult, false, urI18n('unexpected', 'Unexpected error: %s', e && e.message ? e.message : e)); });
     });
   }
 
@@ -270,17 +270,17 @@ ur_emit_page_assets();
       var name = (document.getElementById('ur_key_import_name').value || '').trim();
       var priv = document.getElementById('ur_key_import_priv').value || '';
       var pub  = document.getElementById('ur_key_import_pub').value || '';
-      if (!name) { window.urAjax.show(keyResult, false, 'Enter a key name first.'); return; }
-      if (!priv.trim() && !pub.trim()) { window.urAjax.show(keyResult, false, 'Paste a private and/or public key.'); return; }
-      window.urAjax.show(keyResult, true, 'Importing…');
+      if (!name) { window.urAjax.show(keyResult, false, urI18n('cred.enterName', 'Enter a key name first.')); return; }
+      if (!priv.trim() && !pub.trim()) { window.urAjax.show(keyResult, false, urI18n('cred.pasteKey', 'Paste a private and/or public key.')); return; }
+      window.urAjax.show(keyResult, true, urI18n('cred.importing', 'Importing…'));
       window.urAjax.postForm(HANDLER, { action: 'importKey', name: name, privateKey: priv, publicKey: pub }, CSRF).then(function (res) {
         if (res.ok && res.body && res.body.ok) {
-          window.urAjax.show(keyResult, true, 'Key "' + res.body.name + '" imported. Fingerprint: ' + (res.body.fingerprint || '?'));
+          window.urAjax.show(keyResult, true, urI18n('cred.imported', 'Key "%s" imported. Fingerprint: %s', res.body.name, res.body.fingerprint || '?'));
           window.urUtil.reloadSoon(false);
         } else {
-          window.urAjax.show(keyResult, false, window.urAjax.errText(res, 'Key import failed.'));
+          window.urAjax.show(keyResult, false, window.urAjax.errText(res, urI18n('cred.importFailed', 'Key import failed.')));
         }
-      }).catch(function (e) { window.urAjax.show(keyResult, false, 'Unexpected error: ' + (e && e.message ? e.message : e)); });
+      }).catch(function (e) { window.urAjax.show(keyResult, false, urI18n('unexpected', 'Unexpected error: %s', e && e.message ? e.message : e)); });
     });
   }
 
@@ -293,7 +293,7 @@ ur_emit_page_assets();
       var pub = t.getAttribute('data-pub') || '';
       if (navigator.clipboard && navigator.clipboard.writeText) {
         navigator.clipboard.writeText(pub).then(function () {
-          var old = t.textContent; t.textContent = 'Copied!';
+          var old = t.textContent; t.textContent = urI18n('copied', 'Copied!');
           setTimeout(function () { t.textContent = old; }, 1200);
         });
       } else {
@@ -304,8 +304,8 @@ ur_emit_page_assets();
     } else if (t.classList.contains('ur-key-del-saved')) {
       // Two-step inline confirm (no popup).
       window.urAjax.armOrConfirmDelete(t, {
-        warning: 'Delete key "' + (t.getAttribute('data-key-name') || t.getAttribute('data-key-id')) + '"? '
-          + 'Connections that use it must be repointed first.',
+        warning: urI18n('cred.deleteWarn', 'Delete key "%s"? Connections that use it must be repointed first.',
+          t.getAttribute('data-key-name') || t.getAttribute('data-key-id')),
         resultEl: keyResult,
         run: function () {
           var kid = t.getAttribute('data-key-id');
@@ -313,9 +313,9 @@ ur_emit_page_assets();
             if (res.ok && res.body && res.body.ok) {
               window.urUtil.reloadSoon(false);
             } else {
-              window.urAjax.show(keyResult, false, window.urAjax.errText(res, 'Delete failed.'));
+              window.urAjax.show(keyResult, false, window.urAjax.errText(res, urI18n('deleteFailed', 'Delete failed.')));
             }
-          }).catch(function (e) { window.urAjax.show(keyResult, false, 'Unexpected error: ' + (e && e.message ? e.message : e)); });
+          }).catch(function (e) { window.urAjax.show(keyResult, false, urI18n('unexpected', 'Unexpected error: %s', e && e.message ? e.message : e)); });
         }
       });
     }
@@ -331,13 +331,13 @@ ur_emit_page_assets();
     keysForm.addEventListener('submit', function (ev) {
       ev.preventDefault();
       var result = document.getElementById('ur-keys-save-result');
-      window.urAjax.show(result, true, 'Saving…');
+      window.urAjax.show(result, true, urI18n('saving', 'Saving…'));
       window.urAjax.postFormElement(keysForm).then(function (res) {
         if (res.ok && res.body && res.body.ok) {
-          window.urAjax.show(result, true, res.body.message || 'Saved.');
+          window.urAjax.show(result, true, res.body.message || urI18n('saved', 'Saved.'));
           window.urUtil.reloadSoon(false);
         } else {
-          window.urAjax.show(result, false, window.urAjax.errText(res, 'Save failed.'));
+          window.urAjax.show(result, false, window.urAjax.errText(res, urI18n('saveFailed', 'Save failed.')));
         }
       });
     });

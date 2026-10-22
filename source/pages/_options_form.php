@@ -691,6 +691,39 @@ if (!function_exists('ur_render_bool_row')) {
     }
 }
 
+if (!function_exists('ur_emit_i18n')) {
+    /**
+     * Emit (once per document) window.UR_I18N, PageHelpers::i18n() translated
+     * by PageHelpers::t(), and window.urI18n(key, fallback, ...args): the text
+     * for key, else the English fallback, with %s / %d filled in order. Every
+     * string the scripts render goes through it, so on a translated webGui the
+     * first poll no longer repaints translated server-rendered labels in English.
+     * The shared emitters call this first, so it precedes every page script.
+     */
+    function ur_emit_i18n(): void
+    {
+        static $done = false;
+        if ($done) {
+            return;
+        }
+        $done = true;
+        $map = [];
+        foreach (array_keys(PageHelpers::i18n()) as $key) {
+            $map[$key] = PageHelpers::t($key);
+        }
+        echo '<script type="text/javascript">window.UR_I18N = ' . ur_js($map) . ";\n"
+            . <<<'JS'
+window.urI18n = function (key, fallback) {
+  var map = window.UR_I18N || {};
+  var text = Object.prototype.hasOwnProperty.call(map, key) ? map[key] : fallback;
+  var args = Array.prototype.slice.call(arguments, 2), i = 0;
+  return args.length ? text.replace(/%[sd]/g, function (m) { return i < args.length ? String(args[i++]) : m; }) : text;
+};
+JS
+            . "\n</script>\n";
+    }
+}
+
 if (!function_exists('ur_emit_option_help_assets')) {
     /**
      * Emit the CSS + JS that powers the native "?" help affordance, exactly once
@@ -719,6 +752,7 @@ if (!function_exists('ur_emit_option_help_assets')) {
             return;
         }
         $done = true;
+        ur_emit_i18n();
         ?>
 <style>
 /* Native two-column rsync options. The dl/dt/dd grid + label alignment come from
@@ -928,8 +962,8 @@ if (!function_exists('ur_emit_option_help_assets')) {
     var sel = document.createElement('select');
     sel.name = typeName;
     sel.className = 'ur-filter-type';
-    sel.setAttribute('aria-label', 'Rule type');
-    [['include', '+ include'], ['exclude', '- exclude']].forEach(function (pair) {
+    sel.setAttribute('aria-label', urI18n('filter.ruleType', 'Rule type'));
+    [['include', urI18n('filter.include', '+ include')], ['exclude', urI18n('filter.exclude', '- exclude')]].forEach(function (pair) {
       var o = document.createElement('option');
       o.value = pair[0];
       o.textContent = pair[1];
@@ -941,15 +975,15 @@ if (!function_exists('ur_emit_option_help_assets')) {
     input.type = 'text';
     input.name = patName;
     input.value = '';
-    input.placeholder = 'pattern, e.g. *.tmp';
-    input.setAttribute('aria-label', 'Pattern');
+    input.placeholder = urI18n('filter.placeholder', 'pattern, e.g. *.tmp');
+    input.setAttribute('aria-label', urI18n('filter.pattern', 'Pattern'));
 
     row.appendChild(sel);
     row.appendChild(document.createTextNode(' '));
     row.appendChild(input);
-    [['ur-row-up', '↑', 'Move up'],
-     ['ur-row-down', '↓', 'Move down'],
-     ['ur-row-del', '−', 'Remove']].forEach(function (spec) {
+    [['ur-row-up', '↑', urI18n('row.up', 'Move up')],
+     ['ur-row-down', '↓', urI18n('row.down', 'Move down')],
+     ['ur-row-del', '−', urI18n('row.remove', 'Remove')]].forEach(function (spec) {
       var b = document.createElement('button');
       b.type = 'button';
       b.className = spec[0];
@@ -1110,16 +1144,16 @@ if (!function_exists('ur_emit_option_help_assets')) {
         if (res.ok && res.body && res.body.ok && res.body.tokens) {
           var shown = res.body.display || res.body.tokens;
           out.classList.remove('ur-preview-err');
-          out.textContent = shown.length ? shown.join(' ') : '(no options set)';
+          out.textContent = shown.length ? shown.join(' ') : urI18n('preview.none', '(no options set)');
         } else {
           out.classList.add('ur-preview-err');
-          out.textContent = window.urAjax.errText(res, 'Preview failed');
+          out.textContent = window.urAjax.errText(res, urI18n('preview.failed', 'Preview failed'));
         }
         previewDone(box);
       })
       .catch(function () {
         out.classList.add('ur-preview-err');
-        out.textContent = 'Preview failed: could not reach the server.';
+        out.textContent = urI18n('preview.unreachable', 'Preview failed: could not reach the server.');
         previewDone(box);
       });
   }
@@ -1193,6 +1227,7 @@ if (!function_exists('ur_emit_ajax_helpers')) {
             return;
         }
         $done = true;
+        ur_emit_i18n();
         ?>
 <script type="text/javascript">
 /* Shared robust-fetch helpers. Exposed as window.urAjax so every tab body can
@@ -1310,14 +1345,14 @@ if (!function_exists('ur_emit_ajax_helpers')) {
   /* Build a clear failure message from a postForm result, ALWAYS including the
    * HTTP status (or a network/parse hint), so a failure is never silent. */
   function errText(res, fallback) {
-    fallback = fallback || 'Request failed';
+    fallback = fallback || urI18n('ajax.failed', 'Request failed');
     /* Our own client-side abort (postForm opts.timeoutMs), not an unreachable
      * server - say so, since the two need different remedies. */
     if (res.aborted) {
-      return fallback + ': timed out (no response in time).';
+      return urI18n('ajax.timedOut', '%s: timed out (no response in time).', fallback);
     }
     if (res.networkError || res.status === 0) {
-      return fallback + ': could not reach the server (network error).';
+      return urI18n('ajax.network', '%s: could not reach the server (network error).', fallback);
     }
     /* A 422 body carries `warnings` alongside `errors`; without this they are
      * silently dropped whenever a save fails for some OTHER reason. */
@@ -1332,9 +1367,9 @@ if (!function_exists('ur_emit_ajax_helpers')) {
       return (res.body.message || res.body.error) + warn + ' (HTTP ' + res.status + ')';
     }
     if (res.parseError) {
-      return fallback + ': the server returned a non-JSON response (HTTP ' + res.status + ').';
+      return urI18n('ajax.nonJson', '%s: the server returned a non-JSON response (HTTP %s).', fallback, res.status);
     }
-    return fallback + ' (HTTP ' + res.status + ').';
+    return urI18n('ajax.http', '%s (HTTP %s).', fallback, res.status);
   }
 
   /* ---- two-step inline delete confirm (replaces window.confirm) ----
@@ -1378,7 +1413,7 @@ if (!function_exists('ur_emit_ajax_helpers')) {
     }
     // Arming a new button cancels any other still-armed one.
     if (armedDeleteBtn && armedDeleteBtn !== btn) { disarmDelete(armedDeleteBtn); }
-    var message = (opts.warning || '') + ' Click "Confirm delete?" again to proceed.';
+    var message = urI18n('delete.confirmHint', '%s Click "Confirm delete?" again to proceed.', opts.warning || '');
     btn._urArm = {
       label: btn.textContent,
       resultEl: opts.resultEl || null,
@@ -1387,7 +1422,7 @@ if (!function_exists('ur_emit_ajax_helpers')) {
       timer: setTimeout(function () { disarmDelete(btn); }, ARM_WINDOW_MS)
     };
     armedDeleteBtn = btn;
-    btn.textContent = 'Confirm delete?';
+    btn.textContent = urI18n('delete.confirm', 'Confirm delete?');
     btn.classList.add('ur-armed-delete');
     if (opts.resultEl && opts.warning) {
       opts.resultEl.className = 'ur-result ur-err';
@@ -1456,6 +1491,7 @@ if (!function_exists('ur_emit_badge_assets')) {
             return;
         }
         $done = true;
+        ur_emit_i18n();
         ?>
 <style>
 /* State badges. Colors read correctly under any webGui theme (fixed values with
@@ -1501,9 +1537,9 @@ if (!function_exists('ur_emit_badge_assets')) {
     if (CLASSES.indexOf(c) === -1) { CLASSES.push(c); }
   });
 
-  function entry(state) { return STATES[String(state || '').toUpperCase()] || STATES.PENDING; }
-  function classFor(state) { return 'ur-badge-' + entry(state).cls; }
-  function labelFor(state) { return entry(state).label; }
+  function key(state) { var k = String(state || '').toUpperCase(); return STATES[k] ? k : 'PENDING'; }
+  function classFor(state) { return 'ur-badge-' + STATES[key(state)].cls; }
+  function labelFor(state) { var k = key(state); return urI18n('state.' + k, STATES[k].label); }
 
   /* Repaint a badge element: drop whatever modifier it had, apply this state's
    * class and label. textContent, never innerHTML. */
@@ -1691,6 +1727,7 @@ if (!function_exists('ur_emit_page_assets')) {
             return;
         }
         $done = true;
+        ur_emit_i18n();
         ur_emit_time_helpers();
         ?>
 <style>
@@ -1787,7 +1824,7 @@ input.ur-switch:disabled { opacity: 0.5; cursor: default; }
    * when zero ("in 1h 36m", "6d 7h ago", "45s ago"). */
   function relativeTime(epoch, now) {
     var delta = Math.round(epoch - now), abs = Math.abs(delta), text = '';
-    if (abs < 1) { return 'now'; }
+    if (abs < 1) { return urI18n('rel.now', 'now'); }
     for (var i = 0; i < UNITS.length; i++) {
       if (abs < UNITS[i][1]) { continue; }
       text = Math.floor(abs / UNITS[i][1]) + UNITS[i][0];
@@ -1797,7 +1834,7 @@ input.ur-switch:disabled { opacity: 0.5; cursor: default; }
       }
       break;
     }
-    return delta > 0 ? 'in ' + text : text + ' ago';
+    return delta > 0 ? urI18n('rel.future', 'in %s', text) : urI18n('rel.past', '%s ago', text);
   }
 
   /* Runner::formatDuration: "1h 2m 3s", "2m 5s", "45s". */
@@ -1821,8 +1858,8 @@ input.ur-switch:disabled { opacity: 0.5; cursor: default; }
   /* PageHelpers::nextRunLabel, clause for clause: manual-only, disabled,
    * em-dash, time. A getStatus entry carries manualOnly, enabled, nextRun. */
   function nextRunLabel(s, now) {
-    if (s && s.manualOnly) { return 'manual (on demand)'; }
-    if (s && s.enabled === false) { return 'disabled'; }
+    if (s && s.manualOnly) { return urI18n('next.manual', 'manual (on demand)'); }
+    if (s && s.enabled === false) { return urI18n('next.disabled', 'disabled'); }
     if (!s || !s.nextRun) { return '\u2014'; }
     return window.urFmtLocal(s.nextRun) + ' (' + relativeTime(s.nextRun, now) + ')';
   }
@@ -1836,7 +1873,7 @@ input.ur-switch:disabled { opacity: 0.5; cursor: default; }
 
   /* PageHelpers::dryRunLine for a getStatus lastDryRun object. */
   function dryRunLine(dry, now) {
-    return dry ? dry.label + ' \u00b7 ' + lastRunLabel(dry, now) : '';
+    return dry ? urI18n('dryRun.' + dry.state, dry.label) + ' \u00b7 ' + lastRunLabel(dry, now) : '';
   }
 
   /* Reload after a successful save so the server-rendered state is current.
@@ -1855,8 +1892,8 @@ input.ur-switch:disabled { opacity: 0.5; cursor: default; }
         var ct = r.headers.get('Content-Type') || '';
         if (!r.ok || ct.indexOf('application/json') !== -1) {
           return r.json().then(
-            function (j) { throw new Error((j && j.error) ? j.error : 'Log not available.'); },
-            function () { throw new Error('Log not available.'); }
+            function (j) { throw new Error((j && j.error) ? j.error : urI18n('log.unavailable', 'Log not available.')); },
+            function () { throw new Error(urI18n('log.unavailable', 'Log not available.')); }
           );
         }
         var fname = 'run.log';
@@ -1873,7 +1910,7 @@ input.ur-switch:disabled { opacity: 0.5; cursor: default; }
         setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
       })
       .catch(function (err) {
-        onError((err && err.message) ? err.message : 'Log not available (run logs live in RAM and are cleared on reboot).');
+        onError((err && err.message) ? err.message : urI18n('log.notInRam', 'Log not available (run logs live in RAM and are cleared on reboot).'));
       });
   }
 
@@ -1885,7 +1922,7 @@ input.ur-switch:disabled { opacity: 0.5; cursor: default; }
       var sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(rng);
       try { document.execCommand('copy'); } catch (e) { /* left selected */ }
     }
-    function flash() { var o = btn.textContent; btn.textContent = 'Copied!'; setTimeout(function () { btn.textContent = o; }, 1200); }
+    function flash() { var o = btn.textContent; btn.textContent = urI18n('copied', 'Copied!'); setTimeout(function () { btn.textContent = o; }, 1200); }
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(text).then(flash).catch(selectIt);
     } else {
