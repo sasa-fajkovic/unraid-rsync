@@ -2,10 +2,10 @@
 /**
  * jobs.php - the Jobs tab body.
  *
- * Renders:
- *   - a tablesorter summary list of the configured jobs (Name, Enabled,
- *     Transport, Schedule);
- *   - a full add / edit / remove CRUD form. Each job is an editable card with:
+ * Renders one list: a card per job inside the add / edit / remove CRUD form.
+ * The card's header row is the job's status (state badge, enabled / transport /
+ * schedule, last and next run, Logs / Run / Dry-run / Abort); clicking it
+ * expands the editable body:
  *       name, enable switch, transport (SSH|LOCAL), direction (PUSH|PULL),
  *       connection (populated from the saved Credentials connections; an
  *       unknown existing connectionId is preserved as an option so edits don't
@@ -111,19 +111,52 @@ function ur_render_job_card($job, $index): void
     $hasId = ($id !== '' && strpos($id, '__IDX__') === false);
     echo '<div class="ur-job-card" data-index="' . ur_h($index) . '"' . ($hasId ? ' id="' . ur_h('ur-jobcard-' . $id) . '" data-jobid="' . ur_h($id) . '"' : '') . '>';
 
-    // Collapsible header (COLLAPSED by default): a one-line summary so a page with
-    // many jobs is not a wall of forms. Click / Enter / Space toggles the editable
-    // body below (delegated in JS; works for server-rendered AND cloned cards).
-    $summaryBits = [];
-    $summaryBits[] = $enabled ? ur_t_text('enabled') : ur_t_text('disabled');
-    if ($schedule !== '') {
-        $summaryBits[] = $schedule;
-    }
+    // The run controls sit beside the head, not inside it: the head is
+    // role="button" and the shared accordion toggles on any click within it.
+    $summaryBits = array_filter([
+        $enabled ? ur_t_text('Enabled') : ur_t_text('Disabled'),
+        ur_t_text(PageHelpers::TRANSPORT_LABELS[$transport] ?? $transport),
+        $manualOnly ? ur_t_text('Manual') : $schedule,
+    ]);
+    $running = $hasId && PageHelpers::running($id);
+    echo '<div class="ur-job-row">';
     echo '<div class="ur-job-head" role="button" tabindex="0" aria-expanded="false" aria-controls="' . ur_h($idb . '_body') . '">';
     echo '<span class="ur-job-caret" aria-hidden="true">&#9654;</span>';
     echo '<span class="ur-job-title" data-untitled="' . ur_h(ur_t_text('(unnamed job)')) . '">' . ur_h($name !== '' ? $name : ur_t_text('(unnamed job)')) . '</span>';
+    if ($hasId) {
+        $now      = time();
+        $summary  = Runner::readSummary($id);
+        $lastReal = Runner::lastRealFor($id, $summary);
+        $state    = PageHelpers::deriveState($running, $lastReal);
+        $dryLine  = PageHelpers::dryRunLine(PageHelpers::lastDryRun($summary), $now);
+        $snapLast = $snapOn ? Snapshot::lastSnapshot($summary) : null;
+        echo '<span class="ur-badge ur-state-badge ' . ur_h(ur_state_badge_class($state)) . '" data-jobid="' . ur_h($id) . '">' . ur_h(ur_state_label($state)) . '</span>';
+    }
     echo '<span class="ur-job-sub">' . ur_h(implode(' · ', $summaryBits)) . '</span>';
+    if ($hasId) {
+        echo '<div class="ur-last-run-cell" data-label="' . ur_h(ur_t_text('Last run')) . '">' . ur_h(PageHelpers::lastRunLabel($lastReal, $now))
+            . ($dryLine !== '' ? '<div class="ur-dry-run">' . ur_h($dryLine) . '</div>' : '')
+            . ($snapLast !== null ? '<div class="ur-snap-status" title="' . ur_h($snapLast['stamp']) . '">' . ur_h($snapLast['label']) . '</div>' : '')
+            . '</div>';
+        echo '<div class="ur-next-run-cell" data-label="' . ur_h(ur_t_text('Next run')) . '">' . ur_h(PageHelpers::nextRunLabel($job, $now)) . '</div>';
+    }
     echo '</div>';
+    if ($hasId) {
+        $label   = $name !== '' ? $name : $id;
+        $attrs   = ' data-jobid="' . ur_h($id) . '" data-jobname="' . ur_h($label) . '"';
+        $runDis  = $running ? ' disabled' : '';
+        echo '<div class="ur-job-row-actions">';
+        echo '<button type="button" class="ur-job-viewlog"' . $attrs . ' aria-label="' . ur_h(sprintf(ur_t_text('Logs for %s'), $label)) . '">' . ur_h(ur_t_text('Logs')) . '</button>';
+        echo '<button type="button" class="ur-job-run"' . $attrs . ' aria-label="' . ur_h(sprintf(ur_t_text('Run %s'), $label)) . '"' . $runDis . '>' . ur_h(ur_t_text('Run')) . '</button>';
+        echo '<button type="button" class="ur-job-dry"' . $attrs . ' aria-label="' . ur_h(sprintf(ur_t_text('Dry-run %s'), $label)) . '"' . $runDis . '>' . ur_h(ur_t_text('Dry-run')) . '</button>';
+        echo '<button type="button" class="ur-job-abort"' . $attrs . ' aria-label="' . ur_h(sprintf(ur_t_text('Abort %s'), $label)) . '"' . ($running ? '' : ' disabled') . '>' . ur_h(ur_t_text('Abort')) . '</button>';
+        echo '<span class="ur-dirty-note" data-jobid="' . ur_h($id) . '" hidden>' . ur_h(ur_t_text('Apply changes first')) . '</span>';
+        echo '</div>';
+    }
+    echo '</div>'; // .ur-job-row
+    if ($hasId) {
+        echo '<div class="ur-job-run-result ur-result" data-jobid="' . ur_h($id) . '"></div>';
+    }
 
     // The editable body. `hidden` keeps it collapsed by default; a display:none
     // region still SUBMITS its fields, so saved values are never lost while
@@ -412,27 +445,12 @@ function ur_render_job_card($job, $index): void
     ur_render_rsync_options($opts, $p . '[rsyncOptions]', $idb . '_opts_fields', $transport);
     echo '</div>';
 
-    // Run / Dry-run / Abort actions. These are only meaningful for a saved job
-    // (one with an id); the JS-cloned template card has the literal "__IDX__"
-    // placeholder and no real id, so its run controls are rendered disabled and
-    // the user must save first. A job currently running has Run/Dry-run disabled
-    // and Abort enabled (and vice versa); state comes from RunState::isRunning,
-    // PID-reuse-safe; the getStatus poll keeps them current after load.
-    $running = $hasId && PageHelpers::running($id);
-    $runDis  = (!$hasId || $running) ? ' disabled' : '';
-    $abortDis = (!$hasId || !$running) ? ' disabled' : '';
     echo '<div class="ur-job-card-actions">';
-    $jobNameAttr = ' data-jobname="' . ur_h($name !== '' ? $name : $id) . '"';
-    echo '<button type="button" class="ur-job-run" data-jobid="' . ur_h($id) . '"' . $jobNameAttr . $runDis . '>' . ur_h(ur_t_text('Run')) . '</button>';
-    echo '<button type="button" class="ur-job-dry" data-jobid="' . ur_h($id) . '"' . $jobNameAttr . $runDis . '>' . ur_h(ur_t_text('Dry-run')) . '</button>';
-    echo '<button type="button" class="ur-job-abort" data-jobid="' . ur_h($id) . '"' . $abortDis . '>' . ur_h(ur_t_text('Abort')) . '</button>';
-    echo '<span class="ur-dirty-note" data-jobid="' . ur_h($id) . '" hidden>' . ur_h(ur_t_text('Apply changes first')) . '</span>';
     echo '<button type="button" class="ur-job-del ur-btn-danger">' . ur_h(ur_t_text('Remove job')) . '</button>';
     echo '</div>';
     if (!$hasId) {
         echo '<blockquote class="inline_help"><p>' . ur_h(ur_t_text('Save the job before running it.')) . '</p></blockquote>';
     }
-    echo '<div class="ur-job-run-result ur-result" data-jobid="' . ur_h($id) . '"></div>';
 
     echo '</div>'; // .ur-job-body
     echo '</div>'; // .ur-job-card
@@ -507,7 +525,18 @@ function ur_snap_disabled(bool $snapOn): string
    the bottom buttons sit clear of the buffer's edge. */
 .ur-job-card-actions { margin-top: 8px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .ur-job-card-actions button { margin: 0; }
-.ur-row-actions { white-space: nowrap; }
+.ur-job-row { display: flex; align-items: center; gap: 8px; }
+.ur-job-row .ur-job-head { flex: 1 1 auto; min-width: 0; flex-wrap: wrap; }
+.ur-job-row-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.ur-job-row-actions button { margin: 0; }
+.ur-job-head .ur-last-run-cell, .ur-job-head .ur-next-run-cell { flex: 0 0 20em; font-size: 12px; color: var(--color-text-secondary, #666); }
+.ur-job-head .ur-last-run-cell::before, .ur-job-head .ur-next-run-cell::before { content: attr(data-label) ": "; }
+.ur-job-run-result:empty { display: none; }
+@media (max-width: 700px) {
+  .ur-job-row { flex-wrap: wrap; }
+  .ur-job-head .ur-job-sub { margin-left: 0; flex-basis: 100%; white-space: normal; }
+  .ur-job-head .ur-last-run-cell, .ur-job-head .ur-next-run-cell { flex-basis: 100%; }
+}
 .ur-global-preview { margin-top: 6px; font-size: .9em; }
 .ur-global-preview code { white-space: pre-wrap; word-break: break-word; }
 
@@ -751,61 +780,9 @@ ur_emit_status_poller();
 
 <p>
   <?=_('Define independent rsync backup jobs. Each job has its own schedule and runs one rsync per source → destination pair (no cartesian product)')?>.
-  <?=_('Enabled jobs run automatically on their cron schedule; the Next run column shows when each will fire. You can also Run or Dry-run a job on demand')?>.
-  <?=_('The State column shows each job\'s live status (updated automatically while a job runs); use the Logs button to view per-run output. Per-job notifications are sent through Unraid\'s notification system — pick when to notify with each job\'s Notify setting')?>. <?=ur_tz_note()?>
+  <?=_('Enabled jobs run automatically on their cron schedule; Next run shows when each will fire. You can also Run or Dry-run a job on demand')?>.
+  <?=_('The badge shows each job\'s live status (updated automatically while a job runs); click a job to edit it, and use the Logs button to view per-run output. Per-job notifications are sent through Unraid\'s notification system — pick when to notify with each job\'s Notify setting')?>. <?=ur_tz_note()?>
 </p>
-
-<!-- Summary list ------------------------------------------------------------>
-<?php $urNow = time(); ?>
-<table class="tablesorter ur-job-list">
-  <thead>
-    <tr>
-      <th><?=_('Job')?></th>
-      <th><?=_('State')?></th>
-      <th><?=_('Enabled')?></th>
-      <th><?=_('Transport')?></th>
-      <th><?=_('Schedule')?></th>
-      <th><?=_('Last run')?></th>
-      <th><?=_('Next run')?></th>
-    </tr>
-  </thead>
-  <tbody>
-    <?php if (empty($jobs)): ?>
-      <tr><td colspan="7"><?=_('No jobs configured yet')?>.</td></tr>
-    <?php else: foreach ($jobs as $job):
-        $job     = is_array($job) ? $job : [];
-        $jid     = (string) ($job['id'] ?? '');
-        $running = ($jid !== '') ? PageHelpers::running($jid) : false;
-        $summary = ($jid !== '') ? Runner::readSummary($jid) : null;
-        $lastReal = Runner::lastRealFor($jid, $summary);
-        $state   = PageHelpers::deriveState($running, $lastReal);
-        $dryLine = PageHelpers::dryRunLine(PageHelpers::lastDryRun($summary), $urNow);
-        $snapLast = Config::normalizeSnapshot($job['snapshot'] ?? null) !== null ? Snapshot::lastSnapshot($summary) : null;
-        $jname    = (string) ($job['name'] ?? '');
-        $jlabel   = $jname !== '' ? $jname : $jid;
-        $runAttr  = $running ? ' disabled' : '';
-    ?>
-      <tr data-jobid="<?=htmlspecialchars($jid, ENT_QUOTES, 'UTF-8')?>">
-        <td><?php if ($jid !== ''): ?><a href="#<?=ur_h('ur-jobcard-' . $jid)?>" class="ur-goto ur-job-link localURL" aria-controls="<?=ur_h('ur-jobcard-' . $jid)?>" title="<?=ur_h(ur_t_text('Edit this job'))?>"><?=ur_h($jname)?></a><?php else: ?><?=ur_h($jname)?><?php endif; ?></td>
-        <td class="ur-row-actions">
-          <span class="ur-badge ur-state-badge <?=htmlspecialchars(ur_state_badge_class($state), ENT_QUOTES, 'UTF-8')?>"
-                data-jobid="<?=htmlspecialchars($jid, ENT_QUOTES, 'UTF-8')?>"><?=htmlspecialchars(ur_state_label($state), ENT_QUOTES, 'UTF-8')?></span>
-          <?php if ($jid !== ''): ?>
-            <button type="button" class="ur-job-viewlog" data-jobid="<?=ur_h($jid)?>" data-jobname="<?=ur_h($jlabel)?>" aria-label="<?=ur_h(sprintf(ur_t_text('Logs for %s'), $jlabel))?>"><?=_('Logs')?></button>
-            <button type="button" class="ur-job-run" data-jobid="<?=ur_h($jid)?>" data-jobname="<?=ur_h($jlabel)?>" aria-label="<?=ur_h(sprintf(ur_t_text('Run %s'), $jlabel))?>"<?=$runAttr?>><?=_('Run')?></button>
-            <button type="button" class="ur-job-dry" data-jobid="<?=ur_h($jid)?>" data-jobname="<?=ur_h($jlabel)?>" aria-label="<?=ur_h(sprintf(ur_t_text('Dry-run %s'), $jlabel))?>"<?=$runAttr?>><?=_('Dry-run')?></button>
-            <span class="ur-dirty-note" data-jobid="<?=ur_h($jid)?>" hidden><?=_('Apply changes first')?></span>
-          <?php endif; ?>
-        </td>
-        <td><?=!empty($job['enabled']) ? _('Yes') : _('No')?></td>
-        <td><?=ur_h(ur_t_text(PageHelpers::TRANSPORT_LABELS[(string) ($job['transport'] ?? '')] ?? (string) ($job['transport'] ?? '')))?></td>
-        <td><?=!empty($job['manualOnly']) ? _('Manual') : htmlspecialchars((string)($job['schedule'] ?? ''), ENT_QUOTES, 'UTF-8')?></td>
-        <td class="ur-last-run-cell"><?=htmlspecialchars(PageHelpers::lastRunLabel($lastReal, $urNow), ENT_QUOTES, 'UTF-8')?><?php if ($dryLine !== ''): ?><div class="ur-dry-run"><?=htmlspecialchars($dryLine, ENT_QUOTES, 'UTF-8')?></div><?php endif; ?><?php if ($snapLast !== null): ?><div class="ur-snap-status" title="<?=htmlspecialchars($snapLast['stamp'], ENT_QUOTES, 'UTF-8')?>"><?=htmlspecialchars($snapLast['label'], ENT_QUOTES, 'UTF-8')?></div><?php endif; ?></td>
-        <td class="ur-next-run-cell"><?=htmlspecialchars(PageHelpers::nextRunLabel($job, $urNow), ENT_QUOTES, 'UTF-8')?></td>
-      </tr>
-    <?php endforeach; endif; ?>
-  </tbody>
-</table>
 
 <!-- Per-job run log viewer (modal). A run selector (filled from listRuns) + a
      scrollable <pre> fed by getJobLog. The log text is ALREADY HTML-escaped by
@@ -847,6 +824,7 @@ ur_emit_status_poller();
   <input type="hidden" name="configRevision" value="<?=Config::revision($config)?>">
 
   <div id="ur-jobs-container">
+    <div class="ur-empty-state ur-jobs-empty"<?=empty($jobs) ? '' : ' hidden'?>><?=_('No jobs configured yet')?>.</div>
     <?php foreach ($jobs as $i => $job) {
         ur_render_job_card($job, (int) $i);
     } ?>
@@ -913,6 +891,12 @@ ur_emit_status_poller();
     return max + 1;
   }
 
+  function syncEmptyState() {
+    var container = document.getElementById('ur-jobs-container');
+    var empty = container ? container.querySelector('.ur-jobs-empty') : null;
+    if (empty) { empty.hidden = !!container.querySelector('.ur-job-card'); }
+  }
+
   function addJob() {
     var tpl = document.getElementById('ur-job-template').innerHTML;
     var idx = nextJobIndex();
@@ -923,6 +907,7 @@ ur_emit_status_poller();
     wrap.innerHTML = html.trim();
     var card = wrap.firstElementChild;
     document.getElementById('ur-jobs-container').appendChild(card);
+    syncEmptyState();
     /* A cloned card defaults to SSH transport, so seed its Connection-required
      * state to match. */
     syncAllConnRequired();
@@ -1091,6 +1076,7 @@ ur_emit_status_poller();
     document.getElementById('ur-confirm-ok').addEventListener('click', function () {
       if (pendingDelCard && pendingDelCard.parentNode) {
         pendingDelCard.parentNode.removeChild(pendingDelCard);
+        syncEmptyState();
         var apply = form ? form.querySelector('input[type=submit]') : null;
         if (apply) { apply.disabled = false; }
       }
@@ -1443,9 +1429,9 @@ ur_emit_status_poller();
             msg += ' (' + res.body.warnings.join('; ') + ')';
           }
           window.urAjax.show(result, true, msg);
-          /* Reload so the summary table reflects the saved state; suppressing it
-           * on a warning would leave the table stale on every save of a job
-           * whose remote path legitimately warns (/data, /backup, ...). */
+          /* Reload so the status rows reflect the saved state; suppressing it
+           * on a warning would leave them stale on every save of a job whose
+           * remote path legitimately warns (/data, /backup, ...). */
           window.urUtil.reloadSoon(!!(res.body.warnings && res.body.warnings.length));
         } else {
           window.urAjax.show(result, false, window.urAjax.errText(res, urI18n('saveFailed', 'Save failed.')));
@@ -1460,11 +1446,12 @@ ur_emit_status_poller();
 
   var U = window.urUtil;
 
-  /* The Last-run / Next-run cells of one summary row, from a getStatus entry. */
+  /* The Last-run / Next-run cells of one job's status row, from a getStatus
+   * entry. Scoped to this tab: Overview's rows carry the same data-jobid. */
   function renderTimes(jobId, s, now) {
-    var row = document.querySelector('table.ur-job-list tr[data-jobid="' + U.cssEsc(jobId) + '"]');
-    if (!row) { return; }
-    var cell = row.querySelector('.ur-last-run-cell');
+    var card = document.querySelector('#ur-jobs-container .ur-job-card[data-jobid="' + U.cssEsc(jobId) + '"]');
+    if (!card) { return; }
+    var cell = card.querySelector('.ur-last-run-cell');
     if (cell) {
       /* The badge's run: a dry run is the neutral second line. */
       cell.textContent = U.lastRunLabel(s.lastReal, now);
@@ -1484,7 +1471,7 @@ ur_emit_status_poller();
         cell.appendChild(snapLine);
       }
     }
-    var nextCell = row.querySelector('.ur-next-run-cell');
+    var nextCell = card.querySelector('.ur-next-run-cell');
     if (nextCell) { nextCell.textContent = U.nextRunLabel(s, now); }
   }
 

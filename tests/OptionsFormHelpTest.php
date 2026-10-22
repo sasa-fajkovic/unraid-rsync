@@ -1579,11 +1579,11 @@ final class OptionsFormHelpTest extends TestCase
         }
         $page = Dom\HTMLDocument::createFromString('<!doctype html><body>' . $this->renderPageBody(__DIR__ . '/../source/pages/jobs.php'), LIBXML_NOERROR);
 
-        $line = $page->querySelector('tr[data-jobid="j-snap"] .ur-last-run-cell .ur-snap-status');
+        $line = $page->querySelector('#ur-jobs-container .ur-job-card[data-jobid="j-snap"] .ur-job-head .ur-last-run-cell .ur-snap-status');
         $this->assertNotNull($line);
         $this->assertSame('last snapshot 2026-10-21 03:00:05 (committed)', $line->textContent);
         $this->assertSame('2026-10-21T030005Z', $line->getAttribute('title'));
-        $this->assertNull($page->querySelector('tr[data-jobid="j-mirror"] .ur-snap-status'), 'a mirror row looks as before');
+        $this->assertNull($page->querySelector('.ur-job-card[data-jobid="j-mirror"] .ur-snap-status'), 'a mirror row looks as before');
     }
 
     public function testStatusPollersRenderTheSnapshotLineOnlyWhenGetStatusCarriesOne(): void
@@ -2213,14 +2213,18 @@ final class OptionsFormHelpTest extends TestCase
         }
     }
 
-    public function testJobsRowLookupIsScopedToTheJobsTable(): void
+    public function testJobsCardLookupIsScopedToTheJobsContainer(): void
     {
         // All tabs share one document and Overview's rows carry the same
         // data-jobid, so an unscoped lookup finds the Overview row and the Jobs
         // cells never update (seen live on 7.3.2).
-        $html = $this->renderPageBody(__DIR__ . '/../source/pages/jobs.php');
-        $this->assertStringContainsString("querySelector('table.ur-job-list tr[data-jobid=\"'", $html);
-        $this->assertStringNotContainsString("querySelector('tr[data-jobid=\"'", $html);
+        $js = (string) file_get_contents(__DIR__ . '/../source/pages/jobs.php');
+        $this->assertSame(1, preg_match('/function renderTimes\(jobId, s, now\) \{(.*?)\n  \}\n/s', $js, $m));
+        $this->assertStringContainsString("var card = document.querySelector('#ur-jobs-container .ur-job-card[data-jobid=\"' + U.cssEsc(jobId) + '\"]');", $m[1]);
+        $this->assertStringContainsString("card.querySelector('.ur-last-run-cell')", $m[1]);
+        $this->assertStringContainsString("card.querySelector('.ur-next-run-cell')", $m[1]);
+        $this->assertStringNotContainsString('ur-job-list', $js);
+        $this->assertStringNotContainsString("querySelector('tr[data-jobid=", $js);
     }
 
     /** A mouse click leaves focus on the "?", so plain :focus kept a closed help icon showing. */
@@ -2247,7 +2251,7 @@ final class OptionsFormHelpTest extends TestCase
             'exitCode' => 0, 'dryRun' => true]);
         $page = Dom\HTMLDocument::createFromString('<!doctype html><body>' . $this->renderPageBody(__DIR__ . '/../source/pages/jobs.php'), LIBXML_NOERROR);
 
-        $row = $page->querySelector('table.ur-job-list tr[data-jobid="j-mirror"]');
+        $row = $page->querySelector('#ur-jobs-container .ur-job-card[data-jobid="j-mirror"] .ur-job-head');
         $this->assertNotNull($row);
         $this->assertSame('Failed', trim((string) $row->querySelector('.ur-state-badge')?->textContent), 'a dry run never sets the badge');
         $cell = $row->querySelector('.ur-last-run-cell');
@@ -2299,30 +2303,131 @@ final class OptionsFormHelpTest extends TestCase
 
     #[RunInSeparateProcess]
     #[PreserveGlobalState(false)]
-    public function testJobsRowHasRunDryRunLogsAndAnEditorLink(): void
+    public function testEachJobIsOneCardWhoseHeaderRowIsItsStatusRow(): void
     {
         $page = $this->jobsPage();
-        $this->assertSame('Job', trim((string) $page->querySelector('table.ur-job-list thead th')?->textContent));
-        $row = $page->querySelector('table.ur-job-list tr[data-jobid="j-mirror"]');
-        $this->assertNotNull($row);
+        $this->assertNull($page->querySelector('table.ur-job-list'), 'one list: no status table above the cards');
+        $this->assertNull($page->querySelector('tr[data-jobid]'));
+        $this->assertSame(1, $page->querySelectorAll('.ur-job-card[data-jobid="j-mirror"]')->length);
+        $card = $page->getElementById('ur-jobcard-j-mirror');
+        $this->assertNotNull($card, 'the Overview link target');
+        $row = $page->querySelector('#ur-jobcard-j-mirror > .ur-job-row');
+        $this->assertNotNull($row, 'the card opens with its status row');
 
-        $link = $row->querySelector('a.ur-goto');
-        $this->assertContains('localURL', explode(' ', (string) $link?->getAttribute('class')), 'else Unraid asks "External Link?"');
-        $this->assertSame('#ur-jobcard-j-mirror', $link?->getAttribute('href'));
-        $this->assertSame('ur-jobcard-j-mirror', $link?->getAttribute('aria-controls'));
-        $this->assertSame('Mirror', trim((string) $link?->textContent));
-        $this->assertNotNull($page->getElementById('ur-jobcard-j-mirror'), 'the link target is the job card');
+        $head = $page->querySelector('#ur-jobcard-j-mirror > .ur-job-row > .ur-job-head');
+        $this->assertSame('button', $head?->getAttribute('role'));
+        $classes = [];
+        // childNodes, not children: on PHP 8.4 (CI, the box) iterating the
+        // HTMLCollection yielded nothing while 8.5 iterates it fine.
+        foreach ($head?->childNodes ?? [] as $el) {
+            if ($el instanceof Dom\Element) {
+                $classes[] = explode(' ', (string) $el->getAttribute('class'))[0];
+            }
+        }
+        $this->assertSame(['ur-job-caret', 'ur-job-title', 'ur-badge', 'ur-job-sub', 'ur-last-run-cell', 'ur-next-run-cell'], $classes);
+        $this->assertSame('Mirror', $head?->querySelector('.ur-job-title')?->textContent);
+        $badge = $head?->querySelector('span.ur-badge.ur-state-badge[data-jobid="j-mirror"]');
+        $this->assertSame(ur_state_label('PENDING'), trim((string) $badge?->textContent));
+        $this->assertContains(ur_state_badge_class('PENDING'), explode(' ', (string) $badge?->getAttribute('class')));
+        $this->assertSame('Enabled · SSH (rsync over SSH) · 0 3 * * *', $head?->querySelector('.ur-job-sub')?->textContent);
+        $this->assertSame('Last run', $head?->querySelector('.ur-last-run-cell')?->getAttribute('data-label'));
+        $this->assertSame('—', $head?->querySelector('.ur-last-run-cell')?->textContent);
+        $this->assertSame('Next run', $head?->querySelector('.ur-next-run-cell')?->getAttribute('data-label'));
+        $this->assertSame(PageHelpers::nextRunLabel($this->mirrorJob(), time()), $head?->querySelector('.ur-next-run-cell')?->textContent);
+        // The shared accordion toggles on any click inside .ur-job-head, and a
+        // control nested in role="button" is invalid: the actions are its sibling.
+        $this->assertNull($head?->querySelector('button, a, input, select, textarea'));
+        $accordion = (string) file_get_contents(__DIR__ . '/../source/pages/_options_form.php');
+        $this->assertStringContainsString("var head = ev.target && ev.target.closest ? ev.target.closest('.ur-job-head') : null;", $accordion);
 
-        // Same classes as the editor's buttons, so the same handlers and the
-        // status poll drive them; distinct accessible names per job.
-        $this->assertSame('Run Mirror', $row->querySelector('button.ur-job-run[data-jobid="j-mirror"]')?->getAttribute('aria-label'));
-        $this->assertSame('Dry-run Mirror', $row->querySelector('button.ur-job-dry[data-jobid="j-mirror"]')?->getAttribute('aria-label'));
-        $this->assertSame('Logs for Mirror', $row->querySelector('button.ur-job-viewlog')?->getAttribute('aria-label'));
-        $this->assertTrue($row->querySelector('.ur-dirty-note')?->hasAttribute('hidden'));
+        // Same classes as before, so the same handlers and the status poll
+        // drive them; distinct accessible names per job.
+        $actions = $page->querySelector('#ur-jobcard-j-mirror > .ur-job-row > .ur-job-row-actions');
+        $this->assertNotNull($actions);
+        $labels = ['button.ur-job-viewlog' => 'Logs for Mirror', 'button.ur-job-run' => 'Run Mirror', 'button.ur-job-dry' => 'Dry-run Mirror', 'button.ur-job-abort' => 'Abort Mirror'];
+        foreach ($labels as $sel => $label) {
+            $this->assertSame(1, $page->querySelectorAll($sel . '[data-jobid="j-mirror"]')->length, "$sel: one per job");
+            $btn = $actions->querySelector($sel . '[data-jobid="j-mirror"]');
+            $this->assertSame($label, $btn?->getAttribute('aria-label'), $sel);
+            $this->assertSame('button', $btn?->getAttribute('type'), $sel);
+            $this->assertSame('Mirror', $btn?->getAttribute('data-jobname'), $sel);
+        }
+        $this->assertFalse($actions->querySelector('.ur-job-run')?->hasAttribute('disabled'));
+        $this->assertTrue($actions->querySelector('.ur-job-abort')?->hasAttribute('disabled'), 'Abort is disabled while idle');
+        $this->assertSame(1, $page->querySelectorAll('.ur-dirty-note[data-jobid="j-mirror"]')->length);
+        $this->assertTrue($actions->querySelector('.ur-dirty-note[data-jobid="j-mirror"]')?->hasAttribute('hidden'));
 
-        $js = (string) file_get_contents(__DIR__ . '/../source/pages/jobs.php');
-        $this->assertStringContainsString("document.querySelectorAll('.ur-job-run' + sel + ', .ur-job-dry' + sel)", $js, 'every Run/Dry-run of a job, not the first');
-        $this->assertStringContainsString('syncRunButtons(jobId, !!s.running);', $js);
+        // A Run result shows on a collapsed card; the body keeps only Remove.
+        $this->assertNotNull($page->querySelector('#ur-jobcard-j-mirror > .ur-job-run-result[data-jobid="j-mirror"]'));
+        $this->assertSame(1, $page->querySelectorAll('.ur-job-run-result')->length);
+        $body = $page->querySelector('#ur-jobcard-j-mirror > .ur-job-body');
+        $this->assertTrue($body?->hasAttribute('hidden'));
+        $buttons = [];
+        foreach ($body?->querySelectorAll('.ur-job-card-actions button') ?? [] as $b) {
+            $buttons[] = trim((string) $b->textContent);
+        }
+        $this->assertSame(['Remove job'], $buttons);
+
+        $src = (string) file_get_contents(__DIR__ . '/../source/pages/jobs.php');
+        $this->assertSame(1, preg_match('/@media \(max-width: 700px\) \{\s*\.ur-job-row \{ flex-wrap: wrap; \}(.*?)\n\}/s', $src, $m), 'the row wraps on a narrow screen');
+        $this->assertStringContainsString('.ur-job-head .ur-job-sub { margin-left: 0; flex-basis: 100%;', $m[1], 'name and badge first, then the rest');
+        $this->assertStringContainsString('.ur-job-run-result:empty { display: none; }', $src);
+        $this->assertStringContainsString("document.querySelectorAll('.ur-job-run' + sel + ', .ur-job-dry' + sel)", $src, 'every Run/Dry-run of a job, not the first');
+        $this->assertStringContainsString('syncRunButtons(jobId, !!s.running);', $src);
+    }
+
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testAnUnsavedCardHasAPlainHeadAndOnlyRemoveInItsBody(): void
+    {
+        $page = $this->jobsPage();
+        $tpl = Dom\HTMLDocument::createFromString('<!doctype html><body>' . $page->getElementById('ur-job-template')?->textContent, LIBXML_NOERROR);
+        $card = $tpl->querySelector('.ur-job-card');
+        $this->assertNotNull($card);
+        $this->assertFalse($card->hasAttribute('data-jobid'));
+        $head = $tpl->querySelector('.ur-job-card > .ur-job-row > .ur-job-head');
+        $this->assertSame('(unnamed job)', $head?->querySelector('.ur-job-title')?->textContent);
+        $this->assertSame('Enabled · SSH (rsync over SSH) · 0 3 * * *', $head?->querySelector('.ur-job-sub')?->textContent);
+        foreach (['.ur-state-badge', '.ur-last-run-cell', '.ur-next-run-cell', '.ur-job-row-actions', '.ur-job-viewlog', '.ur-job-run', '.ur-job-dry', '.ur-job-abort', '.ur-dirty-note', '.ur-job-run-result'] as $sel) {
+            $this->assertNull($card->querySelector($sel), "a new card has no $sel");
+        }
+        $actions = $card->querySelector('.ur-job-body .ur-job-card-actions');
+        $this->assertSame(1, $actions?->querySelectorAll('button')->length);
+        $this->assertNotNull($actions?->querySelector('button.ur-job-del'));
+        $this->assertSame('Save the job before running it.', trim((string) $card->querySelector('.ur-job-card-actions + blockquote.inline_help')?->textContent));
+    }
+
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testNoJobsShowsTheEmptyStateInTheListUntilACardIsAdded(): void
+    {
+        @unlink(Config::path());
+        $html = $this->renderPageBody(__DIR__ . '/../source/pages/jobs.php');
+        $page = Dom\HTMLDocument::createFromString('<!doctype html><body>' . $html, LIBXML_NOERROR);
+        $this->assertNull($page->querySelector('#ur-jobs-container .ur-job-card'));
+        $empty = $page->querySelector('#ur-jobs-container > .ur-empty-state.ur-jobs-empty');
+        $this->assertSame('No jobs configured yet.', trim((string) $empty?->textContent));
+        $this->assertFalse($empty?->hasAttribute('hidden'));
+        // No :has(): older browsers on Unraid admin boxes lack it.
+        $this->assertStringNotContainsString(':has(', $html);
+        // Add job and Remove job both re-sync it after changing the list.
+        $this->assertSame(1, preg_match('/function syncEmptyState\(\) \{(.*?)\n  \}\n/s', $html, $m));
+        $this->assertStringContainsString("if (empty) { empty.hidden = !!container.querySelector('.ur-job-card'); }", $m[1]);
+        $this->assertSame(1, preg_match('/function addJob\(\) \{(.*?)\n  \}\n/s', $html, $m));
+        $this->assertStringContainsString("document.getElementById('ur-jobs-container').appendChild(card);\n    syncEmptyState();", $m[1]);
+        $this->assertStringContainsString("pendingDelCard.parentNode.removeChild(pendingDelCard);\n        syncEmptyState();", $html);
+    }
+
+    /** Removing the last saved card client-side must leave an empty state to reveal. */
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testSavedJobsStillRenderTheEmptyStateForTheRemovePath(): void
+    {
+        $page = $this->jobsPage();
+        $this->assertNotNull($page->querySelector('#ur-jobs-container > .ur-job-card[data-jobid="j-mirror"]'));
+        $empty = $page->querySelector('#ur-jobs-container > .ur-empty-state.ur-jobs-empty');
+        $this->assertSame('No jobs configured yet.', trim((string) $empty?->textContent));
+        $this->assertTrue($empty?->hasAttribute('hidden'), 'hidden server-side while jobs exist');
     }
 
     #[RunInSeparateProcess]
@@ -2332,7 +2437,7 @@ final class OptionsFormHelpTest extends TestCase
         $page = $this->jobsPage();
         $card = $page->getElementById('ur-jobcard-j-mirror');
         $this->assertSame('j-mirror', $card?->getAttribute('data-jobid'));
-        $note = $card?->querySelector('.ur-job-card-actions .ur-dirty-note');
+        $note = $card?->querySelector('.ur-job-row .ur-dirty-note');
         $this->assertSame('Apply changes first', trim((string) $note?->textContent));
         $this->assertTrue($note?->hasAttribute('hidden'));
 
