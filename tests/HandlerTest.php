@@ -580,10 +580,13 @@ final class HandlerTest extends TestCase
             $ids = $save([0 => $job, 1 => ['id' => 'j-again-5', 'name' => 'renamed'] + $job]);
             $this->assertSame(['j-again-6', 'j-again-5'], $ids);
 
-            // A tampered stored id ("j-again-5\n") is not that stored job: it is
-            // a NEW row, allocated past every leftover and the stored id.
+            // A tampered stored id ("j-again-5\n", " j-again-5 ") is not that
+            // stored job: it is a NEW row, allocated past every leftover and the
+            // stored id, even when posted first.
             $ids = $save([0 => ['id' => 'j-again-5', 'name' => 'renamed'] + $job, 1 => ['id' => "j-again-5\n"] + $job]);
             $this->assertSame(['j-again-5', 'j-again-7'], $ids);
+            $ids = $save([0 => ['id' => ' j-again-5 ', 'name' => 'renamed'] + $job, 1 => ['id' => 'j-again-5', 'name' => 'renamed'] + $job]);
+            $this->assertSame(['j-again-5-2', 'j-again-5'], $ids);
 
             // A suffixed id never exceeds the 128 bytes ur_safe_job_id accepts.
             $long = str_repeat('a', 130);
@@ -593,6 +596,42 @@ final class HandlerTest extends TestCase
             $this->assertNotSame('', ur_safe_job_id($ids[1]));
         } finally {
             $cleanup();
+        }
+    }
+
+    /** DI-20: leftover logs are looked for in the logDir THIS save stores, not the dispatch-time one. */
+    public function testSaveConfigLooksForLeftoverLogsInTheLogDirBeingSaved(): void
+    {
+        $mnt = realpath(sys_get_temp_dir()) . '/ur-di20-mnt-' . bin2hex(random_bytes(3));
+        $logDir = $mnt . '/user/ur/logs';
+        mkdir($logDir . '/j-fresh', 0700, true);
+        file_put_contents($logDir . '/j-fresh/run-20260101T000000Z.log', "old\n");
+        $prevRoot = Config::$mntRoot;
+        $prevOverride = Logger::$logsDirOverride;
+        Config::$mntRoot = $mnt;
+        Logger::$logsDirOverride = null;   // dispatch-time logs dir: tmpfs, no leftovers there
+        try {
+            $job = ['name' => 'fresh', 'schedule' => '0 3 * * *', 'transport' => 'LOCAL',
+                    'pairs' => [['local' => '/mnt/user/a/', 'remote' => '/mnt/disk1/a/']]];
+            $_POST = ['action' => 'saveConfig', 'csrf_token' => 'test-token',
+                      'global' => ['logDir' => $logDir], 'jobs' => [0 => $job]];
+            [$body, $code] = $this->runCapture(function () {
+                ur_action_save_config();
+            });
+            $this->assertSame(200, $code, json_encode($body));
+            $cfg = Config::load();
+            $this->assertSame($logDir, $cfg['global']['logDir']);
+            $this->assertSame(['j-fresh-2'], array_column($cfg['jobs'], 'id'));
+            $this->assertSame("old\n", file_get_contents($logDir . '/j-fresh/run-20260101T000000Z.log'));
+        } finally {
+            Config::$mntRoot = $prevRoot;
+            Logger::$logsDirOverride = $prevOverride;
+            unlink($logDir . '/j-fresh/run-20260101T000000Z.log');
+            rmdir($logDir . '/j-fresh');
+            rmdir($logDir);
+            rmdir($mnt . '/user/ur');
+            rmdir($mnt . '/user');
+            rmdir($mnt);
         }
     }
 

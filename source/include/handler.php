@@ -926,7 +926,10 @@ function ur_save_config_locked(): void
         // tab opened before snapshot mode existed, and must not silently turn a
         // stored snapshot job into a mirror. A posted key, even with enabled
         // off, is the user's intent.
-        $rawId  = is_scalar($rawJob['id'] ?? null) ? ur_safe_job_id((string) $rawJob['id']) : '';
+        // Only an id posted back exactly as stored names that job: a padded or
+        // tampered copy (" j-x ", "j-x\n") is a new row, never the stored one.
+        $posted = is_scalar($rawJob['id'] ?? null) ? (string) $rawJob['id'] : '';
+        $rawId  = ($posted !== '' && ur_safe_job_id($posted) === $posted) ? $posted : '';
         $stored = $rawId !== '' ? ($storedById[$rawId] ?? null) : null;
         if ($stored !== null && !array_key_exists('snapshot', $rawJob) && isset($stored['snapshot'])) {
             $rawJob['snapshot'] = $stored['snapshot'];
