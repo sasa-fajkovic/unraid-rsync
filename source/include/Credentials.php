@@ -59,6 +59,7 @@ declare(strict_types=1);
  */
 
 require_once __DIR__ . '/Config.php';
+require_once __DIR__ . '/Logger.php';
 
 class Credentials
 {
@@ -139,7 +140,9 @@ class Credentials
      * Run $fn holding the exclusive credentials lock. Every load-modify-save of
      * credentials.json goes through it (handler saves, Ssh::pinHostKey, the
      * secretsDir move). The lock stays beside config.json whatever secretsDir
-     * says, so a relocation and every writer contend for the same file.
+     * says, so a relocation and every writer contend for the same file. A move
+     * a crash interrupted is settled first (reconcilePendingMove), before $fn
+     * can change the live file.
      *
      * @template T
      * @param callable(): T $fn
@@ -147,7 +150,138 @@ class Credentials
      */
     public static function withLock(callable $fn): mixed
     {
-        return Util::withLock(rtrim(UR_CONFIG_BASE, '/') . '/credentials.lock', $fn);
+        return Util::withLock(rtrim(UR_CONFIG_BASE, '/') . '/credentials.lock', static function () use ($fn) {
+            self::reconcilePendingMove();
+            return $fn();
+        });
+    }
+
+    /** The record of a secretsDir move in progress; beside config.json, like the lock. */
+    public static function movePath(): string
+    {
+        return rtrim(UR_CONFIG_BASE, '/') . '/credentials.move.json';
+    }
+
+    /**
+     * Record a move of credentials.json from $sourceDir to $destinationDir whose
+     * verified copy hashes to $sha256. Written BEFORE the new pointer is saved,
+     * so whatever step a crash interrupts, the next writer knows what to finish.
+     *
+     * @throws RuntimeException when the record cannot be written.
+     */
+    public static function recordMove(string $sourceDir, string $destinationDir, string $sha256): void
+    {
+        self::writeMove([
+            'source'      => rtrim($sourceDir, '/'),
+            'destination' => rtrim($destinationDir, '/'),
+            'sha256'      => $sha256,
+            'startedAt'   => gmdate('Y-m-d\TH:i:s\Z'),
+        ]);
+    }
+
+    /**
+     * Settle a move a crash interrupted, by where config.json now points. Runs at
+     * the start of every withLock() scope; returns a warning, or '' when there
+     * was nothing to do or it is done.
+     *   - at the destination: the move committed; finish it (completeMove).
+     *   - still at the source: it never committed; drop the record and the copy
+     *     it left at the destination.
+     *   - anywhere else: leave everything, log once.
+     */
+    public static function reconcilePendingMove(): string
+    {
+        $rec = self::readMove();
+        if ($rec === null) {
+            return '';
+        }
+        try {
+            $dir = Config::sanitizeSecretsDir(Config::load()['global']['secretsDir'] ?? '');
+        } catch (Throwable $e) {
+            return '';
+        }
+        $current = ($dir !== '') ? $dir : rtrim(UR_CONFIG_BASE, '/');
+        if ($current === $rec['destination']) {
+            return self::completeMove();
+        }
+        if ($current === $rec['source']) {
+            $copy = $rec['destination'] . '/credentials.json';
+            if (@hash_file('sha256', $copy) === $rec['sha256']) {
+                @unlink($copy);
+            }
+            @unlink(self::movePath());
+            return '';
+        }
+        return self::stuckMove($rec, 'secretsDir now points at neither end of it');
+    }
+
+    /**
+     * Finish the recorded move once the new pointer is saved: remove the source's
+     * .last-good, then the source itself, then the record. Only while the moved
+     * file still hashes to the record (no writer reached it unsettled) and the
+     * source is the copy that was moved; otherwise everything stays and the
+     * mismatch is logged once. Returns a warning, or '' when done.
+     */
+    public static function completeMove(): string
+    {
+        $rec = self::readMove();
+        if ($rec === null) {
+            return '';
+        }
+        $src = $rec['source'] . '/credentials.json';
+        if (@hash_file('sha256', $rec['destination'] . '/credentials.json') !== $rec['sha256']) {
+            return self::stuckMove($rec, 'the moved credentials.json has changed since');
+        }
+        if (is_file($src) && @hash_file('sha256', $src) !== $rec['sha256']) {
+            return self::stuckMove($rec, 'the old credentials.json has changed since');
+        }
+        foreach ([$src . '.last-good', $src] as $file) {
+            if (is_file($file) && !@unlink($file)) {
+                return self::stuckMove($rec, $file . ' could not be removed - delete it manually');
+            }
+        }
+        @unlink(self::movePath());
+        return '';
+    }
+
+    /** @return array{source:string,destination:string,sha256:string,startedAt?:string,logged?:bool}|null */
+    private static function readMove(): ?array
+    {
+        $path = self::movePath();
+        $rec  = is_file($path) ? json_decode((string) @file_get_contents($path), true) : null;
+        if (!is_array($rec) || !is_string($rec['source'] ?? null) || !is_string($rec['destination'] ?? null)
+            || !is_string($rec['sha256'] ?? null)) {
+            return null;
+        }
+        return $rec;
+    }
+
+    /**
+     * @param array<string,mixed> $rec
+     */
+    private static function writeMove(array $rec): void
+    {
+        Util::writeAtomic(self::movePath(), json_encode($rec, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n", 0600);
+    }
+
+    /**
+     * A move that cannot be settled: keep the record (and both files), log it
+     * once, and return the message as a warning.
+     *
+     * @param array{source:string,destination:string,sha256:string,startedAt?:string,logged?:bool} $rec
+     */
+    private static function stuckMove(array $rec, string $why): string
+    {
+        $msg = 'The move of credentials.json from ' . $rec['source'] . ' to ' . $rec['destination']
+            . ' could not be finished: ' . $why . '. Check both copies, then delete ' . self::movePath() . '.';
+        if (($rec['logged'] ?? false) !== true) {
+            try {
+                Logger::event('', 'credentials', $msg);
+                $rec['logged'] = true;
+                self::writeMove($rec);
+            } catch (Throwable $e) {
+            }
+        }
+        return $msg;
     }
 
     /**
