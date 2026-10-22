@@ -555,6 +555,35 @@ final class HandlerCredentialsTest extends TestCase
         $this->assertSame(422, $code);
     }
 
+    /** generateKey and importKey store the key and answer with the same non-secret shape. */
+    public function testGenerateAndImportKeyStoreAndAnswerWithoutTheSecret(): void
+    {
+        if (!is_executable('/usr/bin/ssh-keygen') && !is_executable('/usr/local/bin/ssh-keygen')) {
+            $this->markTestSkipped('needs ssh-keygen');
+        }
+        $_POST = ['name' => 'Gen', 'type' => 'ed25519'];
+        [$gen, $code] = $this->runCapture(fn() => ur_action_generate_key());
+        $this->assertSame(200, $code, json_encode($gen));
+        $this->assertSame(['ok', 'message', 'id', 'name', 'publicKey', 'fingerprint'], array_keys($gen));
+        $this->assertSame('Key generated.', $gen['message']);
+
+        [$dup, $code] = $this->runCapture(fn() => ur_action_generate_key());
+        $this->assertSame(422, $code);
+        $this->assertSame('A key named "Gen" already exists; names must be unique.', $dup['error']);
+
+        $_POST = ['name' => 'Imp', 'publicKey' => $gen['publicKey']];
+        [$imp, $code] = $this->runCapture(fn() => ur_action_import_key());
+        $this->assertSame(200, $code, json_encode($imp));
+        $this->assertSame(['ok', 'message', 'id', 'name', 'publicKey', 'fingerprint', 'hasPrivate'], array_keys($imp));
+        $this->assertSame('Key imported.', $imp['message']);
+        $this->assertFalse($imp['hasPrivate']);
+        $this->assertSame($gen['fingerprint'], $imp['fingerprint']);
+
+        $stored = Credentials::load()['keys'];
+        $this->assertSame([$gen['id'], $imp['id']], array_column($stored, 'id'));
+        $this->assertNotSame('', $stored[0]['privateKey']);
+    }
+
     // --- CSRF on the new actions -------------------------------------------
 
     public function testCsrfEnforcedOnSaveCredentials(): void

@@ -676,6 +676,110 @@ function ur_action_save_config(): void
 }
 
 /**
+ * Apply a posted Global Settings section to $config: the default rsync options,
+ * retention, hook timeouts, logDir and secretsDir, with their errors and
+ * warnings. A field that is not posted is left alone, so a partial POST never
+ * wipes it. secretsDir is NOT changed here: the move it needs is returned, for
+ * ur_save_config_moving_secrets once every validation has passed.
+ *
+ * @param array<string,mixed> $config
+ * @param array<string,mixed> $globalIn   $_POST['global']
+ * @param array<int,string>   $allErrors
+ * @param array<int,string>   $allWarnings
+ * @return array{0:string,1:string}|null [from, to] secrets dirs, or null for no move
+ */
+function ur_apply_global_settings(array &$config, array $globalIn, array &$allErrors, array &$allWarnings): ?array
+{
+    $defaultOptsIn = (isset($globalIn['defaultRsyncOptions']) && is_array($globalIn['defaultRsyncOptions']))
+        ? $globalIn['defaultRsyncOptions']
+        : [];
+    $config['global']['defaultRsyncOptions'] = Job::normalizeRsyncOptions($defaultOptsIn);
+    // retention: "keep last N executions" - clamp to [1,9999] (mirrors the
+    // client min/max); non-numeric falls back to the default. Only when the
+    // field is present, so a partial global POST can't wipe it.
+    if (array_key_exists('retention', $globalIn)) {
+        $config['global']['retention'] = Config::clampRetention($globalIn['retention']);
+    }
+    foreach (Config::HOOK_TIMEOUT_DEFAULTS as $key => $default) {
+        if (array_key_exists($key, $globalIn)) {
+            $config['global'][$key] = Config::clampHookTimeout($globalIn[$key], $default);
+        }
+    }
+
+    // The global defaults are a bare option object with no job around them, but
+    // a job on "use global config" (the default for a new job) takes them
+    // verbatim - so they need the same value checks a job's own options get.
+    $globalOpts = $config['global']['defaultRsyncOptions'];
+    foreach (array_merge(Job::validateRsyncOptions($globalOpts), Job::globalOptionPathErrors($globalOpts)) as $e) {
+        $allErrors[] = 'Global settings: ' . $e;
+    }
+
+    // Job::validate's --contimeout warning reads the JOB's own options, so a
+    // job on "use global config" - whose own contimeout is always '' - never
+    // triggers it, and Job::validateRsyncOptions has no transport to reason
+    // about. That leaves the one place a connect timeout is naturally set
+    // ONCE with no signal at all, while Rsync::buildArgv silently drops the
+    // value for every SSH and Local job that inherits it (rsync main.c:1558
+    // exits 1 for --contimeout on any non-daemon transfer). Warn here, at the
+    // field, rather than on every job that happens to use the defaults.
+    if (trim((string) ($config['global']['defaultRsyncOptions']['contimeout'] ?? '')) !== '') {
+        $allWarnings[] = 'Global settings: the --contimeout option only applies to rsync daemon '
+            . '(rsyncd) transport; rsync rejects it outright on SSH and Local transfers, so it is '
+            . 'not sent for jobs on those transports.';
+    }
+
+    // A warning, not an error: the global block has no transport, and a
+    // LOCAL job inheriting it runs fine (rsync exempts local copies).
+    if (Job::protocolTooLowForAclsXattrs($config['global']['defaultRsyncOptions'])) {
+        $allWarnings[] = 'Global settings: Preserve ACLs (-A) and Preserve extended attributes (-X) need '
+            . 'rsync protocol 30 or higher, so SSH and rsync daemon jobs that use these defaults will '
+            . 'fail; raise the --protocol value or turn those options off.';
+    }
+
+    // logDir (persistent log directory): validate/confine. A non-empty value that
+    // fails the rules is rejected (logs stay in RAM) WITH a warning so the user
+    // isn't left thinking persistence is on. Only when the field is present, so a
+    // partial (Jobs-only) POST never wipes it.
+    if (array_key_exists('logDir', $globalIn)) {
+        $rawLogDir   = is_string($globalIn['logDir']) ? trim($globalIn['logDir']) : '';
+        $cleanLogDir = Config::sanitizeLogDir($rawLogDir);
+        $config['global']['logDir'] = $cleanLogDir;
+        if ($rawLogDir !== '' && $cleanLogDir === '') {
+            $allWarnings[] = 'Log directory ignored: it must be an absolute path under /mnt '
+                . '(e.g. /mnt/user/appdata/unraid.rsync/logs). Logs will stay in RAM.';
+        }
+    }
+
+    // secretsDir (where credentials.json lives): validate/confine. Changing it
+    // RELOCATES credentials.json so the file always follows the pointer (the load
+    // path reads it from wherever this points). The move happens only at save
+    // time, after every validation below has passed, and the new pointer is
+    // committed only to match where the file actually ended up - see
+    // ur_save_config_moving_secrets. Only when the field is present, so a partial
+    // (Jobs-only) POST never wipes it.
+    $secretsMove = null;
+    if (array_key_exists('secretsDir', $globalIn)) {
+        $oldSecretsDir   = Config::sanitizeSecretsDir($config['global']['secretsDir'] ?? '');
+        $rawSecretsDir   = is_string($globalIn['secretsDir']) ? trim($globalIn['secretsDir']) : '';
+        $cleanSecretsDir = Config::sanitizeSecretsDir($rawSecretsDir);
+        $refusal         = ($cleanSecretsDir !== '' && $cleanSecretsDir !== $oldSecretsDir)
+            ? Config::secretsDirRefusal($cleanSecretsDir) : '';
+        if ($rawSecretsDir !== '' && $cleanSecretsDir === '') {
+            // Non-empty but invalid: reject, keep the current location.
+            $allWarnings[] = 'Secrets directory ignored: it must be an absolute path under /mnt '
+                . '(e.g. /mnt/user/system/unraid.rsync). Credentials stay where they are.';
+        } elseif ($refusal !== '') {
+            $allWarnings[] = 'Secrets directory not changed: ' . $refusal . ' Credentials stay where they are.';
+        } elseif ($cleanSecretsDir !== $oldSecretsDir) {
+            $secretsMove = [$oldSecretsDir, $cleanSecretsDir];
+        }
+        $config['global']['secretsDir'] = $oldSecretsDir;
+    }
+
+    return $secretsMove;
+}
+
+/**
  * ur_action_save_config's body, run under Config::withLock so the load, the
  * revision check and the save cannot interleave with another save.
  */
@@ -729,99 +833,13 @@ function ur_save_config_locked(): void
         return;
     }
 
-    // Global default rsync options (the Global Settings tab) - only when sent.
-    if ($hasGlobal) {
-        $globalIn      = $_POST['global'];
-        $defaultOptsIn = (isset($globalIn['defaultRsyncOptions']) && is_array($globalIn['defaultRsyncOptions']))
-            ? $globalIn['defaultRsyncOptions']
-            : [];
-        $config['global']['defaultRsyncOptions'] = Job::normalizeRsyncOptions($defaultOptsIn);
-        // retention: "keep last N executions" - clamp to [1,9999] (mirrors the
-        // client min/max); non-numeric falls back to the default. Only when the
-        // field is present, so a partial global POST can't wipe it.
-        if (array_key_exists('retention', $globalIn)) {
-            $config['global']['retention'] = Config::clampRetention($globalIn['retention']);
-        }
-        foreach (Config::HOOK_TIMEOUT_DEFAULTS as $key => $default) {
-            if (array_key_exists($key, $globalIn)) {
-                $config['global'][$key] = Config::clampHookTimeout($globalIn[$key], $default);
-            }
-        }
-    }
-
     $allErrors   = [];
     $allWarnings = [];
-
-    // The global defaults are a bare option object with no job around them, but
-    // a job on "use global config" (the default for a new job) takes them
-    // verbatim - so they need the same value checks a job's own options get.
-    if ($hasGlobal) {
-        $globalOpts = $config['global']['defaultRsyncOptions'];
-        foreach (array_merge(Job::validateRsyncOptions($globalOpts), Job::globalOptionPathErrors($globalOpts)) as $e) {
-            $allErrors[] = 'Global settings: ' . $e;
-        }
-
-        // Job::validate's --contimeout warning reads the JOB's own options, so a
-        // job on "use global config" - whose own contimeout is always '' - never
-        // triggers it, and Job::validateRsyncOptions has no transport to reason
-        // about. That leaves the one place a connect timeout is naturally set
-        // ONCE with no signal at all, while Rsync::buildArgv silently drops the
-        // value for every SSH and Local job that inherits it (rsync main.c:1558
-        // exits 1 for --contimeout on any non-daemon transfer). Warn here, at the
-        // field, rather than on every job that happens to use the defaults.
-        if (trim((string) ($config['global']['defaultRsyncOptions']['contimeout'] ?? '')) !== '') {
-            $allWarnings[] = 'Global settings: the --contimeout option only applies to rsync daemon '
-                . '(rsyncd) transport; rsync rejects it outright on SSH and Local transfers, so it is '
-                . 'not sent for jobs on those transports.';
-        }
-
-        // A warning, not an error: the global block has no transport, and a
-        // LOCAL job inheriting it runs fine (rsync exempts local copies).
-        if (Job::protocolTooLowForAclsXattrs($config['global']['defaultRsyncOptions'])) {
-            $allWarnings[] = 'Global settings: Preserve ACLs (-A) and Preserve extended attributes (-X) need '
-                . 'rsync protocol 30 or higher, so SSH and rsync daemon jobs that use these defaults will '
-                . 'fail; raise the --protocol value or turn those options off.';
-        }
-    }
-
-    // logDir (persistent log directory): validate/confine. A non-empty value that
-    // fails the rules is rejected (logs stay in RAM) WITH a warning so the user
-    // isn't left thinking persistence is on. Only when the field is present, so a
-    // partial (Jobs-only) POST never wipes it.
-    if ($hasGlobal && array_key_exists('logDir', $globalIn)) {
-        $rawLogDir   = is_string($globalIn['logDir']) ? trim($globalIn['logDir']) : '';
-        $cleanLogDir = Config::sanitizeLogDir($rawLogDir);
-        $config['global']['logDir'] = $cleanLogDir;
-        if ($rawLogDir !== '' && $cleanLogDir === '') {
-            $allWarnings[] = 'Log directory ignored: it must be an absolute path under /mnt '
-                . '(e.g. /mnt/user/appdata/unraid.rsync/logs). Logs will stay in RAM.';
-        }
-    }
-
-    // secretsDir (where credentials.json lives): validate/confine. Changing it
-    // RELOCATES credentials.json so the file always follows the pointer (the load
-    // path reads it from wherever this points). The move happens only at save
-    // time, after every validation below has passed, and the new pointer is
-    // committed only to match where the file actually ended up - see
-    // ur_save_config_moving_secrets. Only when the field is present, so a partial
-    // (Jobs-only) POST never wipes it.
     $secretsMove = null;
-    if ($hasGlobal && array_key_exists('secretsDir', $globalIn)) {
-        $oldSecretsDir   = Config::sanitizeSecretsDir($config['global']['secretsDir'] ?? '');
-        $rawSecretsDir   = is_string($globalIn['secretsDir']) ? trim($globalIn['secretsDir']) : '';
-        $cleanSecretsDir = Config::sanitizeSecretsDir($rawSecretsDir);
-        $refusal         = ($cleanSecretsDir !== '' && $cleanSecretsDir !== $oldSecretsDir)
-            ? Config::secretsDirRefusal($cleanSecretsDir) : '';
-        if ($rawSecretsDir !== '' && $cleanSecretsDir === '') {
-            // Non-empty but invalid: reject, keep the current location.
-            $allWarnings[] = 'Secrets directory ignored: it must be an absolute path under /mnt '
-                . '(e.g. /mnt/user/system/unraid.rsync). Credentials stay where they are.';
-        } elseif ($refusal !== '') {
-            $allWarnings[] = 'Secrets directory not changed: ' . $refusal . ' Credentials stay where they are.';
-        } elseif ($cleanSecretsDir !== $oldSecretsDir) {
-            $secretsMove = [$oldSecretsDir, $cleanSecretsDir];
-        }
-        $config['global']['secretsDir'] = $oldSecretsDir;
+
+    // Global settings (the Global Settings tab) - only when sent.
+    if ($hasGlobal) {
+        $secretsMove = ur_apply_global_settings($config, $_POST['global'], $allErrors, $allWarnings);
     }
 
     // Jobs (the Jobs tab) - only rebuild the jobs list when it was submitted.
@@ -1194,6 +1212,148 @@ function ur_normalize_connection_for_save(array $raw, array $existing): array
 }
 
 /**
+ * saveCredentials' keys section: apply the posted renames onto the stored keys
+ * by id, keep every key the POST omitted, append new named rows, and validate
+ * the names across the result (errors appended to $errors).
+ *
+ * @param array<string,mixed>     $creds
+ * @param array<int,mixed>        $rawKeys the posted key rows, re-keyed
+ * @param array<int,string>       $errors
+ * @return array<int,array<string,mixed>> the resulting keys
+ */
+function ur_merge_keys(array $creds, array $rawKeys, array &$errors): array
+{
+
+    // Index the submitted rows by their (existing) id.
+    $submittedById = [];
+    $appended      = [];
+    foreach ($rawKeys as $rawKey) {
+        if (!is_array($rawKey)) {
+            continue;
+        }
+        $key = ur_normalize_key_for_save($rawKey, $creds);
+        if ($key['id'] !== '') {
+            $submittedById[$key['id']] = $key;     // an edit of an existing key
+        } elseif ($key['name'] !== '') {
+            $appended[] = $key;                     // a brand-new key row
+        }
+        // (no id AND no name -> empty template row, ignored)
+    }
+
+    // Start from the existing keys, applying any submitted rename; keep keys
+    // that weren't submitted untouched (no delete-by-omission).
+    $resultKeys = [];
+    foreach ($creds['keys'] as $existing) {
+        $eid = (string) ($existing['id'] ?? '');
+        if ($eid !== '' && isset($submittedById[$eid])) {
+            // Preserve secret material (ur_normalize_key_for_save already
+            // copied it by id) and apply the new name.
+            $resultKeys[] = $submittedById[$eid];
+        } else {
+            $resultKeys[] = Credentials::mergeKey(is_array($existing) ? $existing : []);
+        }
+    }
+    // Append genuinely-new key rows (rare via this form; keys are normally
+    // created through generate/import).
+    foreach ($appended as $key) {
+        if ($key['id'] === '') {
+            $key['id'] = Credentials::generateId(
+                $key['name'],
+                'k-',
+                array_column($resultKeys, 'id')
+            );
+        }
+        $resultKeys[] = $key;
+    }
+
+    // Validate names (uniqueness across the whole resulting set). Each key
+    // is checked against the names already seen, so a key is never compared
+    // against itself and a genuine duplicate is reported once.
+    $names = [];
+    foreach ($resultKeys as $key) {
+        $res = Credentials::validateKey($key, $names);
+        foreach ($res['errors'] as $e) {
+            $errors[] = 'Key "' . ($key['name'] !== '' ? $key['name'] : $key['id']) . '": ' . $e;
+        }
+        $names[] = $key['name'];
+    }
+
+    return $resultKeys;
+}
+
+/**
+ * saveCredentials' connections section: apply the posted edits onto the stored
+ * connections by id, keep every connection the POST omitted, append new
+ * non-empty cards with fresh ids, and validate the result against $creds' keys
+ * (errors appended to $errors). Every id the POST edited or added lands in
+ * $touchedIds.
+ *
+ * @param array<string,mixed> $creds
+ * @param array<int,mixed>    $rawConns   the posted connection rows, re-keyed
+ * @param array<int,string>   $errors
+ * @param array<bool>         $touchedIds
+ * @return array<int,array<string,mixed>> the resulting connections
+ */
+function ur_merge_connections(array $creds, array $rawConns, array &$errors, array &$touchedIds): array
+{
+
+    $submittedById = [];
+    $appended      = [];
+    foreach ($rawConns as $rawConn) {
+        if (!is_array($rawConn)) {
+            continue;
+        }
+        $conn = ur_normalize_connection_for_save($rawConn, $creds);
+        $hasContent = !($conn['name'] === '' && $conn['host'] === '' && $conn['username'] === '');
+
+        if ($conn['id'] !== '') {
+            // An edit of an existing connection. Even if all visible fields
+            // were cleared we keep it as an (invalid) edit so validation
+            // surfaces the problem - we never silently drop a row that
+            // carries an id (that path is deleteConnection's job).
+            $submittedById[$conn['id']] = $conn;
+            $touchedIds[$conn['id']]    = true;
+        } elseif ($hasContent) {
+            $appended[] = $conn;                    // a brand-new connection
+        }
+        // (no id AND empty -> blank template card, ignored)
+    }
+
+    // Apply edits onto existing connections; preserve omitted ones.
+    $resultConns = [];
+    foreach ($creds['connections'] as $existing) {
+        $eid = (string) ($existing['id'] ?? '');
+        if ($eid !== '' && isset($submittedById[$eid])) {
+            $resultConns[] = $submittedById[$eid];
+        } else {
+            $resultConns[] = Credentials::mergeConnection(is_array($existing) ? $existing : []);
+        }
+    }
+    // Append new connections, assigning unique ids.
+    foreach ($appended as $conn) {
+        $conn['id'] = Credentials::generateId(
+            $conn['name'],
+            'c-',
+            array_column($resultConns, 'id')
+        );
+        $touchedIds[$conn['id']] = true;
+        $resultConns[]           = $conn;
+    }
+
+    // Validate the whole resulting set (KEY connections' keyId is checked
+    // against the keys we're about to save).
+    foreach ($resultConns as $i => $conn) {
+        $res   = Credentials::validateConnection($conn, $creds);
+        $label = $conn['name'] !== '' ? $conn['name'] : ($conn['id'] !== '' ? $conn['id'] : ('#' . ($i + 1)));
+        foreach ($res['errors'] as $e) {
+            $errors[] = 'Connection "' . $label . '": ' . $e;
+        }
+    }
+
+    return $resultConns;
+}
+
+/**
  * POST saveCredentials: rebuild keys and/or connections from the submission and
  * persist. Section-aware (like saveConfig): the Keys form and the Connections
  * form each submit only their own section with a *_present sentinel, so saving
@@ -1244,63 +1404,7 @@ function ur_save_credentials_locked(): void
 
     // --- keys (rename existing by id; preserve omitted; append new) ---
     if ($hasKeys) {
-        $rawKeys = $keysSubmitted ? array_values($_POST['keys']) : [];
-
-        // Index the submitted rows by their (existing) id.
-        $submittedById = [];
-        $appended      = [];
-        foreach ($rawKeys as $rawKey) {
-            if (!is_array($rawKey)) {
-                continue;
-            }
-            $key = ur_normalize_key_for_save($rawKey, $creds);
-            if ($key['id'] !== '') {
-                $submittedById[$key['id']] = $key;     // an edit of an existing key
-            } elseif ($key['name'] !== '') {
-                $appended[] = $key;                     // a brand-new key row
-            }
-            // (no id AND no name -> empty template row, ignored)
-        }
-
-        // Start from the existing keys, applying any submitted rename; keep keys
-        // that weren't submitted untouched (no delete-by-omission).
-        $resultKeys = [];
-        foreach ($creds['keys'] as $existing) {
-            $eid = (string) ($existing['id'] ?? '');
-            if ($eid !== '' && isset($submittedById[$eid])) {
-                // Preserve secret material (ur_normalize_key_for_save already
-                // copied it by id) and apply the new name.
-                $resultKeys[] = $submittedById[$eid];
-            } else {
-                $resultKeys[] = Credentials::mergeKey(is_array($existing) ? $existing : []);
-            }
-        }
-        // Append genuinely-new key rows (rare via this form; keys are normally
-        // created through generate/import).
-        foreach ($appended as $key) {
-            if ($key['id'] === '') {
-                $key['id'] = Credentials::generateId(
-                    $key['name'],
-                    'k-',
-                    array_column($resultKeys, 'id')
-                );
-            }
-            $resultKeys[] = $key;
-        }
-
-        // Validate names (uniqueness across the whole resulting set). Each key
-        // is checked against the names already seen, so a key is never compared
-        // against itself and a genuine duplicate is reported once.
-        $names = [];
-        foreach ($resultKeys as $key) {
-            $res = Credentials::validateKey($key, $names);
-            foreach ($res['errors'] as $e) {
-                $errors[] = 'Key "' . ($key['name'] !== '' ? $key['name'] : $key['id']) . '": ' . $e;
-            }
-            $names[] = $key['name'];
-        }
-
-        $creds['keys'] = $resultKeys;
+        $creds['keys'] = ur_merge_keys($creds, $keysSubmitted ? array_values($_POST['keys']) : [], $errors);
     }
 
     // Snapshot the PRE-SAVE connections before the block below overwrites
@@ -1317,62 +1421,7 @@ function ur_save_credentials_locked(): void
 
     // --- connections (update existing by id; preserve omitted; append new) ---
     if ($hasConns) {
-        $rawConns = $connsSubmitted ? array_values($_POST['connections']) : [];
-
-        $submittedById = [];
-        $appended      = [];
-        foreach ($rawConns as $rawConn) {
-            if (!is_array($rawConn)) {
-                continue;
-            }
-            $conn = ur_normalize_connection_for_save($rawConn, $creds);
-            $hasContent = !($conn['name'] === '' && $conn['host'] === '' && $conn['username'] === '');
-
-            if ($conn['id'] !== '') {
-                // An edit of an existing connection. Even if all visible fields
-                // were cleared we keep it as an (invalid) edit so validation
-                // surfaces the problem - we never silently drop a row that
-                // carries an id (that path is deleteConnection's job).
-                $submittedById[$conn['id']] = $conn;
-                $touchedIds[$conn['id']]    = true;
-            } elseif ($hasContent) {
-                $appended[] = $conn;                    // a brand-new connection
-            }
-            // (no id AND empty -> blank template card, ignored)
-        }
-
-        // Apply edits onto existing connections; preserve omitted ones.
-        $resultConns = [];
-        foreach ($creds['connections'] as $existing) {
-            $eid = (string) ($existing['id'] ?? '');
-            if ($eid !== '' && isset($submittedById[$eid])) {
-                $resultConns[] = $submittedById[$eid];
-            } else {
-                $resultConns[] = Credentials::mergeConnection(is_array($existing) ? $existing : []);
-            }
-        }
-        // Append new connections, assigning unique ids.
-        foreach ($appended as $conn) {
-            $conn['id'] = Credentials::generateId(
-                $conn['name'],
-                'c-',
-                array_column($resultConns, 'id')
-            );
-            $touchedIds[$conn['id']] = true;
-            $resultConns[]           = $conn;
-        }
-
-        // Validate the whole resulting set (KEY connections' keyId is checked
-        // against the keys we're about to save).
-        foreach ($resultConns as $i => $conn) {
-            $res   = Credentials::validateConnection($conn, $creds);
-            $label = $conn['name'] !== '' ? $conn['name'] : ($conn['id'] !== '' ? $conn['id'] : ('#' . ($i + 1)));
-            foreach ($res['errors'] as $e) {
-                $errors[] = 'Connection "' . $label . '": ' . $e;
-            }
-        }
-
-        $creds['connections'] = $resultConns;
+        $creds['connections'] = ur_merge_connections($creds, $connsSubmitted ? array_values($_POST['connections']) : [], $errors, $touchedIds);
     }
 
     if (!empty($errors)) {
@@ -1475,6 +1524,58 @@ function ur_save_credentials_locked(): void
 }
 
 /**
+ * Answer 422 and return true when $name is already a key's name (case-insensitive).
+ *
+ * @param array<string,mixed> $creds
+ */
+function ur_key_name_taken(array $creds, string $name): bool
+{
+    $existingNames = array_map(static fn($k) => strtolower(trim((string) ($k['name'] ?? ''))), $creds['keys']);
+    if (in_array(strtolower($name), $existingNames, true)) {
+        sendError('A key named "' . $name . '" already exists; names must be unique.', 422);
+        return true;
+    }
+    return false;
+}
+
+/**
+ * Append a generated or imported key to $creds, save, and answer with the
+ * non-secret material only (never the private key).
+ *
+ * @param array<string,mixed> $creds
+ * @param array<string,mixed> $material KeyTools::generate / import's result
+ * @param string              $verb     'generated' | 'imported'
+ * @param array<string,mixed> $extra    appended to the response
+ */
+function ur_store_new_key(array $creds, string $name, array $material, string $verb, array $extra = []): void
+{
+    $id = Credentials::generateId($name, 'k-', array_column($creds['keys'], 'id'));
+    $creds['keys'][] = [
+        'id'          => $id,
+        'name'        => $name,
+        'privateKey'  => (string) $material['privateKey'],
+        'publicKey'   => (string) $material['publicKey'],
+        'fingerprint' => (string) $material['fingerprint'],
+    ];
+
+    try {
+        Credentials::save($creds);
+    } catch (Throwable $e) {
+        sendError("Failed to save the $verb key: " . $e->getMessage(), 500);
+        return;
+    }
+
+    sendResponse([
+        'ok'          => true,
+        'message'     => 'Key ' . $verb . '.',
+        'id'          => $id,
+        'name'        => $name,
+        'publicKey'   => (string) $material['publicKey'],
+        'fingerprint' => (string) $material['fingerprint'],
+    ] + $extra, 200);
+}
+
+/**
  * POST generateKey: ssh-keygen a new key pair, store it, and return the
  * fingerprint + public key (NEVER the private key). The new key is appended to
  * credentials.json so a subsequent connection can reference it immediately.
@@ -1504,10 +1605,7 @@ function ur_generate_key_locked(): void
         sendError('Unsupported key type: ' . $type . '. Choose ed25519 or rsa.', 422);
         return;
     }
-    // Uniqueness across existing keys.
-    $existingNames = array_map(static fn($k) => strtolower(trim((string) ($k['name'] ?? ''))), $creds['keys']);
-    if (in_array(strtolower($name), $existingNames, true)) {
-        sendError('A key named "' . $name . '" already exists; names must be unique.', 422);
+    if (ur_key_name_taken($creds, $name)) {
         return;
     }
 
@@ -1519,31 +1617,7 @@ function ur_generate_key_locked(): void
         return;
     }
 
-    $id = Credentials::generateId($name, 'k-', array_column($creds['keys'], 'id'));
-    $creds['keys'][] = [
-        'id'          => $id,
-        'name'        => $name,
-        'privateKey'  => (string) $gen['privateKey'],
-        'publicKey'   => (string) $gen['publicKey'],
-        'fingerprint' => (string) $gen['fingerprint'],
-    ];
-
-    try {
-        Credentials::save($creds);
-    } catch (Throwable $e) {
-        sendError('Failed to save the generated key: ' . $e->getMessage(), 500);
-        return;
-    }
-
-    // Return only non-secret material.
-    sendResponse([
-        'ok'          => true,
-        'message'     => 'Key generated.',
-        'id'          => $id,
-        'name'        => $name,
-        'publicKey'   => (string) $gen['publicKey'],
-        'fingerprint' => (string) $gen['fingerprint'],
-    ], 200);
+    ur_store_new_key($creds, $name, $gen, 'generated');
 }
 
 /**
@@ -1572,9 +1646,7 @@ function ur_import_key_locked(): void
         sendError('A key name is required.', 422);
         return;
     }
-    $existingNames = array_map(static fn($k) => strtolower(trim((string) ($k['name'] ?? ''))), $creds['keys']);
-    if (in_array(strtolower($name), $existingNames, true)) {
-        sendError('A key named "' . $name . '" already exists; names must be unique.', 422);
+    if (ur_key_name_taken($creds, $name)) {
         return;
     }
 
@@ -1584,32 +1656,8 @@ function ur_import_key_locked(): void
         return;
     }
 
-    $id = Credentials::generateId($name, 'k-', array_column($creds['keys'], 'id'));
-    $creds['keys'][] = [
-        'id'          => $id,
-        'name'        => $name,
-        'privateKey'  => (string) $imp['privateKey'],
-        'publicKey'   => (string) $imp['publicKey'],
-        'fingerprint' => (string) $imp['fingerprint'],
-    ];
-
-    try {
-        Credentials::save($creds);
-    } catch (Throwable $e) {
-        sendError('Failed to save the imported key: ' . $e->getMessage(), 500);
-        return;
-    }
-
-    sendResponse([
-        'ok'          => true,
-        'message'     => 'Key imported.',
-        'id'          => $id,
-        'name'        => $name,
-        'publicKey'   => (string) $imp['publicKey'],
-        'fingerprint' => (string) $imp['fingerprint'],
-        // A pasted public-key-only import has no private material to run with.
-        'hasPrivate'  => trim((string) $imp['privateKey']) !== '',
-    ], 200);
+    // A pasted public-key-only import has no private material to run with.
+    ur_store_new_key($creds, $name, $imp, 'imported', ['hasPrivate' => trim((string) $imp['privateKey']) !== '']);
 }
 
 /**
@@ -2028,13 +2076,7 @@ function ur_action_run_job(bool $dryRun): void
         sendError('Configuration could not be read: ' . $e->getMessage(), 409);
         return;
     }
-    $found = null;
-    foreach (($config['jobs'] ?? []) as $job) {
-        if (is_array($job) && (string) ($job['id'] ?? '') === $jobId) {
-            $found = $job;
-            break;
-        }
-    }
+    $found = Runner::findJob($config, $jobId);
     if ($found === null) {
         sendError('Job not found.', 404);
         return;
@@ -2109,13 +2151,7 @@ function ur_action_abort_job(): void
     // in-flight run whose job row may have just been edited away).
     $known = false;
     try {
-        $config = Config::load();
-        foreach (($config['jobs'] ?? []) as $job) {
-            if (is_array($job) && (string) ($job['id'] ?? '') === $jobId) {
-                $known = true;
-                break;
-            }
-        }
+        $known = Runner::findJob(Config::load(), $jobId) !== null;
     } catch (Throwable $e) {
         // Config unreadable: fall back to the state-file check below.
     }
