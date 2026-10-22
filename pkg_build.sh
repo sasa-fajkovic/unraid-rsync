@@ -106,14 +106,13 @@ trap cleanup EXIT
 mkdir -p "$tmpdir/usr/local/emhttp/plugins/$plugin_name"
 mkdir -p "$archive_dir"
 
-# Copy every file under source/, preserving relative paths, while excluding the
-# build script and any editor/sync cruft. (tests/ lives outside source/, so it
-# is excluded by construction.) Word-splitting on the find output is intentional
+# Copy every file under source/, preserving relative paths, while excluding any
+# editor/sync cruft. (pkg_build.sh and tests/ live outside source/, so they are
+# excluded by construction.) Word-splitting on the find output is intentional
 # here (cp --parents takes a list of paths); our packaged files have no spaces.
 cd "$src_dir"
 # shellcheck disable=SC2046  # intentional word-splitting of the file list
 cp --parents -f $(find . -type f \
-    ! -iname "pkg_build.sh" \
     ! -iname "sftp-config.json" \
     ! -iname ".DS_Store" ) \
   "$tmpdir/usr/local/emhttp/plugins/$plugin_name/"

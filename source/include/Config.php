@@ -772,20 +772,12 @@ class Config
             ));
         }
 
-        // Step the config up one version at a time. Each future arm mutates
-        // $data from version N to N+1, then falls through to the next.
-        while ($version < self::SCHEMA_VERSION) {
-            switch ($version) {
-                case 1:
-                    $data = self::migrateV1ToV2($data);
-                    $version = 2;
-                    $data['schemaVersion'] = 2;
-                    break;
-                default:
-                    // No migration path defined; stop to avoid an infinite loop.
-                    $version = self::SCHEMA_VERSION;
-                    break;
-            }
+        // v1 is the oldest shape there is, so a hand-edited 0 or negative
+        // version is a v1 file too: skipping the arm would leave its excludes
+        // and includes to be dropped by mergeDefaults().
+        if ($version <= 1) {
+            $data = self::migrateV1ToV2($data);
+            $data['schemaVersion'] = 2;
         }
 
         // v2 -> v3 needs no transform; mergeDefaults() sets the version.

@@ -528,6 +528,23 @@ final class ConfigTest extends TestCase
         ];
     }
 
+    /** A hand-edited version below 1 is a v1 file: its filters must not be dropped. */
+    public function testMigrateRunsTheV1ArmForAVersionBelowOne(): void
+    {
+        foreach ([0, -3] as $v) {
+            $migrated = Config::migrate([
+                'schemaVersion' => $v,
+                'jobs'          => [['id' => 'j1', 'rsyncOptions' => $this->v1Options()]],
+            ]);
+            $this->assertSame(2, $migrated['schemaVersion']);
+            $this->assertSame(
+                Config::migrate(['schemaVersion' => 1, 'jobs' => [['id' => 'j1', 'rsyncOptions' => $this->v1Options()]]]),
+                $migrated
+            );
+            $this->assertNotSame([], $migrated['jobs'][0]['rsyncOptions']['filters']);
+        }
+    }
+
     public function testMigrateV1FoldsExcludesAndIncludesIntoOrderedFilters(): void
     {
         $migrated = Config::migrate([

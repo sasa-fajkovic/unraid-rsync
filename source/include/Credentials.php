@@ -487,15 +487,6 @@ class Credentials
             ));
         }
 
-        while ($version < self::SCHEMA_VERSION) {
-            switch ($version) {
-                // case 1: ... transform v1 -> v2 ...; $version = 2; break;
-                default:
-                    $version = self::SCHEMA_VERSION;
-                    break;
-            }
-        }
-
         // The KEYFILE auth method + keyFilePath field were added WITHIN schema v1
         // as a purely additive, backward-compatible change (no version bump). No
         // explicit transform is needed: mergeConnection() fills a missing
