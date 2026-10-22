@@ -55,6 +55,14 @@ class RunState
      */
     public static $baseOverride = null;
 
+    /**
+     * Test seam: fn(): void, called by clearStaleAbort once it has taken the
+     * flag it judges - where a concurrent abortJob would land. null => none.
+     *
+     * @var (callable():void)|null
+     */
+    public static $afterStaleAbortRead = null;
+
     /** The runtime base dir actually in effect. */
     public static function base(): string
     {
@@ -539,10 +547,13 @@ class RunState
     public static function readAbort(string $jobId): ?array
     {
         $raw = @file_get_contents(self::abortPath($jobId));
-        if ($raw === false) {
-            return null;
-        }
-        $data = json_decode($raw, true);
+        return $raw === false ? null : self::parseAbort($raw);
+    }
+
+    /** @return array{by:string,gen:string} */
+    private static function parseAbort(string|false $raw): array
+    {
+        $data = json_decode((string) $raw, true);
         return [
             'by'  => is_array($data) && ($data['by'] ?? '') === 'signal' ? 'signal' : 'user',
             'gen' => is_array($data) && is_string($data['gen'] ?? null) ? $data['gen'] : '',
@@ -561,14 +572,26 @@ class RunState
 
     /**
      * Run start: drop a flag left for any other launch, keep one for $gen (an
-     * Abort clicked between Run and this runner starting).
+     * Abort clicked between Run and this runner starting). The flag is first
+     * renamed aside, so only that copy is judged and deleted: an abortJob for
+     * this launch landing meanwhile writes a fresh file nothing here touches.
+     * Ours goes back with link(), which never replaces a newer flag.
      */
     public static function clearStaleAbort(string $jobId, string $gen): void
     {
-        $flag = self::readAbort($jobId);
-        if ($flag !== null && ($gen === '' || $flag['gen'] !== $gen)) {
-            self::clearAbort($jobId);
+        $path  = self::abortPath($jobId);
+        $taken = $path . '.' . bin2hex(random_bytes(4));
+        if (!@rename($path, $taken)) {
+            return;
         }
+        $flag = self::parseAbort(@file_get_contents($taken));
+        if (self::$afterStaleAbortRead !== null) {
+            (self::$afterStaleAbortRead)();
+        }
+        if ($gen !== '' && $flag['gen'] === $gen) {
+            @link($taken, $path);
+        }
+        @unlink($taken);
     }
 
     /** Clear a job's abort flag (best-effort). Called on run start + end. */
