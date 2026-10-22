@@ -24,7 +24,7 @@
 #
 # Only the <CHANGES>...</CHANGES> body is replaced (wrapped in CDATA, since
 # raw commit-subject text is not otherwise XML-escaped here); every other
-# line of the .plg - including the version/md5 ENTITYs pkg_build.sh rewrites
+# line of the .plg - including the version/md5/sha256 ENTITYs pkg_build.sh rewrites
 # afterward - is left untouched.
 
 set -euo pipefail
