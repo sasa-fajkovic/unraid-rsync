@@ -537,6 +537,36 @@ final class HandlerTest extends TestCase
         $this->assertContains('j-dup-2', $ids);
     }
 
+    /** DI-20: a re-created job must not inherit a removed job's summary or logs. */
+    public function testSaveConfigGivesANewJobAFreshIdWhenARemovedJobLeftFilesBehind(): void
+    {
+        $runs = rtrim(UR_CONFIG_BASE, '/') . '/runs';
+        @mkdir($runs, 0700, true);
+        file_put_contents($runs . '/j-again.summary.json', '{"state":"FAILED"}');
+        @mkdir(Logger::jobLogDir('j-again-2'), 0700, true);
+
+        $job = ['name' => 'again', 'schedule' => '0 3 * * *', 'transport' => 'LOCAL',
+                'pairs' => [['local' => '/mnt/user/a/', 'remote' => '/mnt/disk1/a/']]];
+        $_POST = ['action' => 'saveConfig', 'csrf_token' => 'test-token', 'jobs' => [0 => $job]];
+        [$body, $code] = $this->runCapture(function () {
+            ur_action_save_config();
+        });
+        $this->assertSame(200, $code, json_encode($body));
+        $this->assertSame(['j-again-3'], array_column(Config::load()['jobs'], 'id'), 'summary and log dir both skipped');
+
+        // A stored job keeps its id even though a summary exists under it.
+        $_POST = ['action' => 'saveConfig', 'csrf_token' => 'test-token',
+                  'jobs' => [0 => ['id' => 'j-again-3', 'name' => 'renamed'] + $job]];
+        [$body, $code] = $this->runCapture(function () {
+            ur_action_save_config();
+        });
+        $this->assertSame(200, $code, json_encode($body));
+        $this->assertSame(['j-again-3'], array_column(Config::load()['jobs'], 'id'));
+
+        unlink($runs . '/j-again.summary.json');
+        rmdir(Logger::jobLogDir('j-again-2'));
+    }
+
     public function testSettingsOnlySaveDoesNotWipeJobs(): void
     {
         // Seed a config with a job.

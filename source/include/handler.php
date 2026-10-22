@@ -946,11 +946,15 @@ function ur_save_config_locked(): void
         $job = Job::normalize($rawJob);
 
         // Ensure unique ids across the set (a duplicate would share, and clobber,
-        // the other job's run state and logs).
+        // the other job's run state and logs). A NEW job also skips an id a
+        // removed job left a summary, History, in-flight record or logs under:
+        // it would otherwise show that job's last result before ever running
+        // (DI-20). A stored job keeps its id whatever is on disk.
+        $isNew  = $stored === null;
         $baseId = $job['id'];
         $id = $baseId;
         $suffix = 2;
-        while (isset($seenIds[$id])) {
+        while (isset($seenIds[$id]) || ($isNew && ur_job_id_has_leftovers($id))) {
             $id = $baseId . '-' . $suffix;
             $suffix++;
         }
@@ -2225,6 +2229,16 @@ const UR_LIST_RUNS_DEFAULT = 10;
  * id is ever used to build a state/log path. Returns the id on success, '' on
  * rejection.
  */
+/** True when a removed job's summary, History, in-flight record or log dir still carries this id. */
+function ur_job_id_has_leftovers(string $id): bool
+{
+    $runs = rtrim(UR_CONFIG_BASE, '/') . '/runs/' . Util::safeFileId($id);
+    return is_file($runs . '.summary.json')
+        || is_file(History::path($id))
+        || is_file(RunState::inflightPath($id))
+        || is_dir(Logger::jobLogDir($id));
+}
+
 function ur_safe_job_id(string $id): string
 {
     // Reject any embedded NUL/control byte BEFORE trimming: trim() strips NULs
