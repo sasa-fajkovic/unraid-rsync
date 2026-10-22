@@ -764,7 +764,7 @@ class Rsync
      * Injectable process runner. null => use defaultRun (real proc_open).
      * Signature: fn(array $argv, callable(string):void $onOutput, ?array $env, ?int $timeoutSec, ?callable $stopWhen): int
      *
-     * @var callable|null
+     * @var (callable(array<int,string>, callable(string):void, array<string,string>|null, int|null, (callable():bool)|null): int)|null
      */
     public static $runner = null;
 
