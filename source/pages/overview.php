@@ -2,9 +2,9 @@
 /**
  * overview.php - the Overview tab body (first tab).
  *
- * A read-only status board: one row per configured job showing its last
- * execution state (colored badge), when it last ran, and when it next runs — a
- * single place to see the health of every job at a glance.
+ * A read-only status board: one row per configured job showing its last real
+ * run's state (colored badge) and time, a later dry run as a second line, and
+ * when it next runs — a single place to see the health of every job at a glance.
  *
  * The page renders a skeleton row per job (id + name from config) and then polls
  * the shared getStatus poller (window.urStatus, also feeding the Jobs and Status
@@ -92,7 +92,13 @@ ur_emit_page_assets();  /* shared CSS (.ur-empty-state) + window.urUtil */
       if (b) { window.urBadge.apply(b, s.running ? 'RUNNING' : s.state); }
       var lc = tr.querySelector('.ur-ov-last');
       if (lc) {
-        lc.textContent = U.lastRunLabel(s.lastRun, now) + (s.lastRun && s.lastRun.dryRun ? ' · dry-run' : '');
+        lc.textContent = U.lastRunLabel(s.lastReal, now);
+        if (s.lastDryRun) {
+          var dl = document.createElement('div');
+          dl.className = 'ur-dry-run';
+          dl.textContent = U.dryRunLine(s.lastDryRun, now);
+          lc.appendChild(dl);
+        }
         /* Snapshot jobs only; label in the system timezone, UTC stamp on hover. */
         if (s.snapshot) {
           var sl = document.createElement('div');

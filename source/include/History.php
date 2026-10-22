@@ -191,6 +191,48 @@ class History
     }
 
     /**
+     * Overwrite $fields of ONE run's record, found newest-first by its
+     * startedAt AND its logRef (the run log's unique name): a teardown step
+     * after the append changed that run's outcome. Never by position - a
+     * SKIPPED record (no logRef) may have been appended after it, even within
+     * the same second. Same lock as append() and prune(), same rename as
+     * prune(). false when it could not.
+     *
+     * @param array<string,mixed> $fields
+     */
+    public static function amend(string $jobId, string $startedAt, string $logRef, array $fields): bool
+    {
+        if ($logRef === '') {
+            return false;
+        }
+        $path = self::path($jobId);
+        try {
+            return Util::withLock(self::lockPath($jobId), static function () use ($path, $startedAt, $logRef, $fields): bool {
+                $lines = is_file($path) ? @file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) : false;
+                if (!is_array($lines)) {
+                    return false;
+                }
+                for ($i = count($lines) - 1; $i >= 0; $i--) {
+                    $rec = json_decode((string) $lines[$i], true);
+                    if (!is_array($rec) || ($rec['logRef'] ?? null) !== $logRef || ($rec['startedAt'] ?? null) !== $startedAt) {
+                        continue;
+                    }
+                    $json = json_encode(self::normalizeRecord(array_merge($rec, $fields)), JSON_UNESCAPED_SLASHES);
+                    if ($json === false) {
+                        return false;
+                    }
+                    $lines[$i] = $json;
+                    Util::writeAtomic($path, implode("\n", $lines) . "\n", 0644);
+                    return true;
+                }
+                return false;
+            });
+        } catch (Throwable $e) {
+            return false;
+        }
+    }
+
+    /**
      * A cheap change marker for a job's history file (one stat, no parse):
      * mtime, size and inode, so an append (size) and a prune (rename: inode)
      * both change it. '' when there is no file.

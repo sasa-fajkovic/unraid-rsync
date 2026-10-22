@@ -39,11 +39,10 @@ declare(strict_types=1);
  *
  *   2. Cron::nextRun($expr, $fromTs) - compute the next fire time for a standard
  *      5-field cron expression (minute hour day-of-month month day-of-week). Pure
- *      function, no I/O. Implements the standard vixie-cron day-of-month/
- *      day-of-week OR semantics: when BOTH dom and dow are restricted the job
- *      fires if EITHER matches; when only one is restricted only that one
- *      applies. Returns null for a malformed expression or if no match is found
- *      within a sane horizon.
+ *      function, no I/O. It models the daemon Unraid ships, dillon's cron 4.5
+ *      (dcron, database.c ParseField/FixDayDow), not vixie-cron: see nextRun().
+ *      Returns null for a malformed expression, a schedule dcron never fires, or
+ *      when no match is found within a sane horizon.
  *
  * Injectable seams (set before calling apply()):
  *   - Cron::$updateCronRunner  fn(array $argv): int  - the update_cron exec
@@ -389,10 +388,21 @@ class Cron
      * "*\/n", ranges a-b, lists a,b,c, range-steps a-b/n, and named months
      * (jan..dec) / weekdays (sun..sat). Day-of-week accepts 0 and 7 as Sunday.
      *
-     * Standard vixie-cron DOM/DOW OR semantics: when BOTH the day-of-month and
-     * day-of-week fields are RESTRICTED (not "*"), a day matches if EITHER field
-     * matches. When only one is restricted, only that field constrains the day.
-     * When both are "*", every day matches.
+     * The values are dcron 4.5's, which is what fires the job on Unraid:
+     *   - "N/step" is N alone (ParseField collapses a single value before the
+     *     step is applied), so "5/20" is :05, not :05/:25/:45.
+     *   - "*" in day-of-month starts at 0, so "*\/2" there is days 2,4,...,30
+     *     and "*\/3" days 3,6,...,30 (every other field counts like vixie).
+     * and so is the day rule (FixDayDow + TestJobs), decided by the VALUES, not
+     * by a leading "*":
+     *   - day-of-week covers all 7 days      -> the day-of-month set alone;
+     *   - otherwise day-of-month covers 0-31 -> the day-of-week set alone;
+     *   - otherwise a day-of-month set with day 0 (a "*\/n" form) -> the
+     *     day-of-week set alone;
+     *   - otherwise (a numeric day-of-month AND a restricted day-of-week, e.g.
+     *     "0 3 1 * 1") -> never: FixDayDow shifts by (0-1)%5 for the missing
+     *     day 0, which clears every weekday. Such a schedule saves but dcron
+     *     never runs it, so this returns null.
      *
      * Evaluation is in the server's local timezone (the same timezone crond uses
      * to fire the job), minute-by-minute from the minute after $fromTs. That
@@ -412,7 +422,10 @@ class Cron
             return null;
         }
 
-        [$minutes, $hours, $doms, $months, $dows, $domRestricted, $dowRestricted] = $sets;
+        [$minutes, $hours, $doms, $months, $dows, $dayRule] = $sets;
+        if ($dayRule === 'never') {
+            return null;
+        }
 
         // Start at the next whole minute strictly after $fromTs (a job never
         // "fires now" for an exact-second match; cron has minute resolution).
@@ -460,8 +473,7 @@ class Cron
                 continue;
             }
 
-            // Day gate with OR semantics.
-            if (!self::dayMatches($dom, $dow, $doms, $dows, $domRestricted, $dowRestricted)) {
+            if (!($dayRule === 'dom' ? isset($doms[$dom]) : isset($dows[$dow]))) {
                 // Jump to 00:00 of the next day.
                 $ts = self::localTs(0, (int) date('n', $ts), (int) date('j', $ts) + 1, (int) date('Y', $ts));
                 continue;
@@ -504,37 +516,6 @@ class Cron
     }
 
     /**
-     * Whether a calendar day matches under the vixie-cron OR rule.
-     *
-     * @param array<int,bool> $doms  set of matching days-of-month (keys 1..31)
-     * @param array<int,bool> $dows  set of matching days-of-week (keys 0..6)
-     */
-    private static function dayMatches(
-        int $dom,
-        int $dow,
-        array $doms,
-        array $dows,
-        bool $domRestricted,
-        bool $dowRestricted
-    ): bool {
-        $domHit = isset($doms[$dom]);
-        $dowHit = isset($dows[$dow]);
-
-        if ($domRestricted && $dowRestricted) {
-            // Both restricted -> OR.
-            return $domHit || $dowHit;
-        }
-        if ($domRestricted) {
-            return $domHit;
-        }
-        if ($dowRestricted) {
-            return $dowHit;
-        }
-        // Neither restricted -> every day matches.
-        return true;
-    }
-
-    /**
      * Structural validity of a 5-field cron expression: true iff parseExpression
      * accepts it. This is the SINGLE cron grammar in the plugin - Job::isValidCron
      * (the save-time validator) delegates here, so the save check and the
@@ -547,10 +528,10 @@ class Cron
 
     /**
      * Parse a 5-field cron expression into per-field value sets (as int-keyed
-     * presence maps) plus the dom/dow "restricted" flags needed for OR
-     * semantics. Returns null on any malformed field.
+     * presence maps) plus dcron's day rule ('dom', 'dow' or 'never', see
+     * nextRun). Returns null on any malformed field.
      *
-     * @return array{0:array<int,bool>,1:array<int,bool>,2:array<int,bool>,3:array<int,bool>,4:array<int,bool>,5:bool,6:bool}|null
+     * @return array{0:array<int,bool>,1:array<int,bool>,2:array<int,bool>,3:array<int,bool>,4:array<int,bool>,5:string}|null
      */
     private static function parseExpression(string $expr): ?array
     {
@@ -569,7 +550,7 @@ class Cron
 
         $minutes = self::parseField($fields[0], 0, 59, []);
         $hours   = self::parseField($fields[1], 0, 23, []);
-        $doms    = self::parseField($fields[2], 1, 31, []);
+        $doms    = self::parseField($fields[2], 1, 31, [], 0);
         $months  = self::parseField($fields[3], 1, 12, $monthNames);
         // Day-of-week allows 0 and 7 for Sunday; parse on 0..7 then fold 7 -> 0.
         $dowsRaw = self::parseField($fields[4], 0, 7, $dowNames);
@@ -584,27 +565,15 @@ class Cron
             $dows[$v === 7 ? 0 : $v] = true;
         }
 
-        // "Restricted" follows standard vixie-cron, which decides the dom/dow OR
-        // rule purely by whether the FIRST character of the day field is an
-        // asterisk. So "*", "*/1", "*/01" and "*/2" are all "unrestricted"
-        // (star-prefixed), while "1-31", "1", "15" and named/list forms are
-        // "restricted" - exactly as the system crontab would treat them.
-        $domRestricted = !self::isUnrestricted($fields[2]);
-        $dowRestricted = !self::isUnrestricted($fields[4]);
+        if (count($dows) === 7) {
+            $dayRule = 'dom';
+        } elseif (count($doms) === 32 || isset($doms[0])) {
+            $dayRule = 'dow';
+        } else {
+            $dayRule = 'never';
+        }
 
-        return [$minutes, $hours, $doms, $months, $dows, $domRestricted, $dowRestricted];
-    }
-
-    /**
-     * True when a cron field is "unrestricted" for the vixie-cron dom/dow OR
-     * rule. vixie-cron keys this solely on whether the field's first character
-     * is an asterisk, so "*", "*\/1", "*\/01" and "*\/2" are all unrestricted,
-     * while "1-31", "1" and lists are restricted - matching the real crontab.
-     */
-    private static function isUnrestricted(string $field): bool
-    {
-        $field = trim($field);
-        return $field !== '' && $field[0] === '*';
+        return [$minutes, $hours, $doms, $months, $dows, $dayRule];
     }
 
     /**
@@ -612,10 +581,11 @@ class Cron
      * or null if malformed. Supports comma lists, ranges, steps, "*", and the
      * supplied lowercase name map (month/dow names).
      *
-     * @param array<string,int> $names lowercase name -> int (empty for numeric-only)
+     * @param array<string,int> $names    lowercase name -> int (empty for numeric-only)
+     * @param int|null          $starFrom where "*" starts (dcron's day-of-month: 0)
      * @return array<int,bool>|null
      */
-    private static function parseField(string $field, int $min, int $max, array $names): ?array
+    private static function parseField(string $field, int $min, int $max, array $names, ?int $starFrom = null): ?array
     {
         $field = trim($field);
         if ($field === '') {
@@ -650,7 +620,7 @@ class Cron
 
             // Resolve the value range this part covers.
             if ($part === '*') {
-                $lo = $min;
+                $lo = $starFrom ?? $min;
                 $hi = $max;
             } elseif (strpos($part, '-') !== false) {
                 $rb = explode('-', $part);
@@ -670,15 +640,9 @@ class Cron
                 if ($v === null || $v < $min || $v > $max) {
                     return null;
                 }
-                // A single value with a step (e.g. "5/10") means "from 5 to max
-                // step 10", matching vixie-cron's handling of "N/step".
-                if ($step > 1) {
-                    $lo = $v;
-                    $hi = $max;
-                } else {
-                    $out[$v] = true;
-                    continue;
-                }
+                // dcron: "N/step" is N alone.
+                $out[$v] = true;
+                continue;
             }
 
             for ($i = $lo; $i <= $hi; $i += $step) {

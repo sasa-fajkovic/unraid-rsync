@@ -3,6 +3,8 @@
 declare(strict_types=1);
 
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\PreserveGlobalState;
+use PHPUnit\Framework\Attributes\RunInSeparateProcess;
 use PHPUnit\Framework\Attributes\DataProvider;
 
 /**
@@ -290,7 +292,7 @@ final class HandlerStatusTest extends TestCase
         );
         $this->assertNull($body['jobs'][$never]['snapshot'], 'a snapshot job with no summary yet');
         $this->assertSame(
-            ['name', 'enabled', 'manualOnly', 'running', 'state', 'lastRun', 'nextRun', 'historyRev'],
+            ['name', 'enabled', 'manualOnly', 'running', 'state', 'lastRun', 'lastReal', 'lastDryRun', 'nextRun', 'historyRev'],
             array_keys($body['jobs'][$mirror]),
             'a mirror entry keeps its shape, whatever its summary holds'
         );
@@ -1150,5 +1152,107 @@ final class HandlerStatusTest extends TestCase
         } finally {
             @unlink(History::path($id));
         }
+    }
+
+    // ---- the launch generation (an Abort before the runner starts) ---------
+
+    public function testAbortNamesTheLaunchItIsFor(): void
+    {
+        $id  = $this->seedJob('gen');
+        $gen = RunState::beginLaunch($id);
+        RunState::clearAbort($id);
+
+        $_POST = ['id' => $id];
+        [, $code] = $this->runCapture('ur_action_abort_job');
+
+        $this->assertSame(200, $code);
+        $this->assertSame(['by' => 'user', 'gen' => $gen], RunState::readAbort($id));
+        $this->assertTrue(RunState::abortedByUser($id, $gen));
+        $this->assertFalse(RunState::abortedByUser($id, 'another-launch'));
+        RunState::clearAbort($id);
+        RunState::clear($id);
+    }
+
+    public function testRunJobRefusesWhileTheRunLockIsHeld(): void
+    {
+        $id   = $this->seedJob('locked');
+        $held = RunState::acquireLock($id);
+        try {
+            $_POST = ['id' => $id];
+            [$body, $code] = $this->runCapture(static function (): void {
+                ur_action_run_job(false);
+            });
+        } finally {
+            RunState::releaseLock($held);
+        }
+        $this->assertSame(409, $code, json_encode($body));
+        $this->assertTrue($body['running']);
+        $this->assertArrayNotHasKey('gen', RunState::read($id) ?? [], 'nothing recorded for a launch that did not happen');
+    }
+
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testRunJobRecordsTheGenerationAndHandsItToTheRunner(): void
+    {
+        $dir  = sys_get_temp_dir() . '/ur-fake-runner-' . getmypid() . '-' . bin2hex(random_bytes(3));
+        mkdir($dir);
+        $out  = $dir . '/argv.json';
+        file_put_contents($dir . '/runner.php', '<?php file_put_contents(' . var_export($out, true) . ', json_encode($argv));');
+        define('UR_RUNNER_PATH', $dir . '/runner.php');
+        $id = $this->seedJob('launch');
+
+        $_POST = ['id' => $id];
+        [$body, $code] = $this->runCapture(static function (): void {
+            ur_action_run_job(false);
+        });
+        $this->assertSame(200, $code, json_encode($body));
+        for ($i = 0; $i < 100 && !is_file($out); $i++) {
+            usleep(20000);
+        }
+        $argv = json_decode((string) @file_get_contents($out), true);
+        @unlink($out);
+        @unlink($dir . '/runner.php');
+        @rmdir($dir);
+
+        $gen = (string) (RunState::read($id)['gen'] ?? '');
+        $this->assertMatchesRegularExpression('/^[0-9a-f]{16}$/', $gen, 'recorded before the launch');
+        $this->assertIsArray($argv, 'the runner was started');
+        $this->assertContains('--job=' . $id, $argv);
+        $this->assertContains('--gen=' . $gen, $argv);
+        $this->assertFalse(RunState::read($id)['running'] ?? true, 'a pending launch is not a running one');
+    }
+
+    // ---- the last real run drives the badge; a dry run is a second line ----
+
+    public function testGetStatusDerivesTheBadgeFromTheLastRealRunNotADryRun(): void
+    {
+        $id = $this->seedJob('Audiobooks');
+        Runner::writeSummary($id, ['state' => 'FAILED', 'startedAt' => '2026-10-20T03:00:00Z', 'finishedAt' => '2026-10-20T03:05:00Z', 'exitCode' => 12]);
+        Runner::writeSummary($id, ['state' => 'SUCCESS', 'startedAt' => '2026-10-21T09:00:00Z', 'finishedAt' => '2026-10-21T09:01:00Z',
+            'exitCode' => 0, 'durationSec' => 60, 'dryRun' => true]);
+
+        [$body] = $this->runCapture('ur_action_get_status');
+        $entry = $body['jobs'][$id];
+
+        $this->assertSame('FAILED', $entry['state']);
+        $this->assertSame(['state' => 'SUCCESS', 'startedAt' => '2026-10-21T09:00:00Z', 'finishedAt' => '2026-10-21T09:01:00Z',
+            'exitCode' => 0, 'durationSec' => 60, 'dryRun' => true], $entry['lastRun'], 'lastRun is unchanged: the last execution');
+        $this->assertSame(['state' => 'FAILED', 'startedAt' => '2026-10-20T03:00:00Z', 'finishedAt' => '2026-10-20T03:05:00Z',
+            'exitCode' => 12, 'reason' => ''], $entry['lastReal']);
+        $this->assertSame(['label' => 'Dry-run OK', 'finishedAt' => '2026-10-21T09:01:00Z'], $entry['lastDryRun']);
+    }
+
+    public function testGetStatusShowsACrashedRunAndItsMissingExitCode(): void
+    {
+        $id = $this->seedJob('Crashy', ['notifyMode' => 'off']);
+        Runner::writeSummary($id, ['state' => 'SUCCESS', 'startedAt' => '2026-10-17T03:00:00Z', 'exitCode' => 0]);
+        Runner::reportCrashed(['jobId' => $id, 'pid' => 999999, 'startedAt' => '2026-10-21T03:00:00Z', 'trigger' => 'schedule']);
+
+        [$body] = $this->runCapture('ur_action_get_status');
+        $entry = $body['jobs'][$id];
+        $this->assertSame('CRASHED', $entry['state']);
+        $this->assertNull($entry['lastRun']['exitCode']);
+        $this->assertNull($entry['lastDryRun']);
+        @unlink(History::path($id));
     }
 }

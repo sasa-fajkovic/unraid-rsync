@@ -7,8 +7,10 @@ declare(strict_types=1);
  * the FAT32 flash and is cleared on reboot.
  *
  * Files per job under <runtimeBase>/state/:
- *   <jobid>.json   {jobId, pid, running, dryRun, startedAt, currentLog}
- *   <jobid>.abort  a flag file (its mere existence means "abort requested")
+ *   <jobid>.json   {jobId, pid, running, dryRun, startedAt, currentLog} plus the
+ *                  optional secrets `token` and launch generation `gen`
+ *   <jobid>.abort  the abort flag: its existence means "stop", its JSON body
+ *                  {by: user|signal, at, gen} who asked and for which launch
  *   <jobid>.lock   an advisory flock target for the atomic concurrency guard
  *
  * The interesting part is isRunning(): a stale state file (the worker was
@@ -52,6 +54,14 @@ class RunState
      * @var string|null
      */
     public static $baseOverride = null;
+
+    /**
+     * Test seam: fn(): void, called by clearStaleAbort once it has taken the
+     * flag it judges - where a concurrent abortJob would land. null => none.
+     *
+     * @var (callable():void)|null
+     */
+    public static $afterStaleAbortRead = null;
 
     /** The runtime base dir actually in effect. */
     public static function base(): string
@@ -174,7 +184,7 @@ class RunState
     /**
      * Write a job's runtime state atomically (temp + rename). The written shape
      * is fixed: {jobId, pid, running, dryRun, trigger, startedAt, currentLog},
-     * plus an optional `token` (jobId is always stamped from the $jobId arg).
+     * plus optional `token` and `gen` (jobId is always stamped from the $jobId arg).
      * Unknown keys passed in are dropped so the file stays canonical. `trigger` is clamped to the closed
      * set ('manual'|'schedule', default 'manual').
      *
@@ -196,6 +206,9 @@ class RunState
         // The run's secrets token, so a crashed run's tmpfs secrets can be swept.
         if (is_string($state['token'] ?? null) && $state['token'] !== '') {
             $out['token'] = $state['token'];
+        }
+        if (is_string($state['gen'] ?? null) && $state['gen'] !== '') {
+            $out['gen'] = $state['gen'];
         }
 
         $path = self::statePath($jobId);
@@ -223,7 +236,7 @@ class RunState
      * unreadable/corrupt (a missing/garbage state file just means "not
      * running"). The returned array is always the canonical shape.
      *
-     * @return array{jobId:string,pid:int,running:bool,dryRun:bool,trigger:string,startedAt:string,currentLog:string,token?:string}|null
+     * @return array{jobId:string,pid:int,running:bool,dryRun:bool,trigger:string,startedAt:string,currentLog:string,token?:string,gen?:string}|null
      */
     public static function read(string $jobId): ?array
     {
@@ -247,7 +260,26 @@ class RunState
             'trigger'    => (($data['trigger'] ?? '') === 'schedule') ? 'schedule' : 'manual',
             'startedAt'  => (string) ($data['startedAt'] ?? ''),
             'currentLog' => (string) ($data['currentLog'] ?? ''),
-        ] + (is_string($data['token'] ?? null) && $data['token'] !== '' ? ['token' => $data['token']] : []);
+        ] + (is_string($data['token'] ?? null) && $data['token'] !== '' ? ['token' => $data['token']] : [])
+          + (is_string($data['gen'] ?? null) && $data['gen'] !== '' ? ['gen' => $data['gen']] : []);
+    }
+
+    /** A fresh launch generation. */
+    public static function newGen(): string
+    {
+        return bin2hex(random_bytes(8));
+    }
+
+    /**
+     * Record the generation of a launch before its runner starts, so an Abort
+     * clicked in between names it (the runner adopts it via --gen). The caller
+     * holds the run lock, so no runner can be writing this record meanwhile.
+     */
+    public static function beginLaunch(string $jobId): string
+    {
+        $gen = self::newGen();
+        self::write($jobId, ['gen' => $gen] + (self::read($jobId) ?? []));
+        return $gen;
     }
 
     /** Remove a job's state file (best-effort). */
@@ -488,11 +520,78 @@ class RunState
         return is_file(self::abortPath($jobId));
     }
 
-    /** Request an abort by touching the flag file. */
-    public static function requestAbort(string $jobId): void
+    /**
+     * Raise the abort flag. $by is 'user' (the handler's abortJob) or 'signal'
+     * (a SIGTERM/SIGINT the runner caught); $gen is the launch it is meant for.
+     * A 'signal' flag never replaces one already there: the handler writes its
+     * 'user' flag before it signals the runner's group.
+     */
+    public static function requestAbort(string $jobId, string $gen = '', string $by = 'user'): void
     {
         self::ensureDir();
-        @touch(self::abortPath($jobId));
+        $path = self::abortPath($jobId);
+        if ($by !== 'user' && is_file($path)) {
+            return;
+        }
+        $json = json_encode(['by' => $by, 'at' => gmdate('Y-m-d\TH:i:s\Z'), 'gen' => $gen]);
+        Util::writeAtomic($path, $json === false ? '' : $json, 0600);
+    }
+
+    /**
+     * The abort flag, or null when there is none. An empty or unparsable flag
+     * (an older handler touched it) reads as a user abort for no generation.
+     *
+     * @return array{by:string,gen:string}|null
+     * @phpstan-impure
+     */
+    public static function readAbort(string $jobId): ?array
+    {
+        $raw = @file_get_contents(self::abortPath($jobId));
+        return $raw === false ? null : self::parseAbort($raw);
+    }
+
+    /** @return array{by:string,gen:string} */
+    private static function parseAbort(string|false $raw): array
+    {
+        $data = json_decode((string) $raw, true);
+        return [
+            'by'  => is_array($data) && ($data['by'] ?? '') === 'signal' ? 'signal' : 'user',
+            'gen' => is_array($data) && is_string($data['gen'] ?? null) ? $data['gen'] : '',
+        ];
+    }
+
+    /**
+     * Did a user ask to stop launch $gen? A flag with no generation (written
+     * by an older handler, or mid-run with none recorded) counts.
+     */
+    public static function abortedByUser(string $jobId, string $gen): bool
+    {
+        $flag = self::readAbort($jobId);
+        return $flag !== null && $flag['by'] === 'user' && ($flag['gen'] === '' || $flag['gen'] === $gen);
+    }
+
+    /**
+     * Run start: drop a flag left for any other launch, keep one for $gen (an
+     * Abort clicked between Run and this runner starting). The flag is first
+     * renamed aside, so only that copy is judged and deleted: an abortJob for
+     * this launch landing meanwhile writes a fresh file nothing here touches.
+     * Ours goes back with link(), which never replaces a newer flag.
+     */
+    public static function clearStaleAbort(string $jobId, string $gen): void
+    {
+        $path  = self::abortPath($jobId);
+        $taken = $path . '.' . bin2hex(random_bytes(4));
+        if (!@rename($path, $taken)) {
+            return;
+        }
+        $flag = self::parseAbort(@file_get_contents($taken));
+        if (self::$afterStaleAbortRead !== null) {
+            (self::$afterStaleAbortRead)();
+        }
+        if ($gen !== '' && $flag['gen'] === $gen) {
+            @link($taken, $path);
+        }
+        @unlink($taken);
     }
 
     /** Clear a job's abort flag (best-effort). Called on run start + end. */

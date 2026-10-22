@@ -1145,16 +1145,17 @@ final class SnapshotRunnerTest extends TestCase
     }
 
     #[DataProvider('rsyncAbortProvider')]
-    public function testAnAbortExitWithoutTheFlagKeepsTheAbortImportance(int $exit): void
+    public function testAnAbortExitWithoutTheFlagIsATerminatedFailure(int $exit): void
     {
         $this->saveJob();
         $this->seedSnapshot($this->stamp(1));
         $this->pairExit = ['b' => $exit];
         $res = $this->runJob();
-        $this->assertSame(Rsync::STATE_ABORTED, $res['state']);
-        $this->assertArrayNotHasKey('reason', $res);
+        // Nobody clicked Abort: a shutdown or a stray kill, which must alert.
+        $this->assertSame(Rsync::STATE_FAILED, $res['state']);
+        $this->assertSame('terminated', $res['reason'] ?? null);
         $this->assertNotContains('helper:commit', $this->trace);
-        $this->assertSame('normal', $this->importance());
+        $this->assertSame('alert', $this->importance());
     }
 
     public function testRunawayGrowthIsSuspectOnceThreeValuesExist(): void

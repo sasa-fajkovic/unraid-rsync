@@ -332,6 +332,73 @@ on, forked from, or derived from any other plugin.
   the job still running is recorded as state `SKIPPED` (History only, no
   summary, so `getStatus` keeps the last real outcome), notifies at normal
   importance and never under success-only.
+- **The last-run summary has two slots.** `runs/<jobid>.summary.json`'s top
+  level is the LAST EXECUTION of any kind, in the shape older readers know
+  (`state, startedAt, finishedAt, exitCode, durationSec, dryRun, trigger`, plus
+  `reason` when set and the snapshot fields); `lastReal` is the last NON-dry
+  run's `{state, startedAt, finishedAt, exitCode, reason}` (null: none yet). A
+  dry run rewrites only the top level; a real run both. A summary written
+  before `lastReal` existed reads as its own last real run, or, when it was a
+  dry run, as the newest non-dry, non-SKIPPED History record - the real
+  outcome that dry run overwrote (`Runner::lastRealFor`, every retained record
+  searched). That answer, null included, is written into `summary.json` under
+  the summary lock the first time it is resolved (never over a summary that
+  changed meanwhile), so History is read once per job, not on every poll. The
+  badge, `getStatus.state`, the Dashboard and the Last-run time all come from
+  `lastReal`, so a successful Dry-run can never paint a failed backup green; a
+  dry run shows as a neutral second line (`PageHelpers::lastDryRun` /
+  `dryRunLine`, "Dry-run OK · <time>", "Dry-run failed · …", JS mirror
+  `window.urUtil.dryRunLine`, a muted suffix on the Dashboard). `getStatus`
+  keeps `lastRun` (the top level) and adds `lastReal` and `lastDryRun`.
+  `writeSummary` is a load-modify-save under `runs/<jobid>.summary.lock`.
+  A runner that died (`reportCrashed`) writes state `CRASHED` (summary only;
+  its History record stays `FAILED`/`crashed`) and a scheduled hard failure
+  writes `FAILED` with its reason, both with `exitCode` null and `$keepNewer`:
+  neither slot is replaced by a record that started earlier than what is
+  there (a live or later run wins).
+- **Teardown steps are independent.** `Runner::run`'s `finally` runs flush,
+  post-hook, snapshot prune, host-key pin, secret cleanup, log redaction,
+  summary, History, in-flight cleanup, mark-stopped and abort-flag clear each
+  through its own try/catch (`$step`): a throw logs ONE line (run log +
+  `plugin.log`) and the next step still runs; notify and the lock release
+  never throw. A summary, History or run-state failure (thrown or `false`)
+  turns a SUCCESS into FAILED with reason `teardown-failed` (other states keep
+  theirs), and what was already written before that failure is rewritten to
+  match while the run lock is still held: the summary again, the History
+  record in place (`History::amend`, under the History lock, found
+  newest-first by `startedAt` + `logRef` - never by position: a scheduled
+  launch's SKIPPED record, appended without the run lock, can follow it in the
+  same second). A post-hook that could not run counts as a failed post-hook. The
+  flush stays first and the pin stays before cleanup. Test seam:
+  `Runner::$teardownFault`.
+- **Only a user's Abort for THIS launch is ABORTED.** The abort flag
+  (`state/<jobid>.abort`) is JSON `{by: user|signal, at, gen}`. `runJob` takes
+  the run lock, records a launch generation in the run-state record
+  (`RunState::beginLaunch`) and passes it as `--gen=`; a scheduled run makes
+  its own. `abortJob` writes `by: user` with the generation it reads from the
+  run-state record, before it signals. The runner writes its state, THEN drops
+  a flag for any other generation (`clearStaleAbort`), so an Abort clicked
+  before it started is honoured (ABORTED before anything transfers) and a
+  stale one is not. `clearStaleAbort` renames the flag aside and judges only
+  that copy, putting ours back with `link()` (never over a newer flag): a
+  read-then-unlink of the one path deleted an Abort for this launch that
+  landed in between (seam `RunState::$afterStaleAbortRead`). Its SIGTERM/SIGINT trap writes `by: signal`, never over an
+  existing flag. A run that ends ABORTED (flag, exit 20, or 143) without a
+  user flag for its generation (`RunState::abortedByUser`; a flag with no
+  generation counts) is FAILED with reason `terminated`, before the post-hook
+  sees it. An abort during the pre-hook is ABORTED, not `prehook-failed`.
+- **`Cron::nextRun` models dcron 4.5, not vixie-cron.** Unraid 7.3.2 runs
+  dillon's cron 4.5 (Slackware's `dcron-4.5` + patches that do not touch
+  parsing); source: github.com/dubiousjim/dcron tag `v4.5`, `database.c`
+  `ParseField`, `FixDayDow` and the `TestJobs` match. "N/step" is N alone
+  (`5/20` is :05); `*` in day-of-month starts at day 0, so `*/2` there is days
+  2,4,…,30. The day rule goes by VALUES: a day-of-week covering all 7 days →
+  the day-of-month set; else a day-of-month covering 0-31 or containing day 0
+  (a `*`-form) → the day-of-week set; else (a numeric day-of-month with a
+  restricted day-of-week, `0 3 1 * 1`) → never: `FixDayDow` shifts by
+  `(0-1)%5` for the missing day 0 and clears every weekday, so `nextRun`
+  returns null (em-dash). Such schedules still save. `CronTest`'s dcron cases
+  were taken from those functions compiled and run verbatim.
 - **A manual-only job has NO next run, and `getStatus` must say so.** `enabled`
   + `manualOnly` is exactly how "run on demand" is stored, and such a job keeps
   whatever `schedule` string it was last saved with — so anything that computes
@@ -396,7 +463,9 @@ on, forked from, or derived from any other plugin.
   intentional side effect: any GET that calls `RunState::isRunning`
   (`getStatus`, `getJobLog`, `listHistory`) → `reapStale` →
   `Runner::reportCrashed` records a dead runner exactly once (appends a
-  `crashed` History record, notifies, deletes the in-flight record). The check
+  `crashed` History record, writes the `CRASHED` summary unless a later run
+  already wrote one, notifies, deletes the in-flight record) - plus, once per
+  job after the upgrade, the `lastReal` write-through above. The check
   is **match-ANY** across all server-side-trusted token sources (`$GLOBALS['var']['csrf_token']`,
   `$_SESSION['csrf_token']`, and `var.ini`) — `ur_csrf_token_candidates()` /
   `ur_check_csrf()`. **Do NOT revert to "first non-empty source wins":** on the

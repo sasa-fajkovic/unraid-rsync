@@ -174,6 +174,31 @@ final class RunStateTest extends TestCase
         $this->assertFalse(RunState::abortRequested('j-x'));
     }
 
+    public function testAnAbortForTheNewLaunchLandingDuringTheStaleCheckSurvives(): void
+    {
+        RunState::requestAbort('j-race', 'old0');
+        // abortJob, reading the new launch's generation, writes its flag just
+        // after the runner looked at the stale one.
+        RunState::$afterStaleAbortRead = static fn() => RunState::requestAbort('j-race', 'new1');
+        try {
+            RunState::clearStaleAbort('j-race', 'new1');
+        } finally {
+            RunState::$afterStaleAbortRead = null;
+        }
+        $this->assertSame(['by' => 'user', 'gen' => 'new1'], RunState::readAbort('j-race'));
+        $this->assertTrue(RunState::abortedByUser('j-race', 'new1'));
+        $this->assertSame([], glob(RunState::abortPath('j-race') . '.*') ?: [], 'no side file left behind');
+
+        // A stale flag alone is still dropped, and our own is still kept.
+        RunState::requestAbort('j-race', 'old0');
+        RunState::clearStaleAbort('j-race', 'new1');
+        $this->assertFalse(RunState::abortRequested('j-race'));
+        RunState::requestAbort('j-race', 'new1');
+        RunState::clearStaleAbort('j-race', 'new1');
+        $this->assertTrue(RunState::abortedByUser('j-race', 'new1'));
+        RunState::clearAbort('j-race');
+    }
+
     public function testCmdlineMatchesJob(): void
     {
         $this->assertTrue(RunState::cmdlineMatchesJob("php\0/x/scripts/runner.php\0--job=j-music", 'j-music'));

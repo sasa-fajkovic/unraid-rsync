@@ -35,7 +35,10 @@ declare(strict_types=1);
  *
  * SUMMARY (read by getStatus for the Jobs list, and durable across reboot) is
  * written to /boot at <UR_CONFIG_BASE>/runs/<jobid>.summary.json:
- *   {state, startedAt, finishedAt, exitCode, durationSec, dryRun}
+ *   {state, startedAt, finishedAt, exitCode, durationSec, dryRun, trigger,
+ *    reason?, lastReal?}
+ * The top level is the LAST EXECUTION of any kind; lastReal is the last
+ * non-dry run (see writeSummary / lastReal).
  *
  * NOTIFICATIONS: Runner::notifyHook, with importance chosen by cause; hard
  * failures (hardFail) and runners that died (reportCrashed) notify too.
@@ -110,6 +113,14 @@ class Runner
      */
     public static $logTrimmer = null;
 
+    /**
+     * Injectable teardown fault: fn(string $step): void, called before each
+     * teardown step of run()'s finally; tests throw from it. null => none.
+     *
+     * @var (callable(string):void)|null
+     */
+    public static $teardownFault = null;
+
     /** Resolve our own pid (overridable for tests). */
     private static function pid(): int
     {
@@ -143,12 +154,17 @@ class Runner
      * IN the result, not thrown, so postHook still runs and a summary is still
      * written).
      *
+     * $gen is the launch generation the handler recorded (RunState::beginLaunch)
+     * before starting this runner; a scheduled run gets a fresh one. An Abort
+     * flag for another generation is stale and cleared at start.
+     *
      * @param string $jobId
      * @param bool   $dryRun
      * @return array{state:string,exitCode:int,runLog:string,reason?:string}
      */
-    public static function run(string $jobId, bool $dryRun = false, string $trigger = 'manual'): array
+    public static function run(string $jobId, bool $dryRun = false, string $trigger = 'manual', string $gen = ''): array
     {
+        $gen = preg_match('/^[0-9a-f]{1,64}$/D', $gen) === 1 ? $gen : RunState::newGen();
         // How this run was triggered: 'manual' (UI Run/Dry-run) or 'schedule'
         // (cron). Clamped to the closed set so a junk value never propagates into
         // state/summary/history. Orthogonal to $dryRun (dry-vs-real).
@@ -242,7 +258,6 @@ class Runner
             // fail the run.
             Logger::$retention = $retention;
             Logger::pruneRuns($jobId, null, $runLog);
-            RunState::clearAbort($jobId);
             $runState = [
                 'pid'        => self::pid(),
                 'running'    => true,
@@ -250,11 +265,15 @@ class Runner
                 'trigger'    => $trigger,
                 'startedAt'  => $startedAt,
                 'currentLog' => $runLog,
+                'gen'        => $gen,
             ];
             if ($stamp !== '') {
                 $runState['snapshot'] = $stamp;
             }
             RunState::write($jobId, $runState);
+            // After the write, so an Abort that read the previous generation is
+            // dropped here and one for this launch is kept.
+            RunState::clearStaleAbort($jobId, $gen);
             RunState::writeInflight($jobId, $runState);
         } catch (Throwable $e) {
             RunState::releaseLock($lock);
@@ -299,9 +318,11 @@ class Runner
         $prevAsyncSignals = null;
         if (self::pcntlUsable()) {
             $prevAsyncSignals = pcntl_async_signals(true);
-            $onAbortSignal = static function () use ($jobId): void {
+            // A 'signal' flag stops the run like an Abort, but only a user's
+            // flag (written before the handler signals) records it as ABORTED.
+            $onAbortSignal = static function () use ($jobId, $gen): void {
                 try {
-                    RunState::requestAbort($jobId);
+                    RunState::requestAbort($jobId, $gen, 'signal');
                 } catch (\Throwable $e) {
                     // Never let a signal handler throw.
                 }
@@ -455,9 +476,9 @@ class Runner
             if ($state === Rsync::STATE_SUCCESS && $sn !== null && !$dryRun) {
                 self::snapshotCleanup($sn, $reason, $runLog, $jobId);
             }
-            // An Abort before the pre-hook stops the run there: a hook started
-            // with the flag set would be killed and reported as prehook-failed.
-            if ($state === Rsync::STATE_SUCCESS && $sn !== null && RunState::abortRequested($jobId)) {
+            // An Abort before the pre-hook (including one clicked before this
+            // runner started) stops the run there, before anything transfers.
+            if ($state === Rsync::STATE_SUCCESS && RunState::abortRequested($jobId)) {
                 Logger::event($runLog, $jobId, 'Abort requested; stopping before the pre-run hook.');
                 $state    = Rsync::STATE_ABORTED;
                 $exitCode = 143;
@@ -487,13 +508,19 @@ class Runner
                     );
                     if ($preExit === self::HOOK_TIMED_OUT) {
                         Logger::event($runLog, $jobId, "Pre-run hook timed out after $preMin minute(s) and was killed.");
-                        $state    = Rsync::STATE_FAILED;
-                        $exitCode = 124;
-                        $reason   = 'prehook-timeout';
                     } else {
                         Logger::event($runLog, $jobId, 'Pre-run hook exited with code ' . $preExit . '.');
                     }
-                    if ($preExit !== 0 && $preExit !== self::HOOK_TIMED_OUT) {
+                    if (RunState::abortRequested($jobId)) {
+                        // The stop request killed the hook; not a hook failure.
+                        Logger::event($runLog, $jobId, 'Abort requested; stopping after the pre-run hook.');
+                        $state    = Rsync::STATE_ABORTED;
+                        $exitCode = 143;
+                    } elseif ($preExit === self::HOOK_TIMED_OUT) {
+                        $state    = Rsync::STATE_FAILED;
+                        $exitCode = 124;
+                        $reason   = 'prehook-timeout';
+                    } elseif ($preExit !== 0) {
                         // A failed preHook fails the run; pairs are skipped, but
                         // postHook STILL runs (the finally-style postHook below).
                         $state    = Rsync::STATE_FAILED;
@@ -726,55 +753,89 @@ class Runner
             $reason   = 'exception';
             Logger::event($runLog, $jobId, 'Run failed with an internal error: ' . $e->getMessage());
         } finally {
+            // Every teardown step runs on its own: a step that throws is logged
+            // once and the rest still run (cleanup, summary, History, state,
+            // lock). Only a summary, History or run-state failure changes the
+            // outcome (teardownFailed).
+            $broken = [];
+            $step = static function (string $name, callable $fn) use ($jobId, $runLog, &$broken): void {
+                try {
+                    if (self::$teardownFault !== null) {
+                        (self::$teardownFault)($name);
+                    }
+                    $fn();
+                } catch (Throwable $e) {
+                    $broken[] = $name;
+                    self::reportTeardownFailure($jobId, $runLog, $name, $e);
+                }
+            };
+
             // Land whatever the last sink still holds, FIRST. It has to happen
             // before the postHook: runHook() opens a new sink on this same path
             // and Logger::sink() RESETS the per-path state, so a flush placed
             // after the hook would find nothing left to rescue. This is the
             // abort path's safety net - a SIGTERM'd rsync leaves its last
             // redraw unterminated, and the trap lets this finally run.
-            Logger::flushSink($runLog);
+            $step('flush', static fn() => Logger::flushSink($runLog));
             $state = self::snapshotWarnState($state, $reason);
+
+            // A stop nobody clicked Abort for (a shutdown's SIGTERM, a killed
+            // rsync exiting 20) is a failure, not an abort: it must alert.
+            if ($state === Rsync::STATE_ABORTED && !RunState::abortedByUser($jobId, $gen)) {
+                $state  = Rsync::STATE_FAILED;
+                $reason = 'terminated';
+                Logger::event($runLog, $jobId, 'The run was stopped by a signal, not by Abort; recording it as FAILED.');
+            }
 
             // 7. postHook ALWAYS runs (even on failure/abort), with the outcome
             //    in its environment.
             $postHook = (string) ($job['postHook'] ?? '');
             if (trim($postHook) !== '') {
-                $postEnv = self::hookEnv($job, $jobId, $dryRun, $state, $exitCode, $trigger, $snap === null ? [] : [
-                    'UR_SNAPSHOT'        => !empty($sn['mkstamped']) ? $stamp : '',
-                    'UR_SNAPSHOT_STATUS' => $dryRun ? 'dry-run'
-                        : (!empty($sn['committed']) ? 'committed' : (!empty($sn['mkstamped']) ? 'not-committed' : 'none')),
-                ]);
-                $postMin = Config::hookTimeoutMinutes(
-                    (isset($config['global']) && is_array($config['global'])) ? $config['global'] : [],
-                    'postHookTimeout'
-                );
-                // The post-hook ALWAYS runs, so an abort that already ended the
-                // run must not kill it; only a fresh Abort during it may.
-                $abortedBefore = RunState::abortRequested($jobId);
-                Logger::event($runLog, $jobId, 'Running post-run hook.');
-                $postExit = self::runHook(
-                    $postHook,
-                    $postEnv,
-                    $runLog,
-                    $postMin * 60,
-                    $abortedBefore ? null : static fn(): bool => RunState::abortRequested($jobId)
-                );
-                if ($postExit === self::HOOK_TIMED_OUT) {
-                    // Keeps the primary outcome, like a failed post-hook.
-                    Logger::event($runLog, $jobId, "Post-run hook timed out after $postMin minute(s) and was killed.");
-                    $reason = $reason !== '' ? $reason : 'posthook-timeout';
-                    if ($state === Rsync::STATE_SUCCESS) {
-                        $state = Rsync::STATE_WARNING;
+                $step('post-hook', static function () use ($job, $jobId, $dryRun, $trigger, $snap, $sn, $stamp, $config, $postHook, $runLog, &$state, &$exitCode, &$reason): void {
+                    $postEnv = self::hookEnv($job, $jobId, $dryRun, $state, $exitCode, $trigger, $snap === null ? [] : [
+                        'UR_SNAPSHOT'        => !empty($sn['mkstamped']) ? $stamp : '',
+                        'UR_SNAPSHOT_STATUS' => $dryRun ? 'dry-run'
+                            : (!empty($sn['committed']) ? 'committed' : (!empty($sn['mkstamped']) ? 'not-committed' : 'none')),
+                    ]);
+                    $postMin = Config::hookTimeoutMinutes(
+                        (isset($config['global']) && is_array($config['global'])) ? $config['global'] : [],
+                        'postHookTimeout'
+                    );
+                    // The post-hook ALWAYS runs, so an abort that already ended the
+                    // run must not kill it; only a fresh Abort during it may.
+                    $abortedBefore = RunState::abortRequested($jobId);
+                    Logger::event($runLog, $jobId, 'Running post-run hook.');
+                    $postExit = self::runHook(
+                        $postHook,
+                        $postEnv,
+                        $runLog,
+                        $postMin * 60,
+                        $abortedBefore ? null : static fn(): bool => RunState::abortRequested($jobId)
+                    );
+                    if ($postExit === self::HOOK_TIMED_OUT) {
+                        // Keeps the primary outcome, like a failed post-hook.
+                        Logger::event($runLog, $jobId, "Post-run hook timed out after $postMin minute(s) and was killed.");
+                        $reason = $reason !== '' ? $reason : 'posthook-timeout';
+                        if ($state === Rsync::STATE_SUCCESS) {
+                            $state = Rsync::STATE_WARNING;
+                        }
+                    } else {
+                        Logger::event($runLog, $jobId, 'Post-run hook exited with code ' . $postExit . '.');
                     }
-                } else {
-                    Logger::event($runLog, $jobId, 'Post-run hook exited with code ' . $postExit . '.');
-                }
-                // A failing postHook does NOT override the run's primary outcome,
-                // but we surface it on an otherwise-clean run so it isn't silent,
-                // and record it as the reason wherever none is set yet: an exit-24
-                // run or a manual abort notify as normal unless a reason says
-                // otherwise.
-                if ($postExit !== 0 && $postExit !== self::HOOK_TIMED_OUT && $state !== Rsync::STATE_FAILED) {
+                    // A failing postHook does NOT override the run's primary outcome,
+                    // but we surface it on an otherwise-clean run so it isn't silent,
+                    // and record it as the reason wherever none is set yet: an exit-24
+                    // run or a manual abort notify as normal unless a reason says
+                    // otherwise.
+                    if ($postExit !== 0 && $postExit !== self::HOOK_TIMED_OUT && $state !== Rsync::STATE_FAILED) {
+                        if ($state === Rsync::STATE_SUCCESS) {
+                            $state = Rsync::STATE_WARNING;
+                        }
+                        $reason = $reason !== '' ? $reason : 'posthook-failed';
+                    }
+                });
+                // A post-hook that could not be run counts as a failed one.
+                if (in_array('post-hook', $broken, true) && $state !== Rsync::STATE_FAILED) {
                     if ($state === Rsync::STATE_SUCCESS) {
                         $state = Rsync::STATE_WARNING;
                     }
@@ -784,9 +845,11 @@ class Runner
 
             // 7a. Snapshot prune (§6): after the post-hook, so it holds no
             //     services, and before cleanup, which removes the ssh pieces it
-            //     needs. Never throws.
+            //     needs.
             if ($sn !== null) {
-                self::snapshotPrune($sn, $dryRun, $reason, $runLog, $jobId);
+                $step('snapshot prune', static function () use (&$sn, $dryRun, &$reason, $runLog, $jobId): void {
+                    self::snapshotPrune($sn, $dryRun, $reason, $runLog, $jobId);
+                });
                 $state = self::snapshotWarnState($state, $reason);
             }
 
@@ -796,27 +859,31 @@ class Runner
             //     CHANGED key fails closed on the next run instead of being
             //     silently trusted again.
             if (is_array($sshMat)) {
-                $connId  = (string) ($sshMat['conn']['id'] ?? '');
-                $hostKey = Ssh::harvestHostKey($sshMat);
-                // The endpoint the key came from, not the one stored now: the
-                // connection may have been edited while this run was going.
-                if (Ssh::pinHostKey($connId, $hostKey, (string) ($sshMat['conn']['host'] ?? ''), (int) ($sshMat['conn']['port'] ?? 0))) {
-                    // No key material and no tmpfs path in the message.
-                    Logger::event($runLog, $jobId, 'Pinned host key for connection ' . $connId . ' on first use.');
-                }
+                $step('host-key pin', static function () use ($sshMat, $runLog, $jobId): void {
+                    $connId  = (string) ($sshMat['conn']['id'] ?? '');
+                    $hostKey = Ssh::harvestHostKey($sshMat);
+                    // The endpoint the key came from, not the one stored now: the
+                    // connection may have been edited while this run was going.
+                    if (Ssh::pinHostKey($connId, $hostKey, (string) ($sshMat['conn']['host'] ?? ''), (int) ($sshMat['conn']['port'] ?? 0))) {
+                        // No key material and no tmpfs path in the message.
+                        Logger::event($runLog, $jobId, 'Pinned host key for connection ' . $connId . ' on first use.');
+                    }
+                });
             }
 
             // 8. Cleanup the SSH runtime secrets for THIS run's token, and disarm
             //    the secret-path redaction armed at materialisation (F1).
             if ($token !== '') {
-                Ssh::cleanupRuntime($token);
+                $step('secret cleanup', static fn() => Ssh::cleanupRuntime($token));
             }
             // And again for the postHook's own sink, before the redact pass so
             // an unterminated last line gets scrubbed like everything else.
-            Logger::flushSink($runLog);
             // Final pass, while redaction is still armed: catches anything rsync
             // or the postHook wrote to the run log after the last pair's cap.
-            Logger::redactRunLog($runLog);
+            $step('log redaction', static function () use ($runLog): void {
+                Logger::flushSink($runLog);
+                Logger::redactRunLog($runLog);
+            });
             Logger::clearRedaction();
 
             // 9. Persist the last-run summary to /boot + clear running state.
@@ -829,15 +896,23 @@ class Runner
                 'snapshot'  => !empty($sn['mkstamped']) ? $stamp : '',
                 'committed' => !empty($sn['committed']),
             ];
-            $summaryOk = self::writeSummary($jobId, [
-                'state'       => $state,
+            $summaryRecord = [
                 'startedAt'   => $startedAt,
                 'finishedAt'  => $finishedAt,
                 'exitCode'    => $exitCode,
                 'durationSec' => $durationSec,
                 'dryRun'      => $dryRun,
                 'trigger'     => $trigger,
-            ] + $snapFields);
+            ] + $snapFields;
+            // null = the step threw (already logged), false = it reported failure.
+            $summaryOk  = null;
+            $summarySaid = [$state, $reason];
+            $step('summary', static function () use ($jobId, $state, $reason, $summaryRecord, &$summaryOk): void {
+                $summaryOk = self::writeSummary($jobId, ['state' => $state, 'reason' => $reason] + $summaryRecord);
+            });
+            if ($summaryOk !== true) {
+                self::teardownFailed($state, $reason);
+            }
             if ($snap !== null) {
                 $snapFields += ['suspect' => !empty($sn['suspect']), 'pruned' => (int) ($sn['pruned'] ?? 0)];
                 if (isset($sn['growthKB'])) {
@@ -849,30 +924,57 @@ class Runner
             // cadence as the summary), then lazily prune to the retention cap.
             // jobName is snapshotted so the record survives a later rename/delete;
             // logRef is the run-log BASENAME only (resolves via getJobLog?run=).
-            // Both calls are best-effort and never crash the run.
-            $historyOk = History::append($jobId, [
-                'startedAt'   => $startedAt,
-                'finishedAt'  => $finishedAt,
-                'jobName'     => (string) ($job['name'] ?? $jobId),
-                'dryRun'      => $dryRun,
-                'trigger'     => $trigger,
-                'state'       => $state,
-                'exitCode'    => $exitCode,
-                'durationSec' => $durationSec,
-                'logRef'      => Logger::runIdFromPath($runLog),
-                'reason'      => $reason,
-                'lastError'   => $exitCode !== 0 ? Logger::lastRsyncError($runLog) : '',
-            ] + $snapFields);
+            $historyOk   = null;
+            $historySaid = [$state, $reason];
+            $step('history', static function () use ($jobId, $job, $startedAt, $finishedAt, $dryRun, $trigger, $state, $exitCode, $durationSec, $runLog, $reason, $snapFields, &$historyOk): void {
+                $historyOk = History::append($jobId, [
+                    'startedAt'   => $startedAt,
+                    'finishedAt'  => $finishedAt,
+                    'jobName'     => (string) ($job['name'] ?? $jobId),
+                    'dryRun'      => $dryRun,
+                    'trigger'     => $trigger,
+                    'state'       => $state,
+                    'exitCode'    => $exitCode,
+                    'durationSec' => $durationSec,
+                    'logRef'      => Logger::runIdFromPath($runLog),
+                    'reason'      => $reason,
+                    'lastError'   => $exitCode !== 0 ? Logger::lastRsyncError($runLog) : '',
+                ] + $snapFields);
+            });
+            if ($historyOk !== true) {
+                self::teardownFailed($state, $reason);
+            }
             self::reportPersistFailure($jobId, array_keys(array_filter([
-                'last-run summary' => !$summaryOk,
-                'History record'   => !$historyOk,
+                'last-run summary' => $summaryOk === false,
+                'History record'   => $historyOk === false,
             ])));
-            RunState::clearInflight($jobId);
-            History::prune($jobId, $retention);
+            $step('in-flight record', static function () use ($jobId, $retention): void {
+                RunState::clearInflight($jobId);
+                History::prune($jobId, $retention);
+            });
 
             Logger::event($runLog, $jobId, "Run finished: state=$state exitCode=$exitCode.");
-            RunState::markStopped($jobId);
-            RunState::clearAbort($jobId);
+            $step('run state', static fn() => RunState::markStopped($jobId));
+            if (in_array('run state', $broken, true)) {
+                self::teardownFailed($state, $reason);
+            }
+            // A step after the summary or History write changed the outcome:
+            // bring what was already written into line (the lock is still ours).
+            if ($summaryOk === true && $summarySaid !== [$state, $reason]) {
+                $step('summary update', static function () use ($jobId, $state, $reason, $summaryRecord): void {
+                    if (!self::writeSummary($jobId, ['state' => $state, 'reason' => $reason] + $summaryRecord)) {
+                        throw new RuntimeException('the summary could not be rewritten as ' . $state);
+                    }
+                });
+            }
+            if ($historyOk === true && $historySaid !== [$state, $reason]) {
+                $step('History update', static function () use ($jobId, $startedAt, $runLog, $state, $reason): void {
+                    if (!History::amend($jobId, $startedAt, Logger::runIdFromPath($runLog), ['state' => $state, 'reason' => $reason])) {
+                        throw new RuntimeException('the History record could not be rewritten as ' . $state);
+                    }
+                });
+            }
+            $step('abort flag', static fn() => RunState::clearAbort($jobId));
 
             // Dispatch the per-job notification. Best-effort: it is
             // gated on the job's notifyMode and NEVER throws (see notifyHook),
@@ -887,10 +989,12 @@ class Runner
                 'durationSec' => $durationSec,
             ];
             if ($snap !== null && !$dryRun && $state !== Rsync::STATE_ABORTED && empty($sn['committed'])) {
-                $runs = self::notCommittedRuns($jobId);
-                if ($runs > 1) {
-                    $notify['message'] = sprintf('Job "%s" has not committed a snapshot for %d runs.', (string) ($job['name'] ?? $jobId), $runs);
-                }
+                $step('snapshot history', static function () use ($jobId, $job, &$notify): void {
+                    $runs = self::notCommittedRuns($jobId);
+                    if ($runs > 1) {
+                        $notify['message'] = sprintf('Job "%s" has not committed a snapshot for %d runs.', (string) ($job['name'] ?? $jobId), $runs);
+                    }
+                });
             }
             self::notifyHook($job, $notify);
 
@@ -2459,45 +2563,144 @@ class Runner
 
     /**
      * Persist the compact last-run summary to /boot (durable across reboot) at
-     * <UR_CONFIG_BASE>/runs/<jobid>.summary.json via Util::writeAtomic. Never
-     * throws: a summary failure must not crash the run.
+     * <UR_CONFIG_BASE>/runs/<jobid>.summary.json via Util::writeAtomic, under
+     * the sibling <jobid>.summary.lock (it is a load-modify-save). Never throws:
+     * a summary failure must not crash the run.
+     *
+     * The top level is the last execution of any kind (its shape is what older
+     * readers know); `lastReal` is the last non-dry run's {state, startedAt,
+     * finishedAt, exitCode, reason}. A dry run leaves lastReal as it was.
+     * $keepNewer (crash and hard-fail records) never replaces a top level or a
+     * lastReal that started later than $summary: a live or later run wins.
      *
      * @param array<string,mixed> $summary
      * @return bool false when the summary could not be written
      */
-    public static function writeSummary(string $jobId, array $summary): bool
+    public static function writeSummary(string $jobId, array $summary, bool $keepNewer = false): bool
     {
-        $dir = rtrim(UR_CONFIG_BASE, '/') . '/runs';
+        $path = self::summaryPath($jobId);
+        $dir  = dirname($path);
         if (!is_dir($dir) && !@mkdir($dir, 0755, true) && !is_dir($dir)) {
             return false;
         }
-        $clean = Util::safeFileId($jobId);
-        $path  = $dir . '/' . $clean . '.summary.json';
 
         $trigger = (($summary['trigger'] ?? '') === 'schedule') ? 'schedule' : 'manual';
         $out = [
             'state'       => (string) ($summary['state'] ?? Rsync::STATE_FAILED),
             'startedAt'   => (string) ($summary['startedAt'] ?? ''),
             'finishedAt'  => (string) ($summary['finishedAt'] ?? ''),
-            'exitCode'    => (int) ($summary['exitCode'] ?? 1),
+            'exitCode'    => array_key_exists('exitCode', $summary) && $summary['exitCode'] === null ? null : (int) ($summary['exitCode'] ?? 1),
             'durationSec' => (int) ($summary['durationSec'] ?? 0),
             'dryRun'      => !empty($summary['dryRun']),
             'trigger'     => $trigger,
         ];
+        if ((string) ($summary['reason'] ?? '') !== '') {
+            $out['reason'] = (string) $summary['reason'];
+        }
         if (array_key_exists('snapshot', $summary)) {
             $out['snapshot']  = (string) $summary['snapshot'];
             $out['committed'] = !empty($summary['committed']);
         }
-        $json = json_encode($out, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
-        if ($json === false) {
-            return false;
-        }
         try {
-            Util::writeAtomic($path, $json . "\n", 0644);
+            return Util::withLock(self::summaryPath($jobId, 'lock'), static function () use ($jobId, $path, $out, $keepNewer): bool {
+                $prev     = self::readSummary($jobId);
+                $prevReal = self::lastRealFor($jobId, $prev, false);
+                $newer    = static fn(?array $old): bool => $keepNewer && $old !== null
+                    && strcmp((string) ($old['startedAt'] ?? ''), $out['startedAt']) > 0;
+                $real = ($out['dryRun'] || $newer($prevReal)) ? $prevReal : self::lastReal($out);
+                if ($prev !== null && $newer($prev)) {
+                    if ($real === $prevReal) {
+                        return true;
+                    }
+                    unset($prev['lastReal']);
+                    $out = $prev;
+                }
+                // null too: "no real run yet" must not read as an old summary.
+                $out['lastReal'] = $real;
+                $json = json_encode($out, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+                if ($json === false) {
+                    return false;
+                }
+                Util::writeAtomic($path, $json . "\n", 0644);
+                return true;
+            });
         } catch (Throwable $e) {
             return false;
         }
-        return true;
+    }
+
+    /**
+     * The last non-dry run of a summary: {state, startedAt, finishedAt,
+     * exitCode, reason}, or null when there has been none. A summary written
+     * before lastReal existed is its own last real run unless it was a dry run.
+     *
+     * @param array<string,mixed>|null $summary
+     * @return array{state:string,startedAt:string,finishedAt:string,exitCode:int|null,reason:string}|null
+     */
+    public static function lastReal(?array $summary): ?array
+    {
+        if (!is_array($summary)) {
+            return null;
+        }
+        if (array_key_exists('lastReal', $summary)) {
+            $summary = is_array($summary['lastReal']) ? $summary['lastReal'] : null;
+        } elseif (!empty($summary['dryRun'])) {
+            $summary = null;
+        }
+        if ($summary === null) {
+            return null;
+        }
+        return [
+            'state'      => (string) ($summary['state'] ?? ''),
+            'startedAt'  => (string) ($summary['startedAt'] ?? ''),
+            'finishedAt' => (string) ($summary['finishedAt'] ?? ''),
+            'exitCode'   => isset($summary['exitCode']) ? (int) $summary['exitCode'] : null,
+            'reason'     => (string) ($summary['reason'] ?? ''),
+        ];
+    }
+
+    /** <UR_CONFIG_BASE>/runs/<jobid>.summary.json, or its sibling .summary.lock. */
+    private static function summaryPath(string $jobId, string $ext = 'json'): string
+    {
+        return rtrim(UR_CONFIG_BASE, '/') . '/runs/' . Util::safeFileId($jobId) . '.summary.' . $ext;
+    }
+
+    /**
+     * lastReal(), except for a summary written before lastReal existed whose
+     * last execution was a dry run: the real outcome it overwrote survives only
+     * in History, so the newest real record there (every retained one is
+     * searched) stands in. The answer, null included, is then written into
+     * summary.json ($writeThrough), so History is read once per job, not on
+     * every poll; never over a summary that changed since $summary was read.
+     *
+     * @param array<string,mixed>|null $summary
+     * @return array{state:string,startedAt:string,finishedAt:string,exitCode:int|null,reason:string}|null
+     */
+    public static function lastRealFor(string $jobId, ?array $summary, bool $writeThrough = true): ?array
+    {
+        if (!is_array($summary) || array_key_exists('lastReal', $summary) || empty($summary['dryRun'])) {
+            return self::lastReal($summary);
+        }
+        $real = null;
+        foreach (History::records($jobId) as $r) {
+            if (empty($r['dryRun']) && ($r['state'] ?? '') !== Rsync::STATE_SKIPPED) {
+                $real = self::lastReal($r);
+                break;
+            }
+        }
+        $json = json_encode($summary + ['lastReal' => $real], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+        if ($writeThrough && $json !== false) {
+            try {
+                Util::withLock(self::summaryPath($jobId, 'lock'), static function () use ($jobId, $summary, $json): void {
+                    if (self::readSummary($jobId) === $summary) {
+                        Util::writeAtomic(self::summaryPath($jobId), $json . "\n", 0644);
+                    }
+                });
+            } catch (Throwable $e) {
+                // Still answered; the next read resolves it again.
+            }
+        }
+        return $real;
     }
 
     /**
@@ -2512,10 +2715,23 @@ class Runner
         if ($what === []) {
             return;
         }
-        $msg = 'Could not write the ' . implode(' and ', $what) . ' to '
-            . rtrim(UR_CONFIG_BASE, '/') . "/runs; this run's outcome may be missing from the UI.";
+        self::pluginLine('', $jobId, 'Could not write the ' . implode(' and ', $what) . ' to '
+            . rtrim(UR_CONFIG_BASE, '/') . "/runs; this run's outcome may be missing from the UI.");
+    }
+
+    /** One line naming a teardown step of run() that threw; the others still ran. */
+    private static function reportTeardownFailure(string $jobId, string $runLog, string $step, Throwable $e): void
+    {
+        self::pluginLine($runLog, $jobId, Logger::scrubSecretPaths(
+            'Run teardown step "' . $step . '" failed: ' . rtrim($e->getMessage(), '.') . '. The remaining steps still ran.'
+        ));
+    }
+
+    /** Logger::event, falling back to error_log when plugin.log is unusable. Never throws. */
+    private static function pluginLine(string $runLog, string $jobId, string $msg): void
+    {
         try {
-            if (Logger::event('', $jobId, $msg)) {
+            if (Logger::event($runLog, $jobId, $msg)) {
                 return;
             }
         } catch (Throwable $e) {
@@ -2525,14 +2741,28 @@ class Runner
     }
 
     /**
+     * The outcome could not be recorded (summary, History or run state): a
+     * clean run becomes FAILED with reason teardown-failed; any other state
+     * already reports a problem and keeps it.
+     */
+    private static function teardownFailed(string &$state, string &$reason): void
+    {
+        if ($state === Rsync::STATE_SUCCESS) {
+            $state  = Rsync::STATE_FAILED;
+            $reason = 'teardown-failed';
+        } elseif ($reason === '') {
+            $reason = 'teardown-failed';
+        }
+    }
+
+    /**
      * Read a job's last-run summary, or null when none exists/unreadable.
      *
      * @return array<string,mixed>|null
      */
     public static function readSummary(string $jobId): ?array
     {
-        $clean = Util::safeFileId($jobId);
-        $path  = rtrim(UR_CONFIG_BASE, '/') . '/runs/' . $clean . '.summary.json';
+        $path = self::summaryPath($jobId);
         if (!is_file($path)) {
             return null;
         }
@@ -2546,8 +2776,9 @@ class Runner
 
     /**
      * A hard, pre-run failure: nothing was started (no state/log to keep). Logs
-     * to the plugin log, records a scheduled run in History (so the UI shows
-     * the run that never happened), notifies, and returns a FAILED result.
+     * to the plugin log, records a scheduled run in History and the summary (so
+     * the UI shows the run that never happened), notifies, and returns a FAILED
+     * result.
      * 'already-running' is SKIPPED instead, not a failure: it keeps its own
      * reason so the handler can 409; started by hand it does not notify (the UI
      * already said so), by the schedule it notifies at normal importance. A job
@@ -2578,6 +2809,17 @@ class Runner
 
         if ($trigger === 'schedule') {
             $now = gmdate('Y-m-d\TH:i:s\Z');
+            // SKIPPED keeps the last real outcome on display: History only.
+            $summaryOk = $skipped || self::writeSummary($jobId, [
+                'state'       => $state,
+                'startedAt'   => $now,
+                'finishedAt'  => $now,
+                'exitCode'    => null,
+                'durationSec' => 0,
+                'dryRun'      => $dryRun,
+                'trigger'     => $trigger,
+                'reason'      => $reason,
+            ], true);
             $ok  = History::append($jobId, [
                 'startedAt'   => $now,
                 'finishedAt'  => $now,
@@ -2590,7 +2832,10 @@ class Runner
                 'logRef'      => '',
                 'reason'      => $reason,
             ]);
-            self::reportPersistFailure($jobId, $ok ? [] : ['History record']);
+            self::reportPersistFailure($jobId, array_keys(array_filter([
+                'last-run summary' => !$summaryOk,
+                'History record'   => !$ok,
+            ])));
             History::prune($jobId, $retention);
         }
 
@@ -2620,8 +2865,9 @@ class Runner
     /**
      * A runner died without finishing (RunState found running=true with no
      * live runner behind it). Its finally never ran: no summary, no history,
-     * no post-hook, no notification. Record and alert it here; RunState
-     * guarantees this is called once per stale state. Never throws.
+     * no post-hook, no notification. Record it (History FAILED/crashed, the
+     * summary CRASHED unless a later run already wrote one) and alert it here;
+     * RunState guarantees this is called once per stale state. Never throws.
      *
      * @param array<string,mixed> $state the dead run's RunState record
      */
@@ -2669,9 +2915,20 @@ class Runner
                 // An unwritable log must not swallow the record and the alert.
             }
 
+            $finishedAt = gmdate('Y-m-d\TH:i:s\Z');
+            $summaryOk  = self::writeSummary($jobId, [
+                'state'       => Rsync::STATE_CRASHED,
+                'startedAt'   => $startedAt,
+                'finishedAt'  => $finishedAt,
+                'exitCode'    => null,
+                'durationSec' => 0,
+                'dryRun'      => $dryRun,
+                'trigger'     => $trigger,
+                'reason'      => 'crashed',
+            ], true);
             $ok = History::append($jobId, [
                 'startedAt'   => $startedAt,
-                'finishedAt'  => gmdate('Y-m-d\TH:i:s\Z'),
+                'finishedAt'  => $finishedAt,
                 'jobName'     => $name,
                 'dryRun'      => $dryRun,
                 'trigger'     => $trigger,
@@ -2681,7 +2938,10 @@ class Runner
                 'logRef'      => is_file($log) ? Logger::runIdFromPath($log) : '',
                 'reason'      => 'crashed',
             ]);
-            self::reportPersistFailure($jobId, $ok ? [] : ['History record']);
+            self::reportPersistFailure($jobId, array_keys(array_filter([
+                'last-run summary' => !$summaryOk,
+                'History record'   => !$ok,
+            ])));
             History::prune($jobId, Config::clampRetention($config['global']['retention'] ?? Config::DEFAULT_RETENTION));
 
             self::notifyHook($job ?? ['id' => $jobId, 'name' => $jobId, 'notifyMode' => self::NOTIFY_ALWAYS], [

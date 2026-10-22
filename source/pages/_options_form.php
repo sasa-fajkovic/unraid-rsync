@@ -1627,7 +1627,7 @@ if (!function_exists('ur_emit_page_assets')) {
      * ur-ok / ur-err classes urAjax.show() assigns had no rule at all, so a
      * failure looked exactly like a success.
      *
-     * window.urUtil mirrors PageHelpers (relativeTime, nextRunLabel, lastRunLabel)
+     * window.urUtil mirrors PageHelpers (relativeTime, nextRunLabel, lastRunLabel, dryRunLine)
      * and Runner::formatDuration; times render in UR_TZ via window.urFmtLocal.
      */
     function ur_emit_page_assets(): void
@@ -1670,6 +1670,8 @@ if (!function_exists('ur_emit_page_assets')) {
   background: rgba(127,127,127,0.10); border: 1px solid rgba(127,127,127,0.30);
 }
 .ur-notice-warn { background: rgba(177,92,0,0.12); border-color: #b15c00; }
+/* The dry-run line under Last run: neutral, it never sets the badge. */
+.ur-dry-run { font-size: 0.9em; color: var(--color-text-secondary, #888); }
 </style>
 <script type="text/javascript">
 (function () {
@@ -1722,11 +1724,16 @@ if (!function_exists('ur_emit_page_assets')) {
     return window.urFmtLocal(s.nextRun) + ' (' + relativeTime(s.nextRun, now) + ')';
   }
 
-  /* PageHelpers::lastRunLabel for a getStatus lastRun object. */
+  /* PageHelpers::lastRunLabel for a getStatus lastReal object. */
   function lastRunLabel(lastRun, now) {
     var fin = lastRun ? isoToEpoch(lastRun.finishedAt) : 0;
     if (!fin) { return '\u2014'; }
     return window.urFmtLocal(fin) + ' (' + relativeTime(Math.min(fin, now), now) + ')';
+  }
+
+  /* PageHelpers::dryRunLine for a getStatus lastDryRun object. */
+  function dryRunLine(dry, now) {
+    return dry ? dry.label + ' \u00b7 ' + lastRunLabel(dry, now) : '';
   }
 
   /* Reload after a successful save so the server-rendered state is current.
@@ -1790,6 +1797,7 @@ if (!function_exists('ur_emit_page_assets')) {
     cssEsc: cssEsc,
     nextRunLabel: nextRunLabel,
     lastRunLabel: lastRunLabel,
+    dryRunLine: dryRunLine,
     reloadSoon: reloadSoon,
     downloadFile: downloadFile,
     copyText: copyText
