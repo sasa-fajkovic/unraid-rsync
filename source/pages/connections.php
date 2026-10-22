@@ -850,7 +850,7 @@ ur_emit_page_assets();
           var hasWarnings = res.body.warnings && res.body.warnings.length;
           var msg = res.body.message || urI18n('saved', 'Saved.');
           if (hasWarnings) {
-            msg += ' (' + res.body.warnings.join('; ') + ')';
+            msg += ' (' + window.urAjax.joinMessages(res.body.warnings) + ')';
           }
           window.urAjax.show(result, true, msg);
           window.urUtil.reloadSoon(!!hasWarnings);

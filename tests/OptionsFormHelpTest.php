@@ -2862,6 +2862,42 @@ final class OptionsFormHelpTest extends TestCase
         $this->assertStringContainsString('.ur-log-modal-head .ur-log-title { font-weight: bold; flex: 0 1 auto; min-width: 0; white-space: nowrap;', $js);
     }
 
+    /** Server messages are sentences ending in "."; joined raw with "; " they rendered ".;". */
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testEverySaveMessageSiteJoinsThroughTheOneSharedHelper(): void
+    {
+        $ajax = $this->emitted('ur_emit_ajax_helpers');
+        $this->assertSame(1, substr_count($ajax, 'function joinMessages('));
+        $this->assertStringContainsString('joinMessages: joinMessages', $ajax);
+        $this->assertSame(1, substr_count($ajax, ".join('; ')"), 'only joinMessages joins');
+        foreach (['jobs.php', 'connections.php', 'settings.php'] as $page) {
+            $src = (string) file_get_contents(__DIR__ . '/../source/pages/' . $page);
+            $this->assertStringContainsString('window.urAjax.joinMessages(res.body.warnings)', $src, $page);
+            $this->assertStringNotContainsString(".join('; ')", $src, $page);
+            $this->assertStringNotContainsString('function joinMessages', $src, "$page: no per-tab copy");
+        }
+    }
+
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testJoinMessagesDropsTheSentenceStopBeforeTheSeparator(): void
+    {
+        $node = trim((string) shell_exec('command -v node 2>/dev/null'));
+        if ($node === '') {
+            $this->markTestSkipped('node is not installed');
+        }
+        $this->assertSame(1, preg_match('/function joinMessages\(list\) \{.*?\n  \}\n/s', $this->emitted('ur_emit_ajax_helpers'), $m));
+        $js = $m[0] . 'process.stdout.write(JSON.stringify(['
+            . 'joinMessages(["Job \\"a\\": --delete is forced off in snapshot mode.", "Job \\"a\\": --max-delete is ignored."]),'
+            . 'joinMessages(["Wait...", "no stop"]), joinMessages(["one."])]));';
+        $out = shell_exec(escapeshellarg($node) . ' -e ' . escapeshellarg($js));
+        $this->assertSame(
+            ['Job "a": --delete is forced off in snapshot mode; Job "a": --max-delete is ignored', 'Wait...; no stop', 'one'],
+            json_decode((string) $out, true)
+        );
+    }
+
     private function emitted(string $fn): string
     {
         require_once __DIR__ . '/../source/pages/_options_form.php';

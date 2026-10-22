@@ -1342,6 +1342,12 @@ if (!function_exists('ur_emit_ajax_helpers')) {
     el.textContent = msg;
   }
 
+  /* Server messages are sentences: drop each one's final "." so a "; " join
+   * does not render ".;" (an ellipsis is kept). */
+  function joinMessages(list) {
+    return list.map(function (m) { return String(m).replace(/([^.])\.\s*$/, '$1'); }).join('; ');
+  }
+
   /* Build a clear failure message from a postForm result, ALWAYS including the
    * HTTP status (or a network/parse hint), so a failure is never silent. */
   function errText(res, fallback) {
@@ -1357,9 +1363,9 @@ if (!function_exists('ur_emit_ajax_helpers')) {
     /* A 422 body carries `warnings` alongside `errors`; without this they are
      * silently dropped whenever a save fails for some OTHER reason. */
     var warn = (res.body && res.body.warnings && res.body.warnings.length)
-      ? ' (' + res.body.warnings.join('; ') + ')' : '';
+      ? ' (' + joinMessages(res.body.warnings) + ')' : '';
     if (res.body && res.body.errors && res.body.errors.length) {
-      return res.body.errors.join('; ') + warn + ' (HTTP ' + res.status + ')';
+      return joinMessages(res.body.errors) + warn + ' (HTTP ' + res.status + ')';
     }
     /* A probe failure (testConnection) explains itself in `message`; every
      * failure envelope also carries the shorter `error`. */
@@ -1437,6 +1443,7 @@ if (!function_exists('ur_emit_ajax_helpers')) {
     postFormElement: postFormElement,
     show: show,
     errText: errText,
+    joinMessages: joinMessages,
     armOrConfirmDelete: armOrConfirmDelete,
     disarmDelete: disarmDelete
   };

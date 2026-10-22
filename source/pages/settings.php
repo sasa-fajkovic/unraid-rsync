@@ -193,7 +193,7 @@ ur_emit_form_enable_assets();
         if (res.ok && res.body && res.body.ok) {
           var msg = res.body.message || urI18n('saved', 'Saved.');
           if (res.body.warnings && res.body.warnings.length) {
-            msg += ' (' + res.body.warnings.join('; ') + ')';
+            msg += ' (' + window.urAjax.joinMessages(res.body.warnings) + ')';
           }
           window.urAjax.show(result, true, msg);
           if (res.body.credentials) { showCredentials(res.body.credentials); }
