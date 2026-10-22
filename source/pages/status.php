@@ -81,18 +81,21 @@ ur_emit_status_poller();
 /* Placeholder shown when the plugin log is empty (no run yet). Muted, non-mono so
    it reads as a hint rather than log content. */
 .ur-plugin-log-pre.ur-log-empty { color: #888; font-style: italic; }
+.ur-plugin-log-pre.ur-nowrap { white-space: pre; word-break: normal; }
 .ur-plugin-log-wrap { position: relative; }
+.ur-plugin-log-tools { display: flex; gap: 8px 12px; align-items: center; flex-wrap: wrap; margin: 6px 0; }
+.ur-plugin-log-tools select { width: auto; max-width: 260px; }
 .ur-log-jump { position: absolute; right: 18px; bottom: 10px; }
 </style>
 
 <div class="title">
   <span class="left">
-    <i class="fa fa-refresh title"></i>&nbsp;<?=_('Status')?>
+    <i class="fa fa-bars title"></i>&nbsp;<?=_('Status')?>
   </span>
 </div>
 
 <p>
-  <?=_('Live status of all rsync jobs and the rolling plugin log. This page updates automatically while a job is running')?>.
+  <?=_('Live status of all rsync jobs and the rolling plugin log. It refreshes on its own while the page is open: every 2 seconds while a job is running, every 15 seconds otherwise')?>.
 </p>
 
 <?php if ($jobCount === 0): ?>
@@ -130,7 +133,7 @@ ur_emit_status_poller();
   <span class="left"><i class="fa fa-terminal title"></i>&nbsp;<?=_('rsync binary')?></span>
 </div>
 <div id="ur-rsync-status" class="ur-rsync-status">
-  <span id="ur-rsync-badge" class="ur-badge <?=$rsyncAvailable ? 'ur-badge-idle' : 'ur-badge-failed'?>">
+  <span id="ur-rsync-badge" class="ur-badge <?=$rsyncAvailable ? 'ur-badge-success' : 'ur-badge-failed'?>">
     <?=$rsyncAvailable ? _('Present') : _('Missing')?>
   </span>
   &nbsp;<code id="ur-rsync-path"><?=htmlspecialchars($rsyncPath, ENT_QUOTES, 'UTF-8')?></code>
@@ -150,6 +153,14 @@ ur_emit_status_poller();
 <div class="title">
   <span class="left"><i class="fa fa-file-text-o title"></i>&nbsp;<?=_('Plugin log')?></span>
 </div>
+<div class="ur-plugin-log-tools">
+  <label for="ur-log-job"><?=_('Job')?>:</label>
+  <select id="ur-log-job"><option value=""><?=_('All jobs')?></option></select>
+  <label><input type="checkbox" id="ur-log-wrap" checked> <?=_('Wrap lines')?></label>
+  <button type="button" id="ur-log-copy" class="ur-btn ur-btn-copy"><?=_('Copy')?></button>
+  <a id="ur-log-download" class="ur-btn ur-btn-dl" href="<?=ur_h($handlerUrl . '?action=downloadPluginLog')?>" download>&#11015;&nbsp;<?=_('Download full log')?></a>
+</div>
+<div id="ur-log-result" class="ur-result"></div>
 <div class="ur-plugin-log-wrap">
   <pre id="ur-plugin-log-pre" class="ur-plugin-log-pre"><?=_('Loading…')?></pre>
   <button type="button" id="ur-log-jump" class="ur-log-jump" style="display:none"><?=_('Jump to latest')?></button>
@@ -246,14 +257,49 @@ ur_emit_status_poller();
     return pre.contains(sel.anchorNode) || pre.contains(sel.focusNode);
   }
 
+  /* ---- job filter: one span per line, tagged with the job id that
+   * Logger::event writes as the second bracket ("[<stamp>] [<job id>] ...").
+   * The id is slug-shaped, so it is safe in the attribute; the line itself is
+   * already escaped. Lines of other jobs are hidden, not dropped, so changing
+   * the filter needs no refetch. */
+  var jobSel = document.getElementById('ur-log-job');
+  var LINE_JOB = /^\[[^\]]*\] \[([A-Za-z0-9._-]+)\]/;
+  var seenJobs = {};
+  function addJobOption(id) {
+    var last = window.urStatus.last();
+    var j = last && last.jobs ? last.jobs[id] : null;
+    var o = document.createElement('option');
+    o.value = id;
+    o.textContent = j && j.name ? j.name + ' (' + id + ')' : id;
+    jobSel.appendChild(o);
+  }
+  function linesHtml(escaped) {
+    var lines = escaped.split('\n');
+    if (lines[lines.length - 1] === '') { lines.pop(); }
+    return lines.map(function (line) {
+      var m = LINE_JOB.exec(line);
+      var id = m ? m[1] : '';
+      if (id && !seenJobs[id]) { seenJobs[id] = true; addJobOption(id); }
+      var hide = jobSel.value !== '' && id !== jobSel.value;
+      return '<span class="ur-pl-line" data-job="' + id + '"' + (hide ? ' hidden' : '') + '>' + line + '\n</span>';
+    }).join('');
+  }
+  jobSel.addEventListener('change', function () {
+    var want = jobSel.value;
+    Array.prototype.forEach.call(pre.querySelectorAll('.ur-pl-line'), function (el) {
+      el.hidden = want !== '' && el.getAttribute('data-job') !== want;
+    });
+    if (follow) { toBottom(); }
+  });
+
   /* `pending` is ALREADY HTML-escaped server-side (Logger::readFrom). */
   function render() {
     if (pending === null || selecting()) { return; }
     if (replaceNext) {
       pre.classList.toggle('ur-log-empty', pending === '');
-      if (pending === '') { pre.textContent = EMPTY_TEXT; } else { pre.innerHTML = pending; }
+      if (pending === '') { pre.textContent = EMPTY_TEXT; } else { pre.innerHTML = linesHtml(pending); }
     } else {
-      pre.insertAdjacentHTML('beforeend', pending);
+      pre.insertAdjacentHTML('beforeend', linesHtml(pending));
     }
     pending = null;
     replaceNext = false;
@@ -316,6 +362,21 @@ ur_emit_status_poller();
   tick();
   setInterval(tick, 1000);
 
+  document.getElementById('ur-log-wrap').addEventListener('change', function (ev) {
+    pre.classList.toggle('ur-nowrap', !ev.target.checked);
+  });
+  /* Copy what is shown (innerText skips the lines the job filter hides);
+   * Download is the whole plugin.log, every job. */
+  var copyBtn = document.getElementById('ur-log-copy');
+  copyBtn.addEventListener('click', function () { window.urUtil.copyText(pre.innerText || '', copyBtn, pre); });
+  var dlLink = document.getElementById('ur-log-download');
+  dlLink.addEventListener('click', function (ev) {
+    ev.preventDefault();
+    window.urUtil.downloadFile(dlLink.href, function (msg) {
+      window.urAjax.show(document.getElementById('ur-log-result'), false, msg);
+    });
+  });
+
   /* ---- abort control ---- */
   document.addEventListener('click', function (ev) {
     var t = ev.target;
@@ -357,7 +418,7 @@ ur_emit_status_poller();
         var verEl   = document.getElementById('ur-rsync-version');
         if (pathEl && body.path) { pathEl.textContent = body.path; }   // textContent: no XSS
         if (badge) {
-          badge.className = 'ur-badge ' + (body.available ? 'ur-badge-idle' : 'ur-badge-failed');
+          badge.className = 'ur-badge ' + (body.available ? 'ur-badge-success' : 'ur-badge-failed');
           badge.textContent = body.available ? 'Present' : 'Missing';
         }
         if (verEl) {

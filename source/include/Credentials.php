@@ -137,6 +137,24 @@ class Credentials
     }
 
     /**
+     * Where credentials.json lives now, for the Global Settings status line:
+     * its path, its real mode ('' while it does not exist yet) and whether it
+     * is on the USB flash (no secretsDir).
+     *
+     * @return array{path:string,mode:string,onFlash:bool}
+     */
+    public static function location(): array
+    {
+        $path = self::path();
+        clearstatcache(true, $path);
+        return [
+            'path'    => $path,
+            'mode'    => is_file($path) ? sprintf('%04o', fileperms($path) & 0777) : '',
+            'onFlash' => self::$secretsDirOverride === null || self::$secretsDirOverride === '',
+        ];
+    }
+
+    /**
      * Run $fn holding the exclusive credentials lock. Every load-modify-save of
      * credentials.json goes through it (handler saves, Ssh::pinHostKey, the
      * secretsDir move). The lock stays beside config.json whatever secretsDir

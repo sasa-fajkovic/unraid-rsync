@@ -248,4 +248,25 @@ final class HistoryTest extends TestCase
         $this->assertStringEndsWith('/unknown.history.jsonl', History::path('..'));
         $this->assertStringNotContainsString('/..', History::path('..'));
     }
+
+    public function testLastErrorIsKeptOnlyWhenPresentAndAfterEverythingElse(): void
+    {
+        $id = $this->id('lasterr');
+        History::append($id, $this->rec(['state' => 'FAILED', 'exitCode' => 11, 'lastError' => 'rsync error: error in file IO (code 11)']));
+        History::append($id, $this->rec(['lastError' => '']));
+        [$clean, $failed] = History::list($id, 0, 25)['runs'];
+        $this->assertArrayNotHasKey('lastError', $clean);
+        $this->assertSame('lastError', array_key_last($failed));
+        $this->assertSame('rsync error: error in file IO (code 11)', $failed['lastError']);
+    }
+
+    public function testRecordsAndJobIdsIncludeAJobWithOnlyHistory(): void
+    {
+        $id = $this->id('ids');
+        History::append($id, $this->rec(['exitCode' => 1]));
+        History::append($id, $this->rec(['exitCode' => 2]));
+        $this->assertSame([2, 1], array_column(History::records($id), 'exitCode'));
+        $this->assertContains($id, History::jobIds());
+        $this->assertSame([], History::records('j-hist-none-' . bin2hex(random_bytes(3))));
+    }
 }

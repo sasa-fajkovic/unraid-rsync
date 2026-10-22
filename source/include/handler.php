@@ -29,9 +29,11 @@ declare(strict_types=1);
  *   GET  getJobLog        HTML-escaped tail of a run log.
  *   GET  downloadJobLog   a whole (redacted, size-capped) run log as text/plain.
  *   GET  listRuns         a job's recent run logs.
- *   GET  listHistory      a job's paginated execution history.
+ *   GET  listHistory      a job's paginated execution history (optional
+ *                         state=problems|success and dryRun=0|1 filters).
  *   GET  getPluginLog     HTML-escaped tail of the cross-job plugin.log;
  *                         with since=<byte offset>, only what was appended.
+ *   GET  downloadPluginLog the whole plugin.log as text/plain.
  *   GET  getRsyncStatus   rsync binary presence + version line.
  *
  * Every POST action is CSRF-protected with the webGui csrf_token. Secrets
@@ -867,11 +869,12 @@ function ur_save_config_locked(): void
             return;
         }
         sendResponse([
-            'ok'       => true,
-            'message'  => 'Configuration saved.',
-            'warnings' => $allWarnings,
-            'jobs'     => count($config['jobs'] ?? []),
-            'revision' => $revision,
+            'ok'          => true,
+            'message'     => 'Configuration saved.',
+            'warnings'    => $allWarnings,
+            'jobs'        => count($config['jobs'] ?? []),
+            'revision'    => $revision,
+            'credentials' => Credentials::location(),
         ], 200);
         return;
     }
@@ -985,11 +988,12 @@ function ur_save_config_locked(): void
     }
 
     sendResponse([
-        'ok'       => true,
-        'message'  => 'Configuration saved.',
-        'warnings' => $allWarnings,
-        'jobs'     => count($normalized),
-        'revision' => $revision,
+        'ok'          => true,
+        'message'     => 'Configuration saved.',
+        'warnings'    => $allWarnings,
+        'jobs'        => count($normalized),
+        'revision'    => $revision,
+        'credentials' => Credentials::location(),
     ], 200);
 }
 
@@ -2303,6 +2307,9 @@ function ur_action_get_status(): void
                 'lastRun'    => ur_last_run_shape($summary),
                 'nextRun'    => $nextRun,
             ];
+            // Changes on every History append/prune - including a SKIPPED run
+            // or a failure that never registered, which move no other field.
+            $out[$id]['historyRev'] = History::revision($id);
             // Snapshot jobs only, so a mirror's entry keeps its shape.
             if (Config::normalizeSnapshot($job['snapshot'] ?? null) !== null) {
                 $out[$id]['snapshot'] = Snapshot::lastSnapshot($summary);
@@ -2327,7 +2334,7 @@ function ur_action_get_status(): void
         }
     }
 
-    sendResponse(['ok' => true, 'now' => $now, 'jobs' => $out], 200);
+    sendResponse(['ok' => true, 'now' => $now, 'tz' => Config::systemTimezone(), 'jobs' => $out], 200);
 }
 
 /**
@@ -2393,13 +2400,15 @@ function ur_action_get_job_log(): void
 
     // tail() returns '' for a missing/empty file and is ALREADY HTML-escaped.
     $log = ($path !== '') ? Logger::tail($path, UR_GET_LOG_TAIL_BYTES) : '';
+    clearstatcache(true, $path);
 
     sendResponse([
-        'ok'      => true,
-        'jobId'   => $jobId,
-        'run'     => $servedRun,
-        'log'     => $log,
-        'running' => $running,
+        'ok'        => true,
+        'jobId'     => $jobId,
+        'run'       => $servedRun,
+        'log'       => $log,
+        'running'   => $running,
+        'truncated' => $path !== '' && (int) @filesize($path) > UR_GET_LOG_TAIL_BYTES,
     ], 200);
 }
 
@@ -2449,6 +2458,63 @@ function ur_action_download_job_log(): void
 
     // Test seam: expose what WOULD be streamed without terminating the process
     // or emitting bytes the test harness can't capture (mirrors sendResponse).
+    if (defined('UR_HANDLER_TESTING')) {
+        $body = '';
+        ur_stream_scrubbed($path, static function (string $s) use (&$body): void {
+            $body .= $s;
+        });
+        $GLOBALS['ur_last_download'] = ['path' => $path, 'filename' => $fname, 'size' => strlen($body), 'body' => $body];
+        $GLOBALS['ur_last_response_code'] = 200;
+        return;
+    }
+
+    ur_stream_scrubbed($path, static function (string $s): void {
+        echo $s;
+    });
+    exit;
+}
+
+/**
+ * plugin.log for READING, or '' when it is missing, a symlink, or resolves
+ * outside the logs dir. A persistent logDir is a share other users may write,
+ * and a plugin.log -> credentials.json link would otherwise serve the keychain
+ * (scrubSecretPaths only removes runtime paths, not file contents).
+ */
+function ur_plugin_log_read_path(): string
+{
+    $path = Logger::pluginLogPath();
+    if (is_link($path)) {
+        return '';
+    }
+    $real = @realpath($path);
+    $dir  = @realpath(Logger::logsDir());
+    if ($real === false || $dir === false || $real !== $dir . '/plugin.log' || !is_file($real)) {
+        return '';
+    }
+    return $real;
+}
+
+/**
+ * GET downloadPluginLog: the whole plugin.log as a text/plain attachment
+ * (getPluginLog only returns a bounded tail), through the same scrubbing
+ * streamer as downloadJobLog. No params.
+ */
+function ur_action_download_plugin_log(): void
+{
+    $path = ur_plugin_log_read_path();
+    if ($path === '' || !is_readable($path)) {
+        sendError('The plugin log is empty (it lives in RAM and is cleared on reboot).', 404);
+        return;
+    }
+    $fname = 'unraid.rsync-plugin.log';
+
+    if (!headers_sent()) {
+        header('Content-Type: text/plain; charset=utf-8');
+        header('X-Content-Type-Options: nosniff');
+        header('Content-Disposition: attachment; filename="' . $fname . '"');
+        header('Cache-Control: no-store');
+    }
+
     if (defined('UR_HANDLER_TESTING')) {
         $body = '';
         ur_stream_scrubbed($path, static function (string $s) use (&$body): void {
@@ -2554,12 +2620,11 @@ function ur_action_list_history(): void
     // A run in progress is NOT a History record yet (records are written when a
     // run finishes), so surface each live run as a synthetic newest "RUNNING"
     // row built from RunState. Running rows are the newest VIRTUAL records, so
-    // the logical list is [running... , <persisted, newest-first>] and we page
-    // by slicing that combined list (nothing is shown twice).
+    // the logical list is [running... , <persisted, newest-first>]; filtering
+    // and paging slice that combined list (nothing is shown twice).
+    $names       = [];
+    $runningRows = [];
     if ($allJobs) {
-        // id -> name map + running rows for every currently-running job.
-        $names       = [];
-        $runningRows = [];
         try {
             $cfg = Config::load();
             foreach (($cfg['jobs'] ?? []) as $job) {
@@ -2574,10 +2639,7 @@ function ur_action_list_history(): void
                 if (RunState::isRunning($jid)) {
                     $st = RunState::read($jid);
                     if ($st !== null) {
-                        $row             = ur_running_history_row($st);
-                        $row['jobId']    = $jid;
-                        $row['jobName']  = $names[$jid];
-                        $runningRows[]   = $row;
+                        $runningRows[] = ['jobId' => $jid, 'jobName' => $names[$jid]] + ur_running_history_row($st);
                     }
                 }
             }
@@ -2585,7 +2647,6 @@ function ur_action_list_history(): void
             // A config read error just means no names/running rows; the persisted
             // history still lists.
         }
-
         $persisted = History::allSorted();
         foreach ($persisted as &$rec) {
             // Older records may lack jobName; fall back to the config map, then id.
@@ -2595,36 +2656,25 @@ function ur_action_list_history(): void
             }
         }
         unset($rec);
-
-        $virtual = array_merge($runningRows, $persisted);
-        $total   = count($virtual);
-        $runs    = array_values(array_slice($virtual, $offset, $limit));
-        $running = count($runningRows) > 0;
     } else {
-        $state   = RunState::isRunning($jobId) ? RunState::read($jobId) : null;
-        $running = ($state !== null);
-
-        if ($running && $offset === 0) {
-            $page  = History::list($jobId, 0, max(1, $limit - 1));
-            $runs  = $page['runs'];
-            array_unshift($runs, ur_running_history_row($state));
-            $total = $page['total'] + 1;
-        } elseif ($running) {
-            $page  = History::list($jobId, $offset - 1, $limit);
-            $runs  = $page['runs'];
-            $total = $page['total'] + 1;
-        } else {
-            $page  = History::list($jobId, $offset, $limit);
-            $runs  = $page['runs'];
-            $total = $page['total'];
+        $state = RunState::isRunning($jobId) ? RunState::read($jobId) : null;
+        if ($state !== null) {
+            $runningRows[] = ur_running_history_row($state);
         }
         // Tag every row with the job id so the client resolves View/Download the
         // same way it does in the all-jobs view.
-        foreach ($runs as &$r) {
-            $r['jobId'] = $jobId;
-        }
-        unset($r);
+        $persisted = array_map(static fn(array $r): array => $r + ['jobId' => $jobId], History::records($jobId));
+        $runningRows = array_map(static fn(array $r): array => $r + ['jobId' => $jobId], $runningRows);
     }
+
+    $running = count($runningRows) > 0;
+    $virtual = ur_filter_history(
+        array_merge($runningRows, $persisted),
+        is_string($_GET['state'] ?? null) ? $_GET['state'] : '',
+        is_string($_GET['dryRun'] ?? null) ? $_GET['dryRun'] : ''
+    );
+    $total = count($virtual);
+    $runs  = array_values(array_slice($virtual, $offset, $limit));
 
     sendResponse([
         'ok'      => true,
@@ -2636,6 +2686,35 @@ function ur_action_list_history(): void
         'running' => $running,
         'runs'    => $runs,
     ], 200);
+}
+
+/** History states the "Problems only" filter keeps (a crash is recorded FAILED). */
+const UR_HISTORY_PROBLEM_STATES = ['FAILED', 'WARNING', 'PARTIAL', 'TIMEOUT', 'ABORTED'];
+
+/**
+ * listHistory's optional filters. $state: 'problems' (UR_HISTORY_PROBLEM_STATES)
+ * or 'success'; $dryRun: '1' dry runs only, '0' real runs only. Anything else
+ * (including '') does not filter, so an old client sees every row.
+ *
+ * @param array<int,array<string,mixed>> $rows
+ * @return array<int,array<string,mixed>>
+ */
+function ur_filter_history(array $rows, string $state, string $dryRun): array
+{
+    $keep = match ($state) {
+        'problems' => UR_HISTORY_PROBLEM_STATES,
+        'success'  => ['SUCCESS'],
+        default    => null,
+    };
+    return array_values(array_filter($rows, static function (array $r) use ($keep, $dryRun): bool {
+        if ($keep !== null && !in_array(strtoupper((string) ($r['state'] ?? '')), $keep, true)) {
+            return false;
+        }
+        if ($dryRun === '1' || $dryRun === '0') {
+            return !empty($r['dryRun']) === ($dryRun === '1');
+        }
+        return true;
+    }));
 }
 
 /**
@@ -2674,11 +2753,11 @@ function ur_action_get_plugin_log(): void
 {
     $since = $_GET['since'] ?? null;
     if ($since === null || !is_string($since) || !ctype_digit($since)) {
-        $log = Logger::tail(Logger::pluginLogPath(), UR_GET_LOG_TAIL_BYTES);
+        $log = Logger::tail(ur_plugin_log_read_path(), UR_GET_LOG_TAIL_BYTES);
         sendResponse(['ok' => true, 'log' => $log], 200);
         return;
     }
-    $chunk = Logger::readFrom(Logger::pluginLogPath(), (int) $since, UR_GET_LOG_TAIL_BYTES);
+    $chunk = Logger::readFrom(ur_plugin_log_read_path(), (int) $since, UR_GET_LOG_TAIL_BYTES);
     sendResponse(['ok' => true] + $chunk, 200);
 }
 
@@ -2733,7 +2812,7 @@ function ur_action_preview_options(): void
 
     $tokens = Rsync::optionTokens(Job::normalizeRsyncOptions($optsIn), $transport);
 
-    sendResponse(['ok' => true, 'tokens' => array_values($tokens)], 200);
+    sendResponse(['ok' => true, 'tokens' => array_values($tokens), 'display' => PageHelpers::previewTokens($tokens)], 200);
 }
 
 /**
@@ -2867,6 +2946,7 @@ function ur_dispatch(): void
         case 'listRuns':
         case 'listHistory':
         case 'getPluginLog':
+        case 'downloadPluginLog':
         case 'getRsyncStatus':
             if ($method !== 'GET') {
                 sendError($action . ' requires GET.', 405);
@@ -2879,6 +2959,7 @@ function ur_dispatch(): void
                 case 'listRuns':        ur_action_list_runs();        return;
                 case 'listHistory':     ur_action_list_history();     return;
                 case 'getPluginLog':    ur_action_get_plugin_log();   return;
+                case 'downloadPluginLog': ur_action_download_plugin_log(); return;
                 case 'getRsyncStatus':  ur_action_get_rsync_status(); return;
             }
 

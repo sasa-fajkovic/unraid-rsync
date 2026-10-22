@@ -28,13 +28,17 @@ Cond="version_compare(parse_ini_file('/etc/unraid-version')['version'],'7.0.0','
  *     "Rsync Backups" bar. The tile's visible title lives INSIDE the <tbody>
  *     (the canonical `tile-header` block), exactly like every built-in tile.
  *
- * The tile is read-only: it lists each job with a colored last-execution badge,
- * polling our existing read-only getStatus GET endpoint (no CSRF needed), and
- * not at all while the browser tab is hidden. It is a
+ * The tile is read-only: it lists each job with its last-run time and a colored
+ * last-execution badge, polling our existing read-only getStatus GET endpoint
+ * (no CSRF needed), and not at all while the browser tab is hidden. Times are
+ * in the server's zone (getStatus `tz`): this page must not load Config.php,
+ * so it cannot emit UR_TZ itself. It is a
  * normal sortable dashboard tile (the `title` attribute on the <tbody> is both
  * its Content-Manager description and its sortable key), so users show/hide it
  * and drag it to whatever position they like through the dashboard's own
- * controls; the chosen position is remembered per user.
+ * controls; the chosen position is remembered per user. That is why the
+ * <tbody> title stays "Rsync Backups" while the visible name is the menu's:
+ * renaming the key would reset every user's saved tile layout.
  */
 
 require_once '/usr/local/emhttp/plugins/unraid.rsync/include/PageHelpers.php';
@@ -50,10 +54,10 @@ $mytiles[$slug]['column1'] = str_replace('__UR_STATES__', $urStates === false ? 
   <tr><td>
     <span class="tile-header" id="ur-dash-header">
       <span class="tile-header-left">
-        <img src="/plugins/unraid.rsync/unraid.rsync.png" alt="" class="f32" style="width:32px;height:32px;border-radius:6px;vertical-align:middle;">
+        <i class="fa fa-refresh f32"></i>
         <div class="section">
-          <h3 class="tile-header-main">Rsync Backups</h3>
-          <span><span id="ur-dash-count">0</span> jobs</span>
+          <h3 class="tile-header-main">Unraid Rsync</h3>
+          <span id="ur-dash-sub">0 jobs</span>
         </div>
       </span>
       <span class="tile-header-right">
@@ -75,8 +79,11 @@ $mytiles[$slug]['column1'] = str_replace('__UR_STATES__', $urStates === false ? 
   #ur-dash-body .ur-d-has-snap .ur-d-name { flex-basis:0; }
   #ur-dash-body .ur-d-snap { flex:1 0 100%; font-size:.75rem; opacity:.7; }
   #ur-dash-body .ur-d-row:last-child { border-bottom:none; }
+  #ur-dash-body .ur-d-row:hover { background:rgba(127,127,127,.08); }
+  #ur-dash-body a.ur-d-row, #ur-dash-body a.ur-d-row:hover { color:inherit; text-decoration:none; }
   #ur-dash-body .ur-d-name { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  #ur-dash-body .ur-d-badge { flex:0 0 auto; padding:1px 8px; border-radius:10px; font-size:.78rem; font-weight:bold; color:#fff; white-space:nowrap; }
+  #ur-dash-body .ur-d-when { flex:0 0 auto; font-size:11px; opacity:.6; white-space:nowrap; }
+  #ur-dash-body .ur-d-badge { flex:0 0 auto; padding:1px 8px; border-radius:10px; font-size:11px; font-weight:bold; color:#fff; white-space:nowrap; }
   #ur-dash-body .ur-d-success { background:#1c7d3f; }
   #ur-dash-body .ur-d-warning { background:#b15c00; color:#1a1a1a; }
   #ur-dash-body .ur-d-failed  { background:#b71c1c; }
@@ -92,13 +99,34 @@ $mytiles[$slug]['column1'] = str_replace('__UR_STATES__', $urStates === false ? 
   function stateOf(j) {
     return STATES[j.running ? 'RUNNING' : String(j.state || '').toUpperCase()] || STATES.PENDING;
   }
-  function esc(t) { var d = document.createElement('div'); d.textContent = (t == null ? '' : t); return d.innerHTML; }
-  function render(jobs) {
+  /* Text -> HTML, quotes included: job names also land in title attributes. */
+  function esc(t) { var d = document.createElement('div'); d.textContent = (t == null ? '' : t); return d.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
+  /* "YYYY-MM-DD HH:MM" in the server's zone; UTC, said so, when it is unknown. */
+  function fmt(epoch, tz) {
+    var d = new Date(epoch * 1000);
+    var o = { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', timeZone: tz || 'UTC' };
+    try { return d.toLocaleString('sv-SE', o).replace(',', '') + (tz ? '' : ' UTC'); }
+    catch (e) { return d.toISOString().replace('T', ' ').slice(0, 16) + ' UTC'; }
+  }
+  /* Today's runs read HH:MM, older/later ones keep the date. */
+  function short(epoch, now, tz) {
+    var t = fmt(epoch, tz);
+    return t.slice(0, 10) === fmt(now, tz).slice(0, 10) ? t.slice(11) : t;
+  }
+  function render(d) {
+    var jobs = d.jobs || {};
     var body = document.getElementById('ur-dash-body');
-    var count = document.getElementById('ur-dash-count');
+    var sub = document.getElementById('ur-dash-sub');
     if (!body) { return; }
-    var ids = Object.keys(jobs || {});
-    if (count) { count.textContent = ids.length; }
+    var ids = Object.keys(jobs);
+    var now = parseInt(d.now, 10) || Math.floor(Date.now() / 1000);
+    if (sub) {
+      var ok = ids.filter(function (id) { return !jobs[id].running && String(jobs[id].state || '').toUpperCase() === 'SUCCESS'; }).length;
+      var next = null;
+      ids.forEach(function (id) { var n = jobs[id].nextRun; if (n && (!next || n < next.at)) { next = { at: n, name: jobs[id].name }; } });
+      sub.textContent = ids.length + (ids.length === 1 ? ' job' : ' jobs') + ' · ' + ok + ' OK'
+        + (next ? ' · next: ' + next.name + ' ' + short(next.at, now, d.tz) : '');
+    }
     if (!ids.length) {
       body.innerHTML = '<p style="font-style:italic;text-align:center;padding:8px 0;opacity:.7;">No jobs configured</p>';
       return false;
@@ -108,10 +136,16 @@ $mytiles[$slug]['column1'] = str_replace('__UR_STATES__', $urStates === false ? 
       var j = jobs[id];
       if (j.running) { anyRunning = true; }
       var st = stateOf(j);
+      var fin = j.lastRun ? Date.parse(j.lastRun.finishedAt) / 1000 : 0;
+      var when = fin ? short(fin, now, d.tz) : '';
+      var tip = j.name + ' - last run: ' + (fin ? fmt(fin, d.tz) + ' (exit ' + j.lastRun.exitCode + ')' : 'never')
+        + ' - next: ' + (j.nextRun ? fmt(j.nextRun, d.tz) : (j.manualOnly ? 'manual (on demand)' : (j.enabled === false ? 'disabled' : '—')));
       /* Snapshot jobs only: a second line under the name. */
       var snap = j.snapshot ? '<span class="ur-d-snap" title="' + esc(j.snapshot.stamp) + '">' + esc(j.snapshot.label) + '</span>' : '';
-      return '<div class="ur-d-row' + (snap ? ' ur-d-has-snap' : '') + '"><span class="ur-d-name">' + esc(j.name) +
-             '</span><span class="ur-d-badge ur-d-' + esc(st.cls) + '">' + esc(st.label) + '</span>' + snap + '</div>';
+      return '<a class="ur-d-row' + (snap ? ' ur-d-has-snap' : '') + '" href="/Settings/UnraidRsync" title="' + esc(tip) + '">' +
+             '<span class="ur-d-name">' + esc(j.name) + '</span>' +
+             (when ? '<span class="ur-d-when">' + esc(when) + '</span>' : '') +
+             '<span class="ur-d-badge ur-d-' + esc(st.cls) + '">' + esc(st.label) + '</span>' + snap + '</a>';
     }).join('');
     body.innerHTML = html;
     return anyRunning;
@@ -124,7 +158,7 @@ $mytiles[$slug]['column1'] = str_replace('__UR_STATES__', $urStates === false ? 
     if (document.hidden) { return; }
     fetch(URL, { credentials: 'same-origin', cache: 'no-store' })
       .then(function (r) { return r.json(); })
-      .then(function (d) { return render((d && d.jobs) || {}); })
+      .then(function (d) { return render(d || {}); })
       .catch(function () { return false; })
       .then(function (anyRunning) {
         if (timer) { clearTimeout(timer); }

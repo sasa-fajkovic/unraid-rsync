@@ -138,6 +138,25 @@ final class PageHelpers
     }
 
     /**
+     * The options preview as a reader wants it: with -a present, the positive
+     * flags -a already implies are dropped. Display only - Rsync::optionTokens
+     * and the argv keep them - and everything kept stays in emitted order, so
+     * the --no-* negations still follow -a and the filter rules keep theirs.
+     * Needs Rsync, which every caller has already loaded.
+     *
+     * @param array<int,string> $tokens Rsync::optionTokens() output
+     * @return array<int,string>
+     */
+    public static function previewTokens(array $tokens): array
+    {
+        if (!in_array('-a', $tokens, true)) {
+            return array_values($tokens);
+        }
+        $implied = array_intersect_key(Rsync::BOOL_FLAGS, Rsync::ARCHIVE_IMPLIED);
+        return array_values(array_filter($tokens, static fn(string $t): bool => !in_array($t, $implied, true)));
+    }
+
+    /**
      * Line count of a hook textarea's saved value, or of its placeholder while
      * empty. Trailing blank lines are trimmed: the caller adds one buffer row,
      * and counting a saved trailing "\n" as well doubled the blank space.

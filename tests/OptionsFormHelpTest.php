@@ -477,7 +477,8 @@ final class OptionsFormHelpTest extends TestCase
             $this->assertStringContainsString('id="ur-hist-prev"', $html);
             $this->assertStringContainsString('id="ur-hist-next"', $html);
             // Log modal opens a run's log via getJobLog?run=.
-            $this->assertStringContainsString('action=getJobLog', $html);
+            $this->assertStringContainsString("logHref('getJobLog', r)", $html);
+            $this->assertStringContainsString("'?action=' + action + '&id='", $html);
             $this->assertStringContainsString('id="ur-hist-modal"', $html);
         } finally {
             @unlink(Config::path());
@@ -493,6 +494,8 @@ final class OptionsFormHelpTest extends TestCase
         $this->assertStringNotContainsString('action=listHistory', $html);
     }
 
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
     public function testOverviewPageRendersJobRowsAndPoller(): void
     {
         $cfg = Config::defaults();
@@ -1725,6 +1728,149 @@ final class OptionsFormHelpTest extends TestCase
      * must define the getStatus poller, the shared helpers and the shared CSS
      * exactly once - the per-tab loops and copies are what this replaced.
      */
+    // --- P6: Global Settings, History, Status ---------------------------------
+
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testSettingsPutsStorageFirstWithHelpAndSaysWhereCredentialsLive(): void
+    {
+        @unlink(Config::path());
+        $html = $this->renderPageBody(__DIR__ . '/../source/pages/settings.php');
+
+        $storage = strpos($html, 'Storage (logs &amp; secrets)');
+        $hooks   = strpos($html, 'Retention &amp; hooks');
+        $rsync   = strpos($html, 'Default rsync options');
+        $options = strpos($html, '<div class="ur-rsync-options"');
+        $this->assertNotFalse($storage);
+        $this->assertTrue($storage < $hooks && $hooks < $rsync && $rsync < $options, 'storage, then retention, then the rsync options');
+
+        foreach (['ur_global_logdir', 'ur_global_secretsdir', 'ur_global_retention', 'ur_global_prehook_timeout', 'ur_global_posthook_timeout'] as $id) {
+            $this->assertStringContainsString('aria-controls="' . $id . '_help"', $html, "$id has a ? affordance");
+            $this->assertStringContainsString('id="' . $id . '_help"', $html, "$id has its help block");
+        }
+
+        $this->assertStringContainsString('placeholder="empty = USB flash (/boot)"', $html);
+        $this->assertStringNotContainsString('placeholder="/mnt/user/system/unraid.rsync"', $html);
+        $this->assertStringContainsString('<code id="ur-cred-path">' . rtrim(UR_CONFIG_BASE, '/') . '/credentials.json</code> <span id="ur-cred-note">— USB flash (FAT32, world-readable)</span>', $html);
+        $this->assertStringContainsString('<span id="ur-cred-warn" class="ur-badge ur-badge-warning">Warning</span>', $html);
+        // After Apply moves the file, the line follows the save response.
+        $this->assertStringContainsString('if (res.body.credentials) { showCredentials(res.body.credentials); }', $html);
+        $this->assertStringContainsString('warn.hidden = !c.onFlash;', $html);
+        $this->assertStringContainsString('<div class="ur-notice ur-notice-warn">', $html);
+    }
+
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testSettingsShowsAConfiguredSecretsDirWithoutTheWarning(): void
+    {
+        $cfg = Config::defaults();
+        $cfg['global']['secretsDir'] = '/mnt/user/ur-p6-secrets';
+        Config::save($cfg);
+        try {
+            $html = $this->renderPageBody(__DIR__ . '/../source/pages/settings.php');
+        } finally {
+            @unlink(Config::path());
+            Credentials::$secretsDirOverride = null;
+        }
+        $this->assertStringContainsString('<code id="ur-cred-path">/mnt/user/ur-p6-secrets/credentials.json</code> <span id="ur-cred-note">(not created yet)</span>', $html);
+        $this->assertStringContainsString('<span id="ur-cred-warn" class="ur-badge ur-badge-warning" hidden>', $html);
+    }
+
+    public function testImpliedGroupNoLongerShiftsItsRowsAndThePreviewIsCollapsed(): void
+    {
+        $css = (string) file_get_contents(__DIR__ . '/../source/pages/_options_form.php');
+        $this->assertStringNotContainsString('border-left: 3px solid var(--blue-200', $css);
+        $this->assertStringContainsString('box-shadow: inset 3px 0 0 var(--blue-200, #bce8f1);', $css);
+        $this->assertStringContainsString('var shown = res.body.display || res.body.tokens;', $css);
+
+        ob_start();
+        ur_render_rsync_options(Config::defaultRsyncOptions(), 'jobs[0][rsyncOptions]', 'ur_px');
+        $html = (string) ob_get_clean();
+        $out = html_entity_decode($this->between($html, '<code class="ur-preview-out" aria-live="polite">', '</code>'));
+        $expect = implode(' ', PageHelpers::previewTokens(Rsync::optionTokens(Config::defaultRsyncOptions())));
+        $this->assertSame($expect, $out);
+        $this->assertStringContainsString('Flags that -a already implies are not repeated here', $html);
+    }
+
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testHistoryFiltersDeletedJobsAndRefreshesFromTheSharedPollerOnlyWhileVisible(): void
+    {
+        $cfg = Config::defaults();
+        $cfg['jobs'][] = Job::normalize([
+            'id'        => 'j-hist-live',
+            'name'      => 'Live Job',
+            'transport' => 'LOCAL',
+            'pairs'     => [['local' => '/mnt/user/x/', 'remote' => '/mnt/disk1/x/']],
+        ]);
+        Config::save($cfg);
+        History::append('zz-alert-test', ['startedAt' => '2026-10-01T00:00:00Z', 'state' => 'FAILED', 'exitCode' => 11]);
+        try {
+            $html = $this->renderPageBody(__DIR__ . '/../source/pages/history.php');
+        } finally {
+            @unlink(Config::path());
+            @unlink(History::path('zz-alert-test'));
+        }
+
+        $this->assertStringContainsString('<option value="j-hist-live">Live Job</option>', $html);
+        $this->assertStringContainsString('<option value="zz-alert-test">zz-alert-test (deleted)</option>', $html);
+        $this->assertStringContainsString('<option value="problems">Problems only</option>', $html);
+        $this->assertStringContainsString('<option value="1">Dry run</option>', $html);
+        $this->assertStringContainsString("'&state=' + encodeURIComponent(stateSel.value) + '&dryRun=' + encodeURIComponent(typeSel.value)", $html);
+        $this->assertStringContainsString('id="ur-hist-pageno"', $html);
+        $this->assertStringContainsString('<div class="ur-hist-scroll">', $html);
+        $this->assertStringContainsString('@media (max-width: 700px)', $html);
+
+        // UXB-8: the exit-code meanings and the reason / last rsync error tooltip.
+        $this->assertStringContainsString('"11":"error in file I\/O"', $html);
+        $this->assertStringContainsString("'rsync exit ' + r.exitCode + ': ' + EXIT_MEANINGS[r.exitCode]", $html);
+        $this->assertStringContainsString('b.title = r.reason || r.lastError;', $html);
+        // UXB-11 / UXB-16: the modal title and a truncation notice that is not help text.
+        $this->assertStringContainsString("' · ' + typeLabel(r) + ' · ' + fmtWhen(r.startedAt)", $html);
+        $this->assertStringContainsString('<div id="ur-hist-trunc" class="ur-notice" hidden>', $html);
+        $this->assertStringContainsString('truncEl.hidden = !body.truncated;', $html);
+        $this->assertStringNotContainsString('blockquote class="inline_help"', $html);
+        // UXB-10: View and Download are one compact pair.
+        $this->assertStringContainsString("btn.className = 'ur-btn ur-btn-plain ur-btn-sm';", $html);
+        $this->assertStringContainsString("dl.className = 'ur-btn ur-btn-plain ur-btn-sm ur-hist-dl';", $html);
+
+        // No poller of its own: the shared one, gated on the tab being on screen.
+        $this->assertStringContainsString('window.urStatus.subscribe(function (payload) {', $html);
+        $this->assertStringContainsString('function onScreen() { return !document.hidden && tableEl.offsetParent !== null; }', $html);
+        $this->assertStringContainsString('function refreshIfStale() { if (stale && onScreen()) { stale = false; load(); } }', $html);
+        $this->assertStringContainsString('new IntersectionObserver(', $html);
+        // A SKIPPED record or a failure that never registered a run changes no
+        // running flag and no summary - only the history file's revision.
+        $this->assertStringContainsString("+ ':' + (j.historyRev || '')", $html);
+        $this->assertStringNotContainsString('setTimeout(load', $html);
+        $this->assertStringNotContainsString('body.running', $html);
+    }
+
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testStatusPluginLogHasAJobFilterWrapCopyAndDownload(): void
+    {
+        $html = $this->renderPageBody(__DIR__ . '/../source/pages/status.php');
+        $this->assertStringContainsString('<select id="ur-log-job"><option value="">All jobs</option></select>', $html);
+        $this->assertStringContainsString('var LINE_JOB = /^\[[^\]]*\] \[([A-Za-z0-9._-]+)\]/;', $html);
+        $this->assertStringContainsString('pre.innerHTML = linesHtml(pending);', $html);
+        $this->assertStringContainsString("pre.insertAdjacentHTML('beforeend', linesHtml(pending));", $html);
+        $this->assertStringContainsString("el.hidden = want !== '' && el.getAttribute('data-job') !== want;", $html);
+        $this->assertStringContainsString('id="ur-log-wrap" checked', $html);
+        $this->assertStringContainsString("pre.classList.toggle('ur-nowrap', !ev.target.checked);", $html);
+        $this->assertStringContainsString("window.urUtil.copyText(pre.innerText || '', copyBtn, pre);", $html);
+        $this->assertStringContainsString('href="/plugins/unraid.rsync/include/handler.php?action=downloadPluginLog"', $html);
+        $this->assertStringContainsString('window.urUtil.downloadFile(dlLink.href', $html);
+
+        // UXB-17: honest wording, matching icons, Idle grey and Present green.
+        $this->assertStringNotContainsString('updates automatically while a job is running', $html);
+        $this->assertStringContainsString('<i class="fa fa-bars title"></i>&nbsp;Status', $html);
+        $this->assertStringContainsString('Tag="bars"', (string) file_get_contents(__DIR__ . '/../source/UR.Status.page'));
+        $this->assertStringContainsString('.ur-badge-idle     { background: #757575; }', $html);
+        $this->assertStringContainsString('.ur-badge-success  { background: #1c7d3f; }', $html);
+        $this->assertStringContainsString("body.available ? 'ur-badge-success' : 'ur-badge-failed'", $html);
+    }
+
     #[RunInSeparateProcess]
     #[PreserveGlobalState(false)]
     public function testTabsShareOnePollerAndOneCopyOfTheHelpers(): void
@@ -1764,7 +1910,7 @@ final class OptionsFormHelpTest extends TestCase
         }
         $this->assertStringNotContainsString('setInterval(pollStatus', $html);
         $this->assertStringNotContainsString('setInterval(pollPluginLog', $html);
-        $this->assertSame(3, substr_count($html, 'window.urStatus.subscribe('), 'Overview, Jobs and Status subscribe');
+        $this->assertSame(4, substr_count($html, 'window.urStatus.subscribe('), 'Overview, Jobs, Status and History subscribe');
     }
 
     #[RunInSeparateProcess]
@@ -1856,6 +2002,21 @@ final class OptionsFormHelpTest extends TestCase
         $this->assertStringNotContainsString('Pending', $tile);
         $this->assertStringContainsString('if (document.hidden) { return; }', $tile);
         $this->assertStringContainsString("addEventListener('visibilitychange'", $tile);
+
+        // UXB-13/14/20: readable badge, a summary subtitle, one name, a glyph.
+        $this->assertMatchesRegularExpression('/\.ur-d-badge \{[^}]*font-size:11px;/', $tile);
+        $this->assertStringNotContainsString('.78rem', $tile);
+        $this->assertStringContainsString("(ids.length === 1 ? ' job' : ' jobs') + ' · ' + ok + ' OK'", $tile);
+        $this->assertStringContainsString("' · next: ' + next.name + ' ' + short(next.at, now, d.tz)", $tile);
+        $this->assertStringContainsString('<span class="ur-d-when">', $tile);
+        $this->assertStringContainsString('href="/Settings/UnraidRsync" title="\' + esc(tip) + \'"', $tile);
+        $this->assertStringContainsString('<i class="fa fa-refresh f32"></i>', $tile);
+        $this->assertStringContainsString('<h3 class="tile-header-main">Unraid Rsync</h3>', $tile);
+        $this->assertStringNotContainsString('unraid.rsync.png', $tile);
+        // The sortable key users' saved layouts hang off is unchanged.
+        $this->assertStringContainsString('<tbody class="sortable" title="Rsync Backups">', $tile);
+        // Job names reach title attributes, so quotes are escaped too.
+        $this->assertStringContainsString(".replace(/\"/g, '&quot;')", $tile);
     }
 
     public function testOnlyTheSharedEmittersDefineHelpersOrTheHandlerUrl(): void

@@ -126,4 +126,33 @@ final class PageHelpersTest extends TestCase
         $this->assertSame('2m 5s', Runner::formatDuration(125));
         $this->assertSame('45s', Runner::formatDuration(45));
     }
+
+    public function testPreviewTokensDropOnlyTheFlagsArchiveImpliesAndKeepTheOrder(): void
+    {
+        $tokens = ['-r', '-a', '--no-D', '-z', '-h', '-t', '-p', '-o', '-g', '-l', '--max-delete=25', '--exclude=-r', '--include=*/'];
+        $this->assertSame(['-a', '--no-D', '-z', '-h', '--max-delete=25', '--exclude=-r', '--include=*/'], PageHelpers::previewTokens($tokens));
+        // Without -a every token is meaningful on its own.
+        $plain = ['-r', '-t', '--delete'];
+        $this->assertSame($plain, PageHelpers::previewTokens($plain));
+    }
+
+    public function testPreviewTokensMatchTheRealMapperForTheDefaults(): void
+    {
+        $tokens = Rsync::optionTokens(Config::defaultRsyncOptions());
+        $shown  = PageHelpers::previewTokens($tokens);
+        // Display only: the argv still carries everything, and what is shown is
+        // the same tokens in the same relative order.
+        $this->assertSame(array_values(array_intersect($tokens, $shown)), $shown);
+        foreach (array_intersect_key(Rsync::BOOL_FLAGS, Rsync::ARCHIVE_IMPLIED) as $flag) {
+            $this->assertNotContains($flag, in_array('-a', $tokens, true) ? $shown : []);
+        }
+    }
+
+    /** UXB-8: every exit code the History tooltip must explain has a meaning. */
+    public function testRsyncExitMeaningsCoverTheHistoryTooltipCodes(): void
+    {
+        foreach ([0, 1, 2, 3, 5, 10, 11, 12, 13, 14, 20, 21, 22, 23, 24, 25, 30, 35, 255] as $code) {
+            $this->assertNotSame('', Rsync::EXIT_MEANINGS[$code] ?? '', "exit $code");
+        }
+    }
 }

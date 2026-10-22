@@ -2,28 +2,29 @@
 /**
  * history.php - the History tab body.
  *
- * A paginated table of every PAST execution (real + dry, manual + scheduled) for
- * a selected job, read from the persistent History records via the read-only
- * listHistory GET poller. Columns: when, trigger, type (real/dry), status badge,
- * exit code, duration, and a Logs action that opens that run's log (getJobLog
- * with the record's logRef as ?run=). Server-side paging (page size 25) so up to
- * the 9999-record retention cap never ships at once.
+ * A paginated table of every PAST execution (real + dry, manual + scheduled),
+ * read from the persistent History records via the read-only listHistory GET
+ * poller, filterable by job (configured ones plus ids that only survive in
+ * History), status group and type. Columns: when, trigger, type (real/dry),
+ * status badge, exit code, duration, and View / Download for the run's log
+ * (getJobLog / downloadJobLog with the record's logRef as ?run=). Server-side
+ * paging (page size 25) so up to the 9999-record retention cap never ships at
+ * once.
  *
- * History is NOT live data (it only changes when a run finishes), so it is
- * fetched on tab open + on job/page change - NO 1s poller. Every dynamic field
- * is written via textContent (never innerHTML) so a job name / log path can't
- * inject markup; the log body from getJobLog is already HTML-escaped server-side
+ * History only changes when a run starts or finishes, so there is no poller of
+ * its own: it subscribes to the shared getStatus poller (window.urStatus) and
+ * reloads when the set of running jobs or a last-run time changes - and only
+ * while this tab body is on screen. Every dynamic field is written via
+ * textContent (never innerHTML) so a job name / log path can't inject markup;
+ * the log body from getJobLog is already HTML-escaped server-side
  * (Logger::tail) and is the only thing injected as HTML, into a <pre>.
- *
- * Reuses ur_render_csrf_token + ur_js from the shared options partial, and the
- * ONE badge palette + vocabulary from ur_emit_badge_assets().
  */
 
 require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Config.php';
+require_once '/usr/local/emhttp/plugins/unraid.rsync/include/History.php';
 // ur_render_csrf_token + ur_js helpers:
 require_once '/usr/local/emhttp/plugins/unraid.rsync/pages/_options_form.php';
 
-$csrf       = ur_render_csrf_token();
 $handlerUrl = PageHelpers::HANDLER_URL;
 
 // Job id => name for the filter select. A config read error just leaves the list
@@ -43,16 +44,31 @@ try {
 } catch (Throwable $e) {
     $jobs = [];
 }
-ur_emit_badge_assets(); /* the ONE badge palette + window.urBadge */
-ur_emit_page_assets();  /* shared CSS (.ur-empty-state, .ur-result) + window.urUtil */
+// Ids that only survive in History (the job was deleted since).
+$deletedIds = array_values(array_diff(History::jobIds(), array_keys($jobs)));
+sort($deletedIds);
+
+ur_emit_badge_assets();  /* the ONE badge palette + window.urBadge */
+ur_emit_status_poller(); /* window.urStatus + window.urUtil + UR_TZ */
 ?>
 <style>
-.ur-hist-controls { margin: 8px 0; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.ur-hist-controls { margin: 8px 0; display: flex; gap: 8px 12px; align-items: center; flex-wrap: wrap; }
+.ur-hist-controls select { width: auto; max-width: 260px; }
+.ur-hist-scroll { overflow-x: auto; }
 .ur-hist-table { width: 100%; border-collapse: collapse; margin-top: 6px; }
 .ur-hist-table th, .ur-hist-table td { padding: 6px 10px; text-align: left; border-bottom: 1px solid var(--border-color, #444); white-space: nowrap; }
 .ur-hist-table td.ur-hist-name { white-space: normal; word-break: break-word; }
-.ur-hist-pager { margin: 10px 0; display: flex; gap: 12px; align-items: center; }
+.ur-hist-exit[title] { text-decoration: underline dotted; cursor: help; }
+.ur-hist-logs .ur-btn + .ur-btn { margin-left: 6px; }
+.ur-hist-when-sub { display: none; font-size: 0.85em; opacity: 0.75; }
+/* Narrow screens: Trigger and Type fold into the When cell. */
+@media (max-width: 700px) {
+  .ur-hist-col-trg, .ur-hist-col-type { display: none; }
+  .ur-hist-when-sub { display: block; }
+}
+.ur-hist-pager { margin: 10px 0; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
 .ur-hist-pager button[disabled] { opacity: 0.5; cursor: default; }
+.ur-hist-pager input[type="number"] { width: 5em; min-width: 0; margin: 0 4px; }
 .ur-trigger-icon { opacity: 0.8; margin-right: 4px; }
 .ur-hist-snap { margin-top: 3px; font-size: 0.85em; color: var(--color-text-secondary, #888); }
 /* Log modal (self-contained; the Jobs tab has its own, with a run picker and a
@@ -65,20 +81,9 @@ ur_emit_page_assets();  /* shared CSS (.ur-empty-state, .ur-result) + window.urU
   background: var(--background-color, #1c1c1c); border-radius: 6px; padding: 14px;
   display: flex; flex-direction: column;
 }
-.ur-hist-modal-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; gap: 8px; }
+.ur-hist-modal-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; gap: 8px; flex-wrap: wrap; }
+.ur-hist-modal-head .ur-badge { min-width: 0; }
 .ur-hist-modal-actions { display: flex; align-items: center; gap: 6px; }
-/* Modal action buttons. "Download full log" is a prominent green button (it was
-   an easy-to-miss text link); Copy is blue. */
-.ur-btn {
-  display: inline-block; padding: 5px 12px; border-radius: 4px; cursor: pointer;
-  font-size: 12px; font-weight: bold; text-decoration: none; border: none; line-height: 1.5;
-}
-.ur-btn-dl   { background: var(--green, #1c7d3f); color: #fff; }
-.ur-btn-copy { background: var(--blue-500, #216feb); color: #fff; }
-.ur-btn:hover { filter: brightness(1.12); }
-/* Per-row "Download" link sits next to the View button as a small text button. */
-.ur-hist-dl-row { margin-left: 8px; text-decoration: none; color: var(--blue-500, #2196f3); font-weight: bold; }
-.ur-hist-dl-row:hover { text-decoration: underline; }
 .ur-hist-log-pre {
   overflow: auto; margin: 0; background: #000; color: #d0d0d0; padding: 10px;
   border-radius: 4px; font-family: monospace; font-size: 12px;
@@ -91,30 +96,46 @@ ur_emit_page_assets();  /* shared CSS (.ur-empty-state, .ur-result) + window.urU
 </div>
 
 <p>
-  <?=_('Past executions across all jobs — real runs and dry-runs, started manually or on schedule. Use the filter to narrow to one job. How many are kept per job is the "Keep last N executions" setting on the Global Settings tab')?>. <?=ur_tz_note()?>
+  <?=_('Past executions across all jobs — real runs and dry-runs, started manually or on schedule. Use the filters to narrow the list. How many are kept per job is the "Keep last N executions" setting on the Global Settings tab')?>. <?=ur_tz_note()?>
 </p>
 
-<?php if (empty($jobs)): ?>
+<?php if (empty($jobs) && empty($deletedIds)): ?>
 <div class="ur-empty-state"><?=_('No jobs configured yet — add one in the Jobs tab')?>.</div>
 <?php else: ?>
 
 <div class="ur-hist-controls">
-  <label for="ur-hist-job"><?=_('Filter by job')?>:</label>
+  <label for="ur-hist-job"><?=_('Job')?>:</label>
   <select id="ur-hist-job">
     <option value="" selected><?=_('All jobs')?></option>
     <?php foreach ($jobs as $jid => $jname): ?>
-      <option value="<?=htmlspecialchars($jid, ENT_QUOTES, 'UTF-8')?>"><?=htmlspecialchars($jname, ENT_QUOTES, 'UTF-8')?></option>
+      <option value="<?=ur_h($jid)?>"><?=ur_h($jname)?></option>
     <?php endforeach; ?>
+    <?php foreach ($deletedIds as $jid): ?>
+      <option value="<?=ur_h($jid)?>"><?=ur_h($jid . ' ' . ur_t_text('(deleted)'))?></option>
+    <?php endforeach; ?>
+  </select>
+  <label for="ur-hist-state"><?=_('Status')?>:</label>
+  <select id="ur-hist-state">
+    <option value="" selected><?=_('All')?></option>
+    <option value="problems"><?=_('Problems only')?></option>
+    <option value="success"><?=_('Success only')?></option>
+  </select>
+  <label for="ur-hist-type"><?=_('Type')?>:</label>
+  <select id="ur-hist-type">
+    <option value="" selected><?=_('All')?></option>
+    <option value="0"><?=_('Real')?></option>
+    <option value="1"><?=_('Dry run')?></option>
   </select>
 </div>
 
-<table class="ur-hist-table">
+<div class="ur-hist-scroll">
+<table class="ur-hist-table" id="ur-hist-table">
   <thead>
     <tr>
       <th><?=_('Job')?></th>
       <th><?=_('When')?></th>
-      <th><?=_('Trigger')?></th>
-      <th><?=_('Type')?></th>
+      <th class="ur-hist-col-trg"><?=_('Trigger')?></th>
+      <th class="ur-hist-col-type"><?=_('Type')?></th>
       <th><?=_('Status')?></th>
       <th><?=_('Exit')?></th>
       <th><?=_('Duration')?></th>
@@ -125,10 +146,15 @@ ur_emit_page_assets();  /* shared CSS (.ur-empty-state, .ur-result) + window.urU
     <tr><td colspan="8"><?=_('Loading…')?></td></tr>
   </tbody>
 </table>
+</div>
 
 <div class="ur-hist-pager">
   <button type="button" id="ur-hist-prev"><?=_('‹ Newer')?></button>
-  <span id="ur-hist-pageinfo"></span>
+  <span>
+    <label for="ur-hist-pageno"><?=_('Page')?></label>
+    <input type="number" id="ur-hist-pageno" min="1" step="1" value="1" inputmode="numeric">
+    <span id="ur-hist-pageinfo"></span>
+  </span>
   <button type="button" id="ur-hist-next"><?=_('Older ›')?></button>
 </div>
 <!-- Where a failed row download reports (the modal's <pre> takes over while the
@@ -147,13 +173,12 @@ ur_emit_page_assets();  /* shared CSS (.ur-empty-state, .ur-result) + window.urU
         <button type="button" id="ur-hist-modal-close"><?=_('Close')?></button>
       </span>
     </div>
-    <blockquote class="inline_help" style="display:block;margin:0 0 8px"><p><?=_('The view below shows the most recent part of the log (the tail). Use Download full log for the complete file; Copy copies what is shown')?>.</p></blockquote>
+    <div id="ur-hist-trunc" class="ur-notice" hidden><?=_('This shows the most recent part of a long log (the tail). Use Download full log for the complete file; Copy copies what is shown')?>.</div>
     <pre id="ur-hist-log-pre" class="ur-hist-log-pre"></pre>
   </div>
 </div>
 
 <?php
-ur_emit_time_helpers();  /* UR_TZ + window.urFmtLocal (server timezone) */
 ur_emit_ajax_helpers();  /* window.urAjax.show, for the inline download error */
 ?>
 <script type="text/javascript">
@@ -161,27 +186,28 @@ ur_emit_ajax_helpers();  /* window.urAjax.show, for the inline download error */
   'use strict';
 
   var HANDLER_URL = <?=ur_js($handlerUrl)?>;
+  /* rsync(1) EXIT VALUES, for the Exit cell's tooltip. */
+  var EXIT_MEANINGS = <?=ur_js(Rsync::EXIT_MEANINGS)?>;
   var PAGE_SIZE = 25;
 
   var jobSel   = document.getElementById('ur-hist-job');
+  var stateSel = document.getElementById('ur-hist-state');
+  var typeSel  = document.getElementById('ur-hist-type');
+  var tableEl  = document.getElementById('ur-hist-table');
   var rowsEl   = document.getElementById('ur-hist-rows');
   var prevBtn  = document.getElementById('ur-hist-prev');
   var nextBtn  = document.getElementById('ur-hist-next');
+  var pageNo   = document.getElementById('ur-hist-pageno');
   var pageInfo = document.getElementById('ur-hist-pageinfo');
   var modal    = document.getElementById('ur-hist-modal');
   var modalPre = document.getElementById('ur-hist-log-pre');
   var modalTit = document.getElementById('ur-hist-modal-title');
   var modalDl  = document.getElementById('ur-hist-log-download');
+  var truncEl  = document.getElementById('ur-hist-trunc');
   var dlResult = document.getElementById('ur-hist-dl-result');
 
   var offset = 0;
   var total  = 0;
-  var pollTimer = null; // set only while a RUNNING row is visible
-
-  /* History is normally static (it changes only when a run finishes), so there
-   * is no constant poller. But while an in-flight RUNNING row is on screen we
-   * reload every few seconds so it flips to its final status on its own. */
-  function clearPoll() { if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; } }
 
   /* Records store startedAt as a UTC "...Z" string (Runner.php); render it in
    * the SERVER's timezone, not the browser's - see ur_emit_time_helpers(). */
@@ -190,6 +216,11 @@ ur_emit_ajax_helpers();  /* window.urAjax.show, for the inline download error */
     var e = window.urUtil.isoToEpoch(iso);
     return e ? window.urFmtLocal(e, true) : iso;
   }
+
+  function typeLabel(r) { return r.dryRun ? 'Dry run' : 'Real'; }
+  function triggerLabel(r) { return r.trigger === 'schedule' ? 'Schedule' : 'Manual'; }
+  /* A still-running row has no final exit code yet; a skipped one never ran. */
+  function hasExit(r) { return r.state !== 'RUNNING' && r.state !== 'SKIPPED'; }
 
   /* A snapshot record's line under the status badge: its stamp in the SERVER's
    * timezone (the UTC stamp on hover), committed, suspect and pruned count. */
@@ -207,77 +238,75 @@ ur_emit_ajax_helpers();  /* window.urAjax.show, for the inline download error */
   }
 
   /* Build one table cell with plain text (textContent => no XSS). */
-  function td(text) { var c = document.createElement('td'); c.textContent = text; return c; }
+  function td(text, cls) { var c = document.createElement('td'); c.textContent = text; if (cls) { c.className = cls; } return c; }
+
+  function logHref(action, r) {
+    return HANDLER_URL + '?action=' + action + '&id=' + encodeURIComponent(r.jobId || '') + '&run=' + encodeURIComponent(r.logRef);
+  }
 
   function render(runs) {
     rowsEl.innerHTML = '';
     if (!runs || !runs.length) {
-      var tr0 = document.createElement('tr');
-      var c0 = document.createElement('td');
-      c0.setAttribute('colspan', '8');
-      c0.textContent = (total === 0) ? 'No executions yet.' : 'No executions on this page.';
-      tr0.appendChild(c0);
-      rowsEl.appendChild(tr0);
+      messageRow(total === 0 ? 'No executions match.' : 'No executions on this page.');
       return;
     }
     runs.forEach(function (r) {
       var tr = document.createElement('tr');
 
       // Job name (resolved server-side; falls back to the id).
-      var jobCell = td(r.jobName || r.jobId || '—');
-      jobCell.className = 'ur-hist-name';
-      tr.appendChild(jobCell);
+      tr.appendChild(td(r.jobName || r.jobId || '—', 'ur-hist-name'));
 
-      tr.appendChild(td(fmtWhen(r.startedAt)));
+      // When, with Trigger + Type folded underneath on narrow screens.
+      var when = td(fmtWhen(r.startedAt));
+      var sub = document.createElement('div');
+      sub.className = 'ur-hist-when-sub';
+      sub.textContent = triggerLabel(r) + ' · ' + typeLabel(r);
+      when.appendChild(sub);
+      tr.appendChild(when);
 
       // Trigger (icon + label)
-      var trg = document.createElement('td');
+      var trg = td('', 'ur-hist-col-trg');
       var ic = document.createElement('i');
       ic.className = 'fa ur-trigger-icon ' + (r.trigger === 'schedule' ? 'fa-clock-o' : 'fa-hand-pointer-o');
       ic.setAttribute('aria-hidden', 'true');
       trg.appendChild(ic);
-      trg.appendChild(document.createTextNode(r.trigger === 'schedule' ? 'Schedule' : 'Manual'));
+      trg.appendChild(document.createTextNode(triggerLabel(r)));
       tr.appendChild(trg);
 
-      tr.appendChild(td(r.dryRun ? 'Dry-run' : 'Real'));
+      tr.appendChild(td(typeLabel(r), 'ur-hist-col-type'));
 
-      // Status badge
+      // Status badge; its tooltip is the recorded reason, else rsync's own
+      // last "rsync error:" line.
       var stTd = document.createElement('td');
       var b = document.createElement('span');
       b.className = 'ur-badge';
       window.urBadge.apply(b, r.state);
-      if (r.reason) { b.title = r.reason; }
+      if (r.reason || r.lastError) { b.title = r.reason || r.lastError; }
       stTd.appendChild(b);
       /* Snapshot jobs only: their records carry `snapshot`, mirror ones do not. */
       if ('snapshot' in r) { stTd.appendChild(snapLine(r)); }
       tr.appendChild(stTd);
 
-      // A still-running row has no final exit code or duration yet; a skipped one never ran.
-      var isRunning = (r.state === 'RUNNING');
-      tr.appendChild(td(isRunning || r.state === 'SKIPPED' ? '—' : String(r.exitCode)));
-      tr.appendChild(td(isRunning ? '—' : window.urUtil.formatDuration(r.durationSec)));
+      var exitTd = td(hasExit(r) ? String(r.exitCode) : '—', 'ur-hist-exit');
+      if (hasExit(r) && EXIT_MEANINGS[r.exitCode]) { exitTd.title = 'rsync exit ' + r.exitCode + ': ' + EXIT_MEANINGS[r.exitCode]; }
+      tr.appendChild(exitTd);
+      tr.appendChild(td(r.state === 'RUNNING' ? '—' : window.urUtil.formatDuration(r.durationSec)));
 
       // Logs: View (modal) + Download (full file) when a log ref was recorded.
-      var logTd = document.createElement('td');
+      var logTd = td('', 'ur-hist-logs');
       if (r.logRef) {
         var btn = document.createElement('button');
         btn.type = 'button';
-        btn.className = 'ur-hist-viewlog';
+        btn.className = 'ur-btn ur-btn-plain ur-btn-sm';
         btn.textContent = 'View';
-        btn.setAttribute('data-run', r.logRef);
-        btn.setAttribute('data-jobid', r.jobId || '');
-        /* Title the modal with the run's local start time, not r.logRef - that
-         * is the UTC-stamped FILENAME and showing it raw put a second timezone
-         * in front of the user (issue #135). */
-        btn.setAttribute('data-when', fmtWhen(r.startedAt));
+        btn.addEventListener('click', function () { openLog(r); });
         logTd.appendChild(btn);
 
         var dl = document.createElement('a');
-        dl.className = 'ur-hist-dl-row';
+        dl.className = 'ur-btn ur-btn-plain ur-btn-sm ur-hist-dl';
         dl.textContent = 'Download';
         dl.setAttribute('download', '');
-        dl.href = HANDLER_URL + '?action=downloadJobLog&id=' + encodeURIComponent(r.jobId || '') +
-                  '&run=' + encodeURIComponent(r.logRef);
+        dl.href = logHref('downloadJobLog', r);
         logTd.appendChild(dl);
       } else {
         logTd.textContent = '—';
@@ -288,12 +317,12 @@ ur_emit_ajax_helpers();  /* window.urAjax.show, for the inline download error */
     });
   }
 
-  function currentJob() { return jobSel ? jobSel.value : ''; }
+  function pages() { return Math.max(1, Math.ceil(total / PAGE_SIZE)); }
 
   function updatePager() {
-    var pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
-    var page  = Math.floor(offset / PAGE_SIZE) + 1;
-    pageInfo.textContent = total === 0 ? '0 executions' : ('Page ' + page + ' of ' + pages + ' (' + total + ' total)');
+    pageNo.value = Math.floor(offset / PAGE_SIZE) + 1;
+    pageNo.max = pages();
+    pageInfo.textContent = 'of ' + pages() + ' (' + total + ' total)';
     prevBtn.disabled = (offset <= 0);
     nextBtn.disabled = (offset + PAGE_SIZE >= total);
   }
@@ -309,12 +338,11 @@ ur_emit_ajax_helpers();  /* window.urAjax.show, for the inline download error */
   }
 
   function load() {
-    clearPoll(); // cancel any pending refresh; the success path reschedules if still running
     /* An empty job filter means "all jobs" (the default); the server treats an
-       empty id that way. cache-buster + no-store so a just-finished run shows
-       without a hard refresh. */
-    var job = currentJob();
-    var url = HANDLER_URL + '?action=listHistory&id=' + encodeURIComponent(job) +
+       empty id that way, and empty state/dryRun filters as "all". cache-buster
+       + no-store so a just-finished run shows without a hard refresh. */
+    var url = HANDLER_URL + '?action=listHistory&id=' + encodeURIComponent(jobSel.value) +
+              '&state=' + encodeURIComponent(stateSel.value) + '&dryRun=' + encodeURIComponent(typeSel.value) +
               '&offset=' + offset + '&limit=' + PAGE_SIZE + '&_=' + Date.now();
     fetch(url, { credentials: 'same-origin', cache: 'no-store' })
       .then(function (r) { return r.json(); })
@@ -330,47 +358,73 @@ ur_emit_ajax_helpers();  /* window.urAjax.show, for the inline download error */
         offset = parseInt(body.offset, 10) || 0;
         render(body.runs || []);
         updatePager();
-        // Keep refreshing while the server reports a run in flight, so a RUNNING
-        // row resolves to SUCCESS/FAILED/etc. without a manual reload.
-        clearPoll();
-        if (body.running) { pollTimer = setTimeout(load, 3000); }
       })
       .catch(function () {
-        // Network failure: show feedback instead of leaving "Loading…" stuck,
-        // and reset the pager (History does not auto-retry).
         total = 0; offset = 0;
         messageRow('Could not load history (network error).');
         updatePager();
       });
   }
 
+  /* ---- refresh: driven by the shared getStatus poller, gated on visibility ----
+   * The list goes stale when a job starts or stops running, its last run time
+   * moves (a run too short to be seen running) or its history file changes
+   * (historyRev: a SKIPPED run, or a failure that never registered a run). It is reloaded only
+   * while this tab body is on screen; the IntersectionObserver catches the tab
+   * being shown, which no event reports. */
+  var statusSig = null, stale = true;
+  function onScreen() { return !document.hidden && tableEl.offsetParent !== null; }
+  function refreshIfStale() { if (stale && onScreen()) { stale = false; load(); } }
+  window.urStatus.subscribe(function (payload) {
+    var jobs = payload.jobs || {};
+    var sig = Object.keys(jobs).sort().map(function (id) {
+      var j = jobs[id] || {};
+      return id + (j.running ? ':r:' : ':i:') + ((j.lastRun && j.lastRun.finishedAt) || '') + ':' + (j.historyRev || '');
+    }).join('|');
+    if (statusSig !== null && sig !== statusSig) { stale = true; }
+    statusSig = sig;
+    refreshIfStale();
+  });
+  if (window.IntersectionObserver) {
+    new IntersectionObserver(function (entries) {
+      if (entries.some(function (e) { return e.isIntersecting; })) { refreshIfStale(); }
+    }).observe(tableEl);
+  } else {
+    refreshIfStale();
+  }
+
   /* ---- log modal ---- */
-  function openLog(runRef, job, when) {
-    if (!job || !runRef) { return; }
-    modalTit.textContent = 'Run log — ' + (when || runRef);
-    /* The heading shows local time now, but the downloaded file is still named
-     * with the UTC run id - keep the raw id reachable on hover so a support
-     * thread can match the two without a mental offset conversion. */
-    modalTit.title = runRef;
+  function openLog(r) {
+    if (!r.jobId || !r.logRef) { return; }
+    /* "<job> · <badge> (exit N) · Real|Dry run · <server-local time>". The raw
+     * run id (the UTC-stamped filename the download is saved under) stays on
+     * hover so a support thread can match the two. */
+    modalTit.textContent = (r.jobName || r.jobId) + ' · ';
+    var b = document.createElement('span');
+    b.className = 'ur-badge';
+    window.urBadge.apply(b, r.state);
+    modalTit.appendChild(b);
+    modalTit.appendChild(document.createTextNode(
+      (hasExit(r) ? ' (exit ' + r.exitCode + ')' : '') + ' · ' + typeLabel(r) + ' · ' + fmtWhen(r.startedAt)
+    ));
+    modalTit.title = r.logRef;
     modalPre.textContent = 'Loading…';
+    truncEl.hidden = true;
     modal.classList.add('ur-open');
     modal.setAttribute('aria-hidden', 'false');
     /* Move focus into the dialog so keyboard/SR users don't stay on background
      * controls (mirrors the Jobs-tab log viewer). */
     var closeBtn = document.getElementById('ur-hist-modal-close');
     if (closeBtn && closeBtn.focus) { closeBtn.focus(); }
-    /* Point the "Download full log" link at the full-file endpoint for this run. */
-    if (modalDl) {
-      modalDl.href = HANDLER_URL + '?action=downloadJobLog&id=' + encodeURIComponent(job) + '&run=' + encodeURIComponent(runRef);
-    }
-    var url = HANDLER_URL + '?action=getJobLog&id=' + encodeURIComponent(job) + '&run=' + encodeURIComponent(runRef) + '&_=' + Date.now();
-    fetch(url, { credentials: 'same-origin', cache: 'no-store' })
-      .then(function (r) { return r.json(); })
+    modalDl.href = logHref('downloadJobLog', r);
+    fetch(logHref('getJobLog', r) + '&_=' + Date.now(), { credentials: 'same-origin', cache: 'no-store' })
+      .then(function (res) { return res.json(); })
       .then(function (body) {
         if (body && body.ok && body.log) {
           /* body.log is already HTML-escaped server-side (Logger::tail). */
           modalPre.innerHTML = body.log;
           modalPre.scrollTop = modalPre.scrollHeight;
+          truncEl.hidden = !body.truncated;
         } else {
           /* The record persists across reboots but its tmpfs log does not. */
           modalPre.textContent = 'Log not retained (run logs live in RAM and are cleared on reboot).';
@@ -382,90 +436,38 @@ ur_emit_ajax_helpers();  /* window.urAjax.show, for the inline download error */
     modal.classList.remove('ur-open');
     modal.setAttribute('aria-hidden', 'true');
     modalPre.textContent = '';
-  }
-
-  /* Download a full run log via fetch (not a bare <a download> navigation) so an
-   * expired/missing log surfaces a clean message. Run logs live in RAM (tmpfs)
-   * and are cleared on reboot, so downloadJobLog can legitimately 404 with a JSON
-   * envelope; a plain anchor would save that JSON as "handler.json" and Chrome
-   * would report "File wasn't available on site". Here we inspect the response:
-   * on success we save the bytes via a Blob + object-URL; on an error envelope we
-   * show why instead of downloading anything. */
-  function downloadLog(href) {
-    fetch(href, { credentials: 'same-origin', cache: 'no-store' })
-      .then(function (r) {
-        var ct = r.headers.get('Content-Type') || '';
-        if (!r.ok || ct.indexOf('application/json') !== -1) {
-          return r.json().then(
-            function (j) { throw new Error((j && j.error) ? j.error : 'Log not available.'); },
-            function () { throw new Error('Log not available.'); }
-          );
-        }
-        var fname = 'run.log';
-        var m = (r.headers.get('Content-Disposition') || '').match(/filename="?([^"]+)"?/);
-        if (m) { fname = m[1]; }
-        return r.blob().then(function (blob) { return { blob: blob, fname: fname }; });
-      })
-      .then(function (res) {
-        var url = URL.createObjectURL(res.blob);
-        var a = document.createElement('a');
-        a.href = url; a.download = res.fname;
-        document.body.appendChild(a); a.click(); document.body.removeChild(a);
-        setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
-      })
-      .catch(function (err) {
-        /* No popups anywhere in this plugin: report inline. The modal's <pre> is
-         * the right place while it is open (that is where the user is looking);
-         * a row download reports next to the pager instead. */
-        var msg = (err && err.message)
-          ? err.message
-          : 'Log not available (run logs live in RAM and are cleared on reboot).';
-        if (modal.classList.contains('ur-open')) {
-          modalPre.textContent = msg;
-        } else {
-          window.urAjax.show(dlResult, false, msg);
-        }
-      });
+    truncEl.hidden = true;
   }
 
   /* ---- events ---- */
-  /* Intercept both download links (the modal "Download full log" + each row's
-   * "Download") so the fetch-based path above runs instead of a raw navigation. */
-  document.addEventListener('click', function (ev) {
-    var a = ev.target && ev.target.closest ? ev.target.closest('a.ur-btn-dl, a.ur-hist-dl-row') : null;
+  /* Downloads go through fetch so a log that is gone reports why instead of
+   * saving a JSON error as a file. The modal's <pre> reports while it is open
+   * (that is where the user is looking); a row download next to the pager. */
+  modalDl.addEventListener('click', function (ev) {
+    ev.preventDefault();
+    window.urUtil.downloadFile(modalDl.href, function (msg) { modalPre.textContent = msg; });
+  });
+  rowsEl.addEventListener('click', function (ev) {
+    var a = ev.target && ev.target.closest ? ev.target.closest('a.ur-hist-dl') : null;
     if (!a) { return; }
     ev.preventDefault();
-    downloadLog(a.href);
+    window.urUtil.downloadFile(a.href, function (msg) { window.urAjax.show(dlResult, false, msg); });
   });
-  if (jobSel) { jobSel.addEventListener('change', function () { offset = 0; load(); }); }
+  [jobSel, stateSel, typeSel].forEach(function (sel) {
+    sel.addEventListener('change', function () { offset = 0; load(); });
+  });
   prevBtn.addEventListener('click', function () { if (offset > 0) { offset = Math.max(0, offset - PAGE_SIZE); load(); } });
   nextBtn.addEventListener('click', function () { if (offset + PAGE_SIZE < total) { offset += PAGE_SIZE; load(); } });
-  rowsEl.addEventListener('click', function (ev) {
-    var t = ev.target;
-    if (t && t.classList && t.classList.contains('ur-hist-viewlog')) { openLog(t.getAttribute('data-run'), t.getAttribute('data-jobid'), t.getAttribute('data-when')); }
+  pageNo.addEventListener('change', function () {
+    var p = Math.min(pages(), Math.max(1, parseInt(pageNo.value, 10) || 1));
+    offset = (p - 1) * PAGE_SIZE;
+    load();
   });
   document.getElementById('ur-hist-modal-close').addEventListener('click', closeLog);
 
-  /* Copy the shown log to the clipboard (the visible tail; Download gives the
-   * full file). Falls back to selecting the <pre> when the Clipboard API is
-   * unavailable (non-secure context). */
+  /* Copy the shown log (the visible tail; Download gives the full file). */
   var copyBtn = document.getElementById('ur-hist-log-copy');
-  if (copyBtn) {
-    copyBtn.addEventListener('click', function () {
-      var txt = modalPre.textContent || '';
-      var flash = function () { var o = copyBtn.textContent; copyBtn.textContent = 'Copied!'; setTimeout(function () { copyBtn.textContent = o; }, 1200); };
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(txt).then(flash).catch(function () { selectPre(); });
-      } else {
-        selectPre();
-      }
-    });
-  }
-  function selectPre() {
-    var rng = document.createRange(); rng.selectNodeContents(modalPre);
-    var sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(rng);
-    try { document.execCommand('copy'); } catch (e) { /* leave it selected for manual copy */ }
-  }
+  copyBtn.addEventListener('click', function () { window.urUtil.copyText(modalPre.textContent || '', copyBtn, modalPre); });
 
   /* Close on a genuine backdrop click only. Selecting text in the log and
    * releasing the drag over the backdrop fires a click with target===modal too,
@@ -479,9 +481,6 @@ ur_emit_ajax_helpers();  /* window.urAjax.show, for the inline download error */
     downOnBackdrop = false;
   });
   document.addEventListener('keydown', function (ev) { if (ev.key === 'Escape' && modal.classList.contains('ur-open')) { closeLog(); } });
-
-  /* Initial load (fetch on open; no polling - history only changes on run end). */
-  load();
 })();
 </script>
 <?php endif; ?>
