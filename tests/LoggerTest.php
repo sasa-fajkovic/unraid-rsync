@@ -374,6 +374,35 @@ final class LoggerTest extends TestCase
     }
 
     /**
+     * cap -> redact -> append -> cap: redaction shortens the kept head, so the
+     * marker no longer sits at the cap. The next pair must still end up with
+     * one marker and nothing of its own after it.
+     */
+    public function testEnforceRunLogCapFindsAMarkerThatRedactionMoved(): void
+    {
+        $cap = 1000;
+        Logger::$maxRunLogBytesOverride = $cap;
+        $secret = '/tmp/unraid.rsync/pass/0123456789abcdef/daemon.pass';
+        Logger::setRedaction([$secret]);
+        $path = Logger::openRun('j-redact-cap', 1750000000);
+
+        file_put_contents($path, str_repeat("could not open password file $secret\n", 100), FILE_APPEND);
+        $this->assertTrue(Logger::enforceRunLogCap($path));
+        $this->assertTrue(Logger::redactRunLog($path));
+        clearstatcache();
+        $this->assertLessThan($cap, filesize($path), 'redaction moved the marker below the cap');
+
+        file_put_contents($path, str_repeat("pair 2 line\n", 500), FILE_APPEND);
+        $this->assertTrue(Logger::enforceRunLogCap($path));
+
+        $contents = (string) file_get_contents($path);
+        $this->assertSame(1, substr_count($contents, Logger::TRUNCATE_MARKER_PREFIX));
+        $this->assertStringEndsWith(Logger::TRUNCATE_MARKER_PREFIX . " - exceeded 0 MiB]\n", $contents);
+        $this->assertStringNotContainsString('pair 2 line', $contents);
+        $this->assertStringNotContainsString($secret, $contents);
+    }
+
+    /**
      * Issue #135: rsync writes its own lines into the run log in SYSTEM LOCAL
      * time, so the plugin's own stamps must be local too - a UTC "...Z" stamp
      * put two timezones in one file. The stamp keeps an explicit UTC offset so
