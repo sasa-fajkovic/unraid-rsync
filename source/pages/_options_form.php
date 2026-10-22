@@ -1932,16 +1932,18 @@ input.ur-switch:disabled { opacity: 0.5; cursor: default; }
       } else if (p.classList.contains('tab')) {
         ctl = p.querySelector('input[type=radio]');
       }
-      if (ctl) { if (!ctl.checked && ctl.getAttribute('aria-selected') !== 'true') { ctl.click(); } return; }
+      if (ctl) { if (!ctl.checked && ctl.getAttribute('aria-selected') !== 'true') { ctl.click(); } return true; }
     }
+    return false;
   }
   /* a.ur-goto[href="#id"]: switch to that element's tab, open it when it is a
-   * card, and scroll it into view. */
+   * card, and scroll it into view. false when no tab control was found: the
+   * caller then leaves the native #anchor navigation alone. */
   function reveal(id) {
     var el = id ? document.getElementById(id) : null;
     if (!el) { return false; }
-    showTabOf(el);
     if (el.classList.contains('ur-job-card')) { setCardOpen(el, true); }
+    if (!showTabOf(el)) { return false; }
     setTimeout(function () {
       el.scrollIntoView({ block: 'start' });
       var f = el.querySelector('.ur-job-head') || el;

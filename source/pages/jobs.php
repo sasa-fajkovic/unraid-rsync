@@ -980,6 +980,13 @@ ur_emit_status_poller();
   function postJobAction(action, jobId, btn) {
     if (!jobId) { return; }
     var isLaunch = (action === 'runJob' || action === 'dryRunJob');
+    /* A launch posts only the saved id: never run the saved job while the
+     * card on screen holds unsaved edits. */
+    if (isLaunch && isDirty(jobId)) {
+      syncRunButtons(jobId, jobRunning(jobId));
+      urToast('Apply changes first.', false);
+      return;
+    }
     var card = btn && btn.closest ? btn.closest('.ur-job-card') : null;
     var result = card ? card.querySelector('.ur-job-run-result') : null;
     /* Immediate, obvious feedback that the click was picked up: spinner on the
@@ -1010,12 +1017,12 @@ ur_emit_status_poller();
             result.textContent = window.urAjax.errText(res, 'Action failed.');
           }
         }
-        /* Restore the clicked button's label. On a failed launch re-enable it
-         * (the job didn't start); on success the status poll re-derives the
-         * enable state. */
-        if (btn) {
-          if (prevLabel !== null) { btn.textContent = prevLabel; }
-          if (!okLaunch) { btn.disabled = false; }
+        /* Restore the clicked button's label. After a failed launch the
+         * shared sync decides (the card may have been edited meanwhile); on
+         * success the status poll re-derives the enable state. */
+        if (btn && prevLabel !== null) { btn.textContent = prevLabel; }
+        if (!okLaunch) {
+          if (isLaunch) { syncRunButtons(jobId, jobRunning(jobId)); } else if (btn) { btn.disabled = false; }
         }
         if (okLaunch) {
           if (isLaunch) {
@@ -1187,13 +1194,24 @@ ur_emit_status_poller();
     var card = document.getElementById('ur-jobcard-' + jobId);
     return !!(card && card.classList.contains('ur-dirty'));
   }
+  function jobRunning(jobId) {
+    var last = window.urStatus.last();
+    var s = last && last.jobs ? last.jobs[jobId] : null;
+    return !!(s && s.running);
+  }
+  /* The ONE place Run/Dry-run get enabled: markDirty, the status poll and a
+   * launch response all go through it, so nothing re-enables a dirty card. */
+  function syncRunButtons(jobId, running) {
+    var sel = '[data-jobid="' + window.urUtil.cssEsc(jobId) + '"]';
+    var dirty = isDirty(jobId);
+    document.querySelectorAll('.ur-job-run' + sel + ', .ur-job-dry' + sel).forEach(function (b) { b.disabled = running || dirty; });
+    document.querySelectorAll('.ur-dirty-note' + sel).forEach(function (n) { n.hidden = !dirty; });
+  }
   function markDirty(card) {
     var jobId = card ? card.getAttribute('data-jobid') : '';
-    if (!jobId || card.classList.contains('ur-dirty')) { return; }
+    if (!jobId) { return; }
     card.classList.add('ur-dirty');
-    var sel = '[data-jobid="' + window.urUtil.cssEsc(jobId) + '"]';
-    document.querySelectorAll('.ur-job-run' + sel + ', .ur-job-dry' + sel).forEach(function (b) { b.disabled = true; });
-    document.querySelectorAll('.ur-dirty-note' + sel).forEach(function (n) { n.hidden = false; });
+    syncRunButtons(jobId, jobRunning(jobId));
   }
   ['input', 'change'].forEach(function (evt) {
     document.addEventListener(evt, function (ev) {
@@ -1468,8 +1486,7 @@ ur_emit_status_poller();
       var sel = '[data-jobid="' + U.cssEsc(jobId) + '"]';
       document.querySelectorAll('.ur-state-badge' + sel).forEach(function (b) { window.urBadge.apply(b, s.state); });
       renderTimes(jobId, s, now);
-      var blocked = !!s.running || isDirty(jobId);
-      document.querySelectorAll('.ur-job-run' + sel + ', .ur-job-dry' + sel).forEach(function (b) { b.disabled = blocked; });
+      syncRunButtons(jobId, !!s.running);
       document.querySelectorAll('.ur-job-abort' + sel).forEach(function (b) { b.disabled = !s.running; });
     });
   }

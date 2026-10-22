@@ -2236,7 +2236,7 @@ final class OptionsFormHelpTest extends TestCase
 
         $js = (string) file_get_contents(__DIR__ . '/../source/pages/jobs.php');
         $this->assertStringContainsString("document.querySelectorAll('.ur-job-run' + sel + ', .ur-job-dry' + sel)", $js, 'every Run/Dry-run of a job, not the first');
-        $this->assertStringContainsString('var blocked = !!s.running || isDirty(jobId);', $js);
+        $this->assertStringContainsString('syncRunButtons(jobId, !!s.running);', $js);
     }
 
     #[RunInSeparateProcess]
@@ -2266,6 +2266,48 @@ final class OptionsFormHelpTest extends TestCase
             $this->assertFalse($page->querySelector($sel)->hasAttribute('data-ur-edit'), $sel);
         }
         $this->assertStringContainsString("b.setAttribute('data-ur-edit', '');", $enable, 'JS-built filter rows too');
+    }
+
+    /**
+     * Run edited-while-pending: a failed launch response must not re-enable a
+     * card edited meanwhile, a later edit must still disable it, and the launch
+     * itself refuses a dirty card (it would run the SAVED job).
+     */
+    public function testRunEnableStateHasOneSyncAndALaunchRefusesADirtyCard(): void
+    {
+        $js = (string) file_get_contents(__DIR__ . '/../source/pages/jobs.php');
+        $this->assertSame(1, preg_match('/function postJobAction\(action, jobId, btn\) \{(.*?)\n  \}\n/s', $js, $m));
+        $post = $m[1];
+        $guard = strpos($post, 'if (isLaunch && isDirty(jobId)) {');
+        $this->assertNotFalse($guard, 'the launch is guarded client-side');
+        $this->assertLessThan(strpos($post, 'window.urAjax.postForm('), $guard, 'before anything is posted');
+        $this->assertStringContainsString("urToast('Apply changes first.', false);", $post);
+        $this->assertStringContainsString('if (isLaunch) { syncRunButtons(jobId, jobRunning(jobId)); }', $post, 'a failed launch re-syncs');
+        $this->assertStringNotContainsString('if (!okLaunch) { btn.disabled = false; }', $post);
+
+        $this->assertSame(1, preg_match('/function markDirty\(card\) \{(.*?)\n  \}\n/s', $js, $m));
+        $this->assertStringNotContainsString("contains('ur-dirty')) { return; }", $m[1], 'every edit re-syncs, not only the first');
+        $this->assertStringContainsString('syncRunButtons(jobId, jobRunning(jobId));', $m[1]);
+
+        $this->assertSame(1, preg_match('/function syncRunButtons\(jobId, running\) \{(.*?)\n  \}\n/s', $js, $m));
+        $this->assertStringContainsString('b.disabled = running || dirty;', $m[1]);
+        $this->assertSame(1, substr_count($js, 'b.disabled = running || dirty;'), 'one place enables Run/Dry-run');
+    }
+
+    /** No supported tab control around the target: keep the native #anchor jump. */
+    public function testRevealLeavesTheAnchorAloneWithoutATabControl(): void
+    {
+        $src = (string) file_get_contents(__DIR__ . '/../source/pages/_options_form.php');
+        $this->assertSame(1, preg_match('/function showTabOf\(el\) \{(.*?)\n  \}\n/s', $src, $m));
+        $this->assertStringContainsString("ctl.click(); } return true; }", $m[1]);
+        $this->assertStringEndsWith('return false;', rtrim($m[1]), 'no control found');
+        $this->assertSame(1, preg_match('/function reveal\(id\) \{(.*?)\n  \}\n/s', $src, $m));
+        $this->assertStringContainsString('if (!showTabOf(el)) { return false; }', $m[1]);
+        $this->assertStringContainsString(
+            "if (a && reveal((a.getAttribute('href') || '').replace(/^#/, ''))) { ev.preventDefault(); }",
+            $src,
+            'preventDefault only when reveal() handled it'
+        );
     }
 
     #[RunInSeparateProcess]
