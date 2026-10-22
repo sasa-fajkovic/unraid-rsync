@@ -2317,8 +2317,12 @@ final class OptionsFormHelpTest extends TestCase
         $head = $page->querySelector('#ur-jobcard-j-mirror > .ur-job-row > .ur-job-head');
         $this->assertSame('button', $head?->getAttribute('role'));
         $classes = [];
-        foreach ($head?->children ?? [] as $el) {
-            $classes[] = explode(' ', (string) $el->getAttribute('class'))[0];
+        // childNodes, not children: on PHP 8.4 (CI, the box) iterating the
+        // HTMLCollection yielded nothing while 8.5 iterates it fine.
+        foreach ($head?->childNodes ?? [] as $el) {
+            if ($el instanceof Dom\Element) {
+                $classes[] = explode(' ', (string) $el->getAttribute('class'))[0];
+            }
         }
         $this->assertSame(['ur-job-caret', 'ur-job-title', 'ur-badge', 'ur-job-sub', 'ur-last-run-cell', 'ur-next-run-cell'], $classes);
         $this->assertSame('Mirror', $head?->querySelector('.ur-job-title')?->textContent);
