@@ -30,6 +30,8 @@ if (!defined('UR_CONFIG_BASE')) {
     define('UR_CONFIG_BASE', '/boot/config/plugins/unraid.rsync');
 }
 
+require_once __DIR__ . '/Util.php';
+
 class Config
 {
     /**
@@ -68,6 +70,31 @@ class Config
     public static function path(): string
     {
         return rtrim(UR_CONFIG_BASE, '/') . '/config.json';
+    }
+
+    /**
+     * Run $fn holding the exclusive config.json lock. Every load-validate-save
+     * of config.json goes through it so two concurrent saves serialise.
+     *
+     * @template T
+     * @param callable(): T $fn
+     * @return T
+     */
+    public static function withLock(callable $fn): mixed
+    {
+        return Util::withLock(rtrim(UR_CONFIG_BASE, '/') . '/config.lock', $fn);
+    }
+
+    /**
+     * The config's revision: bumped by every save() that changes the file, so a
+     * form can tell that config.json moved on since it rendered. Absent = 0.
+     *
+     * @param array<string,mixed> $config
+     */
+    public static function revision(array $config): int
+    {
+        $rev = $config['revision'] ?? 0;
+        return is_int($rev) && $rev > 0 ? $rev : 0;
     }
 
     /**
@@ -258,9 +285,13 @@ class Config
      *   - must be a non-empty, absolute (leading "/") string;
      *   - no control bytes (NUL/newline) - those could break a path or a header;
      *   - no "." / ".." traversal segments;
+     *   - canonical (canonicalPath), so every spelling of one directory is one
+     *     string: a secretsDir change from an alias to itself would otherwise
+     *     "move" credentials.json onto itself and unlink the only copy;
      *   - must live UNDER /mnt/<something>/ (array disk, cache, pool, or an
      *     Unassigned Devices mount) - never the bare /mnt, /mnt/user root, or a
-     *     system path like /etc or /boot (flash wear).
+     *     system path like /etc or /boot (flash wear). Checked AFTER
+     *     canonicalising, so a symlink under /mnt cannot lead out of it.
      * Anything failing these returns '' rather than throwing, so an invalid value
      * falls back to the caller's safe default; the save path surfaces a warning.
      *
@@ -283,13 +314,35 @@ class Config
                 return '';
             }
         }
-        $v = rtrim($v, '/');
+        $v = self::canonicalPath($v);
         // Require at least /mnt/<top>/<leaf> so the bare /mnt and /mnt/user roots
         // (and any non-/mnt system path) are rejected.
-        if (!preg_match('#^/mnt/[^/]+/.+#', $v)) {
+        if (!preg_match('#^' . preg_quote(rtrim(self::$mntRoot, '/'), '#') . '/[^/]+/.+#', $v)) {
             return '';
         }
         return $v;
+    }
+
+    /** The storage root sanitizeMntDir() confines to. A test seam; '/mnt' live. */
+    public static string $mntRoot = '/mnt';
+
+    /**
+     * An absolute path with duplicate slashes collapsed, no trailing slash, and
+     * its longest existing ancestor resolved through realpath() (symlinks
+     * followed), so aliases of one directory compare equal. The part that does
+     * not exist yet is kept as written. Expects no "." / ".." segments.
+     */
+    public static function canonicalPath(string $path): string
+    {
+        $head = '/' . implode('/', array_filter(explode('/', $path), static fn(string $s): bool => $s !== ''));
+        $tail = '';
+        while ($head !== '/' && !file_exists($head)) {
+            $tail = '/' . basename($head) . $tail;
+            $head = dirname($head);
+        }
+        $real = realpath($head);
+        $out  = rtrim($real !== false ? $real : $head, '/') . $tail;
+        return $out !== '' ? $out : '/';
     }
 
     /**
@@ -561,9 +614,12 @@ class Config
      * filled from defaults so callers never have to null-check.
      *
      * Contract:
-     *   - File absent or empty            -> the default (empty-install) config.
+     *   - File absent                      -> the default (empty-install) config.
      *   - File present but unreadable      -> throws RuntimeException.
-     *   - File present but malformed JSON  -> throws RuntimeException.
+     *   - File present but empty, whitespace-only or malformed JSON -> throws
+     *     RuntimeException. Only a MISSING file is a fresh install: a truncated
+     *     one (a FAT32 write the power cut short) loaded as zero jobs, and
+     *     Cron::apply then deleted every schedule.
      *   - File from a NEWER schemaVersion than this build understands -> throws
      *     RuntimeException (migrate() refuses to downgrade).
      *
@@ -591,14 +647,11 @@ class Config
             // fresh empty config, silently clobbering it.
             throw new RuntimeException("config.json exists but could not be read: $path");
         }
-        $raw = trim($raw);
-        if ($raw === '') {
-            return self::defaults();
-        }
-
         $data = json_decode($raw, true);
         if (!is_array($data)) {
-            throw new RuntimeException('config.json is not valid JSON');
+            throw new RuntimeException(trim($raw) === ''
+                ? "config.json is empty: $path"
+                : 'config.json is not valid JSON');
         }
 
         $data = self::migrate($data);
@@ -608,16 +661,17 @@ class Config
     /**
      * Persist the given config structure atomically.
      *
-     * The schemaVersion follows the content (schemaVersionFor). The base
-     * directory is created if it does not exist. The write goes to a temp file
-     * in the same directory and is renamed over the target (rename is atomic on
-     * a POSIX filesystem within one directory), so readers never see a
-     * half-written file.
+     * The schemaVersion follows the content (schemaVersionFor), and the revision
+     * goes up by one whenever the bytes change; a no-op re-save keeps both. The
+     * base directory is created if it does not exist. The file being replaced is
+     * first kept as config.json.last-good, when it still parses, and the write
+     * itself is Util::writeAtomic (same-dir temp file, fsync, rename).
      *
      * @param array<string,mixed> $config
+     * @return int the revision now on disk
      * @throws RuntimeException on any filesystem failure.
      */
-    public static function save(array $config): void
+    public static function save(array $config): int
     {
         // Persist the merged shape so on-disk config is always complete.
         $config = self::mergeDefaults($config);
@@ -628,30 +682,33 @@ class Config
             throw new RuntimeException("Unable to create config directory: $dir");
         }
 
+        $current     = is_file($path) ? @file_get_contents($path) : false;
+        $currentData = is_string($current) ? json_decode($current, true) : null;
+        $revision    = max(self::revision($config), is_array($currentData) ? self::revision($currentData) : 0);
+
+        $json = self::encode(['schemaVersion' => $config['schemaVersion'], 'revision' => $revision] + $config);
+        if ($json !== $current) {
+            $revision++;
+            $json = self::encode(['schemaVersion' => $config['schemaVersion'], 'revision' => $revision] + $config);
+            if (is_array($currentData)) {
+                Util::writeAtomic($path . '.last-good', (string) $current, 0644);
+            }
+        }
+        Util::writeAtomic($path, $json, 0644);
+        return $revision;
+    }
+
+    /**
+     * @param array<string,mixed> $config
+     */
+    private static function encode(array $config): string
+    {
         $json = json_encode($config, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
         if ($json === false) {
             throw new RuntimeException('Failed to encode config as JSON: ' . json_last_error_msg());
         }
         // Trailing newline keeps the file POSIX-tidy / diff-friendly.
-        $json .= "\n";
-
-        $tmp = @tempnam($dir, '.config.json.');
-        if ($tmp === false) {
-            throw new RuntimeException("Unable to create temp file in: $dir");
-        }
-
-        if (@file_put_contents($tmp, $json) === false) {
-            @unlink($tmp);
-            throw new RuntimeException("Failed to write temp config file: $tmp");
-        }
-        // Best-effort: make it group/world readable like other webGui config
-        // (FAT32 ignores this; on the test filesystem it keeps perms sane).
-        @chmod($tmp, 0644);
-
-        if (!@rename($tmp, $path)) {
-            @unlink($tmp);
-            throw new RuntimeException("Failed to atomically replace config: $path");
-        }
+        return $json . "\n";
     }
 
     /**
@@ -799,6 +856,10 @@ class Config
 
         // schemaVersion: set from the merged jobs below; first here for key order.
         $out = ['schemaVersion' => $defaults['schemaVersion']];
+        // Kept only once set, so a config that never had one round-trips as is.
+        if (self::revision($data) > 0) {
+            $out['revision'] = self::revision($data);
+        }
 
         // global.defaultRsyncOptions: fill any missing option keys.
         $globalIn  = isset($data['global']) && is_array($data['global']) ? $data['global'] : [];

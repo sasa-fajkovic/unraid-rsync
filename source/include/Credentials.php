@@ -59,6 +59,7 @@ declare(strict_types=1);
  */
 
 require_once __DIR__ . '/Config.php';
+require_once __DIR__ . '/Logger.php';
 
 class Credentials
 {
@@ -136,6 +137,177 @@ class Credentials
     }
 
     /**
+     * Run $fn holding the exclusive credentials lock. Every load-modify-save of
+     * credentials.json goes through it (handler saves, Ssh::pinHostKey, the
+     * secretsDir move). The lock stays beside config.json whatever secretsDir
+     * says, so a relocation and every writer contend for the same file. A move
+     * a crash interrupted is settled first (reconcilePendingMove), before $fn
+     * can change the live file.
+     *
+     * @template T
+     * @param callable(): T $fn
+     * @return T
+     */
+    public static function withLock(callable $fn): mixed
+    {
+        return Util::withLock(rtrim(UR_CONFIG_BASE, '/') . '/credentials.lock', static function () use ($fn) {
+            self::reconcilePendingMove();
+            return $fn();
+        });
+    }
+
+    /** The record of a secretsDir move in progress; beside config.json, like the lock. */
+    public static function movePath(): string
+    {
+        return rtrim(UR_CONFIG_BASE, '/') . '/credentials.move.json';
+    }
+
+    /**
+     * Record a move of credentials.json from $sourceDir to $destinationDir whose
+     * verified copy hashes to $sha256. Written BEFORE the new pointer is saved,
+     * so whatever step a crash interrupts, the next writer knows what to finish.
+     *
+     * @throws RuntimeException when the record cannot be written.
+     */
+    public static function recordMove(string $sourceDir, string $destinationDir, string $sha256): void
+    {
+        self::writeMove([
+            'source'      => rtrim($sourceDir, '/'),
+            'destination' => rtrim($destinationDir, '/'),
+            'sha256'      => $sha256,
+            'startedAt'   => gmdate('Y-m-d\TH:i:s\Z'),
+        ]);
+    }
+
+    /**
+     * Settle a move a crash interrupted, by where config.json now points. Runs at
+     * the start of every withLock() scope; returns a warning, or '' when there
+     * was nothing to do or it is done.
+     *   - at the destination: the move committed; finish it (completeMove).
+     *   - still at the source: it never committed; drop the record and the copy
+     *     it left at the destination.
+     *   - anywhere else: leave everything, log once.
+     */
+    public static function reconcilePendingMove(): string
+    {
+        $rec = self::readMove();
+        if ($rec === null) {
+            return '';
+        }
+        try {
+            $dir = Config::sanitizeSecretsDir(Config::load()['global']['secretsDir'] ?? '');
+        } catch (Throwable $e) {
+            return '';
+        }
+        $current = ($dir !== '') ? $dir : rtrim(UR_CONFIG_BASE, '/');
+        if ($current === $rec['destination']) {
+            return self::completeMove();
+        }
+        if ($current === $rec['source']) {
+            // A pointer save the filesystem rolled back after the source was
+            // already unlinked leaves the destination as the only copy.
+            if (@hash_file('sha256', $rec['source'] . '/credentials.json') !== $rec['sha256']) {
+                return self::stuckMove($rec, 'secretsDir points back at the source, but its credentials.json is gone or has changed');
+            }
+            $copy = $rec['destination'] . '/credentials.json';
+            if (@hash_file('sha256', $copy) === $rec['sha256']) {
+                @unlink($copy);
+            }
+            @unlink(self::movePath());
+            return '';
+        }
+        return self::stuckMove($rec, 'secretsDir now points at neither end of it');
+    }
+
+    /**
+     * Finish the recorded move once the new pointer is saved: remove the source's
+     * .last-good, then the source itself, then the record. Only while the moved
+     * file still hashes to the record (no writer reached it unsettled) and the
+     * source is the copy that was moved; otherwise everything stays and the
+     * mismatch is logged once. Returns a warning, or '' when done.
+     */
+    public static function completeMove(): string
+    {
+        $rec = self::readMove();
+        if ($rec === null) {
+            return '';
+        }
+        $src = $rec['source'] . '/credentials.json';
+        if (@hash_file('sha256', $rec['destination'] . '/credentials.json') !== $rec['sha256']) {
+            return self::stuckMove($rec, 'the moved credentials.json has changed since');
+        }
+        if (is_file($src) && @hash_file('sha256', $src) !== $rec['sha256']) {
+            return self::stuckMove($rec, 'the old credentials.json has changed since');
+        }
+        foreach ([$src . '.last-good', $src] as $file) {
+            if (is_file($file) && !@unlink($file)) {
+                return self::stuckMove($rec, $file . ' could not be removed - delete it manually');
+            }
+        }
+        @unlink(self::movePath());
+        return '';
+    }
+
+    /** @return array{source:string,destination:string,sha256:string,startedAt?:string,logged?:bool}|null */
+    private static function readMove(): ?array
+    {
+        $path = self::movePath();
+        $rec  = is_file($path) ? json_decode((string) @file_get_contents($path), true) : null;
+        if (!is_array($rec) || !is_string($rec['source'] ?? null) || !is_string($rec['destination'] ?? null)
+            || !is_string($rec['sha256'] ?? null)) {
+            return null;
+        }
+        return $rec;
+    }
+
+    /**
+     * @param array<string,mixed> $rec
+     */
+    private static function writeMove(array $rec): void
+    {
+        Util::writeAtomic(self::movePath(), json_encode($rec, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n", 0600);
+    }
+
+    /**
+     * A move that cannot be settled: keep the record (and both files), log it
+     * once, and return the message as a warning.
+     *
+     * @param array{source:string,destination:string,sha256:string,startedAt?:string,logged?:bool} $rec
+     */
+    private static function stuckMove(array $rec, string $why): string
+    {
+        $msg = 'The move of credentials.json from ' . $rec['source'] . ' to ' . $rec['destination']
+            . ' could not be finished: ' . $why . '. Check both copies, then delete ' . self::movePath() . '.';
+        if (($rec['logged'] ?? false) !== true) {
+            try {
+                Logger::event('', 'credentials', $msg);
+                $rec['logged'] = true;
+                self::writeMove($rec);
+            } catch (Throwable $e) {
+            }
+        }
+        return $msg;
+    }
+
+    /**
+     * Re-point $secretsDirOverride at config.json's secretsDir. For a writer
+     * holding withLock() whose pointer was resolved earlier (a request's
+     * dispatcher, a run's start): a relocation may have moved the file since,
+     * and a write to the old path would start a second file. Reads config
+     * WITHOUT its lock - the lock order is config, then credentials. An
+     * unreadable config keeps the current value.
+     */
+    public static function refreshSecretsDir(): void
+    {
+        try {
+            $dir = Config::sanitizeSecretsDir(Config::load()['global']['secretsDir'] ?? '');
+        } catch (Throwable $e) {
+            return;
+        }
+        self::$secretsDirOverride = ($dir !== '') ? $dir : null;
+    }
+
+    /**
      * The default top-level credentials structure (an empty keychain).
      *
      * @return array<string,mixed>
@@ -203,9 +375,10 @@ class Credentials
      * keys are filled from defaults so callers never have to null-check.
      *
      * Contract (identical to Config::load):
-     *   - File absent or empty            -> the default (empty) keychain.
+     *   - File absent                      -> the default (empty) keychain.
      *   - File present but unreadable      -> throws RuntimeException.
-     *   - File present but malformed JSON  -> throws RuntimeException.
+     *   - File present but empty, whitespace-only or malformed JSON -> throws
+     *     RuntimeException (a truncated file is not an empty keychain).
      *   - File from a NEWER schemaVersion  -> throws RuntimeException.
      *
      * @return array<string,mixed>
@@ -226,14 +399,11 @@ class Credentials
             // recoverable secrets file with an empty one.
             throw new RuntimeException("credentials.json exists but could not be read: $path");
         }
-        $raw = trim($raw);
-        if ($raw === '') {
-            return self::defaults();
-        }
-
         $data = json_decode($raw, true);
         if (!is_array($data)) {
-            throw new RuntimeException('credentials.json is not valid JSON');
+            throw new RuntimeException(trim($raw) === ''
+                ? "credentials.json is empty: $path"
+                : 'credentials.json is not valid JSON');
         }
 
         $data = self::migrate($data);
@@ -241,9 +411,11 @@ class Credentials
     }
 
     /**
-     * Persist the given credentials structure atomically (temp file in the same
-     * dir, then rename). The schemaVersion is always stamped to the current
-     * version and the shape is normalised so on-disk data is always complete.
+     * Persist the given credentials structure atomically (Util::writeAtomic:
+     * same-dir temp file, fsync, rename). The schemaVersion is always stamped to
+     * the current version and the shape is normalised so on-disk data is always
+     * complete. The file being replaced is first kept as
+     * credentials.json.last-good, when it still parses and differs.
      *
      * @param array<string,mixed> $creds
      * @throws RuntimeException on any filesystem failure.
@@ -255,7 +427,7 @@ class Credentials
 
         $path = self::path();
         $dir  = dirname($path);
-        if (!is_dir($dir) && !@mkdir($dir, 0755, true) && !is_dir($dir)) {
+        if (!is_dir($dir) && !@mkdir($dir, 0700, true) && !is_dir($dir)) {
             throw new RuntimeException("Unable to create credentials directory: $dir");
         }
 
@@ -265,26 +437,15 @@ class Credentials
         }
         $json .= "\n";
 
-        $tmp = @tempnam($dir, '.credentials.json.');
-        if ($tmp === false) {
-            throw new RuntimeException("Unable to create temp file in: $dir");
+        // 0600 is a no-op on the default FAT32 /boot (the documented reason
+        // secrets are obfuscation-only and keys are materialised to tmpfs 600
+        // before use); on an /mnt secretsDir it STICKS and is the real at-rest
+        // protection for credentials.json.
+        $current = is_file($path) ? @file_get_contents($path) : false;
+        if (is_string($current) && $current !== $json && is_array(json_decode($current, true))) {
+            Util::writeAtomic($path . '.last-good', $current, 0600);
         }
-
-        if (@file_put_contents($tmp, $json) === false) {
-            @unlink($tmp);
-            throw new RuntimeException("Failed to write temp credentials file: $tmp");
-        }
-        // Tighten perms to root-only. On the default /boot (FAT32) this is a
-        // no-op (the documented reason secrets are obfuscation-only and keys are
-        // materialised to tmpfs 600 before use). When $secretsDirOverride points
-        // at an /mnt array/pool (ext4/xfs/btrfs/zfs), this 600 STICKS and is the
-        // real at-rest protection for credentials.json.
-        @chmod($tmp, 0600);
-
-        if (!@rename($tmp, $path)) {
-            @unlink($tmp);
-            throw new RuntimeException("Failed to atomically replace credentials: $path");
-        }
+        Util::writeAtomic($path, $json, 0600);
     }
 
     /**

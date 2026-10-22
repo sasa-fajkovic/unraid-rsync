@@ -660,6 +660,7 @@ class Ssh
                 throw new RuntimeException("Refusing to use a symlinked runtime dir: $dir");
             }
             @chmod($dir, 0700);
+            Util::assertPrivateDir($dir);
         }
     }
 
@@ -794,10 +795,11 @@ class Ssh
      * Persist a harvested host key into the connection's remoteHostKey.
      *
      * Reload-modify-save against credentials.json (rather than saving a
-     * structure loaded before the run) so a concurrent edit is not clobbered
-     * wholesale, and only when the stored pin is STILL empty - so an explicit
-     * "Discover host key" or another run's pin always wins. Never throws: a
-     * completed run must not fail because pinning did.
+     * structure loaded before the run), under Credentials::withLock so a
+     * concurrent save is neither clobbered nor clobbers the pin, and only when
+     * the stored pin is STILL empty - so an explicit "Discover host key" or
+     * another run's pin always wins. Never throws: a completed run must not fail
+     * because pinning did.
      */
     public static function pinHostKey(string $connId, string $hostKey): bool
     {
@@ -806,23 +808,27 @@ class Ssh
             return false;
         }
         try {
-            $creds = Credentials::load();
-            $conns = is_array($creds['connections'] ?? null) ? $creds['connections'] : [];
-            foreach ($conns as $i => $conn) {
-                if (!is_array($conn) || (string) ($conn['id'] ?? '') !== $connId) {
-                    continue;
+            return Credentials::withLock(static function () use ($connId, $hostKey): bool {
+                // The run resolved secretsDir at its start; it may have moved since.
+                Credentials::refreshSecretsDir();
+                $creds = Credentials::load();
+                $conns = is_array($creds['connections'] ?? null) ? $creds['connections'] : [];
+                foreach ($conns as $i => $conn) {
+                    if (!is_array($conn) || (string) ($conn['id'] ?? '') !== $connId) {
+                        continue;
+                    }
+                    if (trim((string) ($conn['remoteHostKey'] ?? '')) !== '') {
+                        return false;
+                    }
+                    $creds['connections'][$i]['remoteHostKey'] = $hostKey;
+                    Credentials::save($creds);
+                    return true;
                 }
-                if (trim((string) ($conn['remoteHostKey'] ?? '')) !== '') {
-                    return false;
-                }
-                $creds['connections'][$i]['remoteHostKey'] = $hostKey;
-                Credentials::save($creds);
-                return true;
-            }
+                return false;
+            });
         } catch (Throwable $e) {
             return false;
         }
-        return false;
     }
 
     // --- test connection ----------------------------------------------------

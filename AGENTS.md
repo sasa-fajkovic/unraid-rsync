@@ -36,7 +36,10 @@ on, forked from, or derived from any other plugin.
   controller push the validated path in); empty = tmpfs. Run state + secrets
   ALWAYS stay in tmpfs regardless. `ssh-keygen`/`ssh-keyscan` scratch dirs live
   under `keygen/` in this same 0700 runtime base (`KeyTools` no longer uses bare
-  `/tmp`), and cleanup never follows symlinks.
+  `/tmp`), and cleanup never follows symlinks. The runtime-dir creators (Ssh,
+  RunState, Logger's tmpfs chain, Notify) also refuse a dir another uid owns or
+  group/others can write (`Util::assertPrivateDir`): under `/tmp` a local user
+  can pre-create it, and root's `chmod 0700` leaves them its owner.
 - **UI** = a parent hub `source/UnraidRsync.page` (`Menu="Utilities"` →
   **Settings ▸ User Utilities**, `Type="xmenu"`, **empty body**) plus child tab
   pages `source/UR.*.page` (`Menu="UnraidRsync:1..7"` → **Overview / Jobs /
@@ -116,6 +119,38 @@ on, forked from, or derived from any other plugin.
   and change what existing backups preserve. v2 → v3 needs no transform (v3 only
   marks the snapshot block). Migration MUST keep running before
   `mergeDefaults()` (which drops unknown keys).
+- **Only a MISSING `config.json` / `credentials.json` is a fresh install.** A
+  present-but-empty or whitespace-only file throws like malformed JSON: a FAT32
+  write cut short used to load as zero jobs, and `apply-cron.php` then deleted
+  the cron file. Saves go through `Util::writeAtomic` (temp file, `fsync`,
+  rename) and first keep the replaced file as `<name>.last-good` when it parses.
+  The parent directory is never fsynced after the rename (PHP cannot fsync a
+  directory handle), so a power cut can still lose the rename itself; the
+  recovery story is the ordering (destination copy → move record → config
+  pointer → source unlink) plus `.last-good`.
+- **Every load-modify-save holds a lock.** `config.json` under
+  `Config::withLock` (`config.lock`), `credentials.json` under
+  `Credentials::withLock` (`credentials.lock`); both locks live in
+  `UR_CONFIG_BASE` and never follow `secretsDir`, so a relocation and every
+  writer contend on one file. Order: config, then credentials. Handler
+  credential actions and `Ssh::pinHostKey` re-read the `secretsDir` pointer
+  once they hold the lock (`Credentials::refreshSecretsDir`, which never takes
+  the config lock). Every `Credentials::withLock` scope first settles a move a
+  crash interrupted (`reconcilePendingMove`, from the `credentials.move.json`
+  record in `UR_CONFIG_BASE`): pointer at the destination → remove the source's
+  `.last-good`, then the source, then the record, only while both files still
+  hash to the record; pointer still at the source and the source still the
+  recorded copy → drop the record and the uncommitted copy; anything else
+  (including a source that is gone) → keep it all and log once.
+  `sanitizeMntDir` canonicalises (`Config::canonicalPath`), and the move itself
+  probes for one directory under two names (`ur_dirs_alias`, BOTH ways: a
+  marker made in each dir, looked for in the other - shfs `/mnt/user` vs
+  `/mnt/cache` has different inodes, realpath cannot see it, and shfs may show
+  only one direction). Either direction seeing it → pointer-only, never unlink;
+  directions disagreeing while a destination credentials.json exists → refused.
+  `config.json` carries a `revision` (absent = 0) that `Config::save()` bumps on
+  every change; the Jobs/Settings forms post it as `configRevision` and
+  `saveConfig` answers 409 when it is stale (absent field = old client, allowed).
 - **Secrets** (SSH keys, passwords) live in `credentials.json`, by default on
   **FAT32 `/boot` (world-readable)**, so Unix perms don't protect them there. They
   are copied to **tmpfs at `chmod 600`** immediately before use (OpenSSH refuses a
@@ -128,7 +163,11 @@ on, forked from, or derived from any other plugin.
   `Credentials::$secretsDirOverride` (Credentials stays decoupled from Config — the
   Runner and the handler front controller push the validated path in, mirroring
   `Logger::$logsDirOverride`); empty = `/boot`. Changing it migrates the file
-  (`ur_migrate_credentials`: copy+verify+`chmod 600`+unlink, never clobbers an
+  as one transaction, only after every validation passed
+  (`ur_migrate_credentials`: private 0600 copy into a 0700 dir + sha256 verify,
+  then the move record, then the `Config::save` of the new pointer, then
+  `Credentials::completeMove`; a failed save removes the copy and the record;
+  a migration with no source file writes no record; never clobbers a DIFFERENT
   existing dest, never `rename` across the FAT32↔ext4 device boundary). The
   **tmpfs materialisation is NOT removed** by this (still needed for a discrete
   `ssh -i` key file + per-run isolation + redaction). Per-run tmpfs secrets +

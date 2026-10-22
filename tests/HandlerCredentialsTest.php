@@ -40,15 +40,36 @@ final class HandlerCredentialsTest extends TestCase
         // Reset the secrets-dir override BEFORE resolving Credentials::path() so a
         // leak from a prior migration test can't point cleanup at the wrong file.
         Credentials::$secretsDirOverride = null;
-        foreach ([Credentials::path(), Config::path()] as $p) {
+        foreach ([Credentials::path(), Credentials::path() . '.last-good', Config::path()] as $p) {
             if (is_file($p)) {
                 unlink($p);
             }
         }
     }
 
+    /** @var array<int,string> */
+    private array $scratchRoots = [];
+
+    /**
+     * A writable stand-in for /mnt (Config::$mntRoot), so a secretsDir the
+     * sanitiser accepts can really be created here. Has a 'pool' share.
+     */
+    private function scratchMntRoot(): string
+    {
+        $root = realpath(sys_get_temp_dir()) . '/ur-mnt-' . getmypid() . '-' . bin2hex(random_bytes(4));
+        mkdir($root . '/pool', 0700, true);
+        Config::$mntRoot      = $root;
+        $this->scratchRoots[] = $root;
+        return $root;
+    }
+
     protected function tearDown(): void
     {
+        unset($GLOBALS['ur_dirs_alias_probe']);
+        Config::$mntRoot = '/mnt';
+        foreach ($this->scratchRoots as $root) {
+            exec('rm -rf ' . escapeshellarg($root));
+        }
         Credentials::$secretsDirOverride = null;
         // The daemon module-listing probe seam is a public static: leaving a
         // fake installed would silently fake every later test's probe.
@@ -1065,6 +1086,610 @@ final class HandlerCredentialsTest extends TestCase
 
         @unlink($blocker);
         $this->rmSecretsDir($src);
+    }
+
+    /**
+     * The move used to run before validation: a 422 left config pointing at the
+     * old dir while the file sat only in the new one, and every job then failed
+     * "Connection not found". Now nothing moves until everything validated. (On
+     * the old code the attempt shows up as a "could not create" warning, since
+     * /mnt is not writable here.)
+     */
+    public function testSecretsDirChangeThatFailsValidationMovesNothing(): void
+    {
+        $seed = Credentials::defaults();
+        $seed['connections'][] = ['id' => 'c-1', 'name' => 'stay', 'host' => 'h', 'username' => 'u'];
+        $this->seedCreds($seed);
+        $before = file_get_contents(Credentials::path());
+        Config::save(Config::defaults());
+
+        $_POST = [
+            'action'     => 'saveConfig',
+            'csrf_token' => 'test-token',
+            'global'     => [
+                'secretsDir'          => '/mnt/user/system/unraid.rsync',
+                'defaultRsyncOptions' => ['bwlimit' => 'abc'],
+            ],
+        ];
+        [$body, $code] = $this->runCapture(fn() => ur_action_save_config());
+
+        $this->assertSame(422, $code, json_encode($body));
+        $this->assertSame([], array_filter($body['warnings'], fn($w) => str_contains($w, 'Secrets directory')));
+        $this->assertSame($before, file_get_contents(Credentials::path()));
+        $this->assertSame('', Config::load()['global']['secretsDir']);
+        $this->assertNull(Credentials::$secretsDirOverride);
+    }
+
+    public function testMigrationCopiesBeforeTheCommitAndRemovesTheSourceOnlyAfterIt(): void
+    {
+        $src = $this->tempSecretsDir();
+        $dst = $this->tempSecretsDir() . '/nested';
+        mkdir($src, 0777, true);
+        $payload = "{\"schemaVersion\":1,\"keys\":[],\"connections\":[]}\n";
+        file_put_contents($src . '/credentials.json', $payload);
+        file_put_contents($src . '/credentials.json.last-good', $payload);
+
+        $seen = [];
+        $res  = ur_migrate_credentials($src, $dst, function () use ($src, $dst, &$seen): void {
+            $rec  = json_decode((string) @file_get_contents(Credentials::movePath()), true);
+            $seen = [is_file($src . '/credentials.json'), file_get_contents($dst . '/credentials.json'),
+                [$rec['source'] ?? null, $rec['destination'] ?? null, $rec['sha256'] ?? null]];
+        });
+
+        $this->assertTrue($res['ok'], $res['warning']);
+        $this->assertSame(
+            [true, $payload, [$src, $dst, hash('sha256', $payload)]],
+            $seen,
+            'at commit time both copies exist and the move is recorded'
+        );
+        $this->assertFileDoesNotExist(Credentials::movePath(), 'and once it is done the record goes');
+        $this->assertFileDoesNotExist($src . '/credentials.json');
+        $this->assertFileDoesNotExist($src . '/credentials.json.last-good', 'no secrets linger at the old place');
+        clearstatcache();
+        $this->assertSame(0600, fileperms($dst . '/credentials.json') & 0777);
+        $this->assertSame(0700, fileperms($dst) & 0777);
+
+        $this->rmSecretsDir($src);
+        $this->rmSecretsDir($dst);
+        @rmdir(dirname($dst));
+    }
+
+    public function testMigrationRollsTheCopyBackWhenTheConfigSaveFails(): void
+    {
+        $src = $this->tempSecretsDir();
+        $dst = $this->tempSecretsDir();
+        mkdir($src, 0777, true);
+        file_put_contents($src . '/credentials.json', "SOURCE\n");
+        // A directory where config.json goes makes Config::save's rename fail.
+        mkdir(Config::path());
+        $warnings = [];
+        try {
+            ur_save_config_moving_secrets(Config::defaults(), [$src, $dst], $warnings);
+            $this->fail('the failed save must propagate');
+        } catch (RuntimeException $e) {
+            $this->assertStringContainsString('Failed to atomically replace', $e->getMessage());
+        } finally {
+            rmdir(Config::path());
+        }
+
+        $this->assertSame("SOURCE\n", file_get_contents($src . '/credentials.json'));
+        $this->assertFileDoesNotExist($dst . '/credentials.json');
+        $this->assertFileDoesNotExist(Credentials::movePath());
+        $this->assertNull(Credentials::$secretsDirOverride);
+
+        $this->rmSecretsDir($src);
+        $this->rmSecretsDir($dst);
+    }
+
+    public function testMigrationFinishesAMoveThatLeftAnIdenticalCopyBehind(): void
+    {
+        $src = $this->tempSecretsDir();
+        $dst = $this->tempSecretsDir();
+        mkdir($src, 0777, true);
+        mkdir($dst, 0700, true);
+        file_put_contents($src . '/credentials.json', "SAME\n");
+        file_put_contents($dst . '/credentials.json', "SAME\n");
+
+        $committed = false;
+        $res = ur_migrate_credentials($src, $dst, function () use (&$committed): void {
+            $committed = true;
+        });
+
+        $this->assertTrue($res['ok'], $res['warning']);
+        $this->assertTrue($committed);
+        $this->assertFileDoesNotExist($src . '/credentials.json');
+        $this->assertSame("SAME\n", file_get_contents($dst . '/credentials.json'));
+
+        $this->rmSecretsDir($src);
+        $this->rmSecretsDir($dst);
+    }
+
+    public function testRefusedMigrationNeverCallsTheCommit(): void
+    {
+        $src = $this->tempSecretsDir();
+        $dst = $this->tempSecretsDir();
+        mkdir($src, 0777, true);
+        mkdir($dst, 0777, true);
+        file_put_contents($src . '/credentials.json', "SOURCE\n");
+        file_put_contents($dst . '/credentials.json', "OTHER\n");
+
+        $res = ur_migrate_credentials($src, $dst, function (): void {
+            $this->fail('commit must not run for a refused move');
+        });
+
+        $this->assertFalse($res['ok']);
+        $this->assertSame("SOURCE\n", file_get_contents($src . '/credentials.json'));
+        $this->assertSame("OTHER\n", file_get_contents($dst . '/credentials.json'));
+
+        $this->rmSecretsDir($src);
+        $this->rmSecretsDir($dst);
+    }
+
+    /**
+     * Two spellings of the current secretsDir must not look like a move: the
+     * file would be "copied" onto itself and the source - the only copy -
+     * unlinked.
+     */
+    public function testSecretsDirAliasOfTheCurrentDirMovesNothing(): void
+    {
+        $root = $this->scratchMntRoot();
+        $dir  = $root . '/pool/secrets';
+        $cfg  = Config::defaults();
+        $cfg['global']['secretsDir'] = $dir;
+        Config::save($cfg);
+        Credentials::$secretsDirOverride = $dir;
+        $seed = Credentials::defaults();
+        $seed['connections'][] = ['id' => 'c-1', 'name' => 'stay', 'host' => 'h', 'username' => 'u'];
+        $this->seedCreds($seed);
+        $before = file_get_contents($dir . '/credentials.json');
+        symlink($root . '/pool', $root . '/pool-link');
+
+        foreach ([$root . '/pool//secrets', $root . '/pool/secrets/', $root . '/pool-link/secrets'] as $alias) {
+            $_POST = ['action' => 'saveConfig', 'csrf_token' => 'test-token', 'global' => ['secretsDir' => $alias]];
+            [$body, $code] = $this->runCapture(fn() => ur_action_save_config());
+
+            $this->assertSame(200, $code, json_encode($body));
+            $this->assertSame([], $body['warnings'], $alias);
+            $this->assertSame($before, @file_get_contents($dir . '/credentials.json'), $alias);
+            $this->assertSame($dir, Config::load()['global']['secretsDir'], $alias);
+        }
+    }
+
+    public function testMigrationBetweenTwoSpellingsOfOneDirNeverUnlinks(): void
+    {
+        $src = $this->tempSecretsDir();
+        mkdir($src, 0700, true);
+        file_put_contents($src . '/credentials.json', "ONLY COPY\n");
+        symlink($src, $src . '-alias');
+
+        foreach ([$src . '-alias', dirname($src) . '//' . basename($src) . '/'] as $alias) {
+            $committed = false;
+            $res = ur_migrate_credentials($src, $alias, function () use (&$committed): void {
+                $committed = true;
+            });
+            $this->assertTrue($res['ok'], $res['warning']);
+            $this->assertTrue($committed, 'the pointer still moves');
+            $this->assertSame("ONLY COPY\n", @file_get_contents($src . '/credentials.json'), $alias);
+        }
+
+        unlink($src . '-alias');
+        $this->rmSecretsDir($src);
+    }
+
+    public function testAnIdenticalLeftoverDestinationIsMadePrivateBeforeItIsUsed(): void
+    {
+        $src = $this->tempSecretsDir();
+        $dst = $this->tempSecretsDir();
+        mkdir($src, 0777, true);
+        mkdir($dst, 0755, true);
+        file_put_contents($src . '/credentials.json', "SAME\n");
+        file_put_contents($dst . '/credentials.json', "SAME\n");
+        chmod($dst . '/credentials.json', 0644);
+
+        $res = ur_migrate_credentials($src, $dst);
+
+        $this->assertTrue($res['ok'], $res['warning']);
+        clearstatcache();
+        $this->assertSame(0600, fileperms($dst . '/credentials.json') & 0777);
+        $this->assertSame(0700, fileperms($dst) & 0777);
+
+        $this->rmSecretsDir($src);
+        $this->rmSecretsDir($dst);
+    }
+
+    public function testASymlinkedDestinationCredentialsFileIsRefused(): void
+    {
+        $src = $this->tempSecretsDir();
+        $dst = $this->tempSecretsDir();
+        mkdir($src, 0777, true);
+        mkdir($dst, 0700, true);
+        file_put_contents($src . '/credentials.json', "SAME\n");
+        $elsewhere = $dst . '-target';
+        file_put_contents($elsewhere, "SAME\n");
+        symlink($elsewhere, $dst . '/credentials.json');
+
+        $res = ur_migrate_credentials($src, $dst, function (): void {
+            $this->fail('commit must not run');
+        });
+
+        $this->assertFalse($res['ok']);
+        $this->assertStringContainsString('symlink', $res['warning']);
+        $this->assertSame("SAME\n", file_get_contents($src . '/credentials.json'));
+
+        unlink($dst . '/credentials.json');
+        unlink($elsewhere);
+        $this->rmSecretsDir($src);
+        $this->rmSecretsDir($dst);
+    }
+
+    /**
+     * The disk state a secretsDir move from $source to <root>/pool/b leaves when
+     * it stops after recording itself: the copy at the destination, the source
+     * and its .last-good still there, the record, and config pointing at
+     * $pointer ($source or the destination, i.e. before or after the commit).
+     *
+     * @return array{0:string,1:string} [source dir, destination dir]
+     */
+    private function interruptedMove(string $root, string $source, bool $committed): array
+    {
+        $dst = $root . '/pool/b';
+        $cfg = Config::defaults();
+        $cfg['global']['secretsDir'] = $committed ? $dst : ($source === rtrim(UR_CONFIG_BASE, '/') ? '' : $source);
+        Config::save($cfg);
+        $seed = Credentials::defaults();
+        $seed['connections'][] = ['id' => 'c-1', 'name' => 'old', 'host' => 'h', 'username' => 'u'];
+        Credentials::$secretsDirOverride = $dst;
+        $this->seedCreds($seed);
+        if (!is_dir($source)) {
+            mkdir($source, 0700, true);
+        }
+        copy($dst . '/credentials.json', $source . '/credentials.json');
+        file_put_contents($source . '/credentials.json.last-good', 'an older keychain');
+        Credentials::recordMove($source, $dst, (string) hash_file('sha256', $dst . '/credentials.json'));
+        Credentials::$secretsDirOverride = null;
+        return [$source, $dst];
+    }
+
+    /** @return array<string,mixed> a Connections save adding one new card */
+    private function newConnectionPost(): array
+    {
+        return [
+            'action' => 'saveCredentials', 'csrf_token' => 'test-token', 'connections_present' => '1',
+            'connections' => [0 => ['name' => 'new', 'host' => 'h2', 'username' => 'u', 'authMethod' => 'KEYFILE',
+                'keyFilePath' => '/root/.ssh/id_ed25519']],
+        ];
+    }
+
+    /** @return array<string,array{bool}> */
+    public static function moveSourceProvider(): array
+    {
+        return ['from /boot' => [true], 'from another /mnt dir' => [false]];
+    }
+
+    /**
+     * A move that stopped after saving the new pointer but before unlinking the
+     * source left the old copy forever: later saves see the pointer unchanged.
+     * The next writer finishes it from the record, before it writes.
+     */
+    #[DataProvider('moveSourceProvider')]
+    public function testTheNextWriterFinishesAMoveInterruptedAfterTheCommit(bool $fromBoot): void
+    {
+        $root = $this->scratchMntRoot();
+        [$src, $dst] = $this->interruptedMove($root, $fromBoot ? rtrim(UR_CONFIG_BASE, '/') : $root . '/pool/a', true);
+
+        $_POST = $this->newConnectionPost();
+        [$body, $code] = $this->runCapture(fn() => ur_action_save_credentials());
+
+        $this->assertSame(200, $code, json_encode($body));
+        $this->assertFileDoesNotExist($src . '/credentials.json');
+        $this->assertFileDoesNotExist($src . '/credentials.json.last-good');
+        $this->assertFileDoesNotExist(Credentials::movePath());
+        $this->assertCount(2, Credentials::load()['connections'], 'the save landed in ' . $dst);
+    }
+
+    public function testTheNextWriterFinishesAMoveInterruptedBetweenItsUnlinks(): void
+    {
+        $root = $this->scratchMntRoot();
+        [$src] = $this->interruptedMove($root, $root . '/pool/a', true);
+        unlink($src . '/credentials.json.last-good');
+
+        $_POST = $this->newConnectionPost();
+        [$body, $code] = $this->runCapture(fn() => ur_action_save_credentials());
+
+        $this->assertSame(200, $code, json_encode($body));
+        $this->assertFileDoesNotExist($src . '/credentials.json');
+        $this->assertFileDoesNotExist(Credentials::movePath());
+
+        // Interrupted after both unlinks: only the record is left to drop.
+        [$src] = $this->interruptedMove($root, $root . '/pool/a', true);
+        unlink($src . '/credentials.json.last-good');
+        unlink($src . '/credentials.json');
+        Credentials::withLock(static fn() => null);
+        $this->assertFileDoesNotExist(Credentials::movePath());
+    }
+
+    public function testAChangedMovedFileLeavesTheRecordAndTheSourceAloneAndLogsOnce(): void
+    {
+        $root = $this->scratchMntRoot();
+        [$src, $dst] = $this->interruptedMove($root, $root . '/pool/a', true);
+        // Written behind the lock's back, so the record no longer describes it.
+        file_put_contents($dst . '/credentials.json', "{\"schemaVersion\":1,\"keys\":[],\"connections\":[]}\n");
+        $log    = Logger::pluginLogPath();
+        $before = substr_count((string) @file_get_contents($log), 'could not be finished');
+
+        foreach ([1, 2] as $_) {
+            $_POST = $this->newConnectionPost();
+            [$body, $code] = $this->runCapture(fn() => ur_action_save_credentials());
+            $this->assertSame(200, $code, json_encode($body));
+        }
+
+        $this->assertFileExists($src . '/credentials.json');
+        $this->assertFileExists($src . '/credentials.json.last-good');
+        $this->assertFileExists(Credentials::movePath());
+        $this->assertSame($before + 1, substr_count((string) @file_get_contents($log), 'could not be finished'));
+        unlink(Credentials::movePath());
+    }
+
+    public function testAMoveInterruptedBeforeTheCommitIsAbandonedAndTheSourceKept(): void
+    {
+        $root = $this->scratchMntRoot();
+        [$src, $dst] = $this->interruptedMove($root, $root . '/pool/a', false);
+        $live = file_get_contents($src . '/credentials.json');
+
+        Credentials::withLock(static fn() => null);
+
+        $this->assertSame($live, file_get_contents($src . '/credentials.json'));
+        $this->assertFileExists($src . '/credentials.json.last-good');
+        $this->assertFileDoesNotExist($dst . '/credentials.json', 'the uncommitted copy goes');
+        $this->assertFileDoesNotExist(Credentials::movePath());
+    }
+
+    /** @return array<string,array{bool}> */
+    public static function sourceGoneProvider(): array
+    {
+        return ['source missing' => [true], 'source changed' => [false]];
+    }
+
+    /**
+     * Pointer back at the source but the source no longer the recorded copy -
+     * e.g. a FAT32 pointer save rolled back after the source unlink: the
+     * destination may be the only copy, so nothing is removed.
+     */
+    #[DataProvider('sourceGoneProvider')]
+    public function testAnUncommittedMoveWhoseSourceIsNotTheRecordedCopyKeepsTheDestination(bool $missing): void
+    {
+        $root = $this->scratchMntRoot();
+        [$src, $dst] = $this->interruptedMove($root, $root . '/pool/a', false);
+        if ($missing) {
+            unlink($src . '/credentials.json');
+        } else {
+            file_put_contents($src . '/credentials.json', "{\"schemaVersion\":1,\"keys\":[],\"connections\":[]}\n");
+        }
+        $moved = file_get_contents($dst . '/credentials.json');
+        $log   = Logger::pluginLogPath();
+        $seen  = substr_count((string) @file_get_contents($log), 'could not be finished');
+
+        Credentials::withLock(static fn() => null);
+        Credentials::withLock(static fn() => null);
+
+        $this->assertSame($moved, file_get_contents($dst . '/credentials.json'));
+        $this->assertFileExists(Credentials::movePath());
+        $this->assertSame($seen + 1, substr_count((string) @file_get_contents($log), 'could not be finished'));
+        unlink(Credentials::movePath());
+    }
+
+    /** @return array<string,array{bool,bool}> */
+    public static function oneWayAliasProvider(): array
+    {
+        return [
+            'marker made in the destination seen in the source' => [true, false],
+            'marker made in the source seen in the destination' => [false, true],
+        ];
+    }
+
+    /**
+     * shfs may show a file made through one name and not one made through the
+     * other, so either direction seeing the marker means one directory.
+     */
+    #[DataProvider('oneWayAliasProvider')]
+    public function testAnAliasSeenInOneDirectionOnlyMovesJustThePointer(bool $there, bool $back): void
+    {
+        $src = $this->tempSecretsDir();
+        $dst = $this->tempSecretsDir();
+        mkdir($src, 0700, true);
+        file_put_contents($src . '/credentials.json', "ONLY COPY\n");
+        $GLOBALS['ur_dirs_alias_probe'] = static fn(string $a, string $b): bool => $a === $dst ? $there : $back;
+
+        $committed = false;
+        $res = ur_migrate_credentials($src, $dst, function () use (&$committed): void {
+            $committed = true;
+        });
+
+        $this->assertTrue($res['ok'], $res['warning']);
+        $this->assertTrue($committed);
+        $this->assertSame("ONLY COPY\n", file_get_contents($src . '/credentials.json'));
+        $this->assertFileDoesNotExist($dst . '/credentials.json', 'nothing copied onto an alias');
+        $this->assertFileDoesNotExist(Credentials::movePath());
+
+        $this->rmSecretsDir($src);
+        $this->rmSecretsDir($dst);
+    }
+
+    #[DataProvider('oneWayAliasProvider')]
+    public function testDisagreeingProbesWithAnExistingDestinationFileRefuseTheMove(bool $there, bool $back): void
+    {
+        $src = $this->tempSecretsDir();
+        $dst = $this->tempSecretsDir();
+        mkdir($src, 0700, true);
+        mkdir($dst, 0700, true);
+        file_put_contents($src . '/credentials.json', "SAME\n");
+        file_put_contents($dst . '/credentials.json', "SAME\n");
+        $GLOBALS['ur_dirs_alias_probe'] = static fn(string $a, string $b): bool => $a === $dst ? $there : $back;
+
+        $res = ur_migrate_credentials($src, $dst, function (): void {
+            $this->fail('commit must not run for an ambiguous move');
+        });
+
+        $this->assertFalse($res['ok']);
+        $this->assertStringContainsString('cannot tell', $res['warning']);
+        $this->assertSame("SAME\n", file_get_contents($src . '/credentials.json'));
+        $this->assertSame("SAME\n", file_get_contents($dst . '/credentials.json'));
+
+        $this->rmSecretsDir($src);
+        $this->rmSecretsDir($dst);
+    }
+
+    /**
+     * A pin is a write too: it must settle an interrupted move first, or the
+     * moved file's hash changes and the old copy can never be matched again.
+     */
+    public function testAPinFinishesAnInterruptedMoveBeforeItWrites(): void
+    {
+        $root = $this->scratchMntRoot();
+        [$src, $dst] = $this->interruptedMove($root, $root . '/pool/a', true);
+        Credentials::$secretsDirOverride = $src;
+
+        $this->assertTrue(Ssh::pinHostKey('c-1', 'h ssh-ed25519 AAAAPIN'));
+
+        $this->assertFileDoesNotExist($src . '/credentials.json');
+        $this->assertFileDoesNotExist($src . '/credentials.json.last-good');
+        $this->assertFileDoesNotExist(Credentials::movePath());
+        Credentials::$secretsDirOverride = $dst;
+        $this->assertSame('h ssh-ed25519 AAAAPIN', Credentials::load()['connections'][0]['remoteHostKey']);
+    }
+
+    /**
+     * /mnt/user and /mnt/cache show one directory under different inode numbers
+     * and realpath() maps neither to the other, so only a marker made through
+     * one name and looked for through the other can tell.
+     */
+    public function testTheAliasProbeSeesOneDirectoryUnderTwoNamesAndLeavesNoMarker(): void
+    {
+        $a = $this->tempSecretsDir();
+        $b = $this->tempSecretsDir();
+        mkdir($a, 0700, true);
+        mkdir($b, 0700, true);
+        symlink($a, $a . '-alias');
+
+        $this->assertTrue(ur_dirs_alias($a . '-alias', $a));
+        $this->assertFalse(ur_dirs_alias($b, $a));
+        $this->assertNull(ur_dirs_alias($a . '/missing', $a));
+        $this->assertSame([], glob($a . '/.ur-alias-*') ?: []);
+        $this->assertSame([], glob($b . '/.ur-alias-*') ?: []);
+
+        unlink($a . '-alias');
+        rmdir($a);
+        rmdir($b);
+    }
+
+    public function testADifferentBootCopyIsNeverRemoved(): void
+    {
+        $root = $this->scratchMntRoot();
+        $dir  = $root . '/pool/secrets';
+        $cfg  = Config::defaults();
+        $cfg['global']['secretsDir'] = $dir;
+        Config::save($cfg);
+        Credentials::$secretsDirOverride = $dir;
+        $this->seedCreds(Credentials::defaults());
+        $boot = rtrim(UR_CONFIG_BASE, '/') . '/credentials.json';
+        file_put_contents($boot, "{\"schemaVersion\":1,\"keys\":[],\"connections\":[{\"id\":\"c-x\"}]}\n");
+
+        $_POST = [
+            'action' => 'saveCredentials', 'csrf_token' => 'test-token', 'connections_present' => '1',
+            'connections' => [0 => ['name' => 'new', 'host' => 'h2', 'username' => 'u', 'authMethod' => 'KEYFILE',
+                'keyFilePath' => '/root/.ssh/id_ed25519']],
+        ];
+        [$body, $code] = $this->runCapture(fn() => ur_action_save_credentials());
+
+        $this->assertSame(200, $code, json_encode($body));
+        $this->assertFileExists($boot);
+        unlink($boot);
+    }
+
+    /**
+     * The dispatcher resolves the secrets pointer before the credentials lock;
+     * a saveConfig that held the lock may have moved the file meanwhile. The
+     * save must follow the pointer as it stands once the lock is held.
+     */
+    public function testCredentialsSaveReReadsTheSecretsPointerUnderTheLock(): void
+    {
+        Config::save(Config::defaults());
+        $stale = $this->tempSecretsDir();
+        Credentials::$secretsDirOverride = $stale;
+
+        $_POST = [
+            'action' => 'saveCredentials', 'csrf_token' => 'test-token', 'connections_present' => '1',
+            'connections' => [0 => ['name' => 'n', 'host' => 'h', 'username' => 'u', 'authMethod' => 'KEYFILE',
+                'keyFilePath' => '/root/.ssh/id_ed25519']],
+        ];
+        [$body, $code] = $this->runCapture(fn() => ur_action_save_credentials());
+
+        $this->assertSame(200, $code, json_encode($body));
+        $this->assertFileDoesNotExist($stale . '/credentials.json');
+        $this->assertFileExists(rtrim(UR_CONFIG_BASE, '/') . '/credentials.json');
+        $this->rmSecretsDir($stale);
+    }
+
+    public function testSaveCredentialsRefusedWhenTheFileIsEmpty(): void
+    {
+        file_put_contents(Credentials::path(), "\n");
+        $_POST = [
+            'action' => 'saveCredentials', 'csrf_token' => 'test-token',
+            'keys_present' => '1', 'keys' => [0 => ['id' => '', 'name' => 'x']],
+        ];
+        [$body, $code] = $this->runCapture(fn() => ur_action_save_credentials());
+        $this->assertSame(409, $code);
+        $this->assertStringContainsString('credentials.json is empty', $body['error']);
+        $this->assertSame("\n", file_get_contents(Credentials::path()));
+    }
+
+    // --- a stale Connections tab must not wipe a first-use host-key pin -----
+
+    /** @return array<string,mixed> */
+    private function pinnedConnectionPost(string $host, int $port): array
+    {
+        $seed = Credentials::defaults();
+        $seed['connections'][] = Credentials::mergeConnection([
+            'id' => 'c-pin', 'name' => 'pin', 'host' => 'nas.local', 'port' => 22, 'username' => 'u',
+            'keyFilePath' => '/root/.ssh/id_ed25519',
+            'remoteHostKey' => 'nas.local ssh-ed25519 AAAAPINNED',
+        ]);
+        $this->seedCreds($seed);
+        return [
+            'action' => 'saveCredentials', 'csrf_token' => 'test-token', 'connections_present' => '1',
+            'connections' => [0 => [
+                'id' => 'c-pin', 'name' => 'pin renamed', 'transport' => 'SSH', 'host' => $host,
+                'port' => (string) $port, 'username' => 'u', 'authMethod' => 'KEYFILE',
+                'keyFilePath' => '/root/.ssh/id_ed25519', 'remoteHostKey' => '', 'strictHostKey' => 'accept-new',
+            ]],
+        ];
+    }
+
+    public function testABlankHostKeyFromAStaleTabKeepsThePinForTheSameHost(): void
+    {
+        $_POST = $this->pinnedConnectionPost('nas.local', 22);
+        [$body, $code] = $this->runCapture(fn() => ur_action_save_credentials());
+        $this->assertSame(200, $code, json_encode($body));
+
+        $conn = Credentials::findConnection(Credentials::load(), 'c-pin');
+        $this->assertSame('pin renamed', $conn['name'] ?? null);
+        $this->assertSame('nas.local ssh-ed25519 AAAAPINNED', $conn['remoteHostKey'] ?? null);
+    }
+
+    /** @return array<string,array{string,int}> */
+    public static function movedTargetProvider(): array
+    {
+        return ['host changed' => ['nas2.local', 22], 'port changed' => ['nas.local', 2222]];
+    }
+
+    #[DataProvider('movedTargetProvider')]
+    public function testABlankHostKeyDoesNotCarryThePinToADifferentTarget(string $host, int $port): void
+    {
+        $_POST = $this->pinnedConnectionPost($host, $port);
+        [$body, $code] = $this->runCapture(fn() => ur_action_save_credentials());
+        $this->assertSame(200, $code, json_encode($body));
+
+        $this->assertSame('', Credentials::findConnection(Credentials::load(), 'c-pin')['remoteHostKey'] ?? null);
     }
 
     // =====================================================================

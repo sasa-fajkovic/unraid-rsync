@@ -1007,6 +1007,7 @@ ur_emit_time_helpers();
        jobs list even when the user has deleted every card (an intentional
        "clear all jobs"), instead of treating it as "Jobs not submitted". -->
   <input type="hidden" name="jobs_present" value="1">
+  <input type="hidden" name="configRevision" value="<?=Config::revision($config)?>">
 
   <div id="ur-jobs-container">
     <?php foreach ($jobs as $i => $job) {

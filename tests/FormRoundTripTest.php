@@ -215,6 +215,28 @@ final class FormRoundTripTest extends TestCase
 
     #[RunInSeparateProcess]
     #[PreserveGlobalState(false)]
+    public function testBothConfigFormsPostTheirRevisionAndAFormStaleByAnotherSaveIsRefused(): void
+    {
+        $this->seedJobs([$this->localJob()]);
+        $rev          = Config::revision(Config::load());
+        $jobsPost     = $this->submit($this->render('jobs.php'), 'ur-jobs-form');
+        $settingsPost = $this->submit($this->render('settings.php'), 'ur-settings-form');
+        $this->assertSame((string) $rev, $jobsPost['configRevision'] ?? null);
+        $this->assertSame((string) $rev, $settingsPost['configRevision'] ?? null);
+
+        $settingsPost['global']['retention'] = '42';
+        [$body, $code] = $this->save('ur_action_save_config', $settingsPost);
+        $this->assertSame(200, $code, (string) json_encode($body));
+        $this->assertSame($rev + 1, $body['revision'] ?? null);
+
+        // The Jobs page rendered before that save would silently undo it.
+        [$body, $code] = $this->save('ur_action_save_config', $jobsPost);
+        $this->assertSame(409, $code, (string) json_encode($body));
+        $this->assertSame(42, Config::load()['global']['retention']);
+    }
+
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
     public function testMirrorJobsReSaveByteIdentical(): void
     {
         $this->seedJobs([$this->mirrorJob(), $this->localJob()]);

@@ -618,6 +618,94 @@ final class HandlerTest extends TestCase
         $this->assertSame(Config::SCHEMA_VERSION + 9, $raw['schemaVersion']);
     }
 
+    /** @return array<string,mixed> a Jobs-tab POST carrying one LOCAL job */
+    private function oneJobPost(string $name): array
+    {
+        return [
+            'action'     => 'saveConfig',
+            'csrf_token' => 'test-token',
+            'jobs'       => [0 => ['name' => $name, 'schedule' => '0 3 * * *', 'transport' => 'LOCAL',
+                'pairs' => [['local' => '/mnt/user/a/', 'remote' => '/mnt/disk1/a/']]]],
+        ];
+    }
+
+    public function testSaveRefusedWhenTheConfigFileIsEmpty(): void
+    {
+        file_put_contents(Config::path(), '');
+        $_POST = $this->oneJobPost('j');
+        [$body, $code] = $this->runCapture(fn() => ur_action_save_config());
+
+        $this->assertSame(409, $code);
+        $this->assertStringContainsString('config.json is empty', $body['error']);
+        $this->assertSame('', file_get_contents(Config::path()));
+    }
+
+    public function testSaveWithAStaleRevisionIsRefusedAndWritesNothing(): void
+    {
+        $cfg = Config::defaults();
+        $cfg['jobs'][] = Job::normalize(['name' => 'saved-elsewhere', 'transport' => 'LOCAL',
+            'pairs' => [['local' => '/mnt/user/a/', 'remote' => '/mnt/disk1/a/']]]);
+        $rev    = Config::save($cfg);
+        $before = file_get_contents(Config::path());
+
+        $_POST = $this->oneJobPost('from-an-old-tab') + ['configRevision' => (string) ($rev - 1)];
+        [$body, $code] = $this->runCapture(fn() => ur_action_save_config());
+
+        $this->assertSame(409, $code);
+        $this->assertFalse($body['ok']);
+        $this->assertSame($rev, $body['revision']);
+        $this->assertStringContainsString('reload', $body['error']);
+        $this->assertSame($before, file_get_contents(Config::path()));
+    }
+
+    public function testSaveWithTheCurrentRevisionSavesAndReturnsTheNextOne(): void
+    {
+        $rev = Config::save(Config::defaults());
+
+        $_POST = $this->oneJobPost('fresh-tab') + ['configRevision' => (string) $rev];
+        [$body, $code] = $this->runCapture(fn() => ur_action_save_config());
+
+        $this->assertSame(200, $code, (string) json_encode($body));
+        $this->assertSame($rev + 1, $body['revision']);
+        $saved = Config::load();
+        $this->assertSame($rev + 1, Config::revision($saved));
+        $this->assertSame('fresh-tab', $saved['jobs'][0]['name']);
+    }
+
+    public function testSaveWithoutARevisionFieldIsAnOldClientAndSaves(): void
+    {
+        Config::save(Config::defaults());
+        Config::save(['global' => ['retention' => 5]] + Config::defaults());
+
+        $_POST = $this->oneJobPost('old-client');
+        [$body, $code] = $this->runCapture(fn() => ur_action_save_config());
+
+        $this->assertSame(200, $code, (string) json_encode($body));
+        $this->assertSame('old-client', Config::load()['jobs'][0]['name']);
+    }
+
+    public function testSaveConfigHoldsTheConfigLockWhileItSaves(): void
+    {
+        $probe = fopen(rtrim(UR_CONFIG_BASE, '/') . '/config.lock', 'c');
+        $this->assertNotFalse($probe);
+        $locked = null;
+        // update_cron runs after the save, still inside the action.
+        Cron::$updateCronRunner = static function () use ($probe, &$locked): int {
+            $locked = !flock($probe, LOCK_EX | LOCK_NB);
+            return 0;
+        };
+        try {
+            $_POST = $this->oneJobPost('locked');
+            [$body, $code] = $this->runCapture(fn() => ur_action_save_config());
+        } finally {
+            Cron::$updateCronRunner = null;
+        }
+        $this->assertSame(200, $code, (string) json_encode($body));
+        $this->assertTrue($locked);
+        $this->assertTrue(flock($probe, LOCK_EX | LOCK_NB), 'released afterwards');
+        fclose($probe);
+    }
+
     public function testSaveWithNeitherSectionRejected(): void
     {
         $_POST = ['action' => 'saveConfig', 'csrf_token' => 'test-token'];

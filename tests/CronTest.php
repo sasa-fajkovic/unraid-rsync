@@ -346,6 +346,33 @@ final class CronTest extends TestCase
         $this->assertCount(0, $this->updateCronCalls, 'update_cron must NOT run on an unreadable config');
     }
 
+    /**
+     * A 0-byte config.json (a FAT32 write cut short) used to load as zero jobs,
+     * so apply-cron.php at boot DELETED the cron file and every schedule stopped.
+     * Runs the real CLI entry against this suite's bases.
+     */
+    public function testApplyCronEntryExitsNonZeroAndKeepsTheCronFileOnAnEmptyConfig(): void
+    {
+        Cron::apply($this->configWith([$this->job('j-keep', '0 2 * * *')]));
+        $before = (string) file_get_contents(Cron::cronFilePath());
+        file_put_contents(Config::path(), '');
+
+        $dir  = realpath(__DIR__ . '/../source');
+        $code = sprintf(
+            'define("UR_CONFIG_BASE", %s); define("UR_RUNTIME_BASE", %s); require %s;'
+            . ' Cron::$updateCronPath = "/nonexistent/update_cron"; require %s;',
+            var_export(UR_CONFIG_BASE, true),
+            var_export(UR_RUNTIME_BASE, true),
+            var_export($dir . '/include/Cron.php', true),
+            var_export($dir . '/scripts/apply-cron.php', true)
+        );
+        exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($code) . ' 2>&1', $out, $exit);
+
+        $this->assertSame(1, $exit, implode("\n", $out));
+        $this->assertStringContainsString('config.json is empty', implode("\n", $out));
+        $this->assertSame($before, file_get_contents(Cron::cronFilePath()));
+    }
+
     // =====================================================================
     // defaultRunUpdateCron - REAL (shell-form) runner
     //

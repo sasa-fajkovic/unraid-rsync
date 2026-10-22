@@ -348,6 +348,7 @@ class Logger
         }
         foreach ($chain as $d) {
             self::ensureLevel($d);
+            Util::assertPrivateDir($d);
         }
     }
 

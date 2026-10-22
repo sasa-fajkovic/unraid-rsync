@@ -293,4 +293,46 @@ final class NotifyTest extends TestCase
         $this->assertCount(1, $seconds, 'sent without the lock');
         $this->assertEqualsWithDelta(Notify::LOCK_TIMEOUT_SECS, array_sum($this->slept), 0.06);
     }
+
+    public function testSendKeepsNoStateInARuntimeDirAnotherUserOwnsButStillSends(): void
+    {
+        $seconds = [];
+        $this->fakeTime(1000.0, $seconds);
+        Util::$euid = posix_geteuid() + 1;
+        try {
+            $this->assertTrue(Notify::send(['event' => 'Unraid Rsync', 'subject' => 'a']));
+        } finally {
+            Util::$euid = null;
+        }
+        $this->assertCount(1, $seconds);
+        $this->assertFileDoesNotExist(UR_RUNTIME_BASE . '/notify.last');
+    }
+
+    public function testSendNeverWritesThroughAPlantedNotifyLastSymlink(): void
+    {
+        $seconds = [];
+        $this->fakeTime(1000.0, $seconds);
+        $target = sys_get_temp_dir() . '/ur-notify-victim-' . getmypid() . '-' . bin2hex(random_bytes(4));
+        file_put_contents($target, 'precious');
+        symlink($target, UR_RUNTIME_BASE . '/notify.last');
+        try {
+            $this->assertTrue(Notify::send(['event' => 'Unraid Rsync', 'subject' => 'a']));
+            $this->assertSame('precious', file_get_contents($target));
+            $this->assertTrue(is_link(UR_RUNTIME_BASE . '/notify.last'));
+        } finally {
+            @unlink(UR_RUNTIME_BASE . '/notify.last');
+            @unlink($target);
+        }
+        $this->assertCount(1, $seconds);
+    }
+
+    public function testSendStampsNotifyLastAsAPrivateFile(): void
+    {
+        $seconds = [];
+        $this->fakeTime(1000.5, $seconds);
+        $this->assertTrue(Notify::send(['event' => 'Unraid Rsync', 'subject' => 'a']));
+        $this->assertSame('1000', file_get_contents(UR_RUNTIME_BASE . '/notify.last'));
+        clearstatcache();
+        $this->assertSame(0600, fileperms(UR_RUNTIME_BASE . '/notify.last') & 0777);
+    }
 }
