@@ -22,7 +22,7 @@ $csrf = ur_render_csrf_token();
 // save (409) anyway. We never persist on load.
 $loadError = '';
 try {
-    $config = Config::load();
+    $config = PageHelpers::config();
 } catch (Throwable $e) {
     $config = Config::defaults();
     $loadError = $e->getMessage();
@@ -40,7 +40,7 @@ $credWhere   = Credentials::location();
 $credOnFlash = ur_t_text('— USB flash (FAT32, world-readable)');
 $credNoFile  = ur_t_text('not created yet');
 
-$helpRetention  = 'How many past executions to keep per job — bounds both the run logs and the persistent run history shown on the History tab. Oldest executions beyond this are pruned. 1–9999 (default 100).';
+$helpRetention  = 'How many past executions to keep per job — bounds both the run logs and the persistent run history shown on the History tab. Oldest executions beyond this are pruned. ' . Config::MIN_RETENTION . '–' . Config::MAX_RETENTION . ' (default ' . Config::DEFAULT_RETENTION . ').';
 $helpPreHook    = 'A pre-run hook still running after this long is stopped (SIGTERM, then SIGKILL 10 seconds later) and the run fails before anything is copied, so a hung command cannot hold the job forever. 0 = no limit (default 30).';
 $helpPostHook   = 'A post-run hook still running after this long is stopped the same way; the run keeps its result, and a successful run is reported as a warning. 0 = no limit (default 60).';
 $helpLogDir     = 'Leave EMPTY (default) to keep run logs in RAM — they are fast and never wear the USB flash, but are cleared on reboot (the History tab still shows past executions; only the full log bodies are lost). To keep logs across reboots, enter an absolute path under /mnt (an array share, cache, or pool), e.g. /mnt/user/appdata/unraid.rsync/logs. The directory is created if missing. Note: writing here keeps the target disk(s) spun up while jobs run.';
@@ -121,7 +121,7 @@ ur_emit_form_enable_assets();
     <dt class="ur-dt"><label for="ur_global_retention"><?=_('Keep last N executions')?></label><?=ur_help_affordance(ur_t_text($helpRetention), 'ur_global_retention_help')?></dt>
     <dd>
       <input type="number" id="ur_global_retention" name="global[retention]"
-             min="1" max="9999" step="1" inputmode="numeric"
+             min="<?=Config::MIN_RETENTION?>" max="<?=Config::MAX_RETENTION?>" step="1" inputmode="numeric"
              value="<?=htmlspecialchars((string)$retention, ENT_QUOTES, 'UTF-8')?>">
       <blockquote class="inline_help ur-help-text" id="ur_global_retention_help"><?=ur_t($helpRetention)?></blockquote>
     </dd>
@@ -188,17 +188,17 @@ ur_emit_form_enable_assets();
     form.addEventListener('submit', function (ev) {
       ev.preventDefault();
       var result = document.getElementById('ur-settings-result');
-      window.urAjax.show(result, true, 'Saving…');
+      window.urAjax.show(result, true, urI18n('saving', 'Saving…'));
       window.urAjax.postFormElement(form).then(function (res) {
         if (res.ok && res.body && res.body.ok) {
-          var msg = res.body.message || 'Saved.';
+          var msg = res.body.message || urI18n('saved', 'Saved.');
           if (res.body.warnings && res.body.warnings.length) {
             msg += ' (' + res.body.warnings.join('; ') + ')';
           }
           window.urAjax.show(result, true, msg);
           if (res.body.credentials) { showCredentials(res.body.credentials); }
         } else {
-          window.urAjax.show(result, false, window.urAjax.errText(res, 'Save failed.'));
+          window.urAjax.show(result, false, window.urAjax.errText(res, urI18n('saveFailed', 'Save failed.')));
         }
       });
     });

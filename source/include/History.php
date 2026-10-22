@@ -36,9 +36,6 @@ require_once __DIR__ . '/Util.php';
 
 class History
 {
-    /** Default records kept per job until the retention setting wires in (PR-E). */
-    const DEFAULT_KEEP = 100;
-
     /** Hard ceiling on records kept, mirroring the retention setting's max. */
     const MAX_KEEP = 9999;
 

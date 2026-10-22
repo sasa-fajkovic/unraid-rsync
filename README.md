@@ -40,7 +40,7 @@ A job picks one of three transports.
 - **SSH** — rsync tunnelled over an `ssh` command line. The job references a
   connection from the reusable **Connections** tab (shown by name in the UI),
   which supplies the host, port, remote user and one of three auth methods:
-  **existing key file**, **managed key**, or **password**. A pair's right-hand
+  **key file on disk**, **managed key**, or **password**. A pair's right-hand
   box is an **absolute filesystem path on the remote host**.
 - **rsync daemon (`rsyncd`)** — rsync's own wire protocol, spoken directly to a
   TCP port (**873** unless the daemon was configured otherwise). This is the
@@ -122,7 +122,7 @@ on both ends; **Preserve times** on; and a target marker with expected content
   **Status** and **History** tabs.
 - Jobs CRUD + Global Settings (config persisted to `config.json`).
 - A **Connections** tab (see [Credentials](#credentials)) in two flavours:
-  **SSH** connections with three auth methods — **existing key file** (default),
+  **SSH** connections with three auth methods — **key file on disk** (default),
   a **managed key** (from the Credentials tab), and **password** (no extra
   packages needed) — plus **Discover host key** and selectable strict-host-key
   modes; and **rsync daemon** connections with a port, a module user and an
@@ -236,7 +236,7 @@ connection or credentials.) Two tabs cover this:
 
 An **SSH** connection picks one of three **auth methods**:
 
-- **Existing key file** (the default) — point the connection at a key already on
+- **Key file on disk** (the default) — point the connection at a key already on
   the server, e.g. `/root/.ssh/id_ed25519`. Nothing is uploaded or copied into
   the plugin's store; it uses the file in place.
 - **Managed key** — use a key from the plugin's **Keys** keychain (generated or

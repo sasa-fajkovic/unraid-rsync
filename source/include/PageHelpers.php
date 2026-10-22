@@ -10,13 +10,14 @@ declare(strict_types=1);
  *
  * Kept out of source/pages so it is unit-tested and inside PHPStan's scope; the
  * pages hard-require webGui paths and are neither. Every method returns PLAIN
- * TEXT: callers escape it. Labels are English on purpose - the JS mirrors that
- * repaint these cells after the first poll are English too, so a translated
- * server render would only flash before being overwritten.
+ * TEXT: callers escape it. Labels go through t(), the same i18n() map the
+ * browser gets as UR_I18N, so a translated server render and the JS repaint
+ * after the first poll agree; off the webGui (getStatus, tests) t() is English.
  *
  * Deliberately loads nothing: the Dashboard tile reads STATES on a page that
  * must not pull in Config.php (which pins the process timezone at load).
- * nextRunLabel() needs Cron, which every caller has already loaded.
+ * nextRunLabel() needs Cron, config() Config and running() RunState, which
+ * every caller has already loaded.
  */
 
 final class PageHelpers
@@ -41,6 +42,146 @@ final class PageHelpers
         'PENDING' => ['cls' => 'pending', 'label' => 'Never run'],
     ];
 
+    /**
+     * Every string the pages render from JavaScript, key => English: the
+     * browser gets it translated as UR_I18N (ur_emit_i18n()), window.urI18n
+     * reads it, and t() serves the PHP renderers from the same map. i18n()
+     * adds state.<STATE> and dryRun.<STATE> for every STATES entry. %s / %d
+     * are filled in order.
+     */
+    public const I18N = [
+        'rel.now'             => 'now',
+        'rel.future'          => 'in %s',
+        'rel.past'            => '%s ago',
+        'next.manual'         => 'manual (on demand)',
+        'next.disabled'       => 'disabled',
+        'loading'             => 'Loading…',
+        'saving'              => 'Saving…',
+        'saved'               => 'Saved.',
+        'saveFailed'          => 'Save failed.',
+        'deleted'             => 'Deleted.',
+        'deleteFailed'        => 'Delete failed.',
+        'done'                => 'Done.',
+        'ok'                  => 'OK',
+        'copied'              => 'Copied!',
+        'unexpected'          => 'Unexpected error: %s',
+        'ajax.failed'         => 'Request failed',
+        'ajax.timedOut'       => '%s: timed out (no response in time).',
+        'ajax.network'        => '%s: could not reach the server (network error).',
+        'ajax.nonJson'        => '%s: the server returned a non-JSON response (HTTP %s).',
+        'ajax.http'           => '%s (HTTP %s).',
+        'delete.confirm'      => 'Confirm delete?',
+        'delete.confirmHint'  => '%s Click "Confirm delete?" again to proceed.',
+        'log.unavailable'     => 'Log not available.',
+        'log.notInRam'        => 'Log not available (run logs live in RAM and are cleared on reboot).',
+        'filter.ruleType'     => 'Rule type',
+        'filter.include'      => '+ include',
+        'filter.exclude'      => '- exclude',
+        'filter.placeholder'  => 'pattern, e.g. *.tmp',
+        'filter.pattern'      => 'Pattern',
+        'row.up'              => 'Move up',
+        'row.down'            => 'Move down',
+        'row.remove'          => 'Remove',
+        'preview.none'        => '(no options set)',
+        'preview.failed'      => 'Preview failed',
+        'preview.unreachable' => 'Preview failed: could not reach the server.',
+        'jobs.applyFirst'     => 'Apply changes first.',
+        'jobs.actionFailed'   => 'Action failed.',
+        'jobs.dryStarted'     => 'Dry-run started.',
+        'jobs.runStarted'     => 'Run started.',
+        'jobs.removeNamed'    => 'Remove the job "%s"? It is deleted permanently when you click Apply.',
+        'jobs.removeUnnamed'  => 'Remove this job? It is deleted permanently when you click Apply.',
+        'jobs.otherTransport' => '(other transport)',
+        'jobs.logTitle'       => 'Run log — %s',
+        'jobs.dryRunTag'      => '(dry run)',
+        'jobs.latestTag'      => '(latest)',
+        'cron.at'             => 'at %s',
+        'cron.everyMinute'    => 'every minute',
+        'cron.everyMinutes'   => 'every %s minutes',
+        'cron.minuteOfHour'   => 'at minute %s of every hour',
+        'cron.everyHours'     => 'every %s hours',
+        'cron.minuteHour'     => 'minute %s, hour %s',
+        'cron.onDays'         => 'on %s',
+        'cron.onWeekday'      => 'on weekday %s',
+        'cron.onDay'          => 'on day %s',
+        'cron.onDayOfMonth'   => 'on day-of-month %s',
+        'cron.inMonths'       => 'in %s',
+        'cron.inMonth'        => 'in month %s',
+        'cron.everyDay'       => '%s every day',
+        'dow.0'               => 'Sun',
+        'dow.1'               => 'Mon',
+        'dow.2'               => 'Tue',
+        'dow.3'               => 'Wed',
+        'dow.4'               => 'Thu',
+        'dow.5'               => 'Fri',
+        'dow.6'               => 'Sat',
+        'mon.1'               => 'Jan',
+        'mon.2'               => 'Feb',
+        'mon.3'               => 'Mar',
+        'mon.4'               => 'Apr',
+        'mon.5'               => 'May',
+        'mon.6'               => 'Jun',
+        'mon.7'               => 'Jul',
+        'mon.8'               => 'Aug',
+        'mon.9'               => 'Sep',
+        'mon.10'              => 'Oct',
+        'mon.11'              => 'Nov',
+        'mon.12'              => 'Dec',
+        'conn.deleteWarn'     => 'Delete this saved connection? Jobs that use it will be DISABLED.',
+        'conn.enterHost'      => 'Enter a host first.',
+        'conn.discovering'    => 'Discovering…',
+        'conn.discoveringFor' => 'Discovering host key… (up to %ss)',
+        'conn.finishing'      => 'Finishing up…',
+        'conn.discovered'     => 'Host key discovered ✓',
+        'conn.discoverFailed' => 'Host key discovery failed.',
+        'conn.testing'        => 'Testing…',
+        'conn.testFailed'     => 'Connection test failed.',
+        'cred.copyTitle'      => 'Copy manually: select all and copy',
+        'cred.copyManually'   => 'Copy manually:',
+        'cred.enterName'      => 'Enter a key name first.',
+        'cred.generating'     => 'Generating…',
+        'cred.generated'      => 'Key "%s" generated. Fingerprint: %s',
+        'cred.genFailed'      => 'Key generation failed.',
+        'cred.pasteKey'       => 'Paste a private and/or public key.',
+        'cred.importing'      => 'Importing…',
+        'cred.imported'       => 'Key "%s" imported. Fingerprint: %s',
+        'cred.importFailed'   => 'Key import failed.',
+        'cred.deleteWarn'     => 'Delete key "%s"? Connections that use it must be repointed first.',
+        'status.abort'        => 'Abort',
+        'status.jobsRunning'  => '%d job(s) running.',
+        'status.idle'         => 'Idle',
+        'status.noneRunning'  => 'No jobs are running.',
+        'status.logEmpty'     => 'No log entries yet. The plugin log fills as jobs run; it lives in memory and is cleared on reboot.',
+        'status.abortAsked'   => 'Abort requested.',
+        'status.abortFailed'  => 'Abort failed.',
+        'status.present'      => 'Present',
+        'status.missing'      => 'Missing',
+        'status.noVersion'    => '(version unavailable)',
+        'status.noRsync'      => 'rsync not found.',
+        'hist.dryRun'         => 'Dry run',
+        'hist.real'           => 'Real',
+        'hist.schedule'       => 'Schedule',
+        'hist.manual'         => 'Manual',
+        'hist.snapshot'       => 'Snapshot %s',
+        'hist.noSnapshot'     => 'No snapshot',
+        'hist.committed'      => 'committed: %s',
+        'hist.yes'            => 'yes',
+        'hist.no'             => 'no',
+        'hist.suspect'        => 'SUSPECT',
+        'hist.pruned'         => 'pruned: %s',
+        'hist.noMatch'        => 'No executions match.',
+        'hist.noneOnPage'     => 'No executions on this page.',
+        'hist.exitTitle'      => 'rsync exit %s: %s',
+        'hist.exitParen'      => '(exit %s)',
+        'hist.view'           => 'View',
+        'hist.download'       => 'Download',
+        'hist.pageInfo'       => 'of %s (%s total)',
+        'hist.loadFailed'     => 'Could not load history.',
+        'hist.loadNetwork'    => 'Could not load history (network error).',
+        'hist.logGone'        => 'Log not retained (run logs live in RAM and are cleared on reboot).',
+        'hist.logFailed'      => 'Could not load the log.',
+    ];
+
     /** One label per transport, shared by the Job and Connection selects. */
     public const TRANSPORT_LABELS = [
         'SSH'    => 'SSH (rsync over SSH)',
@@ -55,10 +196,105 @@ final class PageHelpers
         'PASSWORD' => 'Password',
     ];
 
-    /** @return array{cls:string,label:string} */
+    /** @var array<string,string>|null */
+    private static ?array $i18n = null;
+
+    /** @var (Closure(string): string)|null test seam standing in for ur_t_text() */
+    public static ?Closure $translate = null;
+
+    /** @var array<string,mixed>|Throwable|null */
+    private static array|Throwable|null $config = null;
+
+    /** @var array<string,bool> */
+    private static array $running = [];
+
+    /**
+     * Config::load() once per request: all seven tabs render into one
+     * document. A load that threw throws again on every call, so each tab
+     * still shows its own load error.
+     *
+     * @return array<string,mixed>
+     */
+    public static function config(): array
+    {
+        if (self::$config === null) {
+            try {
+                self::$config = Config::load();
+            } catch (Throwable $e) {
+                self::$config = $e;
+            }
+        }
+        if (self::$config instanceof Throwable) {
+            throw self::$config;
+        }
+        return self::$config;
+    }
+
+    /** RunState::isRunning once per job per request (a first call may reap a dead runner). */
+    public static function running(string $jobId): bool
+    {
+        return self::$running[$jobId] ??= RunState::isRunning($jobId);
+    }
+
+    /** Forget the request-scoped config and running state (tests render several requests in one process). */
+    public static function resetRequest(): void
+    {
+        self::$config  = null;
+        self::$running = [];
+    }
+
+    /**
+     * I18N plus state.<STATE> (the badge label) and dryRun.<STATE> ("Dry-run
+     * OK" for SUCCESS, else "Dry-run <label>") for every STATES entry.
+     *
+     * @return array<string,string>
+     */
+    public static function i18n(): array
+    {
+        if (self::$i18n === null) {
+            self::$i18n = self::I18N;
+            foreach (self::STATES as $key => $entry) {
+                self::$i18n['state.' . $key]  = $entry['label'];
+                self::$i18n['dryRun.' . $key] = 'Dry-run ' . ($key === 'SUCCESS' ? 'OK' : strtolower($entry['label']));
+            }
+        }
+        return self::$i18n;
+    }
+
+    /**
+     * An i18n() entry, %s / %d filled in order: translated through ur_t_text()
+     * where the page partial is loaded (the webGui), English elsewhere.
+     * ur_emit_i18n() builds UR_I18N from this too, so both sides agree.
+     */
+    public static function t(string $key, string|int ...$args): string
+    {
+        $text = self::i18n()[$key] ?? $key;
+        if (self::$translate !== null) {
+            $text = (self::$translate)($text);
+        } elseif (function_exists('ur_t_text')) {
+            $text = ur_t_text($text);
+        }
+        if ($args === []) {
+            return $text;
+        }
+        return (string) preg_replace_callback('/%[sd]/', static function (array $m) use (&$args): string {
+            return $args === [] ? $m[0] : (string) array_shift($args);
+        }, $text);
+    }
+
+    /**
+     * STATES' class and translated label (t('state.<STATE>')); an unknown
+     * state is PENDING.
+     *
+     * @return array{cls:string,label:string}
+     */
     public static function state(string $state): array
     {
-        return self::STATES[strtoupper($state)] ?? self::STATES['PENDING'];
+        $key = strtoupper($state);
+        if (!isset(self::STATES[$key])) {
+            $key = 'PENDING';
+        }
+        return ['cls' => self::STATES[$key]['cls'], 'label' => self::t('state.' . $key)];
     }
 
     /**
@@ -88,7 +324,7 @@ final class PageHelpers
         $delta = $epoch - $now;
         $abs   = abs($delta);
         if ($abs < 1) {
-            return 'now';
+            return self::t('rel.now');
         }
         $units = [['d', 86400], ['h', 3600], ['m', 60], ['s', 1]];
         $text  = '';
@@ -106,7 +342,7 @@ final class PageHelpers
             }
             break;
         }
-        return $delta > 0 ? 'in ' . $text : $text . ' ago';
+        return self::t($delta > 0 ? 'rel.future' : 'rel.past', $text);
     }
 
     /**
@@ -120,10 +356,10 @@ final class PageHelpers
     public static function nextRunLabel(array $job, int $now): string
     {
         if (!empty($job['manualOnly'])) {
-            return 'manual (on demand)';
+            return self::t('next.manual');
         }
         if (empty($job['enabled'])) {
-            return 'disabled';
+            return self::t('next.disabled');
         }
         $schedule = trim((string) ($job['schedule'] ?? ''));
         $next = ($schedule === '') ? null : Cron::nextRun($schedule, $now);
@@ -173,12 +409,14 @@ final class PageHelpers
     }
 
     /**
-     * The last execution, when it was a dry run: {label, finishedAt}, label
-     * "Dry-run OK" for SUCCESS, else "Dry-run <state label>" ("Dry-run
-     * failed"). null otherwise. getStatus sends it as lastDryRun.
+     * The last execution, when it was a dry run: {label, finishedAt, state},
+     * label t('dryRun.<state>'): "Dry-run OK" for SUCCESS, else "Dry-run
+     * <state label>" ("Dry-run failed"); state is the STATES key (an unknown
+     * one is PENDING), which the JS mirror translates by. null otherwise.
+     * getStatus sends it as lastDryRun.
      *
      * @param array<string,mixed>|null $summary
-     * @return array{label:string,finishedAt:string}|null
+     * @return array{label:string,finishedAt:string,state:string}|null
      */
     public static function lastDryRun(?array $summary): ?array
     {
@@ -186,9 +424,13 @@ final class PageHelpers
             return null;
         }
         $state = strtoupper((string) ($summary['state'] ?? ''));
+        if (!isset(self::STATES[$state])) {
+            $state = 'PENDING';
+        }
         return [
-            'label'      => 'Dry-run ' . ($state === 'SUCCESS' ? 'OK' : strtolower(self::state($state)['label'])),
+            'label'      => self::t('dryRun.' . $state),
             'finishedAt' => (string) ($summary['finishedAt'] ?? ''),
+            'state'      => $state,
         ];
     }
 
@@ -196,7 +438,7 @@ final class PageHelpers
      * The neutral second line under Last run: "Dry-run OK · <time>", or ''.
      * Mirrored by window.urUtil.dryRunLine.
      *
-     * @param array{label:string,finishedAt:string}|null $dry lastDryRun()
+     * @param array{label:string,finishedAt:string,state?:string}|null $dry lastDryRun()
      */
     public static function dryRunLine(?array $dry, int $now): string
     {

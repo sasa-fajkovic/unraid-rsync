@@ -35,14 +35,14 @@ $initialRunning = [];
 // the empty-state hint — never a false "no jobs" when some exist).
 $jobCount = 0;
 try {
-    $config = Config::load();
+    $config = PageHelpers::config();
     foreach (($config['jobs'] ?? []) as $job) {
         if (!is_array($job)) {
             continue;
         }
         $jobCount++;
         $jid = (string) ($job['id'] ?? '');
-        if ($jid !== '' && RunState::isRunning($jid)) {
+        if ($jid !== '' && PageHelpers::running($jid)) {
             $initialRunning[$jid] = (string) ($job['name'] ?? $jid);
         }
     }
@@ -202,7 +202,7 @@ ur_emit_status_poller();
         btn.type = 'button';
         btn.className = 'ur-status-abort';
         btn.setAttribute('data-jobid', jobId);
-        btn.textContent = 'Abort';
+        btn.textContent = urI18n('status.abort', 'Abort');
         li.appendChild(name);
         li.appendChild(document.createTextNode(' '));
         li.appendChild(b);
@@ -216,13 +216,13 @@ ur_emit_status_poller();
       if (running.length) {
         badge.classList.remove('ur-badge-idle');
         window.urBadge.apply(badge, 'RUNNING');
-        text.textContent = running.length + ' job(s) running.';
+        text.textContent = urI18n('status.jobsRunning', '%d job(s) running.', running.length);
       } else {
         /* Idle is not a run state, so it is not in the badge vocabulary. */
         window.urBadge.CLASSES.forEach(function (c) { badge.classList.remove(c); });
         badge.classList.add('ur-badge-idle');
-        badge.textContent = 'Idle';
-        text.textContent = 'No jobs are running.';
+        badge.textContent = urI18n('status.idle', 'Idle');
+        text.textContent = urI18n('status.noneRunning', 'No jobs are running.');
       }
     }
   }
@@ -235,7 +235,7 @@ ur_emit_status_poller();
    * and only the bytes after `offset`, which it appends. */
   var pre  = document.getElementById('ur-plugin-log-pre');
   var jump = document.getElementById('ur-log-jump');
-  var EMPTY_TEXT = 'No log entries yet. The plugin log fills as jobs run; it lives in memory and is cleared on reboot.';
+  var EMPTY_TEXT = urI18n('status.logEmpty', 'No log entries yet. The plugin log fills as jobs run; it lives in memory and is cleared on reboot.');
   var MAX_CHARS = 262144;
   var offset = 0, wantReset = true, inflight = false, lastFetch = 0, wasVisible = false;
   /* Escaped HTML waiting to be written (null = nothing), and whether it
@@ -394,9 +394,9 @@ ur_emit_status_poller();
         var ok = res.ok && res.body && res.body.ok;
         if (result) {
           if (ok) {
-            window.urAjax.show(result, true, res.body.message || 'Abort requested.');
+            window.urAjax.show(result, true, res.body.message || urI18n('status.abortAsked', 'Abort requested.'));
           } else {
-            window.urAjax.show(result, false, window.urAjax.errText(res, 'Abort failed.'));
+            window.urAjax.show(result, false, window.urAjax.errText(res, urI18n('status.abortFailed', 'Abort failed.')));
           }
         }
         /* On an application-level failure the abort didn't take, so re-enable the
@@ -419,17 +419,17 @@ ur_emit_status_poller();
         if (pathEl && body.path) { pathEl.textContent = body.path; }   // textContent: no XSS
         if (badge) {
           badge.className = 'ur-badge ' + (body.available ? 'ur-badge-success' : 'ur-badge-failed');
-          badge.textContent = body.available ? 'Present' : 'Missing';
+          badge.textContent = body.available ? urI18n('status.present', 'Present') : urI18n('status.missing', 'Missing');
         }
         if (verEl) {
           /* textContent only - never innerHTML - so the version/message string
            * (from the trusted local binary, but escaped defensively) is inert. */
           if (body.available) {
             verEl.className = '';
-            verEl.textContent = body.version || '(version unavailable)';
+            verEl.textContent = body.version || urI18n('status.noVersion', '(version unavailable)');
           } else {
             verEl.className = 'ur-err';
-            verEl.textContent = body.message || 'rsync not found.';
+            verEl.textContent = body.message || urI18n('status.noRsync', 'rsync not found.');
           }
         }
       })

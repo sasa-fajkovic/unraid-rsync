@@ -31,7 +31,7 @@ $handlerUrl = PageHelpers::HANDLER_URL;
 // empty (the empty state then points the user at the Jobs tab).
 $jobs = [];
 try {
-    $config = Config::load();
+    $config = PageHelpers::config();
     foreach (($config['jobs'] ?? []) as $job) {
         if (!is_array($job)) {
             continue;
@@ -237,8 +237,8 @@ ur_emit_ajax_helpers();  /* window.urAjax.show, for the inline download error */
     return e ? window.urFmtLocal(e, true) : iso;
   }
 
-  function typeLabel(r) { return r.dryRun ? 'Dry run' : 'Real'; }
-  function triggerLabel(r) { return r.trigger === 'schedule' ? 'Schedule' : 'Manual'; }
+  function typeLabel(r) { return r.dryRun ? urI18n('hist.dryRun', 'Dry run') : urI18n('hist.real', 'Real'); }
+  function triggerLabel(r) { return r.trigger === 'schedule' ? urI18n('hist.schedule', 'Schedule') : urI18n('hist.manual', 'Manual'); }
   /* A still-running row has no final exit code yet; a skipped one never ran. */
   function hasExit(r) { return r.state !== 'RUNNING' && r.state !== 'SKIPPED'; }
 
@@ -248,11 +248,11 @@ ur_emit_ajax_helpers();  /* window.urAjax.show, for the inline download error */
     var d = document.createElement('div');
     d.className = 'ur-hist-snap';
     var m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2})(\d{2})(\d{2})Z$/.exec(r.snapshot || '');
-    var bits = [m ? 'Snapshot ' + window.urFmtLocal(Date.UTC(+m[1], m[2] - 1, +m[3], +m[4], +m[5], +m[6]) / 1000, true) : 'No snapshot'];
+    var bits = [m ? urI18n('hist.snapshot', 'Snapshot %s', window.urFmtLocal(Date.UTC(+m[1], m[2] - 1, +m[3], +m[4], +m[5], +m[6]) / 1000, true)) : urI18n('hist.noSnapshot', 'No snapshot')];
     if (m) { d.title = r.snapshot; }
-    bits.push('committed: ' + (r.committed ? 'yes' : 'no'));
-    if (r.suspect) { bits.push('SUSPECT'); }
-    bits.push('pruned: ' + (parseInt(r.pruned, 10) || 0));
+    bits.push(urI18n('hist.committed', 'committed: %s', r.committed ? urI18n('hist.yes', 'yes') : urI18n('hist.no', 'no')));
+    if (r.suspect) { bits.push(urI18n('hist.suspect', 'SUSPECT')); }
+    bits.push(urI18n('hist.pruned', 'pruned: %s', parseInt(r.pruned, 10) || 0));
     d.textContent = bits.join(' · ');
     return d;
   }
@@ -267,7 +267,7 @@ ur_emit_ajax_helpers();  /* window.urAjax.show, for the inline download error */
   function render(runs) {
     rowsEl.innerHTML = '';
     if (!runs || !runs.length) {
-      messageRow(total === 0 ? 'No executions match.' : 'No executions on this page.');
+      messageRow(total === 0 ? urI18n('hist.noMatch', 'No executions match.') : urI18n('hist.noneOnPage', 'No executions on this page.'));
       return;
     }
     runs.forEach(function (r) {
@@ -308,7 +308,7 @@ ur_emit_ajax_helpers();  /* window.urAjax.show, for the inline download error */
       tr.appendChild(stTd);
 
       var exitTd = td(hasExit(r) ? String(r.exitCode) : '—', 'ur-hist-exit');
-      if (hasExit(r) && EXIT_MEANINGS[r.exitCode]) { exitTd.title = 'rsync exit ' + r.exitCode + ': ' + EXIT_MEANINGS[r.exitCode]; }
+      if (hasExit(r) && EXIT_MEANINGS[r.exitCode]) { exitTd.title = urI18n('hist.exitTitle', 'rsync exit %s: %s', r.exitCode, EXIT_MEANINGS[r.exitCode]); }
       tr.appendChild(exitTd);
       tr.appendChild(td(r.state === 'RUNNING' ? '—' : window.urUtil.formatDuration(r.durationSec)));
 
@@ -318,13 +318,13 @@ ur_emit_ajax_helpers();  /* window.urAjax.show, for the inline download error */
         var btn = document.createElement('button');
         btn.type = 'button';
         btn.className = 'ur-btn ur-btn-plain ur-btn-sm';
-        btn.textContent = 'View';
+        btn.textContent = urI18n('hist.view', 'View');
         btn.addEventListener('click', function () { openLog(r); });
         logTd.appendChild(btn);
 
         var dl = document.createElement('a');
         dl.className = 'ur-btn ur-btn-plain ur-btn-sm ur-hist-dl';
-        dl.textContent = 'Download';
+        dl.textContent = urI18n('hist.download', 'Download');
         dl.setAttribute('download', '');
         dl.href = logHref('downloadJobLog', r);
         logTd.appendChild(dl);
@@ -342,7 +342,7 @@ ur_emit_ajax_helpers();  /* window.urAjax.show, for the inline download error */
   function updatePager() {
     pageNo.value = Math.floor(offset / PAGE_SIZE) + 1;
     pageNo.max = pages();
-    pageInfo.textContent = 'of ' + pages() + ' (' + total + ' total)';
+    pageInfo.textContent = urI18n('hist.pageInfo', 'of %s (%s total)', pages(), total);
     prevBtn.disabled = (offset <= 0);
     nextBtn.disabled = (offset + PAGE_SIZE >= total);
   }
@@ -370,7 +370,7 @@ ur_emit_ajax_helpers();  /* window.urAjax.show, for the inline download error */
         if (!body || !body.ok) {
           // Reset paging so the pager can't stay stale/enabled over an error.
           total = 0; offset = 0;
-          messageRow((body && body.error) || 'Could not load history.');
+          messageRow((body && body.error) || urI18n('hist.loadFailed', 'Could not load history.'));
           updatePager();
           return;
         }
@@ -381,7 +381,7 @@ ur_emit_ajax_helpers();  /* window.urAjax.show, for the inline download error */
       })
       .catch(function () {
         total = 0; offset = 0;
-        messageRow('Could not load history (network error).');
+        messageRow(urI18n('hist.loadNetwork', 'Could not load history (network error).'));
         updatePager();
       });
   }
@@ -425,10 +425,10 @@ ur_emit_ajax_helpers();  /* window.urAjax.show, for the inline download error */
     window.urBadge.apply(b, r.state);
     modalTit.appendChild(b);
     modalTit.appendChild(document.createTextNode(
-      (hasExit(r) ? ' (exit ' + r.exitCode + ')' : '') + ' · ' + typeLabel(r) + ' · ' + fmtWhen(r.startedAt)
+      (hasExit(r) ? ' ' + urI18n('hist.exitParen', '(exit %s)', r.exitCode) : '') + ' · ' + typeLabel(r) + ' · ' + fmtWhen(r.startedAt)
     ));
     modalTit.title = r.logRef;
-    modalPre.textContent = 'Loading…';
+    modalPre.textContent = urI18n('loading', 'Loading…');
     truncEl.hidden = true;
     modal.classList.add('ur-open');
     modal.setAttribute('aria-hidden', 'false');
@@ -447,10 +447,10 @@ ur_emit_ajax_helpers();  /* window.urAjax.show, for the inline download error */
           truncEl.hidden = !body.truncated;
         } else {
           /* The record persists across reboots but its tmpfs log does not. */
-          modalPre.textContent = 'Log not retained (run logs live in RAM and are cleared on reboot).';
+          modalPre.textContent = urI18n('hist.logGone', 'Log not retained (run logs live in RAM and are cleared on reboot).');
         }
       })
-      .catch(function () { modalPre.textContent = 'Could not load the log.'; });
+      .catch(function () { modalPre.textContent = urI18n('hist.logFailed', 'Could not load the log.'); });
   }
   function closeLog() {
     modal.classList.remove('ur-open');

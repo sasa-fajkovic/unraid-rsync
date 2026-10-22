@@ -64,7 +64,9 @@ on, forked from, or derived from any other plugin.
   to the ONE `getStatus` poller (`window.urStatus`, `ur_emit_status_poller()`;
   2 s while a job runs, 15 s idle, paused while the document is hidden), and
   shared CSS/JS is emitted once by the `ur_emit_*` helpers. Never add a per-tab
-  polling loop or a per-tab copy of a shared helper.
+  polling loop or a per-tab copy of a shared helper. Page bodies read the config
+  and a job's running state through `PageHelpers::config()` / `running()`,
+  memoised for the request, never `Config::load()` / `RunState::isRunning()`.
 - **Dashboard widget:** `source/UR.Dashboard.page` uses `Menu="Dashboard"` (NOT
   the `UnraidRsync` xmenu) and sets `$mytiles['unraid.rsync']['column1']` to a
   self-contained tile string (markup + scoped CSS + a `getStatus` poller) that
@@ -358,7 +360,8 @@ on, forked from, or derived from any other plugin.
   dry run shows as a neutral second line (`PageHelpers::lastDryRun` /
   `dryRunLine`, "Dry-run OK · <time>", "Dry-run failed · …", JS mirror
   `window.urUtil.dryRunLine`, a muted suffix on the Dashboard). `getStatus`
-  keeps `lastRun` (the top level) and adds `lastReal` and `lastDryRun`.
+  keeps `lastRun` (the top level) and adds `lastReal` and `lastDryRun`
+  (`{label, finishedAt, state}`; the JS translates by `state`).
   `writeSummary` is a load-modify-save under `runs/<jobid>.summary.lock`.
   A runner that died (`reportCrashed`) writes state `CRASHED` (summary only;
   its History record stays `FAILED`/`crashed`) and a scheduled hard failure
@@ -464,7 +467,13 @@ on, forked from, or derived from any other plugin.
   **`_()` and `ur_t()` return HTML, not text**: Unraid's `_()` turns `'` into
   `&apos;` and `*x*` into `<i>x</i>`, so `ur_h(ur_t(...))` printed a literal
   `&apos;`. Emit `_()` output raw; anything that must be escaped (attributes, JS,
-  a mix with user data) takes `ur_t_text()` and then `ur_h()`. Captured run output is also **redacted** of
+  a mix with user data) takes `ur_t_text()` and then `ur_h()`. **A string a
+  script renders goes through `urI18n('key', 'English', ...args)`**, never a bare
+  literal: the key lives in `PageHelpers::I18N` (`i18n()` adds `state.*` /
+  `dryRun.*` from `STATES`), `ur_emit_i18n()` sends it once as `UR_I18N`, and the
+  PHP renderers read the same entries through `PageHelpers::t()`, so on a
+  translated webGui the first poll no longer repaints labels in English.
+  `OptionsFormHelpTest` checks every call site against the map. Captured run output is also **redacted** of
   per-run tmpfs secret paths and **size-capped** before it is written
   (`Logger::setRedaction` / `Logger::sink` / `UR_MAX_RUN_LOG_BYTES`).
 - **CSRF**: every state-changing POST verifies the webGui `csrf_token` via

@@ -39,7 +39,7 @@
 
 require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Config.php';
 require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Credentials.php';
-require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Ssh.php';
+require_once '/usr/local/emhttp/plugins/unraid.rsync/include/KeyTools.php';
 require_once '/usr/local/emhttp/plugins/unraid.rsync/pages/_options_form.php'; // ur_h / ur_t
 
 $csrf = ur_render_csrf_token();
@@ -474,17 +474,17 @@ ur_emit_page_assets();
         // Two-step inline confirm (no popup).
         var connsResult = document.getElementById('ur-conns-result');
         window.urAjax.armOrConfirmDelete(t, {
-          warning: 'Delete this saved connection? Jobs that use it will be DISABLED.',
+          warning: urI18n('conn.deleteWarn', 'Delete this saved connection? Jobs that use it will be DISABLED.'),
           resultEl: connsResult,
           run: function () {
             window.urAjax.postForm(HANDLER, { action: 'deleteConnection', id: savedId }, CSRF).then(function (res) {
               if (res.ok && res.body && res.body.ok) {
-                window.urAjax.show(connsResult, true, res.body.message || 'Deleted.');
+                window.urAjax.show(connsResult, true, res.body.message || urI18n('deleted', 'Deleted.'));
                 window.urUtil.reloadSoon(false);
               } else {
-                window.urAjax.show(connsResult, false, window.urAjax.errText(res, 'Delete failed.'));
+                window.urAjax.show(connsResult, false, window.urAjax.errText(res, urI18n('deleteFailed', 'Delete failed.')));
               }
-            }).catch(function (e) { window.urAjax.show(connsResult, false, 'Unexpected error: ' + (e && e.message ? e.message : e)); });
+            }).catch(function (e) { window.urAjax.show(connsResult, false, urI18n('unexpected', 'Unexpected error: %s', e && e.message ? e.message : e)); });
           }
         });
       } else if (card.parentNode) {
@@ -648,7 +648,7 @@ ur_emit_page_assets();
    * + up to ~1s for SIGKILL ≈ 33s) so that, whenever possible, the user gets the
    * server's structured timeout (504) message rather than a generic client-side
    * abort. */
-  var DISCOVER_MAX_SECONDS = 30;          // mirrors KeyTools::DISCOVER_TIMEOUT_MAX
+  var DISCOVER_MAX_SECONDS = <?=ur_js(KeyTools::DISCOVER_TIMEOUT_MAX)?>;
   var DISCOVER_CLIENT_ABORT_MS = 35000;   // > server worst-case (~33s) so the 504 wins
   var DISCOVER_SUCCESS_HIDE_MS = 2000;    // keep the green "done" state briefly, then hide
   var DISCOVER_FAIL_HIDE_MS = 6000;       // keep the red fail+reason longer to read
@@ -686,7 +686,7 @@ ur_emit_page_assets();
         prog.style.display = 'flex';
         prog.classList.add('is-fail');
         if (fill) { fill.style.width = '100%'; }
-        if (label) { label.textContent = 'Enter a host first.'; }
+        if (label) { label.textContent = urI18n('conn.enterHost', 'Enter a host first.'); }
         prog._urHideTimer = setTimeout(function () {
           prog.style.display = 'none';
           prog.classList.remove('is-fail');
@@ -697,7 +697,7 @@ ur_emit_page_assets();
     }
 
     var old = btn.textContent;
-    btn.disabled = true; btn.textContent = 'Discovering…';
+    btn.disabled = true; btn.textContent = urI18n('conn.discovering', 'Discovering…');
     if (prog) { prog.style.display = 'flex'; }
 
     /* A 100ms ticker advances the bar/countdown toward the 30s cap. It does NOT
@@ -711,8 +711,8 @@ ur_emit_page_assets();
       if (fill)  { fill.style.width = pct.toFixed(1) + '%'; }
       if (label) {
         label.textContent = remaining > 0
-          ? ('Discovering host key… (up to ' + remaining + 's)')
-          : 'Finishing up…';
+          ? urI18n('conn.discoveringFor', 'Discovering host key… (up to %ss)', remaining)
+          : urI18n('conn.finishing', 'Finishing up…');
       }
     }, 100);
 
@@ -729,7 +729,7 @@ ur_emit_page_assets();
         prog.classList.remove('is-fail');
         prog.classList.add('is-success');
         if (fill) { fill.style.width = '100%'; }
-        if (label) { label.textContent = 'Host key discovered ✓'; }
+        if (label) { label.textContent = urI18n('conn.discovered', 'Host key discovered ✓'); }
         prog._urHideTimer = setTimeout(function () {
           prog.style.display = 'none';
           prog.classList.remove('is-success');
@@ -769,10 +769,10 @@ ur_emit_page_assets();
         if (clr) { clr.checked = false; }
         finishSuccess();
       } else {
-        finishFail(window.urAjax.errText(res, 'Host key discovery failed.'));
+        finishFail(window.urAjax.errText(res, urI18n('conn.discoverFailed', 'Host key discovery failed.')));
       }
     }).catch(function (e) {
-      finishFail('Unexpected error: ' + (e && e.message ? e.message : e));
+      finishFail(urI18n('unexpected', 'Unexpected error: %s', e && e.message ? e.message : e));
     });
   }
 
@@ -781,26 +781,26 @@ ur_emit_page_assets();
     var connId = btn.getAttribute('data-conn-id');
     var card = btn.closest ? btn.closest('.ur-conn-card') : null;
     var resultEl = card ? card.querySelector('.ur-test-result') : null;
-    if (resultEl) { resultEl.className = 'ur-test-result'; resultEl.textContent = 'Testing…'; }
+    if (resultEl) { resultEl.className = 'ur-test-result'; resultEl.textContent = urI18n('conn.testing', 'Testing…'); }
     window.urAjax.postForm(HANDLER, { action: 'testConnection', id: connId }, CSRF).then(function (res) {
       if (!resultEl) { return; }
       var b = res.body || {};
       var ok = res.ok && b.ok;
       resultEl.className = 'ur-test-result ' + (ok ? 'ur-ok' : 'ur-err');
       if (ok) {
-        resultEl.textContent = b.message || 'OK';
+        resultEl.textContent = b.message || urI18n('ok', 'OK');
       } else if (b.message) {
         // App-level failure with a structured message (auth/hostkey/etc).
         resultEl.textContent = b.message + (b.reason ? ' [' + b.reason + ']' : '');
       } else {
         // Transport-level failure (non-JSON / non-2xx / network) - surface the
         // status so the user isn't left guessing.
-        resultEl.textContent = window.urAjax.errText(res, 'Connection test failed.');
+        resultEl.textContent = window.urAjax.errText(res, urI18n('conn.testFailed', 'Connection test failed.'));
       }
     }).catch(function (e) {
       if (resultEl) {
         resultEl.className = 'ur-test-result ur-err';
-        resultEl.textContent = 'Unexpected error: ' + (e && e.message ? e.message : e);
+        resultEl.textContent = urI18n('unexpected', 'Unexpected error: %s', e && e.message ? e.message : e);
       }
     });
   }
@@ -844,18 +844,18 @@ ur_emit_page_assets();
     connsForm.addEventListener('submit', function (ev) {
       ev.preventDefault();
       var result = document.getElementById('ur-conns-result');
-      window.urAjax.show(result, true, 'Saving…');
+      window.urAjax.show(result, true, urI18n('saving', 'Saving…'));
       window.urAjax.postFormElement(connsForm).then(function (res) {
         if (res.ok && res.body && res.body.ok) {
           var hasWarnings = res.body.warnings && res.body.warnings.length;
-          var msg = res.body.message || 'Saved.';
+          var msg = res.body.message || urI18n('saved', 'Saved.');
           if (hasWarnings) {
             msg += ' (' + res.body.warnings.join('; ') + ')';
           }
           window.urAjax.show(result, true, msg);
           window.urUtil.reloadSoon(!!hasWarnings);
         } else {
-          window.urAjax.show(result, false, window.urAjax.errText(res, 'Save failed.'));
+          window.urAjax.show(result, false, window.urAjax.errText(res, urI18n('saveFailed', 'Save failed.')));
         }
       });
     });

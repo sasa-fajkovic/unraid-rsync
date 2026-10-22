@@ -22,7 +22,7 @@ require_once '/usr/local/emhttp/plugins/unraid.rsync/pages/_options_form.php';
 
 $jobs = [];
 try {
-    $config = Config::load();
+    $config = PageHelpers::config();
     foreach (($config['jobs'] ?? []) as $job) {
         if (!is_array($job)) {
             continue;
@@ -70,7 +70,7 @@ ur_emit_page_assets();  /* shared CSS (.ur-empty-state) + window.urUtil */
         $jid      = (string) $jid;
         $summary  = Runner::readSummary($jid);
         $lastReal = Runner::lastRealFor($jid, $summary);
-        $state    = PageHelpers::deriveState(RunState::isRunning($jid), $lastReal);
+        $state    = PageHelpers::deriveState(PageHelpers::running($jid), $lastReal);
         $dryLine  = PageHelpers::dryRunLine(PageHelpers::lastDryRun($summary), $urNow);
         $snapLast = Config::normalizeSnapshot($job['snapshot'] ?? null) !== null ? Snapshot::lastSnapshot($summary) : null;
     ?>

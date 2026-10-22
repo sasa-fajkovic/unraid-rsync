@@ -69,7 +69,11 @@ if (!function_exists('ur_push_secrets_dir_override')) {
      */
     function ur_push_secrets_dir_override(): void
     {
-        $dir = Config::secretsDir();
+        try {
+            $dir = Config::sanitizeSecretsDir(PageHelpers::config()['global']['secretsDir'] ?? '');
+        } catch (Throwable $e) {
+            $dir = '';
+        }
         Credentials::$secretsDirOverride = ($dir !== '') ? $dir : null;
     }
 }
@@ -347,64 +351,6 @@ if (!function_exists('ur_render_rsync_options')) {
      */
     function ur_render_rsync_options(array $opts, string $prefix, string $idBase, ?string $transport = null): void
     {
-        // The options -a IMPLIES, rendered as a sub-group under the Archive box.
-        // They are ordinary standalone options too (a plain -r -t copy uses two
-        // of them), but grouping them is the only way the UI can be honest about
-        // -a: ticking Archive turns every one of these on, and unticking one
-        // while Archive is on emits the matching --no-* to turn it back off.
-        // Keys and order mirror Rsync::ARCHIVE_IMPLIED / Config::ARCHIVE_IMPLIED_KEYS.
-        $archiveImplied = [
-            'recursive'      => ['Recurse into directories', '-r'],
-            'symlinks'       => ['Copy symlinks as symlinks', '-l'],
-            'perms'          => ['Preserve permissions', '-p'],
-            'times'          => ['Preserve times', '-t'],
-            'owner'          => ['Preserve owner', '-o'],
-            'group'          => ['Preserve group', '-g'],
-            'devices'        => ['Preserve devices and special files', '-D'],
-        ];
-        // key => [label, flag] for the remaining boolean checkboxes, in display
-        // order. Nothing here is affected by -a.
-        $bools = [
-            'compress'       => ['Compress', '-z'],
-            'humanReadable'  => ['Human-readable', '-h'],
-            'omitDirTimes'   => ['Omit directory times', '-O'],
-            'omitLinkTimes'  => ['Omit symlink times', '-J'],
-            'xattrs'         => ['Preserve extended attributes', '-X'],
-            'acls'           => ['Preserve ACLs', '-A'],
-            'hardlinks'      => ['Preserve hard links', '-H'],
-            'sparse'         => ['Handle sparse files efficiently', '-S'],
-            'numericIds'     => ['Use numeric user/group IDs', '--numeric-ids'],
-            'partial'        => ['Keep partially transferred files', '--partial'],
-            'inplace'        => ['Update files in place', '--inplace'],
-            'checksum'       => ['Compare by checksum', '-c'],
-            'update'         => ['Skip files newer on receiver', '-u'],
-            'wholeFile'      => ['Copy whole files (no delta)', '-W'],
-            'sizeOnly'       => ['Skip files matching size', '--size-only'],
-            'ignoreExisting' => ['Skip files that already exist', '--ignore-existing'],
-            'mkpath'         => ['Create destination path if missing', '--mkpath'],
-        ];
-        // Destructive booleans rendered separately with a warning.
-        $destructive = [
-            'delete'         => ['Delete extraneous files on destination', '--delete'],
-            'deleteExcluded' => ['Also delete excluded files on destination', '--delete-excluded'],
-        ];
-        // key => [label, flag] for scalar value inputs.
-        $scalars = [
-            'maxDelete'     => ['Max delete', '--max-delete='],
-            'bwlimit'       => ['Bandwidth limit (KB/s)', '--bwlimit='],
-            'timeout'       => ['I/O timeout (s)', '--timeout='],
-            'contimeout'    => ['Connect timeout (s)', '--contimeout='],
-            'maxSize'       => ['Max file size', '--max-size='],
-            'minSize'       => ['Min file size', '--min-size='],
-            'chmod'         => ['Chmod', '--chmod='],
-            'tempDir'       => ['Temp dir', '--temp-dir='],
-            'backupDir'     => ['Backup dir (enables --backup)', '--backup-dir='],
-            'compressLevel' => ['Compress level', '--compress-level='],
-            'modifyWindow'  => ['Modify window (s)', '--modify-window='],
-            'remoteRsyncPath' => ['Remote rsync path (SSH jobs)', '--rsync-path='],
-            'protocol'      => ['Protocol version', '--protocol='],
-        ];
-
         // Emit the help CSS + JS exactly once per page, even when several option
         // blocks render (Global Settings has one; the Jobs tab has one per card
         // plus the hidden template). Guarding here keeps the help UI self-contained
@@ -427,19 +373,14 @@ if (!function_exists('ur_render_rsync_options')) {
             'Limits'   => ['bwlimit', 'timeout', 'contimeout', 'maxSize', 'minSize', 'modifyWindow'],
             'Advanced' => ['chmod', 'tempDir', 'remoteRsyncPath', 'protocol'],
         ];
-        $boolRows = $bools + $destructive;
         foreach ($groups as $legend => $keys) {
             echo '<fieldset class="ur-opt-group"><legend>' . ur_h(ur_t_text($legend)) . '</legend>';
             if ($legend === 'Preserve') {
-                ur_render_archive_group($prefix, $idBase, $opts, $archiveImplied);
+                ur_render_archive_group($prefix, $idBase, $opts);
             }
             echo '<dl>';
             foreach ($keys as $key) {
-                if (isset($boolRows[$key])) {
-                    ur_render_bool_row($prefix, $idBase, $key, $boolRows[$key][0], $boolRows[$key][1], !empty($opts[$key]));
-                } else {
-                    ur_render_scalar_row($prefix, $idBase, $key, $scalars[$key][0], $scalars[$key][1], isset($opts[$key]) ? (string) $opts[$key] : '');
-                }
+                ur_render_option_row($prefix, $idBase, $key, $opts);
             }
             echo '</dl>';
             if ($legend === 'Transfer') {
@@ -484,21 +425,93 @@ if (!function_exists('ur_render_rsync_options')) {
     }
 }
 
+if (!function_exists('ur_option_labels')) {
+    /**
+     * The form label of every whitelisted option. The flag shown beside it is
+     * Rsync::BOOL_FLAGS / SCALAR_FLAGS; the row order is the groups in
+     * ur_render_rsync_options() plus Rsync::ARCHIVE_IMPLIED.
+     *
+     * @return array<string,string>
+     */
+    function ur_option_labels(): array
+    {
+        return [
+            'archive'         => 'Archive',
+            'recursive'       => 'Recurse into directories',
+            'symlinks'        => 'Copy symlinks as symlinks',
+            'perms'           => 'Preserve permissions',
+            'times'           => 'Preserve times',
+            'owner'           => 'Preserve owner',
+            'group'           => 'Preserve group',
+            'devices'         => 'Preserve devices and special files',
+            'compress'        => 'Compress',
+            'humanReadable'   => 'Human-readable',
+            'omitDirTimes'    => 'Omit directory times',
+            'omitLinkTimes'   => 'Omit symlink times',
+            'xattrs'          => 'Preserve extended attributes',
+            'acls'            => 'Preserve ACLs',
+            'hardlinks'       => 'Preserve hard links',
+            'sparse'          => 'Handle sparse files efficiently',
+            'numericIds'      => 'Use numeric user/group IDs',
+            'partial'         => 'Keep partially transferred files',
+            'inplace'         => 'Update files in place',
+            'checksum'        => 'Compare by checksum',
+            'update'          => 'Skip files newer on receiver',
+            'wholeFile'       => 'Copy whole files (no delta)',
+            'sizeOnly'        => 'Skip files matching size',
+            'ignoreExisting'  => 'Skip files that already exist',
+            'mkpath'          => 'Create destination path if missing',
+            'delete'          => 'Delete extraneous files on destination',
+            'deleteExcluded'  => 'Also delete excluded files on destination',
+            'maxDelete'       => 'Max delete',
+            'bwlimit'         => 'Bandwidth limit (KB/s)',
+            'timeout'         => 'I/O timeout (s)',
+            'contimeout'      => 'Connect timeout (s)',
+            'maxSize'         => 'Max file size',
+            'minSize'         => 'Min file size',
+            'chmod'           => 'Chmod',
+            'tempDir'         => 'Temp dir',
+            'backupDir'       => 'Backup dir (enables --backup)',
+            'compressLevel'   => 'Compress level',
+            'modifyWindow'    => 'Modify window (s)',
+            'remoteRsyncPath' => 'Remote rsync path (SSH jobs)',
+            'protocol'        => 'Protocol version',
+        ];
+    }
+}
+
+if (!function_exists('ur_render_option_row')) {
+    /**
+     * One whitelisted option: a checkbox for a Rsync::BOOL_FLAGS key, else a
+     * value input for its Rsync::SCALAR_FLAGS flag.
+     *
+     * @param array<string,mixed> $opts
+     */
+    function ur_render_option_row(string $prefix, string $idBase, string $key, array $opts): void
+    {
+        $label = ur_option_labels()[$key];
+        if (isset(Rsync::BOOL_FLAGS[$key])) {
+            ur_render_bool_row($prefix, $idBase, $key, $label, Rsync::BOOL_FLAGS[$key], !empty($opts[$key]));
+        } else {
+            ur_render_scalar_row($prefix, $idBase, $key, $label, Rsync::SCALAR_FLAGS[$key] . '=', isset($opts[$key]) ? (string) $opts[$key] : '');
+        }
+    }
+}
+
 if (!function_exists('ur_render_archive_group')) {
     /**
      * Archive, then the options it implies indented beneath it: -a turns all
      * seven on, and the only way to turn one back off is the --no-* that
      * Rsync::optionTokens() emits for an unticked box. The note is marked
-     * active by JS while Archive is ticked.
+     * active by JS while Archive is ticked. The rows follow Rsync::ARCHIVE_IMPLIED.
      *
-     * @param array<string,mixed>                    $opts
-     * @param array<string,array{0:string,1:string}> $archiveImplied
+     * @param array<string,mixed> $opts
      */
-    function ur_render_archive_group(string $prefix, string $idBase, array $opts, array $archiveImplied): void
+    function ur_render_archive_group(string $prefix, string $idBase, array $opts): void
     {
         $archiveOn = !empty($opts['archive']);
         echo '<dl>';
-        ur_render_bool_row($prefix, $idBase, 'archive', 'Archive', '-a', $archiveOn);
+        ur_render_option_row($prefix, $idBase, 'archive', $opts);
         echo '</dl>';
         echo '<div class="ur-implied' . ($archiveOn ? ' ur-implied-active' : '') . '"'
             . ' data-archive="' . ur_h($idBase . '_archive') . '">';
@@ -506,8 +519,8 @@ if (!function_exists('ur_render_archive_group')) {
             . ur_h(ur_t_text('Implied by Archive (-a): ticking Archive turns all of these on. Untick one while Archive is on and the plugin adds the matching --no- flag to genuinely turn it off. Each also works on its own with Archive off.'))
             . '</p>';
         echo '<dl>';
-        foreach ($archiveImplied as $key => [$label, $flag]) {
-            ur_render_bool_row($prefix, $idBase, $key, $label, $flag, !empty($opts[$key]));
+        foreach (array_keys(Rsync::ARCHIVE_IMPLIED) as $key) {
+            ur_render_option_row($prefix, $idBase, $key, $opts);
         }
         echo '</dl>';
         echo '</div>';
@@ -678,6 +691,39 @@ if (!function_exists('ur_render_bool_row')) {
     }
 }
 
+if (!function_exists('ur_emit_i18n')) {
+    /**
+     * Emit (once per document) window.UR_I18N, PageHelpers::i18n() translated
+     * by PageHelpers::t(), and window.urI18n(key, fallback, ...args): the text
+     * for key, else the English fallback, with %s / %d filled in order. Every
+     * string the scripts render goes through it, so on a translated webGui the
+     * first poll no longer repaints translated server-rendered labels in English.
+     * The shared emitters call this first, so it precedes every page script.
+     */
+    function ur_emit_i18n(): void
+    {
+        static $done = false;
+        if ($done) {
+            return;
+        }
+        $done = true;
+        $map = [];
+        foreach (array_keys(PageHelpers::i18n()) as $key) {
+            $map[$key] = PageHelpers::t($key);
+        }
+        echo '<script type="text/javascript">window.UR_I18N = ' . ur_js($map) . ";\n"
+            . <<<'JS'
+window.urI18n = function (key, fallback) {
+  var map = window.UR_I18N || {};
+  var text = Object.prototype.hasOwnProperty.call(map, key) ? map[key] : fallback;
+  var args = Array.prototype.slice.call(arguments, 2), i = 0;
+  return args.length ? text.replace(/%[sd]/g, function (m) { return i < args.length ? String(args[i++]) : m; }) : text;
+};
+JS
+            . "\n</script>\n";
+    }
+}
+
 if (!function_exists('ur_emit_option_help_assets')) {
     /**
      * Emit the CSS + JS that powers the native "?" help affordance, exactly once
@@ -706,6 +752,7 @@ if (!function_exists('ur_emit_option_help_assets')) {
             return;
         }
         $done = true;
+        ur_emit_i18n();
         ?>
 <style>
 /* Native two-column rsync options. The dl/dt/dd grid + label alignment come from
@@ -915,8 +962,8 @@ if (!function_exists('ur_emit_option_help_assets')) {
     var sel = document.createElement('select');
     sel.name = typeName;
     sel.className = 'ur-filter-type';
-    sel.setAttribute('aria-label', 'Rule type');
-    [['include', '+ include'], ['exclude', '- exclude']].forEach(function (pair) {
+    sel.setAttribute('aria-label', urI18n('filter.ruleType', 'Rule type'));
+    [['include', urI18n('filter.include', '+ include')], ['exclude', urI18n('filter.exclude', '- exclude')]].forEach(function (pair) {
       var o = document.createElement('option');
       o.value = pair[0];
       o.textContent = pair[1];
@@ -928,15 +975,15 @@ if (!function_exists('ur_emit_option_help_assets')) {
     input.type = 'text';
     input.name = patName;
     input.value = '';
-    input.placeholder = 'pattern, e.g. *.tmp';
-    input.setAttribute('aria-label', 'Pattern');
+    input.placeholder = urI18n('filter.placeholder', 'pattern, e.g. *.tmp');
+    input.setAttribute('aria-label', urI18n('filter.pattern', 'Pattern'));
 
     row.appendChild(sel);
     row.appendChild(document.createTextNode(' '));
     row.appendChild(input);
-    [['ur-row-up', '↑', 'Move up'],
-     ['ur-row-down', '↓', 'Move down'],
-     ['ur-row-del', '−', 'Remove']].forEach(function (spec) {
+    [['ur-row-up', '↑', urI18n('row.up', 'Move up')],
+     ['ur-row-down', '↓', urI18n('row.down', 'Move down')],
+     ['ur-row-del', '−', urI18n('row.remove', 'Remove')]].forEach(function (spec) {
       var b = document.createElement('button');
       b.type = 'button';
       b.className = spec[0];
@@ -1097,16 +1144,16 @@ if (!function_exists('ur_emit_option_help_assets')) {
         if (res.ok && res.body && res.body.ok && res.body.tokens) {
           var shown = res.body.display || res.body.tokens;
           out.classList.remove('ur-preview-err');
-          out.textContent = shown.length ? shown.join(' ') : '(no options set)';
+          out.textContent = shown.length ? shown.join(' ') : urI18n('preview.none', '(no options set)');
         } else {
           out.classList.add('ur-preview-err');
-          out.textContent = window.urAjax.errText(res, 'Preview failed');
+          out.textContent = window.urAjax.errText(res, urI18n('preview.failed', 'Preview failed'));
         }
         previewDone(box);
       })
       .catch(function () {
         out.classList.add('ur-preview-err');
-        out.textContent = 'Preview failed: could not reach the server.';
+        out.textContent = urI18n('preview.unreachable', 'Preview failed: could not reach the server.');
         previewDone(box);
       });
   }
@@ -1180,6 +1227,7 @@ if (!function_exists('ur_emit_ajax_helpers')) {
             return;
         }
         $done = true;
+        ur_emit_i18n();
         ?>
 <script type="text/javascript">
 /* Shared robust-fetch helpers. Exposed as window.urAjax so every tab body can
@@ -1297,14 +1345,14 @@ if (!function_exists('ur_emit_ajax_helpers')) {
   /* Build a clear failure message from a postForm result, ALWAYS including the
    * HTTP status (or a network/parse hint), so a failure is never silent. */
   function errText(res, fallback) {
-    fallback = fallback || 'Request failed';
+    fallback = fallback || urI18n('ajax.failed', 'Request failed');
     /* Our own client-side abort (postForm opts.timeoutMs), not an unreachable
      * server - say so, since the two need different remedies. */
     if (res.aborted) {
-      return fallback + ': timed out (no response in time).';
+      return urI18n('ajax.timedOut', '%s: timed out (no response in time).', fallback);
     }
     if (res.networkError || res.status === 0) {
-      return fallback + ': could not reach the server (network error).';
+      return urI18n('ajax.network', '%s: could not reach the server (network error).', fallback);
     }
     /* A 422 body carries `warnings` alongside `errors`; without this they are
      * silently dropped whenever a save fails for some OTHER reason. */
@@ -1319,9 +1367,9 @@ if (!function_exists('ur_emit_ajax_helpers')) {
       return (res.body.message || res.body.error) + warn + ' (HTTP ' + res.status + ')';
     }
     if (res.parseError) {
-      return fallback + ': the server returned a non-JSON response (HTTP ' + res.status + ').';
+      return urI18n('ajax.nonJson', '%s: the server returned a non-JSON response (HTTP %s).', fallback, res.status);
     }
-    return fallback + ' (HTTP ' + res.status + ').';
+    return urI18n('ajax.http', '%s (HTTP %s).', fallback, res.status);
   }
 
   /* ---- two-step inline delete confirm (replaces window.confirm) ----
@@ -1365,7 +1413,7 @@ if (!function_exists('ur_emit_ajax_helpers')) {
     }
     // Arming a new button cancels any other still-armed one.
     if (armedDeleteBtn && armedDeleteBtn !== btn) { disarmDelete(armedDeleteBtn); }
-    var message = (opts.warning || '') + ' Click "Confirm delete?" again to proceed.';
+    var message = urI18n('delete.confirmHint', '%s Click "Confirm delete?" again to proceed.', opts.warning || '');
     btn._urArm = {
       label: btn.textContent,
       resultEl: opts.resultEl || null,
@@ -1374,7 +1422,7 @@ if (!function_exists('ur_emit_ajax_helpers')) {
       timer: setTimeout(function () { disarmDelete(btn); }, ARM_WINDOW_MS)
     };
     armedDeleteBtn = btn;
-    btn.textContent = 'Confirm delete?';
+    btn.textContent = urI18n('delete.confirm', 'Confirm delete?');
     btn.classList.add('ur-armed-delete');
     if (opts.resultEl && opts.warning) {
       opts.resultEl.className = 'ur-result ur-err';
@@ -1443,6 +1491,7 @@ if (!function_exists('ur_emit_badge_assets')) {
             return;
         }
         $done = true;
+        ur_emit_i18n();
         ?>
 <style>
 /* State badges. Colors read correctly under any webGui theme (fixed values with
@@ -1488,9 +1537,9 @@ if (!function_exists('ur_emit_badge_assets')) {
     if (CLASSES.indexOf(c) === -1) { CLASSES.push(c); }
   });
 
-  function entry(state) { return STATES[String(state || '').toUpperCase()] || STATES.PENDING; }
-  function classFor(state) { return 'ur-badge-' + entry(state).cls; }
-  function labelFor(state) { return entry(state).label; }
+  function key(state) { var k = String(state || '').toUpperCase(); return STATES[k] ? k : 'PENDING'; }
+  function classFor(state) { return 'ur-badge-' + STATES[key(state)].cls; }
+  function labelFor(state) { var k = key(state); return urI18n('state.' + k, STATES[k].label); }
 
   /* Repaint a badge element: drop whatever modifier it had, apply this state's
    * class and label. textContent, never innerHTML. */
@@ -1678,6 +1727,7 @@ if (!function_exists('ur_emit_page_assets')) {
             return;
         }
         $done = true;
+        ur_emit_i18n();
         ur_emit_time_helpers();
         ?>
 <style>
@@ -1774,7 +1824,7 @@ input.ur-switch:disabled { opacity: 0.5; cursor: default; }
    * when zero ("in 1h 36m", "6d 7h ago", "45s ago"). */
   function relativeTime(epoch, now) {
     var delta = Math.round(epoch - now), abs = Math.abs(delta), text = '';
-    if (abs < 1) { return 'now'; }
+    if (abs < 1) { return urI18n('rel.now', 'now'); }
     for (var i = 0; i < UNITS.length; i++) {
       if (abs < UNITS[i][1]) { continue; }
       text = Math.floor(abs / UNITS[i][1]) + UNITS[i][0];
@@ -1784,7 +1834,7 @@ input.ur-switch:disabled { opacity: 0.5; cursor: default; }
       }
       break;
     }
-    return delta > 0 ? 'in ' + text : text + ' ago';
+    return delta > 0 ? urI18n('rel.future', 'in %s', text) : urI18n('rel.past', '%s ago', text);
   }
 
   /* Runner::formatDuration: "1h 2m 3s", "2m 5s", "45s". */
@@ -1808,8 +1858,8 @@ input.ur-switch:disabled { opacity: 0.5; cursor: default; }
   /* PageHelpers::nextRunLabel, clause for clause: manual-only, disabled,
    * em-dash, time. A getStatus entry carries manualOnly, enabled, nextRun. */
   function nextRunLabel(s, now) {
-    if (s && s.manualOnly) { return 'manual (on demand)'; }
-    if (s && s.enabled === false) { return 'disabled'; }
+    if (s && s.manualOnly) { return urI18n('next.manual', 'manual (on demand)'); }
+    if (s && s.enabled === false) { return urI18n('next.disabled', 'disabled'); }
     if (!s || !s.nextRun) { return '\u2014'; }
     return window.urFmtLocal(s.nextRun) + ' (' + relativeTime(s.nextRun, now) + ')';
   }
@@ -1823,7 +1873,7 @@ input.ur-switch:disabled { opacity: 0.5; cursor: default; }
 
   /* PageHelpers::dryRunLine for a getStatus lastDryRun object. */
   function dryRunLine(dry, now) {
-    return dry ? dry.label + ' \u00b7 ' + lastRunLabel(dry, now) : '';
+    return dry ? urI18n('dryRun.' + dry.state, dry.label) + ' \u00b7 ' + lastRunLabel(dry, now) : '';
   }
 
   /* Reload after a successful save so the server-rendered state is current.
@@ -1842,8 +1892,8 @@ input.ur-switch:disabled { opacity: 0.5; cursor: default; }
         var ct = r.headers.get('Content-Type') || '';
         if (!r.ok || ct.indexOf('application/json') !== -1) {
           return r.json().then(
-            function (j) { throw new Error((j && j.error) ? j.error : 'Log not available.'); },
-            function () { throw new Error('Log not available.'); }
+            function (j) { throw new Error((j && j.error) ? j.error : urI18n('log.unavailable', 'Log not available.')); },
+            function () { throw new Error(urI18n('log.unavailable', 'Log not available.')); }
           );
         }
         var fname = 'run.log';
@@ -1860,7 +1910,7 @@ input.ur-switch:disabled { opacity: 0.5; cursor: default; }
         setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
       })
       .catch(function (err) {
-        onError((err && err.message) ? err.message : 'Log not available (run logs live in RAM and are cleared on reboot).');
+        onError((err && err.message) ? err.message : urI18n('log.notInRam', 'Log not available (run logs live in RAM and are cleared on reboot).'));
       });
   }
 
@@ -1872,7 +1922,7 @@ input.ur-switch:disabled { opacity: 0.5; cursor: default; }
       var sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(rng);
       try { document.execCommand('copy'); } catch (e) { /* left selected */ }
     }
-    function flash() { var o = btn.textContent; btn.textContent = 'Copied!'; setTimeout(function () { btn.textContent = o; }, 1200); }
+    function flash() { var o = btn.textContent; btn.textContent = urI18n('copied', 'Copied!'); setTimeout(function () { btn.textContent = o; }, 1200); }
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(text).then(flash).catch(selectIt);
     } else {
