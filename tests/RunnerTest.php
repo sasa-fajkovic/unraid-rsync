@@ -71,6 +71,7 @@ final class RunnerTest extends TestCase
         Rsync::$rsyncPathOverride = null;
         Credentials::$secretsDirOverride = null;
         Runner::$scanDir = null;
+        Runner::$localLister = null;
     }
 
     /** Build + persist a LOCAL job, returning its id. */
@@ -2777,7 +2778,7 @@ final class RunnerTest extends TestCase
             ['local' => '/mnt/user/appdata/', 'remote' => '/srv/backup/appdata'],
             ['local' => '/mnt/cache/system/', 'remote' => '/srv/backup/appdata'],
         ]]);
-        Runner::$scanDir = fn(string $p): array => ['.', '..'];
+        Runner::$localLister = fn(string $p): array => ['.', '..'];
         $res = $this->withDevices(
             ['/' => 1, '/mnt' => 1, '/mnt/user' => 2, '/mnt/user/appdata' => 2, '/mnt/cache' => 3, '/mnt/cache/system' => 3],
             fn(): array => $this->runInTempRuntime($rt, 'j-live')
@@ -2790,7 +2791,7 @@ final class RunnerTest extends TestCase
     public function testAnEmptySourceRefusesADeleteRunButADryRunOnlySaysSo(): void
     {
         $this->fakeRsync();
-        Runner::$scanDir = fn(string $p): array|false => $p === '/mnt/user/src/' ? ['.', '..'] : false;
+        Runner::$localLister = fn(string $p): ?array => $p === '/mnt/user/src/' ? ['.', '..'] : null;
         $id = $this->saveLocalJob('j-empty', ['postHook' => 'POST', 'rsyncOptions' => Config::mergeRsyncOptions(['delete' => true, 'maxDelete' => '5'])]);
 
         $res = Runner::run($id, false);
@@ -2814,25 +2815,33 @@ final class RunnerTest extends TestCase
         $this->assertSame(Rsync::STATE_SUCCESS, $res['state']);
     }
 
-    /** @return array<string,array{0:string,1:array<int,string>,2:string}> */
+    /**
+     * The listing: entries, false = exists but cannot be listed, null = missing.
+     *
+     * @return array<string,array{0:string,1:array<int,string>|false|null,2:string}>
+     */
     public static function localDeleteDestProvider(): array
     {
         return [
-            'local, drive root'     => ['LOCAL', ['.', '..', '.unraid-rsync-target', 'data'], 'dest-is-protected'],
-            'local, snapshot store' => ['LOCAL', ['.', '..', 'snapshots'], 'dest-is-protected'],
-            'local, ordinary dir'   => ['LOCAL', ['.', '..', 'snapshots-old', 'data'], ''],
-            'ssh pull, drive root'  => ['SSH', ['.', '..', '.unraid-rsync-target'], 'dest-is-protected'],
-            'daemon pull, snapshot' => ['DAEMON', ['.', '..', '.ur-snapshot-root'], 'dest-is-protected'],
+            'local, drive root'       => ['LOCAL', ['.', '..', '.unraid-rsync-target', 'data'], 'dest-is-protected'],
+            'local, snapshot store'   => ['LOCAL', ['.', '..', 'snapshots'], 'dest-is-protected'],
+            'local, ordinary dir'     => ['LOCAL', ['.', '..', 'snapshots-old', 'data'], ''],
+            'local, not there yet'    => ['LOCAL', null, ''],
+            'local, unlistable'       => ['LOCAL', false, 'dest-probe-failed'],
+            'ssh pull, drive root'    => ['SSH', ['.', '..', '.unraid-rsync-target'], 'dest-is-protected'],
+            'ssh pull, unlistable'    => ['SSH', false, 'dest-probe-failed'],
+            'daemon pull, snapshot'   => ['DAEMON', ['.', '..', '.ur-snapshot-root'], 'dest-is-protected'],
+            'daemon pull, not there'  => ['DAEMON', null, ''],
         ];
     }
 
-    /** @param array<int,string> $listing */
+    /** @param array<int,string>|false|null $listing */
     #[DataProvider('localDeleteDestProvider')]
-    public function testALocalDeleteDestinationIsProbedForProtectedEntries(string $transport, array $listing, string $reason): void
+    public function testALocalDeleteDestinationIsProbedForProtectedEntries(string $transport, array|false|null $listing, string $reason): void
     {
         $this->fakeRsync();
         $dest = '/mnt/disks/usb/backup';
-        Runner::$scanDir = fn(string $p): array|false => $p === $dest ? $listing : false;
+        Runner::$localLister = fn(string $p): array|false|null => $p === $dest ? $listing : null;
         $opts = Config::mergeRsyncOptions(['delete' => true, 'maxDelete' => '5']);
         if ($transport === 'LOCAL') {
             $id  = $this->saveLocalJob('j-ldest', ['rsyncOptions' => $opts, 'pairs' => [['local' => '/mnt/user/src/', 'remote' => $dest]]]);

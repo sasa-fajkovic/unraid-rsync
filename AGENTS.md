@@ -259,7 +259,9 @@ on, forked from, or derived from any other plugin.
   empty mountpoint is a valid source a mirror empties the backup to match. With
   a delete option on it also refuses an empty local source (`source-empty`; a
   **dry run only logs it**, so the preview still shows the damage) and a local
-  destination holding a `PROTECTED_ENTRIES` name. `tests/bootstrap.php` makes
+  destination holding a `PROTECTED_ENTRIES` name or one that exists but cannot
+  be listed (`dest-probe-failed`; only a missing one is fine, seam
+  `Runner::$localLister`). `tests/bootstrap.php` makes
   every path but `/` its own device, so tests that need "not mounted" set the seam.
 - **NEVER name a form input `action`.** An input named `action` becomes a NAMED
   PROPERTY of its `<form>`, so `form.action` returns that input instead of the

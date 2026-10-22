@@ -18,7 +18,8 @@ declare(strict_types=1);
  *   - Rsync::$runner            the rsync process spawn (fake in tests)
  *   - Runner::$hookRunner       the bash -c hook spawn (fake in tests)
  *   - Runner::$pidProvider      getmypid() seam (fixed pid in tests)
- *   - Runner::$scanDir          scandir() of local sources and destinations (tests)
+ *   - Runner::$scanDir          scandir() of a snapshot job's sources (tests)
+ *   - Runner::$localLister      listing of a delete job's local source/destination (tests)
  *   - Snapshot::$remoteRunner / Snapshot::$nowProvider  the snapshot helper and clock
  *
  * SECURITY:
@@ -72,12 +73,21 @@ class Runner
     public static $pidProvider = null;
 
     /**
-     * Injectable scandir for local sources and destinations: fn(string $path): array|false.
+     * Injectable scandir for a snapshot job's local sources: fn(string $path): array|false.
      * null => scandir().
      *
      * @var callable|null
      */
     public static $scanDir = null;
+
+    /**
+     * Injectable listing of a delete job's local source and destination:
+     * fn(string $path): array|false|null - the entries, false when the path
+     * exists but cannot be listed, null when it does not exist. null => scandir().
+     *
+     * @var (callable(string):(array<int,string>|false|null))|null
+     */
+    public static $localLister = null;
 
     /** Resolve our own pid (overridable for tests). */
     private static function pid(): int
@@ -1420,7 +1430,8 @@ class Runner
         $pull       = $remoteHost && strtoupper(trim((string) ($job['direction'] ?? 'PUSH'))) === 'PULL';
         $deleteOn   = Config::normalizeSnapshot($job['snapshot'] ?? null) === null
             && (!empty($opts['delete']) || !empty($opts['deleteExcluded']));
-        $scan       = self::$scanDir ?? static fn(string $p): array|false => @scandir($p);
+        $list       = self::$localLister
+            ?? static fn(string $p): array|false|null => (file_exists($p) || is_link($p)) ? @scandir($p) : null;
         $pairs      = (isset($job['pairs']) && is_array($job['pairs'])) ? $job['pairs'] : [];
 
         foreach ($pairs as $i => $pair) {
@@ -1440,7 +1451,7 @@ class Runner
                 continue;
             }
 
-            $entries = $src !== '' ? $scan($src) : false;
+            $entries = $src !== '' ? $list($src) : null;
             if (is_array($entries) && array_diff($entries, ['.', '..']) === []) {
                 if (!$dryRun) {
                     Logger::event($runLog, $jobId, "Pair #$n: the source $src is empty and a delete option is on, so this "
@@ -1450,9 +1461,14 @@ class Runner
                 Logger::event($runLog, $jobId, "Pair #$n: the source $src is empty; a real run would be refused (source-empty).");
             }
 
-            // false = not there yet (rsync creates it), like the remote probe.
-            $entries = $dest !== '' ? $scan($dest) : false;
-            $found   = array_values(array_intersect(self::PROTECTED_ENTRIES, is_array($entries) ? $entries : []));
+            // Missing is fine (rsync creates it); present but unlistable is not.
+            $entries = $dest !== '' ? $list($dest) : null;
+            if ($entries === false) {
+                Logger::event($runLog, $jobId, "Pair #$n: the --delete destination $dest exists but could not be "
+                    . 'listed, so it cannot be checked.');
+                return 'dest-probe-failed';
+            }
+            $found = array_values(array_intersect(self::PROTECTED_ENTRIES, $entries ?? []));
             if ($found !== []) {
                 return self::refuseProtected($n, $dest, $found[0], $runLog, $jobId);
             }

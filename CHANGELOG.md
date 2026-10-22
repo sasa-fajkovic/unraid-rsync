@@ -143,7 +143,7 @@ user-facing highlights.
 - **More `--delete` safety.** A delete-enabled run refuses an empty local source
   (`source-empty`; a dry run only reports it), and now checks local and rsync
   daemon destinations for a drive root or snapshot store too (`dest-is-protected`,
-  or `dest-probe-failed` when a daemon destination cannot be listed). At save
+  or `dest-probe-failed` when an existing destination cannot be listed). At save
   time two pairs of one delete job may no longer write to the same or nested
   directories, and two Connections to the same host are recognised as one
   destination filesystem.
