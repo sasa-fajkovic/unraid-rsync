@@ -97,9 +97,9 @@ class ProcIO
     /**
      * Run $argv (no shell, stdin /dev/null) and capture at most $cap bytes of
      * each of stdout and stderr. Returns within $timeoutSec + 1 s (one select
-     * tick) + 2 x $killGraceSec: past the deadline the child gets SIGTERM, then SIGKILL,
-     * and one that still has not died (stuck in an uninterruptible syscall) is
-     * abandoned rather than waited for - proc_close() would block on it.
+     * tick) + 2 x $killGraceSec: past the deadline the child gets SIGTERM, then
+     * SIGKILL, and one that still has not died (stuck in an uninterruptible
+     * syscall) is abandoned rather than waited for - proc_close() would block.
      *
      * @param array<int,string>         $argv
      * @param array<string,string>|null $env full child environment, or null to inherit

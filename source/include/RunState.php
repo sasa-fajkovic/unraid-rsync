@@ -174,8 +174,8 @@ class RunState
     /**
      * Write a job's runtime state atomically (temp + rename). The written shape
      * is fixed: {jobId, pid, running, dryRun, trigger, startedAt, currentLog},
-     * plus an optional `token` (jobId is always stamped from the $jobId arg). Unknown keys passed in are
-     * dropped so the file stays canonical. `trigger` is clamped to the closed
+     * plus an optional `token` (jobId is always stamped from the $jobId arg).
+     * Unknown keys passed in are dropped so the file stays canonical. `trigger` is clamped to the closed
      * set ('manual'|'schedule', default 'manual').
      *
      * @param array<string,mixed> $state

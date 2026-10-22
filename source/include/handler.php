@@ -1167,8 +1167,8 @@ function ur_normalize_connection_for_save(array $raw, array $existing): array
             $conn['remoteHostKey'] = '';
             try {
                 Logger::event('', 'credentials', 'Connection ' . Util::safeFileId($conn['id'])
-                    . ': the host or port changed, so its pinned host key was cleared. The next run or'
-                    . ' Test connection pins the new host\'s key.');
+                    . ': the host or port changed, so its pinned host key was cleared (with accept-new,'
+                    . ' the next run or Test connection pins the new one).');
             } catch (Throwable $e) {
             }
         }
@@ -1778,6 +1778,10 @@ function ur_keytools_class(): string
 function ur_action_discover_host_key(): void
 {
     $host    = isset($_POST['host']) ? trim((string) $_POST['host']) : '';
+    // A saved IPv6 host is bracketed for rsync; ssh-keyscan wants the literal.
+    if (preg_match('/^\[([^\]]+)\]$/D', $host, $m) && filter_var($m[1], FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) !== false) {
+        $host = $m[1];
+    }
     $port    = isset($_POST['port']) ? (int) $_POST['port'] : 22;
     $timeout = isset($_POST['timeout']) ? (int) $_POST['timeout'] : 10;
 
