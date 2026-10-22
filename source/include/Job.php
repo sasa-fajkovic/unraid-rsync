@@ -518,6 +518,10 @@ class Job
             }
         }
 
+        foreach (self::pairOverlapErrors($job, $opts) as $e) {
+            $errors[] = $e;
+        }
+
         foreach (self::markerErrors($job, $transport, $direction) as $e) {
             $errors[] = $e;
         }
@@ -853,14 +857,15 @@ class Job
     }
 
     /**
-     * Where a job writes: a scope (the connection for a remote destination,
+     * Where a job writes: a scope (the remote endpoint, see remoteScope(), or
      * 'local' for this box) and the destination path of each pair, keyed by pair
      * index. Resolved exactly as Runner::resolvePair does.
      *
-     * @param array<string,mixed> $job
+     * @param array<string,mixed>      $job
+     * @param array<string,mixed>|null $creds loaded credentials, to resolve the endpoint
      * @return array{scope:string,paths:array<int,string>}
      */
-    public static function destinations(array $job): array
+    public static function destinations(array $job, ?array $creds = null): array
     {
         $transport    = strtoupper(trim((string) ($job['transport'] ?? 'SSH')));
         $direction    = strtoupper(trim((string) ($job['direction'] ?? 'PUSH')));
@@ -876,25 +881,77 @@ class Job
                 $paths[(int) $i] = $p;
             }
         }
-        $scope = $destIsRemote ? $transport . ':' . trim((string) ($job['connectionId'] ?? '')) : 'local';
+        $scope = $destIsRemote ? self::remoteScope($transport, trim((string) ($job['connectionId'] ?? '')), $creds) : 'local';
         return ['scope' => $scope, 'paths' => $paths];
+    }
+
+    /**
+     * The filesystem a remote destination lives on: host:port:user for SSH and
+     * host:port for DAEMON (the module is the first segment of every daemon
+     * path), so two Connections to one endpoint share a scope. Falls back to
+     * the connection id when it cannot be resolved; validate() reports that.
+     *
+     * @param array<string,mixed>|null $creds
+     */
+    private static function remoteScope(string $transport, string $connectionId, ?array $creds): string
+    {
+        $conn = is_array($creds) ? Credentials::findConnection($creds, $connectionId) : null;
+        if ($conn === null) {
+            return $transport . ':' . $connectionId;
+        }
+        $c    = Credentials::mergeConnection($conn);
+        $host = strtolower((string) $c['host']);
+        return $transport === 'DAEMON'
+            ? "DAEMON@$host:{$c['port']}"
+            : "$transport@$host:{$c['port']}:{$c['username']}";
+    }
+
+    /**
+     * With a delete option on, no two pairs of one job may write to the same
+     * directory or one inside the other: pairs run as separate transfers, so a
+     * later pair's --delete removes what an earlier pair just copied.
+     *
+     * @param array<string,mixed> $job
+     * @param array<string,mixed> $opts the job's EFFECTIVE rsync options
+     * @return array<int,string>
+     */
+    public static function pairOverlapErrors(array $job, array $opts): array
+    {
+        if ((empty($opts['delete']) && empty($opts['deleteExcluded']))
+            || Config::normalizeSnapshot($job['snapshot'] ?? null) !== null) {
+            return [];
+        }
+        $paths  = self::destinations($job)['paths'];
+        $errors = [];
+        foreach ($paths as $i => $a) {
+            foreach ($paths as $j => $b) {
+                $na = self::normalizePath($a);
+                $nb = self::normalizePath($b);
+                if ($j > $i && ($na === $nb || self::pathContains($na, $nb) || self::pathContains($nb, $na))) {
+                    $errors[] = 'Pair #' . ($i + 1) . ' and pair #' . ($j + 1) . ': a delete option is enabled, so their '
+                        . "destinations must not be the same directory or lie inside one another ('$a', '$b').";
+                }
+            }
+        }
+        return $errors;
     }
 
     /**
      * The targets a --delete destination must keep clear of: every OTHER job's
      * destinations. A list so further protected roots can be appended to it.
      *
-     * @param array<int,mixed> $jobs
+     * @param array<int,mixed>         $jobs
+     * @param array<string,mixed>|null $creds loaded credentials, to resolve endpoints
      * @return array<int,array{scope:string,path:string,label:string}>
      */
-    public static function protectedTargets(array $jobs, string $exceptJobId): array
+    public static function protectedTargets(array $jobs, string $exceptJobId, ?array $creds = null): array
     {
         $out = [];
         foreach ($jobs as $other) {
             if (!is_array($other) || (string) ($other['id'] ?? '') === $exceptJobId) {
                 continue;
             }
-            $d     = self::destinations($other);
+            $d     = self::destinations($other, $creds);
             $label = 'job "' . (string) (($other['name'] ?? '') !== '' ? $other['name'] : ($other['id'] ?? '')) . '"';
             foreach ($d['paths'] as $p) {
                 $out[] = ['scope' => $d['scope'], 'path' => $p, 'label' => $label];
@@ -902,7 +959,7 @@ class Job
             $snap = Config::normalizeSnapshot($other['snapshot'] ?? null);
             if ($snap !== null) {
                 $out[] = [
-                    'scope' => 'SSH:' . trim((string) ($other['connectionId'] ?? '')),
+                    'scope' => self::remoteScope('SSH', trim((string) ($other['connectionId'] ?? '')), $creds),
                     'path'  => $snap['root'],
                     'label' => 'the snapshot root of ' . $label,
                 ];
@@ -913,24 +970,25 @@ class Job
 
     /**
      * Snapshot roots must not overlap each other, and no job may write into one,
-     * with or without --delete. Same scope (connection) only.
+     * with or without --delete. Same scope (remote endpoint) only.
      *
-     * @param array<string,mixed> $job
-     * @param array<int,mixed>    $jobs the whole job set ($job may be among them)
+     * @param array<string,mixed>      $job
+     * @param array<int,mixed>         $jobs  the whole job set ($job may be among them)
+     * @param array<string,mixed>|null $creds loaded credentials, to resolve endpoints
      * @return array<int,string>
      */
-    public static function snapshotRootErrors(array $job, array $jobs): array
+    public static function snapshotRootErrors(array $job, array $jobs, ?array $creds = null): array
     {
         $errors = [];
         $id     = (string) ($job['id'] ?? '');
-        $mine   = self::snapshotRoot($job);
-        $myDest = self::destinations($job);
+        $mine   = self::snapshotRoot($job, $creds);
+        $myDest = self::destinations($job, $creds);
         foreach ($jobs as $other) {
             if (!is_array($other) || (string) ($other['id'] ?? '') === $id) {
                 continue;
             }
             $label  = 'job "' . (string) (($other['name'] ?? '') !== '' ? $other['name'] : ($other['id'] ?? '')) . '"';
-            $theirs = self::snapshotRoot($other);
+            $theirs = self::snapshotRoot($other, $creds);
             if ($mine !== null && $theirs !== null && $mine['scope'] === $theirs['scope']
                 && (self::atOrInside($mine['path'], $theirs['path']) || self::pathContains($mine['path'], $theirs['path']))) {
                 $errors[] = "Snapshot root '{$mine['path']}' must not be, contain, or lie inside the snapshot root of "
@@ -945,7 +1003,7 @@ class Job
                 }
             }
             if ($mine !== null) {
-                $d = self::destinations($other);
+                $d = self::destinations($other, $creds);
                 if ($d['scope'] === $mine['scope']) {
                     foreach ($d['paths'] as $p) {
                         if (self::atOrInside(self::normalizePath($p), $mine['path'])) {
@@ -961,14 +1019,16 @@ class Job
     /**
      * A job's enabled snapshot root and its scope, or null.
      *
-     * @param array<string,mixed> $job
+     * @param array<string,mixed>      $job
+     * @param array<string,mixed>|null $creds
      * @return array{scope:string,path:string}|null
      */
-    private static function snapshotRoot(array $job): ?array
+    private static function snapshotRoot(array $job, ?array $creds): ?array
     {
-        $snap = Config::normalizeSnapshot($job['snapshot'] ?? null);
-        $root = $snap !== null ? self::normalizePath($snap['root']) : '';
-        return $root === '' ? null : ['scope' => 'SSH:' . trim((string) ($job['connectionId'] ?? '')), 'path' => $root];
+        $snap  = Config::normalizeSnapshot($job['snapshot'] ?? null);
+        $root  = $snap !== null ? self::normalizePath($snap['root']) : '';
+        $scope = self::remoteScope('SSH', trim((string) ($job['connectionId'] ?? '')), $creds);
+        return $root === '' ? null : ['scope' => $scope, 'path' => $root];
     }
 
     private static function atOrInside(string $path, string $root): bool
@@ -984,15 +1044,16 @@ class Job
      * @param array<string,mixed> $job
      * @param array<string,mixed> $opts      the job's EFFECTIVE rsync options
      * @param array<int,array{scope:string,path:string,label:string}> $protected
+     * @param array<string,mixed>|null $creds the credentials $protected was resolved with
      * @return array<int,string>
      */
-    public static function ancestryErrors(array $job, array $opts, array $protected): array
+    public static function ancestryErrors(array $job, array $opts, array $protected, ?array $creds = null): array
     {
         if (empty($opts['delete']) && empty($opts['deleteExcluded'])) {
             return [];
         }
         $errors = [];
-        $d = self::destinations($job);
+        $d = self::destinations($job, $creds);
         foreach ($d['paths'] as $i => $path) {
             $mine = self::normalizePath($path);
             foreach ($protected as $t) {

@@ -18,7 +18,7 @@ declare(strict_types=1);
  *   - Rsync::$runner            the rsync process spawn (fake in tests)
  *   - Runner::$hookRunner       the bash -c hook spawn (fake in tests)
  *   - Runner::$pidProvider      getmypid() seam (fixed pid in tests)
- *   - Runner::$scanDir          scandir() of a snapshot job's sources (tests)
+ *   - Runner::$scanDir          scandir() of local sources and destinations (tests)
  *   - Snapshot::$remoteRunner / Snapshot::$nowProvider  the snapshot helper and clock
  *
  * SECURITY:
@@ -72,7 +72,7 @@ class Runner
     public static $pidProvider = null;
 
     /**
-     * Injectable scandir for a snapshot job's local sources: fn(string $path): array|false.
+     * Injectable scandir for local sources and destinations: fn(string $path): array|false.
      * null => scandir().
      *
      * @var callable|null
@@ -153,6 +153,18 @@ class Runner
         // Derived from the already-loaded config (no extra disk read).
         $secretsDir = Config::sanitizeSecretsDir($config['global']['secretsDir'] ?? '');
         Credentials::$secretsDirOverride = ($secretsDir !== '') ? $secretsDir : null;
+
+        // Cron::buildContent's own rule, re-checked: a cron file that failed to
+        // update still carries the line of a job since disabled or made manual.
+        if ($trigger === 'schedule' && (empty($job['enabled']) || !empty($job['manualOnly']))) {
+            try {
+                Logger::event('', $jobId, 'Scheduled run ignored: the job is '
+                    . (empty($job['enabled']) ? 'disabled' : 'manual-only') . ', so a stale cron line started it.');
+            } catch (Throwable $e) {
+                // best-effort, like hardFail's log line.
+            }
+            return ['state' => Rsync::STATE_FAILED, 'exitCode' => 1, 'runLog' => '', 'reason' => 'not-scheduled'];
+        }
 
         // 2. Concurrency guard. Acquire an ATOMIC per-job lock FIRST so two
         //    near-simultaneous launches can't both pass an isRunning() check and
@@ -448,6 +460,17 @@ class Runner
                         $exitCode = $preExit;
                         $reason   = 'prehook-failed';
                     }
+                }
+            }
+
+            // 5c'. This box's side of every pair, after the pre-hook (it may mount
+            //      the storage) and before anything is written.
+            if ($state === Rsync::STATE_SUCCESS) {
+                $localCheck = self::localChecks($job, $transport, $opts, $dryRun, $runLog, $jobId);
+                if ($localCheck !== '') {
+                    $state    = Rsync::STATE_FAILED;
+                    $exitCode = 1;
+                    $reason   = $localCheck;
                 }
             }
 
@@ -1336,12 +1359,18 @@ class Runner
             }
         }
         $jobs   = (isset($config['jobs']) && is_array($config['jobs'])) ? $config['jobs'] : [];
+        try {
+            $creds = Credentials::load();
+        } catch (Throwable $e) {
+            $creds = null;
+        }
         $errors = array_merge(
             $errors,
+            Job::pairOverlapErrors($job, $opts),
             Job::optionErrors($opts, $transport, $direction),
             Job::markerErrors($job, $transport, $direction),
-            Job::ancestryErrors($job, $opts, Job::protectedTargets($jobs, $jobId)),
-            Job::snapshotRootErrors($job, $jobs)
+            Job::ancestryErrors($job, $opts, Job::protectedTargets($jobs, $jobId, $creds), $creds),
+            Job::snapshotRootErrors($job, $jobs, $creds)
         );
         // A rejected option is snapshot-preflight (§2.6); every other snapshot
         // rule (transport, root, marker, retention, subs) is a guardrail.
@@ -1363,11 +1392,79 @@ class Runner
             return 'dest-not-mounted';
         }
 
-        // Snapshot mode forces delete off, whatever $opts says.
-        if (!$snapshotOn && $transport === 'SSH' && $direction !== 'PULL' && (!empty($opts['delete']) || !empty($opts['deleteExcluded']))) {
-            return self::probeDeleteDestinations($pairs, $opts, $sshPieces, $userHost, $runLog, $jobId);
+        // Snapshot mode forces delete off, whatever $opts says. A local
+        // destination is probed by localChecks(), after the pre-hook.
+        if (!$snapshotOn && in_array($transport, ['SSH', 'DAEMON'], true) && $direction !== 'PULL'
+            && (!empty($opts['delete']) || !empty($opts['deleteExcluded']))) {
+            return self::probeDeleteDestinations($pairs, $opts, $sshPieces, $userHost, $transport === 'DAEMON', $runLog, $jobId);
         }
         return '';
+    }
+
+    /**
+     * This box's side of every pair, run after the pre-hook: each local source
+     * and destination must be on a mounted drive, not the RAM root (where
+     * --mkpath would create a destination, and an empty mountpoint is a valid
+     * source). With a delete option on, a source must not be an empty directory
+     * and a destination must not hold a PROTECTED_ENTRIES name. A dry run only
+     * reports an empty source: it deletes nothing, and showing what a real run
+     * would do is its job. Returns '' or the failure reason (already logged).
+     *
+     * @param array<string,mixed> $job
+     * @param array<string,mixed> $opts EFFECTIVE rsync options
+     */
+    private static function localChecks(array $job, string $transport, array $opts, bool $dryRun, string $runLog, string $jobId): string
+    {
+        clearstatcache();
+        $remoteHost = in_array($transport, ['SSH', 'DAEMON'], true);
+        $pull       = $remoteHost && strtoupper(trim((string) ($job['direction'] ?? 'PUSH'))) === 'PULL';
+        $deleteOn   = Config::normalizeSnapshot($job['snapshot'] ?? null) === null
+            && (!empty($opts['delete']) || !empty($opts['deleteExcluded']));
+        $scan       = self::$scanDir ?? static fn(string $p): array|false => @scandir($p);
+        $pairs      = (isset($job['pairs']) && is_array($job['pairs'])) ? $job['pairs'] : [];
+
+        foreach ($pairs as $i => $pair) {
+            $n     = (int) $i + 1;
+            $local = trim((string) (is_array($pair) ? ($pair['local'] ?? '') : ''));
+            $src   = $pull ? '' : $local;
+            $dest  = $remoteHost ? ($pull ? $local : '') : trim((string) (is_array($pair) ? ($pair['remote'] ?? '') : ''));
+
+            foreach (['source' => $src, 'destination' => $dest] as $role => $path) {
+                if ($path !== '' && Util::isOnRootFs($path)) {
+                    Logger::event($runLog, $jobId, "Pair #$n: the $role $path is on the RAM root filesystem, not on a "
+                        . 'mounted drive, so the run is refused.');
+                    return $role === 'source' ? 'source-not-mounted' : 'dest-not-mounted';
+                }
+            }
+            if (!$deleteOn) {
+                continue;
+            }
+
+            $entries = $src !== '' ? $scan($src) : false;
+            if (is_array($entries) && array_diff($entries, ['.', '..']) === []) {
+                if (!$dryRun) {
+                    Logger::event($runLog, $jobId, "Pair #$n: the source $src is empty and a delete option is on, so this "
+                        . 'run would empty the destination. Refused; check that the source is mounted and populated.');
+                    return 'source-empty';
+                }
+                Logger::event($runLog, $jobId, "Pair #$n: the source $src is empty; a real run would be refused (source-empty).");
+            }
+
+            // false = not there yet (rsync creates it), like the remote probe.
+            $entries = $dest !== '' ? $scan($dest) : false;
+            $found   = array_values(array_intersect(self::PROTECTED_ENTRIES, is_array($entries) ? $entries : []));
+            if ($found !== []) {
+                return self::refuseProtected($n, $dest, $found[0], $runLog, $jobId);
+            }
+        }
+        return '';
+    }
+
+    private static function refuseProtected(int $n, string $dest, string $found, string $runLog, string $jobId): string
+    {
+        Logger::event($runLog, $jobId, "Pair #$n: the --delete destination $dest contains '$found', so it is a "
+            . 'drive root or a snapshot store that a mirror would wipe. Point the job at a sub-directory.');
+        return 'dest-is-protected';
     }
 
     /**
@@ -1428,26 +1525,32 @@ class Runner
     }
 
     /**
-     * Before an SSH --delete mirror, list each destination directory (one level,
-     * same -e and --rsync-path as the transfer) and refuse it when it holds a
+     * Before a remote --delete mirror, list each destination directory (one
+     * level, over the transfer's own transport: -e and --rsync-path for SSH,
+     * --port and --password-file for a daemon) and refuse it when it holds a
      * PROTECTED_ENTRIES name: it is then a drive root or a snapshot store, which
      * a mirror would empty. A destination that does not exist yet is fine -
-     * rsync creates it. Returns '' or the failure reason.
+     * rsync creates it. Any other failure refuses the run. Returns '' or the
+     * failure reason.
      *
      * @param array<int,mixed>         $pairs
      * @param array<string,mixed>      $opts
      * @param array<string,mixed>|null $sshPieces
      */
-    private static function probeDeleteDestinations(array $pairs, array $opts, ?array $sshPieces, string $userHost, string $runLog, string $jobId): string
+    private static function probeDeleteDestinations(array $pairs, array $opts, ?array $sshPieces, string $userHost, bool $daemon, string $runLog, string $jobId): string
     {
         foreach ($pairs as $i => $pair) {
-            $dest = trim((string) (is_array($pair) ? ($pair['remote'] ?? '') : ''));
-            $n    = (int) $i + 1;
+            $dest  = trim((string) (is_array($pair) ? ($pair['remote'] ?? '') : ''));
+            $n     = (int) $i + 1;
+            $flags = ['--list-only', '--dirs', '--timeout=' . self::PROBE_TIMEOUT];
+            if ($daemon) {
+                $flags[] = '--contimeout=' . self::PROBE_TIMEOUT;
+            }
             $argv = Rsync::auxArgv(
-                ['--list-only', '--dirs', '--timeout=' . self::PROBE_TIMEOUT],
+                $flags,
                 $opts,
                 $sshPieces,
-                [$userHost . ':' . rtrim($dest, '/') . '/']
+                [$userHost . ($daemon ? '::' : ':') . rtrim($dest, '/') . '/']
             );
 
             $found = '';
@@ -1464,13 +1567,16 @@ class Runner
                     }
                 }
             };
-            $exit = Rsync::run($argv, $onOutput, Ssh::childEnv(is_array($sshPieces) ? (array) ($sshPieces['sshEnv'] ?? []) : []));
+            $exit = Rsync::run(
+                $argv,
+                $onOutput,
+                Ssh::childEnv(is_array($sshPieces) ? (array) ($sshPieces['sshEnv'] ?? []) : []),
+                $daemon ? 2 * self::PROBE_TIMEOUT : null
+            );
             $onOutput("\n");
 
             if ($found !== '') {
-                Logger::event($runLog, $jobId, "Pair #$n: the --delete destination $dest contains '$found', so it is a "
-                    . 'drive root or a snapshot store that a mirror would wipe. Point the job at a sub-directory.');
-                return 'dest-is-protected';
+                return self::refuseProtected($n, $dest, $found, $runLog, $jobId);
             }
             // rsync exits 23 with "change_dir ... No such file or directory" for a
             // destination that is not there yet.

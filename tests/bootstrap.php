@@ -118,3 +118,8 @@ require_once __DIR__ . '/../source/include/Snapshot.php';
 // to the suite. NotifyTest drives the spacing with its own clock and sleep.
 Notify::$sleep = static function (float $seconds): void {
 };
+
+// The test host has no Unraid /mnt, so every local path a test names would read
+// as "not mounted". Here everything but "/" is its own device; the mount-check
+// tests swap in their own and put this one back.
+Util::$devIdOf = static fn(string $p): int => $p === '/' ? 1 : 2;

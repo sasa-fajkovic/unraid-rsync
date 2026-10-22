@@ -70,6 +70,7 @@ final class RunnerTest extends TestCase
         Rsync::$runner = null;
         Rsync::$rsyncPathOverride = null;
         Credentials::$secretsDirOverride = null;
+        Runner::$scanDir = null;
     }
 
     /** Build + persist a LOCAL job, returning its id. */
@@ -2687,5 +2688,275 @@ final class RunnerTest extends TestCase
         $this->assertSame($trigger, Runner::readSummary($id)['trigger']);
         $this->assertContains('hook:POST:ABORTED', $this->trace);
         $this->assertFalse(RunState::abortRequested($id));
+    }
+
+    // --- mount checks, empty sources, local and daemon --delete probes ---------
+
+    /**
+     * Run $fn with Util::$devIdOf answering from $devs (path => device, "/" is
+     * the RAM root); paths not listed do not exist.
+     *
+     * @param array<string,int> $devs
+     */
+    private function withDevices(array $devs, callable $fn): mixed
+    {
+        $prev = Util::$devIdOf;
+        Util::$devIdOf = static fn(string $p): int|false => $devs[$p] ?? false;
+        try {
+            return $fn();
+        } finally {
+            Util::$devIdOf = $prev;
+        }
+    }
+
+    public function testTheMountCheckRunsAfterThePreHookSoAHookCanMountTheDrive(): void
+    {
+        $this->fakeRsync();
+        $devs = ['/' => 1, '/mnt' => 1, '/mnt/user' => 2, '/mnt/user/src' => 2, '/mnt/disks' => 1, '/mnt/disks/usb' => 1];
+        $prev = Util::$devIdOf;
+        Util::$devIdOf = static function (string $p) use (&$devs): int|false {
+            return $devs[$p] ?? false;
+        };
+        Runner::$hookRunner = function (string $hook, array $env) use (&$devs): int {
+            $this->trace[] = 'hook:' . $hook . ':' . ($env['UR_JOB_STATUS'] ?? '');
+            if ($hook === 'PRE') {
+                $devs['/mnt/disks/usb'] = 3;
+            }
+            return 0;
+        };
+        $pairs = [['local' => '/mnt/user/src/', 'remote' => '/mnt/disks/usb/backup']];
+        try {
+            $id  = $this->saveLocalJob('j-mount', ['preHook' => 'PRE', 'postHook' => 'POST', 'pairs' => $pairs]);
+            $res = Runner::run($id, false);
+            $this->assertSame(Rsync::STATE_SUCCESS, $res['state'], (string) @file_get_contents($res['runLog']));
+            $this->assertSame(['hook:PRE:', 'rsync', 'hook:POST:SUCCESS'], $this->trace);
+
+            // No hook mounts it this time: the copy would land in RAM.
+            $devs['/mnt/disks/usb'] = 1;
+            $this->trace = [];
+            $id  = $this->saveLocalJob('j-unmounted', ['postHook' => 'POST', 'pairs' => $pairs]);
+            $res = Runner::run($id, false);
+            $this->assertSame(Rsync::STATE_FAILED, $res['state']);
+            $this->assertSame('dest-not-mounted', $res['reason'] ?? '');
+            $this->assertSame(['hook:POST:FAILED'], $this->trace, 'nothing is copied; the post-hook still runs');
+            $this->assertStringContainsString(
+                'Pair #1: the destination /mnt/disks/usb/backup is on the RAM root filesystem',
+                (string) file_get_contents($res['runLog'])
+            );
+            $this->assertSame('dest-not-mounted', History::list($id, 0, 1)['runs'][0]['reason']);
+        } finally {
+            Util::$devIdOf = $prev;
+        }
+    }
+
+    public function testAnUnmountedSourceFailsAPushBeforeAnyTransfer(): void
+    {
+        $this->fakeRsync();
+        $rt = $this->seedSshJob('j-nosrc', ['rsyncOptions' => Config::defaultRsyncOptions(), 'pairs' => [
+            ['local' => '/mnt/cache/appdata/', 'remote' => '/srv/backup/a'],
+            ['local' => '/mnt/disks/usb/photos/', 'remote' => '/srv/backup/b'],
+        ]]);
+        $res = $this->withDevices(
+            ['/' => 1, '/mnt' => 1, '/mnt/cache' => 3, '/mnt/cache/appdata' => 3, '/mnt/disks' => 1, '/mnt/disks/usb' => 1],
+            fn(): array => $this->runInTempRuntime($rt, 'j-nosrc')
+        );
+
+        $this->assertSame(Rsync::STATE_FAILED, $res['state']);
+        $this->assertSame('source-not-mounted', $res['reason'] ?? '');
+        $this->assertSame([], $this->trace, 'pair 1 is not copied before pair 2 is refused');
+    }
+
+    /**
+     * The live box's shape: SSH pushes, no delete, sources on /mnt/user (shfs)
+     * and /mnt/cache (a pool). None of the new checks may refuse them.
+     */
+    public function testSshPushesFromUserSharesAndAPoolAreUnaffected(): void
+    {
+        $this->fakeRsync();
+        $rt = $this->seedSshJob('j-live', ['rsyncOptions' => Config::defaultRsyncOptions(), 'pairs' => [
+            ['local' => '/mnt/user/appdata/', 'remote' => '/srv/backup/appdata'],
+            ['local' => '/mnt/cache/system/', 'remote' => '/srv/backup/appdata'],
+        ]]);
+        Runner::$scanDir = fn(string $p): array => ['.', '..'];
+        $res = $this->withDevices(
+            ['/' => 1, '/mnt' => 1, '/mnt/user' => 2, '/mnt/user/appdata' => 2, '/mnt/cache' => 3, '/mnt/cache/system' => 3],
+            fn(): array => $this->runInTempRuntime($rt, 'j-live')
+        );
+
+        $this->assertSame(Rsync::STATE_SUCCESS, $res['state'], (string) @file_get_contents($res['runLog']));
+        $this->assertSame(['rsync', 'rsync'], $this->trace);
+    }
+
+    public function testAnEmptySourceRefusesADeleteRunButADryRunOnlySaysSo(): void
+    {
+        $this->fakeRsync();
+        Runner::$scanDir = fn(string $p): array|false => $p === '/mnt/user/src/' ? ['.', '..'] : false;
+        $id = $this->saveLocalJob('j-empty', ['postHook' => 'POST', 'rsyncOptions' => Config::mergeRsyncOptions(['delete' => true, 'maxDelete' => '5'])]);
+
+        $res = Runner::run($id, false);
+        $this->assertSame(Rsync::STATE_FAILED, $res['state']);
+        $this->assertSame('source-empty', $res['reason'] ?? '');
+        $this->assertSame(['hook:POST:FAILED'], $this->trace);
+
+        $this->trace = [];
+        $res = Runner::run($id, true);
+        $this->assertSame(Rsync::STATE_SUCCESS, $res['state']);
+        $this->assertSame(['rsync', 'hook:POST:SUCCESS'], $this->trace);
+        $this->assertStringContainsString(
+            'Pair #1: the source /mnt/user/src/ is empty; a real run would be refused (source-empty).',
+            (string) file_get_contents($res['runLog'])
+        );
+
+        // Without delete an empty source deletes nothing, so it is copied as is.
+        $this->trace = [];
+        $id  = $this->saveLocalJob('j-empty-nodelete');
+        $res = Runner::run($id, false);
+        $this->assertSame(Rsync::STATE_SUCCESS, $res['state']);
+    }
+
+    /** @return array<string,array{0:string,1:array<int,string>,2:string}> */
+    public static function localDeleteDestProvider(): array
+    {
+        return [
+            'local, drive root'     => ['LOCAL', ['.', '..', '.unraid-rsync-target', 'data'], 'dest-is-protected'],
+            'local, snapshot store' => ['LOCAL', ['.', '..', 'snapshots'], 'dest-is-protected'],
+            'local, ordinary dir'   => ['LOCAL', ['.', '..', 'snapshots-old', 'data'], ''],
+            'ssh pull, drive root'  => ['SSH', ['.', '..', '.unraid-rsync-target'], 'dest-is-protected'],
+            'daemon pull, snapshot' => ['DAEMON', ['.', '..', '.ur-snapshot-root'], 'dest-is-protected'],
+        ];
+    }
+
+    /** @param array<int,string> $listing */
+    #[DataProvider('localDeleteDestProvider')]
+    public function testALocalDeleteDestinationIsProbedForProtectedEntries(string $transport, array $listing, string $reason): void
+    {
+        $this->fakeRsync();
+        $dest = '/mnt/disks/usb/backup';
+        Runner::$scanDir = fn(string $p): array|false => $p === $dest ? $listing : false;
+        $opts = Config::mergeRsyncOptions(['delete' => true, 'maxDelete' => '5']);
+        if ($transport === 'LOCAL') {
+            $id  = $this->saveLocalJob('j-ldest', ['rsyncOptions' => $opts, 'pairs' => [['local' => '/mnt/user/src/', 'remote' => $dest]]]);
+            $res = Runner::run($id, false);
+        } else {
+            $pull = ['direction' => 'PULL', 'rsyncOptions' => $opts, 'pairs' => [['local' => $dest, 'remote' => $transport === 'SSH' ? '/srv/a' : 'mod/a']]];
+            $rt   = $transport === 'SSH' ? $this->seedSshJob('j-ldest', $pull) : $this->seedDaemonJob('j-ldest', [], $pull);
+            $res  = $this->runInTempRuntime($rt, 'j-ldest');
+        }
+
+        $this->assertSame($reason, $res['reason'] ?? '');
+        $this->assertSame($reason === '' ? ['rsync'] : [], $this->trace, 'a local destination needs no remote probe');
+    }
+
+    /** @return array<string,array{0:string,1:int,2:string}> */
+    public static function daemonProbeProvider(): array
+    {
+        $dir = "drwxr-xr-x          4,096 2026/10/20 12:00:00 ";
+        return [
+            'snapshot store' => [$dir . ".\n" . $dir . "snapshots\n", 0, 'dest-is-protected'],
+            'ordinary dir'   => [$dir . ".\n" . $dir . "photos-2025\n", 0, ''],
+            'not there yet'  => ["rsync: [sender] change_dir \"/photos\" (in rsync_bkp) failed: No such file or directory (2)\n", 23, ''],
+            'auth refused'   => ["@ERROR: auth failed on module rsync_bkp\n", 5, 'dest-probe-failed'],
+            'timed out'      => ["rsync did not finish within 120 seconds and was stopped.\n", 35, 'dest-probe-failed'],
+        ];
+    }
+
+    #[DataProvider('daemonProbeProvider')]
+    public function testADaemonDeleteDestinationIsProbedOverTheDaemonBeforeThePreHook(string $listing, int $exit, string $reason): void
+    {
+        $this->fakeRsync(null, $listing, $exit);
+        $inner    = Rsync::$runner;
+        $timeouts = [];
+        Rsync::$runner = static function (array $argv, $onOutput, ?array $env = null, ?int $timeoutSec = null) use ($inner, &$timeouts): int {
+            $timeouts[] = $timeoutSec;
+            return $inner($argv, $onOutput);
+        };
+        $rt  = $this->seedDaemonJob('j-dprobe', [], [
+            'preHook'      => 'PRE',
+            'rsyncOptions' => Config::mergeRsyncOptions(['delete' => true, 'maxDelete' => '5']),
+        ]);
+        $res = $this->runInTempRuntime($rt, 'j-dprobe');
+
+        $this->assertSame($reason, $res['reason'] ?? '', (string) @file_get_contents($res['runLog']));
+        $this->assertSame($reason === '' ? ['probe', 'hook:PRE:', 'rsync'] : ['probe'], $this->trace);
+
+        $probe = $this->argvs[0];
+        $this->assertSame(['--', 'moduser@nas.local::rsync_bkp/photos/'], array_slice($probe, -2), 'an argv array, operands after --');
+        $this->assertContains('--list-only', $probe);
+        $this->assertContains('--port=873', $probe);
+        $this->assertContains('--contimeout=' . Runner::PROBE_TIMEOUT, $probe);
+        $this->assertCount(1, preg_grep('/^--password-file=/', $probe) ?: []);
+        $this->assertSame(2 * Runner::PROBE_TIMEOUT, $timeouts[0], 'the daemon probe has a wall-clock deadline');
+        if ($reason === '') {
+            $this->assertNull($timeouts[1], 'the transfer itself has none');
+        }
+    }
+
+    /** @return array<string,array{0:array<string,mixed>}> */
+    public static function notScheduledProvider(): array
+    {
+        return ['disabled' => [['enabled' => false]], 'manual-only' => [['manualOnly' => true]]];
+    }
+
+    /** @param array<string,mixed> $overrides */
+    #[DataProvider('notScheduledProvider')]
+    public function testAStaleCronLineDoesNotRunADisabledOrManualOnlyJob(array $overrides): void
+    {
+        $this->fakeRsync();
+        $sent = 0;
+        Notify::$runner = function (string $command) use (&$sent): int {
+            $sent++;
+            return 0;
+        };
+        try {
+            $id  = $this->saveLocalJob('j-unsched-' . array_key_first($overrides), $overrides + ['preHook' => 'PRE', 'notifyMode' => 'always']);
+            $res = Runner::run($id, false, 'schedule');
+        } finally {
+            Notify::$runner = null;
+        }
+
+        $this->assertSame(['state' => Rsync::STATE_FAILED, 'exitCode' => 1, 'runLog' => '', 'reason' => 'not-scheduled'], $res);
+        if (!defined('UR_RUNNER_TESTING')) {
+            define('UR_RUNNER_TESTING', true);
+        }
+        require_once __DIR__ . '/../source/scripts/runner.php';
+        $this->assertSame(1, ur_runner_exit_code($res['state']), 'cron sees a non-zero exit');
+        $this->assertSame([], $this->trace);
+        $this->assertSame(0, $sent);
+        $this->assertNull(Runner::readSummary($id));
+        $this->assertSame(0, History::list($id, 0, 1)['total']);
+        $this->assertFalse(RunState::isRunning($id));
+        $this->assertStringContainsString("[$id] Scheduled run ignored", (string) file_get_contents(Logger::pluginLogPath()));
+
+        // By hand it still runs.
+        $this->assertSame(Rsync::STATE_SUCCESS, Runner::run($id, false)['state']);
+    }
+
+    public function testTheRunLogCapHoldsAcrossEveryPair(): void
+    {
+        $cap = 1000;
+        Logger::$maxRunLogBytesOverride = $cap;
+        // Stands in for rsync's own --log-file writes, which bypass the sink.
+        Rsync::$runner = static function (array $argv): int {
+            foreach ($argv as $a) {
+                if (str_starts_with($a, '--log-file=')) {
+                    file_put_contents(substr($a, 11), str_repeat("direct rsync log line\n", 2000), FILE_APPEND);
+                }
+            }
+            return 0;
+        };
+        try {
+            $id  = $this->saveLocalJob('j-cap', ['pairs' => [
+                ['local' => '/mnt/user/a/', 'remote' => '/mnt/disk1/a/'],
+                ['local' => '/mnt/user/b/', 'remote' => '/mnt/disk1/b/'],
+                ['local' => '/mnt/user/c/', 'remote' => '/mnt/disk1/c/'],
+            ]]);
+            $res = Runner::run($id, false);
+        } finally {
+            Logger::$maxRunLogBytesOverride = null;
+        }
+
+        $log = (string) file_get_contents($res['runLog']);
+        $this->assertLessThanOrEqual($cap + 40, strlen($log), 'pairs 2 and 3 must not grow the log past the cap');
+        $this->assertSame(1, substr_count($log, Logger::TRUNCATE_MARKER_PREFIX));
     }
 }

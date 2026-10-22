@@ -732,9 +732,10 @@ class Rsync
      * ARGV ARRAY directly (no shell), so nothing is re-parsed.
      *
      * The spawn is injectable for tests: set Rsync::$runner to a callable
-     * `fn(array $argv, callable $onOutput, ?array $env): int` and this method
-     * delegates to it instead of touching a real binary. A stub declaring only
-     * the first two parameters still works - PHP ignores the extra argument.
+     * `fn(array $argv, callable $onOutput, ?array $env, ?int $timeoutSec): int`
+     * and this method delegates to it instead of touching a real binary. A stub
+     * declaring only the first two parameters still works - PHP ignores the
+     * extra arguments.
      * The default $runner uses proc_open.
      *
      * @param array<int,string>          $argv     full rsync argv
@@ -742,23 +743,25 @@ class Rsync
      * @param array<string,string>|null  $env      full child environment, or null
      *        to inherit. PASSWORD auth passes the SSH_ASKPASS vars here; rsync
      *        hands them to the ssh it spawns.
+     * @param int|null $timeoutSec wall-clock deadline; past it the child is
+     *        killed and 35 (RERR_CONTIMEOUT) returned. null = none (transfers).
      * @return int the process exit code (128+signal when terminated by a signal)
      */
-    public static function run(array $argv, ?callable $onOutput = null, ?array $env = null): int
+    public static function run(array $argv, ?callable $onOutput = null, ?array $env = null, ?int $timeoutSec = null): int
     {
         $sink = $onOutput ?? static function (string $_chunk): void {
             // default: discard (the run log is fed by rsync's own --log-file).
         };
 
         if (self::$runner !== null) {
-            return (self::$runner)($argv, $sink, $env);
+            return (self::$runner)($argv, $sink, $env, $timeoutSec);
         }
-        return self::defaultRun($argv, $sink, $env);
+        return self::defaultRun($argv, $sink, $env, $timeoutSec);
     }
 
     /**
      * Injectable process runner. null => use defaultRun (real proc_open).
-     * Signature: fn(array $argv, callable(string):void $onOutput): int
+     * Signature: fn(array $argv, callable(string):void $onOutput, ?array $env, ?int $timeoutSec): int
      *
      * @var callable|null
      */
@@ -774,7 +777,7 @@ class Rsync
      * @param callable(string):void     $onOutput
      * @param array<string,string>|null $env full child environment, or null to inherit
      */
-    private static function defaultRun(array $argv, callable $onOutput, ?array $env = null): int
+    private static function defaultRun(array $argv, callable $onOutput, ?array $env = null, ?int $timeoutSec = null): int
     {
         $descriptors = [
             0 => ['file', '/dev/null', 'r'],
@@ -791,14 +794,45 @@ class Rsync
         // Non-blocking reads so a slow/long transfer streams to the log rather
         // than buffering until exit. The shared drain loop selects across stdout
         // and stderr (reading one to EOF first could deadlock). [ROB-01]
+        $deadline = $timeoutSec !== null ? microtime(true) + $timeoutSec : null;
         ProcIO::drainPipes(
             [1 => $pipes[1], 2 => $pipes[2]],
             static function (int $fd, string $chunk) use ($onOutput): void {
                 $onOutput($chunk);
-            }
+            },
+            $deadline
         );
 
+        if ($deadline !== null && self::waitOrKill($proc, $deadline)) {
+            self::reapExitCode($proc);
+            $onOutput("rsync did not finish within $timeoutSec seconds and was stopped.\n");
+            return 35;
+        }
         return self::reapExitCode($proc);
+    }
+
+    /**
+     * Wait for $proc to exit, or kill it (TERM, then KILL for a wedged one) once
+     * $deadline passes; true when it was killed. EOF on both pipes is NOT proof
+     * the child has exited: one that closes stdout and stderr and lingers would
+     * otherwise leave proc_close() blocking for as long as it likes.
+     *
+     * @param resource $proc
+     */
+    private static function waitOrKill($proc, float $deadline): bool
+    {
+        while (true) {
+            $running = @proc_get_status($proc);
+            if (empty($running['running'])) {
+                return false;
+            }
+            if (microtime(true) >= $deadline) {
+                @proc_terminate($proc);
+                @proc_terminate($proc, 9);
+                return true;
+            }
+            usleep(20000);
+        }
     }
 
     /**
@@ -950,30 +984,11 @@ class Rsync
                 $deadline
             );
 
-            // drainPipes honours the deadline but deliberately never touches the
-            // process handle, so bounding the CALL is ours to do - and EOF on
-            // both pipes is NOT proof the child has exited. A child that closes
-            // stdout and stderr and then lingers ends the drain immediately,
-            // leaving proc_close() inside reapExitCode() to block for as long as
-            // it feels like: exactly the php-fpm wedge DAEMON_PROBE_TIMEOUT
-            // exists to prevent. So poll unconditionally until it is gone or the
-            // deadline passes, then two signals - TERM so rsync can clean up,
-            // then KILL for a wedged one.
-            while (true) {
-                $running = @proc_get_status($proc);
-                if (empty($running['running'])) {
-                    break;
-                }
-                if (microtime(true) >= $deadline) {
-                    @proc_terminate($proc);
-                    @proc_terminate($proc, 9);
-                    $timedOut = true;
-                    break;
-                }
-                usleep(20000);
-            }
-
-            $exit = self::reapExitCode($proc);
+            // drainPipes honours the deadline but never touches the process
+            // handle: a lingering child would wedge this php-fpm worker in
+            // proc_close(), exactly what DAEMON_PROBE_TIMEOUT exists to prevent.
+            $timedOut = self::waitOrKill($proc, $deadline);
+            $exit     = self::reapExitCode($proc);
         }
 
         if ($timedOut) {
