@@ -139,13 +139,15 @@ on, forked from, or derived from any other plugin.
   crash interrupted (`reconcilePendingMove`, from the `credentials.move.json`
   record in `UR_CONFIG_BASE`): pointer at the destination → remove the source's
   `.last-good`, then the source, then the record, only while both files still
-  hash to the record; pointer still at the source → drop the record and the
-  uncommitted copy; anything else → keep it all and log once.
+  hash to the record; pointer still at the source and the source still the
+  recorded copy → drop the record and the uncommitted copy; anything else
+  (including a source that is gone) → keep it all and log once.
   `sanitizeMntDir` canonicalises (`Config::canonicalPath`), and the move itself
-  probes for one directory under two names (`ur_dirs_alias`: a marker made in
-  the destination, looked for in the source - shfs `/mnt/user` vs `/mnt/cache`
-  has different inodes and realpath cannot see it), so an alias only moves the
-  pointer and never unlinks.
+  probes for one directory under two names (`ur_dirs_alias`, BOTH ways: a
+  marker made in each dir, looked for in the other - shfs `/mnt/user` vs
+  `/mnt/cache` has different inodes, realpath cannot see it, and shfs may show
+  only one direction). Either direction seeing it → pointer-only, never unlink;
+  directions disagreeing while a destination credentials.json exists → refused.
   `config.json` carries a `revision` (absent = 0) that `Config::save()` bumps on
   every change; the Jobs/Settings forms post it as `configRevision` and
   `saveConfig` answers 409 when it is stale (absent field = old client, allowed).

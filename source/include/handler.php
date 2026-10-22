@@ -434,7 +434,9 @@ function ur_release_session_lock(): void
  * filesystem shows rather than by path or inode: Unraid's /mnt/user (shfs)
  * shows /mnt/cache's files under other inode numbers, and realpath() maps
  * neither name to the other. A random 0600 marker made in $a is looked for in
- * $b, then removed. Null when no marker could be made in $a.
+ * $b, then removed. Null when no marker could be made in $a. Tests replace it
+ * through $GLOBALS['ur_dirs_alias_probe'], since a one-way view needs a union
+ * mount.
  */
 function ur_dirs_alias(string $a, string $b): ?bool
 {
@@ -521,12 +523,20 @@ function ur_migrate_credentials(string $from, string $to, ?callable $commit = nu
         }
 
         // Two names for one directory: the file is already where the pointer is
-        // going, and unlinking the "source" would delete the only copy.
-        $alias = ur_dirs_alias($dstDir, $srcDir);
-        if ($alias === null) {
-            return $refuse('could not write to ' . $dstDir . '.');
+        // going, and unlinking the "source" would delete the only copy. Probed
+        // both ways: shfs may place a file made through /mnt/user on a disk that
+        // the /mnt/cache name never shows, so one direction alone can miss it.
+        $probe = $GLOBALS['ur_dirs_alias_probe'] ?? 'ur_dirs_alias';
+        $there = $probe($dstDir, $srcDir);
+        $back  = $probe($srcDir, $dstDir);
+        if ($there === null || $back === null) {
+            return $refuse('could not write to ' . ($there === null ? $dstDir : $srcDir) . '.');
         }
-        if ($alias) {
+        if ($there !== $back && is_file($dstFile)) {
+            return $refuse('cannot tell whether ' . $dstDir . ' and ' . $srcDir
+                . ' are one directory, and ' . $dstFile . ' already exists.');
+        }
+        if ($there || $back) {
             $commit();
             return ['ok' => true, 'warning' => ''];
         }

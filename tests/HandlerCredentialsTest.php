@@ -65,6 +65,7 @@ final class HandlerCredentialsTest extends TestCase
 
     protected function tearDown(): void
     {
+        unset($GLOBALS['ur_dirs_alias_probe']);
         Config::$mntRoot = '/mnt';
         foreach ($this->scratchRoots as $root) {
             exec('rm -rf ' . escapeshellarg($root));
@@ -1441,6 +1442,101 @@ final class HandlerCredentialsTest extends TestCase
         $this->assertFileExists($src . '/credentials.json.last-good');
         $this->assertFileDoesNotExist($dst . '/credentials.json', 'the uncommitted copy goes');
         $this->assertFileDoesNotExist(Credentials::movePath());
+    }
+
+    /** @return array<string,array{bool}> */
+    public static function sourceGoneProvider(): array
+    {
+        return ['source missing' => [true], 'source changed' => [false]];
+    }
+
+    /**
+     * Pointer back at the source but the source no longer the recorded copy -
+     * e.g. a FAT32 pointer save rolled back after the source unlink: the
+     * destination may be the only copy, so nothing is removed.
+     */
+    #[DataProvider('sourceGoneProvider')]
+    public function testAnUncommittedMoveWhoseSourceIsNotTheRecordedCopyKeepsTheDestination(bool $missing): void
+    {
+        $root = $this->scratchMntRoot();
+        [$src, $dst] = $this->interruptedMove($root, $root . '/pool/a', false);
+        if ($missing) {
+            unlink($src . '/credentials.json');
+        } else {
+            file_put_contents($src . '/credentials.json', "{\"schemaVersion\":1,\"keys\":[],\"connections\":[]}\n");
+        }
+        $moved = file_get_contents($dst . '/credentials.json');
+        $log   = Logger::pluginLogPath();
+        $seen  = substr_count((string) @file_get_contents($log), 'could not be finished');
+
+        Credentials::withLock(static fn() => null);
+        Credentials::withLock(static fn() => null);
+
+        $this->assertSame($moved, file_get_contents($dst . '/credentials.json'));
+        $this->assertFileExists(Credentials::movePath());
+        $this->assertSame($seen + 1, substr_count((string) @file_get_contents($log), 'could not be finished'));
+        unlink(Credentials::movePath());
+    }
+
+    /** @return array<string,array{bool,bool}> */
+    public static function oneWayAliasProvider(): array
+    {
+        return [
+            'marker made in the destination seen in the source' => [true, false],
+            'marker made in the source seen in the destination' => [false, true],
+        ];
+    }
+
+    /**
+     * shfs may show a file made through one name and not one made through the
+     * other, so either direction seeing the marker means one directory.
+     */
+    #[DataProvider('oneWayAliasProvider')]
+    public function testAnAliasSeenInOneDirectionOnlyMovesJustThePointer(bool $there, bool $back): void
+    {
+        $src = $this->tempSecretsDir();
+        $dst = $this->tempSecretsDir();
+        mkdir($src, 0700, true);
+        file_put_contents($src . '/credentials.json', "ONLY COPY\n");
+        $GLOBALS['ur_dirs_alias_probe'] = static fn(string $a, string $b): bool => $a === $dst ? $there : $back;
+
+        $committed = false;
+        $res = ur_migrate_credentials($src, $dst, function () use (&$committed): void {
+            $committed = true;
+        });
+
+        $this->assertTrue($res['ok'], $res['warning']);
+        $this->assertTrue($committed);
+        $this->assertSame("ONLY COPY\n", file_get_contents($src . '/credentials.json'));
+        $this->assertFileDoesNotExist($dst . '/credentials.json', 'nothing copied onto an alias');
+        $this->assertFileDoesNotExist(Credentials::movePath());
+
+        $this->rmSecretsDir($src);
+        $this->rmSecretsDir($dst);
+    }
+
+    #[DataProvider('oneWayAliasProvider')]
+    public function testDisagreeingProbesWithAnExistingDestinationFileRefuseTheMove(bool $there, bool $back): void
+    {
+        $src = $this->tempSecretsDir();
+        $dst = $this->tempSecretsDir();
+        mkdir($src, 0700, true);
+        mkdir($dst, 0700, true);
+        file_put_contents($src . '/credentials.json', "SAME\n");
+        file_put_contents($dst . '/credentials.json', "SAME\n");
+        $GLOBALS['ur_dirs_alias_probe'] = static fn(string $a, string $b): bool => $a === $dst ? $there : $back;
+
+        $res = ur_migrate_credentials($src, $dst, function (): void {
+            $this->fail('commit must not run for an ambiguous move');
+        });
+
+        $this->assertFalse($res['ok']);
+        $this->assertStringContainsString('cannot tell', $res['warning']);
+        $this->assertSame("SAME\n", file_get_contents($src . '/credentials.json'));
+        $this->assertSame("SAME\n", file_get_contents($dst . '/credentials.json'));
+
+        $this->rmSecretsDir($src);
+        $this->rmSecretsDir($dst);
     }
 
     /**

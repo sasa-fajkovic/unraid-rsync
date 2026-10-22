@@ -204,6 +204,11 @@ class Credentials
             return self::completeMove();
         }
         if ($current === $rec['source']) {
+            // A pointer save the filesystem rolled back after the source was
+            // already unlinked leaves the destination as the only copy.
+            if (@hash_file('sha256', $rec['source'] . '/credentials.json') !== $rec['sha256']) {
+                return self::stuckMove($rec, 'secretsDir points back at the source, but its credentials.json is gone or has changed');
+            }
             $copy = $rec['destination'] . '/credentials.json';
             if (@hash_file('sha256', $copy) === $rec['sha256']) {
                 @unlink($copy);
