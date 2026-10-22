@@ -124,12 +124,20 @@ on, forked from, or derived from any other plugin.
   write cut short used to load as zero jobs, and `apply-cron.php` then deleted
   the cron file. Saves go through `Util::writeAtomic` (temp file, `fsync`,
   rename) and first keep the replaced file as `<name>.last-good` when it parses.
+  The parent directory is never fsynced after the rename (PHP cannot fsync a
+  directory handle), so a power cut can still lose the rename itself; the
+  recovery story is the ordering (destination copy → config pointer → source
+  unlink) plus `.last-good`.
 - **Every load-modify-save holds a lock.** `config.json` under
   `Config::withLock` (`config.lock`), `credentials.json` under
   `Credentials::withLock` (`credentials.lock`); both locks live in
   `UR_CONFIG_BASE` and never follow `secretsDir`, so a relocation and every
   writer contend on one file. Order: config, then credentials. Handler
-  credential actions re-read the `secretsDir` pointer once they hold the lock.
+  credential actions and `Ssh::pinHostKey` re-read the `secretsDir` pointer
+  once they hold the lock (`Credentials::refreshSecretsDir`, which never takes
+  the config lock), and the handler then removes a /boot copy an interrupted
+  move left behind if it is byte-identical. `sanitizeMntDir` canonicalises
+  (`Config::canonicalPath`), so two spellings of one dir never look like a move.
   `config.json` carries a `revision` (absent = 0) that `Config::save()` bumps on
   every change; the Jobs/Settings forms post it as `configRevision` and
   `saveConfig` answers 409 when it is stale (absent field = old client, allowed).
