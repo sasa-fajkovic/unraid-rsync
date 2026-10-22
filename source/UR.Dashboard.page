@@ -87,10 +87,10 @@ $mytiles[$slug]['column1'] = str_replace('__UR_STATES__', $urStates === false ? 
   #ur-dash-body .ur-d-when { flex:0 0 auto; font-size:11px; opacity:.6; white-space:nowrap; }
   #ur-dash-body .ur-d-badge { flex:0 0 auto; padding:1px 8px; border-radius:10px; font-size:11px; font-weight:bold; color:#fff; white-space:nowrap; }
   #ur-dash-body .ur-d-success { background:#1c7d3f; }
-  #ur-dash-body .ur-d-warning { background:#b15c00; color:#1a1a1a; }
+  #ur-dash-body .ur-d-warning { background:#b15c00; }
   #ur-dash-body .ur-d-failed  { background:#b71c1c; }
-  #ur-dash-body .ur-d-aborted { background:#555; }
-  #ur-dash-body .ur-d-pending { background:#777; }
+  #ur-dash-body .ur-d-aborted { background:#6b6b6b; }
+  #ur-dash-body .ur-d-pending { background:#5f6368; }
   #ur-dash-body .ur-d-running { background:#1565c0; }
 </style>
 <script>

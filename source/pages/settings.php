@@ -147,7 +147,7 @@ ur_emit_form_enable_assets();
     <span class="left"><i class="fa fa-cog title"></i>&nbsp;<?=_('Default rsync options')?></span>
   </div>
   <p>
-    <?=_('These default rsync options seed every new job and are applied to any job set to "use global defaults". Changing them here does not retroactively change jobs that keep their own options')?>.
+    <?=_('These default rsync options seed every new job and are applied to any job set to "Use global defaults". Changing them here does not retroactively change jobs that keep their own options')?>.
   </p>
 
   <?php ur_render_rsync_options($defaultOpts, 'global[defaultRsyncOptions]', 'ur_global'); ?>

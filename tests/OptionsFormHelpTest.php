@@ -751,15 +751,16 @@ final class OptionsFormHelpTest extends TestCase
             $html
         );
 
-        // The summary table gains a Transport column, and a daemon row's Auth
-        // cell reads the literal "rsyncd" rather than a meaningless authMethod.
+        // The summary table names transport and auth in words, never the raw
+        // codes; a daemon row's Auth cell says whether a module secret is set
+        // rather than echoing a meaningless authMethod.
         $tbody = $this->collapse($this->between($html, '<tbody>', '</tbody>'));
         $this->assertStringContainsString(
-            '<tr> <td>Legacy NAS</td> <td>SSH</td> <td>nas.local:22</td> <td>root</td> <td>KEYFILE</td> </tr>',
+            '<tr> <td>Legacy NAS</td> <td>SSH (rsync over SSH)</td> <td>nas.local:22</td> <td>root</td> <td>Key file on disk</td> </tr>',
             $tbody
         );
         $this->assertStringContainsString(
-            '<tr> <td>Daemon NAS</td> <td>DAEMON</td> <td>nas2.local:873</td> <td>moduser</td> <td>rsyncd</td> </tr>',
+            '<tr> <td>Daemon NAS</td> <td>rsync daemon (rsyncd)</td> <td>nas2.local:873</td> <td>moduser</td> <td>None</td> </tr>',
             $tbody
         );
         $this->assertStringContainsString(
@@ -1259,9 +1260,9 @@ final class OptionsFormHelpTest extends TestCase
         // All three transports, with the stored DAEMON pre-selected on the card.
         $card = $this->between($html, 'id="ur_job_0_transport"', '</select>');
         $this->assertSame(
-            '<option value="SSH">SSH (remote host)</option>'
+            '<option value="SSH">SSH (rsync over SSH)</option>'
             . '<option value="LOCAL">Local (this server)</option>'
-            . '<option value="DAEMON" selected>rsync daemon (host::module)</option>',
+            . '<option value="DAEMON" selected>rsync daemon (rsyncd)</option>',
             trim($this->between($card, '>', '')),
             'The job Transport select must offer SSH, LOCAL and DAEMON in that order.'
         );
@@ -1298,12 +1299,12 @@ final class OptionsFormHelpTest extends TestCase
     }
 
     /**
-     * The per-job Connection <select> must LIST every saved connection, daemon
-     * ones included, and use the transport only to append a " [rsyncd]" label
-     * suffix - never to filter or to group into <optgroup>s. A connection
-     * dropped from this select would let the next save silently clear the job's
-     * connectionId, and the suffix must be read with ?? 'SSH' so a record that
-     * predates the transport field still renders.
+     * The per-job Connection <select> must RENDER every saved connection,
+     * daemon ones included, and HIDE (never drop, never group) the ones whose
+     * transport differs from the job's. A connection dropped from this select
+     * would let the next save silently clear the job's connectionId; the
+     * transport is read with ?? 'SSH' so a record that predates the field
+     * still renders, and a selected mismatch stays visible but marked.
      *
      * Driven through ur_render_job_card() directly rather than the whole page:
      * the card renderer reads `global $urConnections`, and renderPageBody()
@@ -1317,7 +1318,7 @@ final class OptionsFormHelpTest extends TestCase
      */
     #[RunInSeparateProcess]
     #[PreserveGlobalState(false)]
-    public function testJobsPageListsDaemonConnectionsWithALabelSuffixAndNoFiltering(): void
+    public function testJobsPageHidesOtherTransportConnectionsWithoutDroppingAny(): void
     {
         // Defines ur_render_job_card() (function declarations are global no
         // matter where the file is included from).
@@ -1345,16 +1346,31 @@ final class OptionsFormHelpTest extends TestCase
 
         $select = $this->between($card, 'name="jobs[0][connectionId]"', '</select>');
         $this->assertNotSame('', $select, 'the Connection select did not render.');
-        preg_match_all('/<option value="[^"]*"(?: selected)?>[^<]*<\/option>/', $select, $m);
+        preg_match_all('/<option value="[^"]*"[^>]*>[^<]*<\/option>/', $select, $m);
         $this->assertSame([
             '<option value="">(none)</option>',
-            '<option value="c-legacy">Legacy NAS</option>',
-            '<option value="c-ssh">SSH NAS</option>',
-            '<option value="c-daemon" selected>Daemon NAS [rsyncd]</option>',
-            '<option value="c-lower">Lower NAS [rsyncd]</option>',
+            '<option value="c-legacy" data-transport="SSH" data-label="Legacy NAS" hidden>Legacy NAS</option>',
+            '<option value="c-ssh" data-transport="SSH" data-label="SSH NAS" hidden>SSH NAS</option>',
+            '<option value="c-daemon" data-transport="DAEMON" data-label="Daemon NAS [rsyncd]" selected>Daemon NAS [rsyncd]</option>',
+            '<option value="c-lower" data-transport="DAEMON" data-label="Lower NAS [rsyncd]">Lower NAS [rsyncd]</option>',
         ], $m[0]);
-        // No grouping, and nothing filtered out.
         $this->assertStringNotContainsString('<optgroup', $select);
+
+        // An SSH job that still points at a daemon connection keeps it, marked.
+        ob_start();
+        ur_render_job_card(Job::normalize([
+            'id' => 'j-ssh', 'name' => 'SSH Job', 'transport' => 'SSH', 'connectionId' => 'c-daemon',
+            'pairs' => [['local' => '/mnt/user/photos/', 'remote' => '/srv/photos/']],
+        ]), 1);
+        $ssh = $this->between((string) ob_get_clean(), 'name="jobs[1][connectionId]"', '</select>');
+        $this->assertStringContainsString('<option value="c-daemon" data-transport="DAEMON" data-label="Daemon NAS [rsyncd]" selected>Daemon NAS [rsyncd] (other transport)</option>', $ssh);
+        $this->assertStringContainsString('<option value="c-lower" data-transport="DAEMON" data-label="Lower NAS [rsyncd]" hidden>', $ssh);
+        $this->assertStringContainsString('<option value="c-ssh" data-transport="SSH" data-label="SSH NAS">', $ssh);
+
+        // The client re-filters on a transport change the same way.
+        $js = (string) file_get_contents(__DIR__ . '/../source/pages/jobs.php');
+        $this->assertStringContainsString("var other = tr !== 'LOCAL' && ot !== tr;", $js);
+        $this->assertStringContainsString('o.hidden = other && !o.selected;', $js);
 
         // The help under the select names both remote transports now (this
         // branch only renders when connections exist, which is why it lives
@@ -1642,7 +1658,7 @@ final class OptionsFormHelpTest extends TestCase
     private function transportOptions(string $html): array
     {
         preg_match_all(
-            '/<option value="(SSH|DAEMON)"( selected)?>(?:SSH \(rsync over SSH\)|rsync daemon \(rsyncd, port 873\))<\/option>/',
+            '/<option value="(SSH|DAEMON)"( selected)?>(?:SSH \(rsync over SSH\)|rsync daemon \(rsyncd\))<\/option>/',
             $html,
             $m,
             PREG_SET_ORDER
@@ -2182,6 +2198,336 @@ final class OptionsFormHelpTest extends TestCase
         // P6's muted last-run time and tooltip are the real run's too.
         $this->assertStringContainsString('var fin = real ? Date.parse(real.finishedAt) / 1000 : 0;', $dash);
         $this->assertStringNotContainsString('j.lastRun.', $dash);
+    }
+
+    // --- P5: Jobs, Overview, Connections, Credentials UX ----------------------
+
+    /** The Jobs tab with the mirror job saved, parsed. */
+    private function jobsPage(): Dom\HTMLDocument
+    {
+        $this->seedConnections();
+        $cfg = Config::defaults();
+        $cfg['jobs'] = [$this->mirrorJob()];
+        Config::save($cfg);
+        return Dom\HTMLDocument::createFromString('<!doctype html><body>' . $this->renderPageBody(__DIR__ . '/../source/pages/jobs.php'), LIBXML_NOERROR);
+    }
+
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testJobsRowHasRunDryRunLogsAndAnEditorLink(): void
+    {
+        $page = $this->jobsPage();
+        $this->assertSame('Job', trim((string) $page->querySelector('table.ur-job-list thead th')?->textContent));
+        $row = $page->querySelector('table.ur-job-list tr[data-jobid="j-mirror"]');
+        $this->assertNotNull($row);
+
+        $link = $row->querySelector('a.ur-goto');
+        $this->assertSame('#ur-jobcard-j-mirror', $link?->getAttribute('href'));
+        $this->assertSame('ur-jobcard-j-mirror', $link?->getAttribute('aria-controls'));
+        $this->assertSame('Mirror', trim((string) $link?->textContent));
+        $this->assertNotNull($page->getElementById('ur-jobcard-j-mirror'), 'the link target is the job card');
+
+        // Same classes as the editor's buttons, so the same handlers and the
+        // status poll drive them; distinct accessible names per job.
+        $this->assertSame('Run Mirror', $row->querySelector('button.ur-job-run[data-jobid="j-mirror"]')?->getAttribute('aria-label'));
+        $this->assertSame('Dry-run Mirror', $row->querySelector('button.ur-job-dry[data-jobid="j-mirror"]')?->getAttribute('aria-label'));
+        $this->assertSame('Logs for Mirror', $row->querySelector('button.ur-job-viewlog')?->getAttribute('aria-label'));
+        $this->assertTrue($row->querySelector('.ur-dirty-note')?->hasAttribute('hidden'));
+
+        $js = (string) file_get_contents(__DIR__ . '/../source/pages/jobs.php');
+        $this->assertStringContainsString("document.querySelectorAll('.ur-job-run' + sel + ', .ur-job-dry' + sel)", $js, 'every Run/Dry-run of a job, not the first');
+        $this->assertStringContainsString('var blocked = !!s.running || isDirty(jobId);', $js);
+    }
+
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testAnEditedCardBlocksRunUntilApplyAndActionButtonsDoNotEnableApply(): void
+    {
+        $page = $this->jobsPage();
+        $card = $page->getElementById('ur-jobcard-j-mirror');
+        $this->assertSame('j-mirror', $card?->getAttribute('data-jobid'));
+        $note = $card?->querySelector('.ur-job-card-actions .ur-dirty-note');
+        $this->assertSame('Apply changes first', trim((string) $note?->textContent));
+        $this->assertTrue($note?->hasAttribute('hidden'));
+
+        $js = (string) file_get_contents(__DIR__ . '/../source/pages/jobs.php');
+        $this->assertStringContainsString("if (t && t.name && t.closest) { markDirty(t.closest('.ur-job-card')); }", $js);
+        $this->assertStringContainsString("closest('button[data-ur-edit]')", $js);
+
+        $enable = (string) file_get_contents(__DIR__ . '/../source/pages/_options_form.php');
+        $this->assertStringContainsString("if (btn && (btn.type !== 'button' || btn.hasAttribute('data-ur-edit'))) { enableSubmit(pluginForm(btn)); }", $enable);
+        // Edit controls are marked; actions are not.
+        foreach (['.ur-pair-add', '.ur-pair-del', '#ur-add-job', '.ur-row-add', '.ur-row-up', '.ur-row-down', '.ur-row-del'] as $sel) {
+            $el = $page->querySelector($sel);
+            $this->assertNotNull($el, $sel);
+            $this->assertTrue($el->hasAttribute('data-ur-edit'), $sel);
+        }
+        foreach (['.ur-job-run', '.ur-job-dry', '.ur-job-abort', '.ur-job-viewlog'] as $sel) {
+            $this->assertFalse($page->querySelector($sel)->hasAttribute('data-ur-edit'), $sel);
+        }
+        $this->assertStringContainsString("b.setAttribute('data-ur-edit', '');", $enable, 'JS-built filter rows too');
+    }
+
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testRemoveIsAnOutlinedDangerButtonAtTheRightEdge(): void
+    {
+        $page = $this->jobsPage();
+        $actions = $page->getElementById('ur-jobcard-j-mirror')?->querySelector('.ur-job-card-actions');
+        $last = $actions?->lastElementChild;
+        $this->assertSame('Remove job', trim((string) $last?->textContent));
+        $this->assertStringContainsString('ur-btn-danger', (string) $last?->getAttribute('class'));
+        $css = (string) file_get_contents(__DIR__ . '/../source/pages/_options_form.php');
+        $this->assertSame(1, preg_match('/\.ur-btn-danger, \.ur-btn-danger:hover \{([^}]*)\}/', $css, $m));
+        $this->assertStringContainsString('margin-left: auto', $m[1]);
+        $this->assertStringContainsString('border: 1px solid var(--red-800, #b71c1c)', $m[1]);
+        $this->assertStringContainsString('ur-btn-danger', (string) file_get_contents(__DIR__ . '/../source/pages/connections.php'));
+    }
+
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testJobCardControlsHaveAccessibleNames(): void
+    {
+        $card = $this->jobsPage()->getElementById('ur-jobcard-j-mirror');
+        foreach (['ur_job_0_enabled', 'ur_job_0_manual', 'ur_job_0_useglobal', 'ur_job_0_snapon', 'ur_job_0_snapprune'] as $id) {
+            $this->assertSame('checkbox', $card?->querySelector('#' . $id)?->getAttribute('type'), $id);
+            $this->assertNotNull($card?->querySelector('label[for="' . $id . '"]'), "$id has a <label for>");
+        }
+        $this->assertSame('ur_job_0_body', $card?->querySelector('.ur-job-head')?->getAttribute('aria-controls'));
+        $this->assertNotNull($card?->querySelector('#ur_job_0_body.ur-job-body'));
+        $this->assertSame('Remove pair', $card?->querySelector('.ur-pair-del')?->getAttribute('aria-label'));
+        $this->assertSame('Path on this server', $card?->querySelector('input[name="jobs[0][pairs][0][local]"]')?->getAttribute('aria-label'));
+        $this->assertSame('Path on the other side', $card?->querySelector('input[name="jobs[0][pairs][0][remote]"]')?->getAttribute('aria-label'));
+    }
+
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testLongHelpIsCollapsedShortHintsAreVisibleAndTermsAgree(): void
+    {
+        $card = $this->jobsPage()->getElementById('ur-jobcard-j-mirror');
+        $summaries = [];
+        foreach ($card?->querySelectorAll('details.ur-details > summary') ?? [] as $sum) {
+            $summaries[] = trim((string) $sum->textContent);
+        }
+        $this->assertSame(['How pairs work', 'About hooks'], $summaries);
+
+        // Only the job's transport's pair paragraph is shown (SSH here).
+        $this->assertFalse($card?->querySelector('.ur-for-transport[data-transport="SSH"]')?->hasAttribute('style'));
+        $this->assertSame('display:none', $card?->querySelector('.ur-for-transport[data-transport="DAEMON"]')?->getAttribute('style'));
+
+        // The root warning stays outside the collapsed block.
+        $warn = $card?->querySelector('.ur-hook-help > .ur-hook-warn');
+        $this->assertStringContainsString('full root privileges', (string) $warn?->textContent);
+        $this->assertNull($card?->querySelector('details .ur-hook-warn'));
+
+        $hints = '';
+        foreach ($card?->querySelectorAll('.ur-hint') ?? [] as $h) {
+            $hints .= $h->textContent . "\n";
+        }
+        foreach (['never scheduled', 'uses the rsync options you set on the Global Settings tab', 'unmounted drive', 'Quiet and Summary'] as $needle) {
+            $this->assertStringContainsString($needle, $hints);
+        }
+        $this->assertSame('Off — e.g. /mnt/disks/backup/.unraid-rsync-target', $card?->querySelector('#ur_job_0_marker')?->getAttribute('placeholder'));
+        $this->assertStringContainsString('Use global defaults', (string) $card?->querySelector('label[for="ur_job_0_useglobal"]')?->textContent);
+        $this->assertStringContainsString('Source → destination pairs', (string) $card?->textContent);
+        $this->assertStringNotContainsString('Use global config', (string) $card?->textContent);
+
+        $css = (string) file_get_contents(__DIR__ . '/../source/pages/_options_form.php');
+        $this->assertMatchesRegularExpression('/input::placeholder[^{]*\{ color: var\(--color-text-secondary, #8a8a8a\); opacity: 1; font-style: italic; \}/', $css);
+        $this->assertMatchesRegularExpression('/\.ur-help \{[^}]*opacity: \.5;/', $css, 'the "?" is visible before hover');
+    }
+
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testUseGlobalDefaultsShowsWhatWillRunForEachTransport(): void
+    {
+        $this->renderPageBody(__DIR__ . '/../source/pages/jobs.php');
+        $GLOBALS['urConnections'] = [];
+        $GLOBALS['globalOpts'] = array_merge(Config::defaultRsyncOptions(), ['delete' => true, 'maxDelete' => '25']);
+        $job = $this->mirrorJob();
+        $job['useGlobalDefaults'] = true;
+        $on = $this->card($job, 0);
+        $box = $on->querySelector('#ur_job_0_globalpreview');
+        $this->assertFalse($box?->hasAttribute('hidden'));
+        $code = $box?->querySelector('code.ur-global-line');
+        $this->assertSame(PageHelpers::optionsLine($GLOBALS['globalOpts'], 'SSH'), $code?->textContent);
+        $this->assertStringContainsString('--delete', (string) $code?->textContent);
+        $this->assertSame(PageHelpers::optionsLine($GLOBALS['globalOpts'], 'DAEMON'), $code?->getAttribute('data-line-daemon'));
+        $this->assertSame('#ur-settings-form', $box?->querySelector('a.ur-goto')?->getAttribute('href'));
+        $this->assertSame('ur_job_0_globalpreview', $on->querySelector('#ur_job_0_useglobal')?->getAttribute('data-global-preview'));
+
+        $job['useGlobalDefaults'] = false;
+        $this->assertTrue($this->card($job, 0)->querySelector('#ur_job_0_globalpreview')?->hasAttribute('hidden'));
+    }
+
+    public function testOptionsAreGroupedIntoFieldsetsWithoutReorderingTheArgv(): void
+    {
+        $opts = array_merge(Config::defaultRsyncOptions(), [
+            'archive' => true, 'delete' => true,
+            'filters' => [['type' => 'include', 'pattern' => '*/'], ['type' => 'exclude', 'pattern' => '*']],
+        ]);
+        $doc = Dom\HTMLDocument::createFromString('<!doctype html><body>' . $this->renderOptions($opts, 'jobs[0][rsyncOptions]', 'g'), LIBXML_NOERROR);
+        $legends = [];
+        foreach ($doc->querySelectorAll('.ur-rsync-options > fieldset.ur-opt-group > legend') as $l) {
+            $legends[] = $l->textContent;
+        }
+        $this->assertSame(['Preserve', 'Transfer', 'Deletion', 'Limits', 'Advanced'], $legends);
+
+        // Every whitelist key rendered exactly once (filters as their two arrays).
+        foreach (array_keys(Config::defaultRsyncOptions()) as $key) {
+            $n = $key === 'filters'
+                ? count($doc->querySelectorAll('[name="jobs[0][rsyncOptions][filters][pattern][]"]'))
+                : count($doc->querySelectorAll('[name="jobs[0][rsyncOptions][' . $key . ']"]:not([type="hidden"])'));
+            $this->assertSame($key === 'filters' ? 2 : 1, $n, $key);
+        }
+        $this->assertNotNull($doc->querySelector('fieldset.ur-opt-group:nth-of-type(1) #g_archive'));
+        $this->assertNotNull($doc->querySelector('fieldset.ur-opt-group:nth-of-type(2) .ur-filter-rows'));
+        $this->assertNotNull($doc->querySelector('fieldset.ur-opt-group:nth-of-type(3) #g_delete'));
+        $this->assertNotNull($doc->querySelector('fieldset.ur-opt-group:nth-of-type(5) #g_statsMode'));
+        // The filter rows keep their stored order, and the preview is the argv's.
+        $pats = [];
+        foreach ($doc->querySelectorAll('[name="jobs[0][rsyncOptions][filters][pattern][]"]') as $in) {
+            $pats[] = $in->getAttribute('value');
+        }
+        $this->assertSame(['*/', '*'], $pats);
+        $this->assertSame(PageHelpers::optionsLine($opts, null), $doc->querySelector('.ur-preview-out')?->textContent);
+    }
+
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testConnectionCardsAreAnAccordionWithNameFirst(): void
+    {
+        $this->seedConnections();
+        $page = Dom\HTMLDocument::createFromString('<!doctype html><body>' . $this->renderPageBody(__DIR__ . '/../source/pages/connections.php'), LIBXML_NOERROR);
+        $card = $page->querySelector('.ur-conn-card[data-conn-id="c-legacy"]');
+        $this->assertStringContainsString('ur-job-card', (string) $card?->getAttribute('class'));
+        $this->assertSame('Legacy NAS', $card?->querySelector('.ur-job-head .ur-job-title')?->textContent);
+        $this->assertSame('SSH (rsync over SSH) · nas.local:22', $card?->querySelector('.ur-job-head .ur-job-sub')?->textContent);
+        $this->assertTrue($card?->querySelector('#ur_conn_0_body')?->hasAttribute('hidden'));
+        $this->assertSame('ur_conn_0_name', $card?->querySelector('dl dt label')?->getAttribute('for'), 'Name is the first field');
+        $this->assertStringContainsString('ur-switch', (string) $card?->querySelector('#ur_conn_0_sudo')?->getAttribute('class'));
+        $this->assertSame('Remove connection', trim((string) $card?->querySelector('.ur-conn-card-actions .ur-btn-danger')?->textContent));
+        $opts = [];
+        foreach ($card?->querySelectorAll('#ur_conn_0_strict option') ?? [] as $o) {
+            $opts[] = $o->textContent;
+        }
+        $this->assertSame(['accept-new (pin on first connect)', 'yes (pinned key required)', 'no (insecure)'], $opts);
+        $auth = [];
+        foreach ($card?->querySelectorAll('#ur_conn_0_auth option') ?? [] as $o) {
+            $auth[] = $o->textContent;
+        }
+        $this->assertSame(['Key file on disk', 'Managed key', 'Password'], $auth);
+    }
+
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testPinnedHostKeyShowsItsFingerprintWithClearAndReplace(): void
+    {
+        $this->seedConnections();
+        $creds = Credentials::load();
+        $creds['connections'][0]['remoteHostKey'] = 'nas.local ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFH++n/GvCAHHKUzjnBGVlq/ldPq0biex6u5ivgysR44';
+        Credentials::save($creds);
+        $page = Dom\HTMLDocument::createFromString('<!doctype html><body>' . $this->renderPageBody(__DIR__ . '/../source/pages/connections.php'), LIBXML_NOERROR);
+
+        $pinned = $page->querySelector('.ur-conn-card[data-conn-id="c-legacy"]');
+        $this->assertSame('ssh-ed25519 SHA256:+ZjfDhL77345365Qi0LcRjDa7c+ztg8TCGjlwLbhKx4', $pinned?->querySelector('.ur-hostkey-fps li')?->textContent);
+        $this->assertSame('connections[0][clearHostKey]', $pinned?->querySelector('input.ur-hostkey-clear')?->getAttribute('name'));
+        $this->assertSame('ur_conn_0', $pinned?->querySelector('button.ur-hostkey-replace')?->getAttribute('data-idb'));
+        $ta = $pinned?->querySelector('#ur_conn_0_hostkey');
+        $this->assertTrue($ta?->hasAttribute('hidden'), 'the raw key is behind Replace…');
+        $this->assertStringContainsString('AAAAC3NzaC1lZDI1NTE5', (string) $ta?->textContent, 'and still posts the pin unchanged');
+
+        $unpinned = $page->querySelector('.ur-conn-card[data-conn-id="c-daemon"]');
+        $this->assertNull($unpinned?->querySelector('.ur-hostkey-clear'));
+        $this->assertFalse($unpinned?->querySelector('#ur_conn_1_hostkey')?->hasAttribute('hidden'));
+        $this->assertStringContainsString('Not pinned yet', (string) $unpinned?->querySelector('.ur-hint')?->textContent);
+    }
+
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testCredentialsEmptyStateAndSplitGenerateImport(): void
+    {
+        $this->seedConnections();
+        $html = $this->renderPageBody(__DIR__ . '/../source/pages/credentials.php');
+        $page = Dom\HTMLDocument::createFromString('<!doctype html><body>' . $html, LIBXML_NOERROR);
+        $this->assertNull($page->getElementById('ur-keys-form'), 'no "Save key names" with no keys');
+        $heads = [];
+        foreach ($page->querySelectorAll('#ur-key-new h3') as $h) {
+            $heads[] = $h->textContent;
+        }
+        $this->assertSame(['Generate a new key', 'Import an existing key'], $heads);
+        $this->assertNotNull($page->getElementById('ur_key_import_name'), 'import has its own name field');
+        $this->assertStringContainsString('<th>Private key stored</th>', $html);
+        $this->assertStringContainsString('Managed keys', $html);
+        $this->assertStringContainsString('class="ur-notice"', $html, 'the "only needed if" note is always visible');
+        $this->assertStringContainsString("getElementById('ur_key_import_name')", $html);
+    }
+
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testCredentialsWithKeysKeepsTheRenameForm(): void
+    {
+        $creds = Credentials::defaults();
+        $creds['keys'][] = ['id' => 'k-1', 'name' => 'backup', 'publicKey' => 'ssh-ed25519 AAAA', 'privateKey' => 'x', 'fingerprint' => 'SHA256:x'];
+        Credentials::save($creds);
+        $page = Dom\HTMLDocument::createFromString('<!doctype html><body>' . $this->renderPageBody(__DIR__ . '/../source/pages/credentials.php'), LIBXML_NOERROR);
+        $this->assertNotNull($page->getElementById('ur-keys-form'));
+        $this->assertSame('Yes', trim((string) $page->querySelector('tr[data-key-id="k-1"] td:nth-child(3)')?->textContent));
+    }
+
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testOverviewFirstPaintIsServerRenderedAndNamesLinkToTheEditor(): void
+    {
+        $cfg = Config::defaults();
+        $cfg['jobs'][] = Job::normalize([
+            'id' => 'j-ov', 'name' => 'Overview Job', 'transport' => 'LOCAL', 'manualOnly' => true,
+            'pairs' => [['local' => '/mnt/user/x/', 'remote' => '/mnt/disk1/x/']],
+        ]);
+        Config::save($cfg);
+        Runner::writeSummary('j-ov', ['state' => 'FAILED', 'startedAt' => '2026-10-20T03:00:00Z', 'finishedAt' => '2026-10-20T03:05:00Z', 'exitCode' => 12]);
+        $page = Dom\HTMLDocument::createFromString('<!doctype html><body>' . $this->renderPageBody(__DIR__ . '/../source/pages/overview.php'), LIBXML_NOERROR);
+        $row = $page->querySelector('#ur-ov-rows tr[data-jobid="j-ov"]');
+        $badge = $row?->querySelector('.ur-ov-state .ur-badge');
+        $this->assertSame('Failed', $badge?->textContent);
+        $this->assertStringContainsString('ur-badge-failed', (string) $badge?->getAttribute('class'));
+        $this->assertStringStartsWith('2026-10-20 ', (string) $row?->querySelector('.ur-ov-last')?->textContent);
+        $this->assertSame('manual (on demand)', $row?->querySelector('.ur-ov-next')?->textContent);
+        $this->assertSame('#ur-jobcard-j-ov', $row?->querySelector('a.ur-goto')?->getAttribute('href'));
+        $this->assertStringNotContainsString('…', (string) $row?->textContent);
+    }
+
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testSharedGotoSwitchesTabAndOpensTheCard(): void
+    {
+        $js = $this->emitted('ur_emit_page_assets');
+        $this->assertStringContainsString("closest('a.ur-goto')", $js);
+        $this->assertStringContainsString("if (el.classList.contains('ur-job-card')) { setCardOpen(el, true); }", $js);
+        $this->assertStringContainsString("p.getAttribute('role') === 'tabpanel'", $js);
+        $this->assertStringContainsString("ctl = p.querySelector('input[type=radio]');", $js);
+        $this->assertStringContainsString('setCardOpen: setCardOpen,', $js);
+    }
+
+    public function testBadgeColoursPassAaAndTheDashboardMatches(): void
+    {
+        $css = (string) file_get_contents(__DIR__ . '/../source/pages/_options_form.php');
+        $dash = (string) file_get_contents(__DIR__ . '/../source/UR.Dashboard.page');
+        foreach (['warning' => '#b15c00', 'pending' => '#5f6368', 'aborted' => '#6b6b6b'] as $cls => $bg) {
+            $this->assertMatchesRegularExpression('/\.ur-badge-' . $cls . '\s*\{ background: ' . $bg . '; \}/', $css, $cls);
+            $this->assertStringContainsString('.ur-d-' . $cls . ' { background:' . $bg . '; }', $dash, $cls);
+        }
+        $this->assertStringNotContainsString('#1a1a1a', $dash);
+        $this->assertStringNotContainsString('#9aa0a6', $css);
+    }
+
+    public function testLogPickerReadsStartToFinishWithTheBadgeLabel(): void
+    {
+        $js = (string) file_get_contents(__DIR__ . '/../source/pages/jobs.php');
+        $this->assertStringContainsString("if (run.ts && run.finishedTs) {", $js);
+        $this->assertStringContainsString("lbl += ' \\u2192 '", $js);
+        $this->assertStringContainsString('window.urBadge.labelFor(run.state)', $js);
+        $this->assertStringContainsString('.ur-log-modal-head .ur-log-title { font-weight: bold; flex: 0 1 auto; min-width: 0; white-space: nowrap;', $js);
     }
 
     private function emitted(string $fn): string
