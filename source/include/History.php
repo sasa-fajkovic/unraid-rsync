@@ -191,6 +191,19 @@ class History
     }
 
     /**
+     * A cheap change marker for a job's history file (one stat, no parse):
+     * mtime, size and inode, so an append (size) and a prune (rename: inode)
+     * both change it. '' when there is no file.
+     */
+    public static function revision(string $jobId): string
+    {
+        $path = self::path($jobId);
+        clearstatcache(true, $path);
+        $st = @stat($path);
+        return $st === false ? '' : $st['mtime'] . '-' . $st['size'] . '-' . $st['ino'];
+    }
+
+    /**
      * The job ids that have a history file, including jobs since deleted.
      *
      * @return array<int,string>

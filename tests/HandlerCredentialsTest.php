@@ -2772,4 +2772,19 @@ final class HandlerCredentialsTest extends TestCase
         $this->assertTrue($post(['useSudo' => '1'])['useSudo']);
         $this->assertArrayNotHasKey('useSudo', $post(['transport' => 'DAEMON', 'port' => '873']), 'dropped on DAEMON');
     }
+
+    public function testSaveConfigReportsWhereCredentialsNowLive(): void
+    {
+        $_POST = ['action' => 'saveConfig', 'csrf_token' => 'test-token', 'global' => ['secretsDir' => '']];
+        [$body, $code] = $this->runCapture(fn() => ur_action_save_config());
+        $this->assertSame(200, $code, json_encode($body));
+        $this->assertSame(['path' => Credentials::path(), 'mode' => '', 'onFlash' => true], $body['credentials']);
+
+        $_POST['global']['secretsDir'] = '/mnt/user/system/unraid.rsync';
+        [$body] = $this->runCapture(fn() => ur_action_save_config());
+        $this->assertSame(
+            ['path' => '/mnt/user/system/unraid.rsync/credentials.json', 'mode' => '', 'onFlash' => false],
+            $body['credentials']
+        );
+    }
 }

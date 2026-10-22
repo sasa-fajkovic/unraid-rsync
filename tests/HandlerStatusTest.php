@@ -290,7 +290,7 @@ final class HandlerStatusTest extends TestCase
         );
         $this->assertNull($body['jobs'][$never]['snapshot'], 'a snapshot job with no summary yet');
         $this->assertSame(
-            ['name', 'enabled', 'manualOnly', 'running', 'state', 'lastRun', 'nextRun'],
+            ['name', 'enabled', 'manualOnly', 'running', 'state', 'lastRun', 'nextRun', 'historyRev'],
             array_keys($body['jobs'][$mirror]),
             'a mirror entry keeps its shape, whatever its summary holds'
         );
@@ -1069,7 +1069,7 @@ final class HandlerStatusTest extends TestCase
         $_SERVER['REQUEST_METHOD'] = 'GET';
         [, $code] = $this->runCapture('ur_handle_request');
         $this->assertSame(200, $code);
-        $this->assertSame($path, $GLOBALS['ur_last_download']['path']);
+        $this->assertSame(realpath($path), $GLOBALS['ur_last_download']['path']);
         $this->assertSame('unraid.rsync-plugin.log', $GLOBALS['ur_last_download']['filename']);
         $this->assertSame("[t] [j-a] one\n[t] [j-b] two\n", $GLOBALS['ur_last_download']['body'], 'streamed through ur_stream_scrubbed');
 
@@ -1084,5 +1084,71 @@ final class HandlerStatusTest extends TestCase
         $this->seedJob('Tz');
         [$body] = $this->runCapture('ur_action_get_status');
         $this->assertSame(Config::systemTimezone(), $body['tz']);
+    }
+
+    // ---- review: log reads never follow a symlink out of the logs dir --------
+
+    public function testASymlinkedPluginLogIsRefusedAndNothingIsStreamedOrTailed(): void
+    {
+        $secret = $this->rtBase . '/credentials.json';
+        @mkdir($this->rtBase, 0700, true);
+        file_put_contents($secret, "PRIVATE-KEY-BYTES\n");
+        $path = Logger::pluginLogPath();
+        @mkdir(dirname($path), 0777, true);
+        symlink($secret, $path);
+
+        $GLOBALS['ur_last_download'] = null;
+        [$json, $code] = $this->runCapture('ur_action_download_plugin_log');
+        $this->assertSame(404, $code);
+        $this->assertNull($GLOBALS['ur_last_download'], 'nothing streamed');
+        $this->assertStringNotContainsString('PRIVATE-KEY-BYTES', (string) json_encode($json));
+
+        [$body] = $this->runCapture('ur_action_get_plugin_log');
+        $this->assertSame('', $body['log']);
+        [$body] = $this->pluginLogSince(0);
+        $this->assertSame('', $body['text']);
+    }
+
+    public function testASymlinkedRunLogIsRefused(): void
+    {
+        $id     = $this->seedJob('SymRun');
+        $real   = Logger::openRun($id, 1750000000);
+        $secret = $this->rtBase . '/outside.txt';
+        file_put_contents($secret, "PRIVATE\n");
+        $link = dirname($real) . '/run-20250615T000000Z.log';
+        symlink($secret, $link);
+
+        $_GET = ['id' => $id, 'run' => basename($link)];
+        $GLOBALS['ur_last_download'] = null;
+        ob_start();
+        ur_action_download_job_log();
+        ob_end_clean();
+        $this->assertSame(400, (int) $GLOBALS['ur_last_response_code']);
+        $this->assertNull($GLOBALS['ur_last_download']);
+    }
+
+    // ---- review: History refresh sees records that change no summary ---------
+
+    public function testHistoryRevChangesOnASkippedAppendWithUnchangedLastRun(): void
+    {
+        $id = $this->seedJob('HistRev');
+        @unlink(History::path($id));
+        Runner::writeSummary($id, ['state' => 'SUCCESS', 'finishedAt' => '2026-10-01T03:00:00Z']);
+        try {
+            [$before] = $this->runCapture('ur_action_get_status');
+            $this->assertSame('', $before['jobs'][$id]['historyRev'], 'no history file yet');
+
+            History::append($id, ['startedAt' => '2026-10-02T03:00:00Z', 'state' => 'SKIPPED', 'trigger' => 'schedule']);
+            [$after] = $this->runCapture('ur_action_get_status');
+            $this->assertSame($before['jobs'][$id]['lastRun'], $after['jobs'][$id]['lastRun']);
+            $this->assertSame($before['jobs'][$id]['running'], $after['jobs'][$id]['running']);
+            $this->assertNotSame('', $after['jobs'][$id]['historyRev']);
+
+            History::append($id, ['startedAt' => '2026-10-03T03:00:00Z', 'state' => 'SKIPPED', 'trigger' => 'schedule']);
+            [$again] = $this->runCapture('ur_action_get_status');
+            $this->assertNotSame($after['jobs'][$id]['historyRev'], $again['jobs'][$id]['historyRev']);
+        } finally {
+            @unlink(History::path($id));
+        }
     }
 }

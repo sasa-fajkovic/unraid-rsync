@@ -36,9 +36,9 @@ $postHookMin = Config::hookTimeoutMinutes($config['global'], 'postHookTimeout');
 $handlerUrl  = PageHelpers::HANDLER_URL;
 
 ur_push_secrets_dir_override();
-$credPath = Credentials::path();
-clearstatcache(true, $credPath);
-$credMode = is_file($credPath) ? sprintf('%04o', fileperms($credPath) & 0777) : ur_t_text('not created yet');
+$credWhere   = Credentials::location();
+$credOnFlash = ur_t_text('— USB flash (FAT32, world-readable)');
+$credNoFile  = ur_t_text('not created yet');
 
 $helpRetention  = 'How many past executions to keep per job — bounds both the run logs and the persistent run history shown on the History tab. Oldest executions beyond this are pruned. 1–9999 (default 100).';
 $helpPreHook    = 'A pre-run hook still running after this long is stopped (SIGTERM, then SIGKILL 10 seconds later) and the run fails before anything is copied, so a hung command cannot hold the job forever. 0 = no limit (default 30).';
@@ -104,12 +104,8 @@ ur_emit_form_enable_assets();
              value="<?=htmlspecialchars($secretsDir, ENT_QUOTES, 'UTF-8')?>"
              placeholder="<?=ur_h(ur_t_text('empty = USB flash (/boot)'))?>" spellcheck="false">
       <p class="ur-cred-where">
-        <?php if ($secretsDir === ''): ?>
-          <span class="ur-badge ur-badge-warning"><?=_('Warning')?></span>
-          <?=_('Currently')?>: <code><?=ur_h($credPath)?></code> — <?=_('USB flash (FAT32, world-readable)')?>
-        <?php else: ?>
-          <?=_('Currently')?>: <code><?=ur_h($credPath)?></code> (<?=ur_h($credMode)?>)
-        <?php endif; ?>
+        <span id="ur-cred-warn" class="ur-badge ur-badge-warning"<?=$credWhere['onFlash'] ? '' : ' hidden'?>><?=_('Warning')?></span>
+        <?=_('Currently')?>: <code id="ur-cred-path"><?=ur_h($credWhere['path'])?></code> <span id="ur-cred-note"><?=ur_h($credWhere['onFlash'] ? $credOnFlash : '(' . ($credWhere['mode'] !== '' ? $credWhere['mode'] : $credNoFile) . ')')?></span>
       </p>
       <div class="ur-notice ur-notice-warn">
         <?=_('Changing this MOVES credentials.json to the new directory. The array must be started before any job can read credentials stored under /mnt, and uninstalling the plugin does NOT delete them there')?>.
@@ -177,6 +173,17 @@ ur_emit_form_enable_assets();
    * VISIBLE error WITH its HTTP status instead of a silent failure inside
    * r.json(). */
   var form = document.getElementById('ur-settings-form');
+  var ON_FLASH = <?=ur_js($credOnFlash)?>, NO_FILE = <?=ur_js($credNoFile)?>;
+
+  /* Apply may have moved credentials.json: follow Credentials::location()
+   * from the save response rather than the location rendered at page load. */
+  function showCredentials(c) {
+    var warn = document.getElementById('ur-cred-warn');
+    document.getElementById('ur-cred-path').textContent = c.path;
+    document.getElementById('ur-cred-note').textContent = c.onFlash ? ON_FLASH : '(' + (c.mode || NO_FILE) + ')';
+    warn.hidden = !c.onFlash;
+  }
+
   if (form) {
     form.addEventListener('submit', function (ev) {
       ev.preventDefault();
@@ -189,6 +196,7 @@ ur_emit_form_enable_assets();
             msg += ' (' + res.body.warnings.join('; ') + ')';
           }
           window.urAjax.show(result, true, msg);
+          if (res.body.credentials) { showCredentials(res.body.credentials); }
         } else {
           window.urAjax.show(result, false, window.urAjax.errText(res, 'Save failed.'));
         }

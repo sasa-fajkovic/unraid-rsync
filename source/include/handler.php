@@ -869,11 +869,12 @@ function ur_save_config_locked(): void
             return;
         }
         sendResponse([
-            'ok'       => true,
-            'message'  => 'Configuration saved.',
-            'warnings' => $allWarnings,
-            'jobs'     => count($config['jobs'] ?? []),
-            'revision' => $revision,
+            'ok'          => true,
+            'message'     => 'Configuration saved.',
+            'warnings'    => $allWarnings,
+            'jobs'        => count($config['jobs'] ?? []),
+            'revision'    => $revision,
+            'credentials' => Credentials::location(),
         ], 200);
         return;
     }
@@ -987,11 +988,12 @@ function ur_save_config_locked(): void
     }
 
     sendResponse([
-        'ok'       => true,
-        'message'  => 'Configuration saved.',
-        'warnings' => $allWarnings,
-        'jobs'     => count($normalized),
-        'revision' => $revision,
+        'ok'          => true,
+        'message'     => 'Configuration saved.',
+        'warnings'    => $allWarnings,
+        'jobs'        => count($normalized),
+        'revision'    => $revision,
+        'credentials' => Credentials::location(),
     ], 200);
 }
 
@@ -2305,6 +2307,9 @@ function ur_action_get_status(): void
                 'lastRun'    => ur_last_run_shape($summary),
                 'nextRun'    => $nextRun,
             ];
+            // Changes on every History append/prune - including a SKIPPED run
+            // or a failure that never registered, which move no other field.
+            $out[$id]['historyRev'] = History::revision($id);
             // Snapshot jobs only, so a mirror's entry keeps its shape.
             if (Config::normalizeSnapshot($job['snapshot'] ?? null) !== null) {
                 $out[$id]['snapshot'] = Snapshot::lastSnapshot($summary);
@@ -2470,14 +2475,34 @@ function ur_action_download_job_log(): void
 }
 
 /**
+ * plugin.log for READING, or '' when it is missing, a symlink, or resolves
+ * outside the logs dir. A persistent logDir is a share other users may write,
+ * and a plugin.log -> credentials.json link would otherwise serve the keychain
+ * (scrubSecretPaths only removes runtime paths, not file contents).
+ */
+function ur_plugin_log_read_path(): string
+{
+    $path = Logger::pluginLogPath();
+    if (is_link($path)) {
+        return '';
+    }
+    $real = @realpath($path);
+    $dir  = @realpath(Logger::logsDir());
+    if ($real === false || $dir === false || $real !== $dir . '/plugin.log' || !is_file($real)) {
+        return '';
+    }
+    return $real;
+}
+
+/**
  * GET downloadPluginLog: the whole plugin.log as a text/plain attachment
  * (getPluginLog only returns a bounded tail), through the same scrubbing
  * streamer as downloadJobLog. No params.
  */
 function ur_action_download_plugin_log(): void
 {
-    $path = Logger::pluginLogPath();
-    if (!is_file($path) || !is_readable($path)) {
+    $path = ur_plugin_log_read_path();
+    if ($path === '' || !is_readable($path)) {
         sendError('The plugin log is empty (it lives in RAM and is cleared on reboot).', 404);
         return;
     }
@@ -2728,11 +2753,11 @@ function ur_action_get_plugin_log(): void
 {
     $since = $_GET['since'] ?? null;
     if ($since === null || !is_string($since) || !ctype_digit($since)) {
-        $log = Logger::tail(Logger::pluginLogPath(), UR_GET_LOG_TAIL_BYTES);
+        $log = Logger::tail(ur_plugin_log_read_path(), UR_GET_LOG_TAIL_BYTES);
         sendResponse(['ok' => true, 'log' => $log], 200);
         return;
     }
-    $chunk = Logger::readFrom(Logger::pluginLogPath(), (int) $since, UR_GET_LOG_TAIL_BYTES);
+    $chunk = Logger::readFrom(ur_plugin_log_read_path(), (int) $since, UR_GET_LOG_TAIL_BYTES);
     sendResponse(['ok' => true] + $chunk, 200);
 }
 

@@ -1751,8 +1751,11 @@ final class OptionsFormHelpTest extends TestCase
 
         $this->assertStringContainsString('placeholder="empty = USB flash (/boot)"', $html);
         $this->assertStringNotContainsString('placeholder="/mnt/user/system/unraid.rsync"', $html);
-        $this->assertStringContainsString('<code>' . rtrim(UR_CONFIG_BASE, '/') . '/credentials.json</code> — USB flash (FAT32, world-readable)', $html);
-        $this->assertStringContainsString('<span class="ur-badge ur-badge-warning">Warning</span>', $html);
+        $this->assertStringContainsString('<code id="ur-cred-path">' . rtrim(UR_CONFIG_BASE, '/') . '/credentials.json</code> <span id="ur-cred-note">— USB flash (FAT32, world-readable)</span>', $html);
+        $this->assertStringContainsString('<span id="ur-cred-warn" class="ur-badge ur-badge-warning">Warning</span>', $html);
+        // After Apply moves the file, the line follows the save response.
+        $this->assertStringContainsString('if (res.body.credentials) { showCredentials(res.body.credentials); }', $html);
+        $this->assertStringContainsString('warn.hidden = !c.onFlash;', $html);
         $this->assertStringContainsString('<div class="ur-notice ur-notice-warn">', $html);
     }
 
@@ -1769,8 +1772,8 @@ final class OptionsFormHelpTest extends TestCase
             @unlink(Config::path());
             Credentials::$secretsDirOverride = null;
         }
-        $this->assertStringContainsString('<code>/mnt/user/ur-p6-secrets/credentials.json</code> (not created yet)', $html);
-        $this->assertStringNotContainsString('ur-badge ur-badge-warning', $html);
+        $this->assertStringContainsString('<code id="ur-cred-path">/mnt/user/ur-p6-secrets/credentials.json</code> <span id="ur-cred-note">(not created yet)</span>', $html);
+        $this->assertStringContainsString('<span id="ur-cred-warn" class="ur-badge ur-badge-warning" hidden>', $html);
     }
 
     public function testImpliedGroupNoLongerShiftsItsRowsAndThePreviewIsCollapsed(): void
@@ -1836,6 +1839,9 @@ final class OptionsFormHelpTest extends TestCase
         $this->assertStringContainsString('function onScreen() { return !document.hidden && tableEl.offsetParent !== null; }', $html);
         $this->assertStringContainsString('function refreshIfStale() { if (stale && onScreen()) { stale = false; load(); } }', $html);
         $this->assertStringContainsString('new IntersectionObserver(', $html);
+        // A SKIPPED record or a failure that never registered a run changes no
+        // running flag and no summary - only the history file's revision.
+        $this->assertStringContainsString("+ ':' + (j.historyRev || '')", $html);
         $this->assertStringNotContainsString('setTimeout(load', $html);
         $this->assertStringNotContainsString('body.running', $html);
     }

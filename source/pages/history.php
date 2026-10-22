@@ -367,8 +367,9 @@ ur_emit_ajax_helpers();  /* window.urAjax.show, for the inline download error */
   }
 
   /* ---- refresh: driven by the shared getStatus poller, gated on visibility ----
-   * The list goes stale when a job starts or stops running, or a job's last
-   * run time moves (a run too short to be seen running). It is reloaded only
+   * The list goes stale when a job starts or stops running, its last run time
+   * moves (a run too short to be seen running) or its history file changes
+   * (historyRev: a SKIPPED run, or a failure that never registered a run). It is reloaded only
    * while this tab body is on screen; the IntersectionObserver catches the tab
    * being shown, which no event reports. */
   var statusSig = null, stale = true;
@@ -378,7 +379,7 @@ ur_emit_ajax_helpers();  /* window.urAjax.show, for the inline download error */
     var jobs = payload.jobs || {};
     var sig = Object.keys(jobs).sort().map(function (id) {
       var j = jobs[id] || {};
-      return id + (j.running ? ':r:' : ':i:') + ((j.lastRun && j.lastRun.finishedAt) || '');
+      return id + (j.running ? ':r:' : ':i:') + ((j.lastRun && j.lastRun.finishedAt) || '') + ':' + (j.historyRev || '');
     }).join('|');
     if (statusSig !== null && sig !== statusSig) { stale = true; }
     statusSig = sig;
