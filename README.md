@@ -118,8 +118,8 @@ on both ends; **Preserve times** on; and a target marker with expected content
   built by `pkg_build.sh`, released via GitHub Actions; **CalVer** auto-releases
   on every merge to `main`).
 - A tabbed **Unraid Rsync** page under **Settings → User Utilities** with
-  **Jobs**, **Connections**, **Credentials**, **Global Settings**, **Status**
-  and **History** tabs.
+  **Overview**, **Jobs**, **Connections**, **Credentials**, **Global Settings**,
+  **Status** and **History** tabs.
 - Jobs CRUD + Global Settings (config persisted to `config.json`).
 - A **Connections** tab (see [Credentials](#credentials)) in two flavours:
   **SSH** connections with three auth methods — **existing key file** (default),
@@ -202,10 +202,11 @@ subdirectory) because Unraid's `/usr/local/sbin/update_cron` concatenates each
 plugin's cron files with a **non-recursive, top-level `*.cron` glob** — a
 subdirectory would never be scanned. A **single** regenerated file (rather than
 one file per job) means deleting or disabling a job can never leave an orphaned
-schedule behind. Each line invokes the runner directly:
+schedule behind. Each line invokes the runner directly, with an absolute php
+path (normally `/usr/bin/php`):
 
 ```
-<schedule> php /usr/local/emhttp/plugins/unraid.rsync/scripts/runner.php --job=<id> >/dev/null 2>&1
+<schedule> /usr/bin/php /usr/local/emhttp/plugins/unraid.rsync/scripts/runner.php --job=<id> --trigger=schedule >/dev/null 2>&1
 ```
 
 After rewriting the file (atomically: temp + rename) the plugin runs
@@ -339,7 +340,7 @@ if it is somehow absent — a sign your system is misconfigured).
    ```
 
    This is the **latest release's** manifest. It always carries the correct
-   version + md5 for the newest published `.txz`, and it is also the URL the
+   version + md5/sha256 for the newest published `.txz`, and it is also the URL the
    installed plugin checks for updates.
 
 3. Click **Install**. When it finishes, open
@@ -389,15 +390,20 @@ all of which now ship:
 See [RELEASING.md](RELEASING.md) for the full pipeline. In short:
 
 - **CI** runs on every PR (and is **required** by branch protection on `main`):
-  - **`lint`** — `xmllint` on the `.plg`, `bash -n` + `shellcheck` on
-    `pkg_build.sh`, and `php -l` on every PHP file and `.page` body;
-  - **`PHPUnit`** — the unit-test suite.
+  - **`lint`** — `xmllint` on the `.plg`, `ca_profile.xml` and
+    `unraid.rsync.xml`; `bash -n` + `shellcheck` on `pkg_build.sh`,
+    `gen-plg-changes.sh`, `source/event/started` and
+    `source/scripts/askpass.sh`; `sh -n` + `shellcheck -s sh` on
+    `source/scripts/ur-snapshot.sh`; and `php -l` on every PHP file and `.page`
+    body;
+  - **`PHPUnit`** — `composer validate`, the `php-cs-fixer` style check, the
+    unit-test suite (with a coverage report) and `phpstan` static analysis.
 
   A PR cannot merge until both checks are green.
 
 - **Releasing is automatic.** Merging to `main` builds the `.txz` inside
   `aclemons/slackware:15.0` via `pkg_build.sh` (which rewrites the `.plg`'s
-  version + md5 to match the package), then publishes a versioned GitHub Release
+  version, md5 and sha256 to match the package), then publishes a versioned GitHub Release
   with both the `.txz` and the regenerated `.plg` attached and marks it
   `latest`. The version is auto-computed (`YYYY.MM.DD`, with a same-day
   lowercase suffix for additional releases on the same day).

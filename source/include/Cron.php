@@ -3,7 +3,7 @@
 declare(strict_types=1);
 
 /**
- * Cron.php - per-job scheduling for the Unraid Rsync plugin (Phase 5).
+ * Cron.php - per-job scheduling for the Unraid Rsync plugin.
  *
  * Two responsibilities, both deliberately seam-friendly so tests never touch the
  * real system:
@@ -26,13 +26,14 @@ declare(strict_types=1);
  *      A single regenerated file means deleting/disabling a job can never leave
  *      an orphaned per-job cron file behind.
  *
- *      Each line is exactly:
- *        <schedule> php /usr/local/emhttp/plugins/unraid.rsync/scripts/runner.php --job=<id> >/dev/null 2>&1
+ *      Each line is exactly (<php> = UR_CRON_PHP_PATH, normally /usr/bin/php):
+ *        <schedule> <php> /usr/local/emhttp/plugins/unraid.rsync/scripts/runner.php --job=<id> --trigger=schedule >/dev/null 2>&1
  *      The "runner.php" + "--job=<id>" tokens are load-bearing: RunState::isRunning
  *      matches a recorded pid's /proc cmdline against exactly those tokens.
  *
- *      After (re)writing the file we invoke update_cron via its ABSOLUTE path as
- *      an ARGV ARRAY (no shell string). With zero enabled jobs we remove the
+ *      After (re)writing the file we invoke update_cron via its ABSOLUTE path,
+ *      through /bin/sh with the path escapeshellarg'd (see defaultRunUpdateCron
+ *      for why it needs the shell). With zero enabled jobs we remove the
  *      cron file (and still run update_cron) so a removed schedule clears from
  *      the live crontab.
  *
@@ -46,7 +47,8 @@ declare(strict_types=1);
  *
  * Injectable seams (set before calling apply()):
  *   - Cron::$updateCronRunner  fn(array $argv): int  - the update_cron exec
- *                              (default: proc_open, no shell). Tests set a stub.
+ *                              (default: proc_open via /bin/sh, path
+ *                              escapeshellarg'd). Tests set a stub.
  *   - Cron::$updateCronPath    absolute path to update_cron (default
  *                              /usr/local/sbin/update_cron).
  * The config base is UR_CONFIG_BASE (already overridden in tests); the runner
@@ -98,7 +100,7 @@ class Cron
 
     /**
      * Injectable update_cron runner: fn(array $argv): int (the process exit
-     * code). null => the live runner (proc_open with the argv array, no shell).
+     * code). null => the live runner (defaultRunUpdateCron: /bin/sh, escaped path).
      * Tests set this to a stub that records the argv instead of executing.
      *
      * @var callable|null
@@ -321,7 +323,7 @@ class Cron
             $wrote = true;
         }
 
-        // Rebuild the live crontab. Absolute path, argv array, NO shell string.
+        // Rebuild the live crontab (absolute, escaped path through /bin/sh).
         $code = self::runUpdateCron();
 
         return [

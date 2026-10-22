@@ -5,10 +5,10 @@ declare(strict_types=1);
 /**
  * runner.php - the CLI entry point that actually runs a job.
  *
- * Invoked detached by handler.php's runJob / dryRunJob actions today, and by
- * the per-job cron line in Phase 5:
+ * Invoked detached by handler.php's runJob / dryRunJob actions, and by the
+ * per-job cron line (with --trigger=schedule):
  *
- *   php /usr/local/emhttp/plugins/unraid.rsync/scripts/runner.php --job=<id> [--dry-run]
+ *   php /usr/local/emhttp/plugins/unraid.rsync/scripts/runner.php --job=<id> [--dry-run] [--trigger=<manual|schedule>]
  *
  * It is a THIN shell: it parses --job / --dry-run, then delegates ALL the
  * orchestration (state, logging, SSH transport, preHook -> pairs -> postHook,

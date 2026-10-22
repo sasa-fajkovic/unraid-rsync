@@ -154,7 +154,6 @@ update_entity version "$version"
 echo "Updated $plg_filepath (version=$version, md5=$hash, sha256=$sha256)"
 
 # --- optional sideload to a live Unraid host (local dev convenience) --------
-# NOTE: the correct shell syntax requires the `then` keyword: `if [[ ... ]]; then`.
 if [[ -z "$unraidHost" ]]; then
   echo "Done."
   exit 0

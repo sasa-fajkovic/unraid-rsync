@@ -6,8 +6,9 @@ declare(strict_types=1);
  * Logger.php - the per-run and plugin log writers, plus a bounded, HTML-escaped
  * tail for the UI.
  *
- * Logs live in RAM (tmpfs) so they never wear the FAT32 flash and are cleared
- * on reboot. Two destinations:
+ * Logs live in RAM (tmpfs) by default, so they never wear the FAT32 flash and
+ * are cleared on reboot; global.logDir ($logsDirOverride) can move them to an
+ * array/pool path. Two destinations:
  *   - per-run log:  <runtimeBase>/logs/<jobid>/run-<UTCts>.log
  *                   This is BOTH the target rsync writes to via --log-file AND
  *                   where the runner writes its own preamble/epilogue (which
@@ -24,9 +25,6 @@ declare(strict_types=1);
  * a <pre> safely. This is the defence against the classic log-XSS hole where a
  * filename/path in the log is rendered as raw innerHTML. The UI must NEVER take
  * a raw log line and innerHTML it; it consumes this escaped output.
- *
- * (Retention pruning of old run logs and the run-selector log VIEWER are Phase
- * 6; Phase 4 only needs a writer + a safe tail.)
  *
  * The runtime base is overridable via UR_RUNTIME_BASE (shared with RunState) or
  * the $baseOverride static, so tests write to a temp dir.
@@ -1040,7 +1038,7 @@ class Logger
      * Prune a job's run logs to the newest $keep (default = retention()), deleting
      * the OLDEST first. plugin.log is NEVER touched (it lives one level up under
      * logsDir and never matches the run-file pattern). Called on every run start
-     * (the one place Phase 6 mutates state). Best-effort: a failed unlink is
+     * (the one place log pruning mutates state). Best-effort: a failed unlink is
      * ignored rather than failing a run.
      *
      * @return int the number of run logs deleted

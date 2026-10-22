@@ -52,11 +52,12 @@ jobs:
             bash -n "$f"
             shellcheck "$f"
           done
-          echo "pkg_build.sh + gen-plg-changes.sh + source/event/started: syntax + shellcheck clean"
+          echo "pkg_build.sh + gen-plg-changes.sh + source/event/started + source/scripts/askpass.sh: syntax + shellcheck clean"
           # source/scripts/ur-snapshot.sh ships 0644 and is never run here: it
           # is sent over ssh to the receiver's POSIX sh, so it is checked as sh.
           sh -n source/scripts/ur-snapshot.sh
           shellcheck -s sh source/scripts/ur-snapshot.sh
+          echo "source/scripts/ur-snapshot.sh: sh syntax + shellcheck clean"
 
       - name: Set up PHP
         uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
@@ -117,7 +118,7 @@ jobs:
       - name: Run PHPUnit (with coverage report)
         # --coverage-text prints a per-file line-coverage summary to the log
         # (scope defined by <source> in phpunit.xml). No threshold gate yet - this
-        # is visibility for the existing 758-test suite.
+        # is visibility for the test suite.
         run: vendor/bin/phpunit --colors=never --coverage-text
 
       - name: PHPStan static analysis

@@ -20,7 +20,7 @@ declare(strict_types=1);
  *     ($runner) so tests can supply a fake rsync and assert on argv + drive the
  *     exit code without a real binary.
  *
- * SCOPE (Phase 4): only the whitelisted, structured options object is mapped to
+ * SCOPE: only the whitelisted, structured options object is mapped to
  * tokens. There is deliberately no free-form flag string anywhere in the
  * plugin, so an unlisted flag simply cannot be emitted - the map below is the
  * single source of truth, and it mirrors the keys Job.php normalises and
@@ -148,8 +148,7 @@ class Rsync
      * deliberately does NOT install rsync (there is no clean Slackware artifact
      * to pin, and a bundled copy would shadow the base binary). We only guard
      * against a broken/misconfigured system with a defensive presence check
-     * (rsyncAvailable() below), mirroring how sshpass is detect-and-degrade -
-     * except here the expected state is "present", not "optional".
+     * (rsyncAvailable() below).
      *
      * Overridable for tests via $rsyncPathOverride so the run path can be driven
      * with a present/absent binary without touching the real /usr/bin/rsync.

@@ -14,8 +14,10 @@ declare(strict_types=1);
  * - is pure and unit-tested against representative sample output.
  *
  * SECURITY
- *   - All invocations are argv ARRAYS (proc_open without a shell). No path,
- *     name or key material is ever interpolated into a shell string.
+ *   - Invocations are argv ARRAYS (proc_open without a shell), except the
+ *     detached ssh-keyscan launcher (`setsid sh -c ...`, every element
+ *     escapeshellarg'd - see runKeyscan). No path, name or key material
+ *     is ever interpolated unquoted into a shell string.
  *   - Generation uses an EMPTY passphrase (-N "") on purpose: jobs run
  *     unattended from cron. The resulting private
  *     key is a secret stored in credentials.json; the UI documents that it

@@ -6,9 +6,8 @@
  * (the same controls a job uses). These defaults seed new jobs and are applied
  * to any job that has "use global defaults" enabled.
  *
- * Phase 2: render + persist only. The form POSTs to the plugin handler with the
- * webGui csrf_token; the handler validates and atomically saves config.json.
- * Nothing runs rsync yet.
+ * The form POSTs to the plugin handler with the webGui csrf_token; the handler
+ * validates and atomically saves config.json.
  */
 
 require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Config.php';

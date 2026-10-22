@@ -5,14 +5,14 @@ declare(strict_types=1);
 /**
  * Ssh.php - the SSH transport helper for the Unraid Rsync plugin.
  *
- * Two responsibilities, both shared with Phase 4 (Rsync.php) and the
- * Credentials tab's "Test connection" button:
+ * Two responsibilities, both shared by the Runner (via Rsync.php) and the
+ * Connections tab's "Test connection" button:
  *
  *   1. Build the ssh invocation as an ARGV ARRAY (never a shell
  *      string). rsync consumes the ssh transport via its `-e` option, whose
  *      VALUE is itself a small command line; we expose both the argv pieces
  *      (for proc_open without a shell) and the joined `-e` string value so
- *      Phase 4 can compose `rsync ... -e "<value>" ...` exactly.
+ *      Rsync.php can compose `rsync ... -e "<value>" ...` exactly.
  *
  *   2. Materialise secrets to a tmpfs runtime dir with tight permissions
  *      immediately before use. credentials.json lives on FAT32 /boot (every
@@ -55,7 +55,6 @@ declare(strict_types=1);
  *         -o ConnectTimeout=<n> -o ServerAliveInterval=30
  *         -o ServerAliveCountMax=6 -p <port>
  *   PASSWORD:
- *       wrapping
  *     ssh -o PubkeyAuthentication=no -o PreferredAuthentications=password
  *         -o StrictHostKeyChecking=<mode> -o UserKnownHostsFile=<kh>
  *         -o ConnectTimeout=<n> -o ServerAliveInterval=30
@@ -354,7 +353,7 @@ class Ssh
 
     /**
      * Materialise everything a connection needs to run, returning the concrete
-     * tmpfs paths + argv pieces Phase 4's Rsync.php composes with. This is the
+     * tmpfs paths + argv pieces Rsync.php composes with. This is the
      * primary entry point for "I have a connectionId, give me what I need to
      * shell out safely."
      *
@@ -600,8 +599,8 @@ class Ssh
 
     /**
      * Remove a run's materialised secrets (best-effort), identified by the
-     * per-run token returned from materialize(). Phase 4 calls this in a finally
-     * after a run; the Credentials tab's testConnection cleans up its own token.
+     * per-run token returned from materialize(). The Runner calls this in a
+     * finally after a run; testConnection cleans up its own token.
      *
      * For KEYFILE auth nothing is materialised in the tmpfs keys dir (the run
      * uses the user's existing key file in place), so this never touches it -
