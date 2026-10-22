@@ -114,17 +114,7 @@ final class SnapshotRunnerTest extends TestCase
 
     protected function tearDown(): void
     {
-        Snapshot::$nowProvider    = null;
-        Snapshot::$remoteRunner   = null;
-        Snapshot::$helperPathOverride = null;
-        Rsync::$runner            = null;
-        Rsync::$rsyncPathOverride = null;
-        Runner::$pidProvider      = null;
-        Runner::$hookRunner       = null;
-        Runner::$scanDir          = null;
-        Notify::$runner           = null;
-        Notify::$notifyPath       = '/usr/local/emhttp/webGui/scripts/notify';
-        Ssh::$runtimeBase         = '/tmp/unraid.rsync';
+        TestSeams::reset();
         Credentials::save(Credentials::defaults());
         RunState::clearAbort(self::JOB);
         @unlink(History::path(self::JOB));

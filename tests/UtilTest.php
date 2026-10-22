@@ -21,10 +21,7 @@ final class UtilTest extends TestCase
 
     protected function tearDown(): void
     {
-        Util::$euid             = null;
-        RunState::$baseOverride = null;
-        Logger::$baseOverride   = null;
-        Ssh::$runtimeBase       = '/tmp/unraid.rsync';
+        TestSeams::reset();
         exec('rm -rf ' . escapeshellarg($this->dir));
     }
 
@@ -169,6 +166,27 @@ final class UtilTest extends TestCase
         $this->assertSame(['occupied'], array_values(array_diff((array) scandir($this->dir), ['.', '..'])));
     }
 
+    /** RunState::write keeps the messages it had before it moved onto writeAtomic. */
+    public function testWriteAtomicNamesTheFileAndCodesTheFailedStage(): void
+    {
+        $path = $this->dir . '/occupied';
+        mkdir($path);
+        try {
+            Util::writeAtomic($path, 'data', 0600, false, 'state');
+            $this->fail('a rename over a directory must throw');
+        } catch (RuntimeException $e) {
+            $this->assertSame("Failed to atomically replace state file: $path", $e->getMessage());
+            $this->assertSame(Util::WRITE_RENAME, $e->getCode());
+        }
+        try {
+            Util::writeAtomic($this->dir . '/missing/f', 'data', 0600, false, 'state');
+            $this->fail('a missing dir must throw');
+        } catch (RuntimeException $e) {
+            $this->assertSame('Unable to create temp state file in: ' . $this->dir . '/missing', $e->getMessage());
+            $this->assertSame(Util::WRITE_TEMP, $e->getCode());
+        }
+    }
+
     public function testWriteAtomicRefusesToStageOutsideAnUnwritableTargetDir(): void
     {
         if (posix_geteuid() === 0) {
@@ -294,5 +312,51 @@ final class UtilTest extends TestCase
         RunState::write('j', ['pid' => 1]);
         $this->assertFileExists(Logger::openRun('j'));
         $this->assertDirectoryExists(Ssh::ensureMarkersDir());
+    }
+
+    public function testEnsurePrivateDirChmodsOnlyALevelItCreated(): void
+    {
+        $made = $this->dir . '/made';
+        $old  = umask(0077);
+        try {
+            Util::ensurePrivateDir($made, 'state');
+        } finally {
+            umask($old);
+        }
+        $this->assertSame(0700, fileperms($made) & 0777);
+
+        chmod($made, 0755);
+        Util::ensurePrivateDir($made, 'state');
+        $this->assertSame(0755, fileperms($made) & 0777, 'an existing dir is never chmodded');
+    }
+
+    public function testEnsurePrivateDirRefusesASymlinkAFileAndAMissingParent(): void
+    {
+        symlink($this->dir, $this->dir . '/link');
+        touch($this->dir . '/file');
+        $cases = [
+            'link'        => 'Refusing to use a symlinked state dir',
+            'file'        => 'State path exists but is not a directory',
+            'missing/sub' => 'Unable to create state dir',
+        ];
+        foreach ($cases as $name => $message) {
+            try {
+                Util::ensurePrivateDir($this->dir . '/' . $name, 'state');
+                $this->fail("$name must be refused");
+            } catch (RuntimeException $e) {
+                $this->assertStringContainsString($message, $e->getMessage());
+            }
+        }
+    }
+
+    public function testEveryRuntimeBaseHonoursUrRuntimeBase(): void
+    {
+        $base = rtrim(UR_RUNTIME_BASE, '/');
+        Ssh::$runtimeBase = null;
+        $this->assertSame($base, Util::runtimeBase());
+        $this->assertSame($base, RunState::base());
+        $this->assertSame($base, Logger::base());
+        $this->assertSame($base, Ssh::base());
+        $this->assertSame($base . '/keys', Ssh::keysDir());
     }
 }

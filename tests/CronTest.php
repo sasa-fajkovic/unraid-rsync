@@ -27,6 +27,7 @@ final class CronTest extends TestCase
 
     protected function setUp(): void
     {
+        TestSeams::reset();
         // Clean any cron file from a prior test.
         $path = Cron::cronFilePath();
         if (is_file($path)) {
@@ -44,15 +45,11 @@ final class CronTest extends TestCase
             $this->updateCronCalls[] = $argv;
             return 0;
         };
-        Cron::$updateCronPath = null; // use the documented default path
     }
 
     protected function tearDown(): void
     {
-        // Critical: clear the static seam so other test classes (e.g. the
-        // handler tests) are not affected by our stub.
-        Cron::$updateCronRunner = null;
-        Cron::$updateCronPath = null;
+        TestSeams::reset();
     }
 
     /** Build a minimal enabled job. */

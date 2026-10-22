@@ -24,9 +24,7 @@ final class SnapshotTest extends TestCase
 
     protected function tearDown(): void
     {
-        Snapshot::$nowProvider        = null;
-        Snapshot::$remoteRunner       = null;
-        Snapshot::$helperPathOverride = null;
+        TestSeams::reset();
         exec('chmod -R u+rwx ' . escapeshellarg($this->tmp) . ' && rm -rf ' . escapeshellarg($this->tmp));
     }
 

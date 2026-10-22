@@ -117,12 +117,10 @@ require_once __DIR__ . '/../source/include/Cron.php';
 require_once __DIR__ . '/../source/include/Snapshot.php';
 require_once __DIR__ . '/../source/include/PageHelpers.php';
 
-// Notify::send() spaces sends one unix second apart; real sleeps would add ~25 s
-// to the suite. NotifyTest drives the spacing with its own clock and sleep.
-Notify::$sleep = static function (float $seconds): void {
-};
+require_once __DIR__ . '/TestSeams.php';
 
-// The test host has no Unraid /mnt, so every local path a test names would read
-// as "not mounted". Here everything but "/" and "/mnt" is another device; the
-// mount-check tests swap in their own and put this one back.
-Util::$devIdOf = static fn(string $p): int => ($p === '/' || $p === '/mnt') ? 1 : 2;
+// Two suite-wide pins live in TestSeams: Notify::send()'s one-second spacing
+// sleeps for real (~25 s over the suite) unless stubbed, and the test host has
+// no Unraid /mnt, so every local path would read as "not mounted" unless all
+// but "/" and "/mnt" count as another device.
+TestSeams::reset();

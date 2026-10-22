@@ -45,6 +45,7 @@ final class RunnerLifecycleTest extends TestCase
 
     protected function setUp(): void
     {
+        TestSeams::reset();
         $this->trace    = [];
         $this->captured = [];
         $this->fakeBin  = sys_get_temp_dir() . '/ur-life-notify-' . getmypid() . '-' . bin2hex(random_bytes(4));
@@ -66,21 +67,13 @@ final class RunnerLifecycleTest extends TestCase
             return 0;
         };
         Config::save(Config::defaults());
-        Credentials::$secretsDirOverride = null;
     }
 
     protected function tearDown(): void
     {
-        Runner::$teardownFault    = null;
-        Runner::$hookRunner       = null;
-        Runner::$pidProvider      = null;
-        Rsync::$runner            = null;
-        Rsync::$rsyncPathOverride = null;
-        Notify::$runner           = null;
-        Notify::$notifyPath       = '/usr/local/emhttp/webGui/scripts/notify';
+        TestSeams::reset();
         @unlink($this->fakeBin);
         if ($this->rt !== '') {
-            Ssh::$runtimeBase = '/tmp/unraid.rsync';
             Credentials::save(Credentials::defaults());
             $this->rmTree($this->rt);
             $this->rt = '';

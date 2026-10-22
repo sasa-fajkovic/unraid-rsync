@@ -38,9 +38,7 @@ final class CrashReapEntryPointTest extends TestCase
 
     protected function tearDown(): void
     {
-        Notify::$notifyPath      = '/usr/local/emhttp/webGui/scripts/notify';
-        Notify::$runner          = null;
-        Logger::$logsDirOverride = null;
+        TestSeams::reset();
         putenv('UR_CRASH_REAP_DELAY');
         @unlink($this->fakeBin);
     }

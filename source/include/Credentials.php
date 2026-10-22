@@ -122,7 +122,7 @@ class Credentials
      *
      * @var string|null
      */
-    public static $secretsDirOverride = null;
+    public static ?string $secretsDirOverride = null;
 
     /**
      * Absolute path to credentials.json. Lives under $secretsDirOverride when set
@@ -485,15 +485,6 @@ class Credentials
                 $version,
                 self::SCHEMA_VERSION
             ));
-        }
-
-        while ($version < self::SCHEMA_VERSION) {
-            switch ($version) {
-                // case 1: ... transform v1 -> v2 ...; $version = 2; break;
-                default:
-                    $version = self::SCHEMA_VERSION;
-                    break;
-            }
         }
 
         // The KEYFILE auth method + keyFilePath field were added WITHIN schema v1

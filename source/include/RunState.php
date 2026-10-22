@@ -35,9 +35,6 @@ declare(strict_types=1);
  * runs on a live box and under PHPUnit without writing to /tmp/unraid.rsync.
  */
 
-if (!defined('UR_RUNTIME_BASE')) {
-    define('UR_RUNTIME_BASE', '/tmp/unraid.rsync');
-}
 if (!defined('UR_CONFIG_BASE')) {
     define('UR_CONFIG_BASE', '/boot/config/plugins/unraid.rsync');
 }
@@ -53,15 +50,15 @@ class RunState
      *
      * @var string|null
      */
-    public static $baseOverride = null;
+    public static ?string $baseOverride = null;
 
     /**
      * Test seam: fn(): void, called by clearStaleAbort once it has taken the
      * flag it judges - where a concurrent abortJob would land. null => none.
      *
-     * @var (callable():void)|null
+     * @var (\Closure():void)|null
      */
-    public static $afterStaleAbortRead = null;
+    public static ?\Closure $afterStaleAbortRead = null;
 
     /** The runtime base dir actually in effect. */
     public static function base(): string
@@ -69,7 +66,7 @@ class RunState
         if (self::$baseOverride !== null && self::$baseOverride !== '') {
             return rtrim((string) self::$baseOverride, '/');
         }
-        return rtrim(UR_RUNTIME_BASE, '/');
+        return Util::runtimeBase();
     }
 
     /** Dir holding the per-job state + abort files. */
@@ -150,34 +147,11 @@ class RunState
         }
     }
 
-    /**
-     * Ensure the state dir exists (mode 700; it holds pids/log paths only).
-     *
-     * Walks the ancestry base() -> stateDir() and creates each level
-     * NON-recursively, refusing a symlink at ANY level. A plain
-     * `mkdir($dir, 0700, true)` would silently FOLLOW a symlinked runtime base
-     * (the base lives under world-writable /tmp), letting an attacker redirect
-     * root-written state/lock files out of the sandbox. Mirrors
-     * Ssh::ensureRuntimeDirs. The post-mkdir re-check closes the TOCTOU where a
-     * level is swapped for a symlink between create and use.
-     */
+    /** Ensure base() and stateDir() exist as private 0700 dirs (Util::ensurePrivateDir). */
     private static function ensureDir(): void
     {
         foreach ([self::base(), self::stateDir()] as $dir) {
-            if (is_link($dir)) {
-                throw new RuntimeException("Refusing to use a symlinked state dir: $dir");
-            }
-            if (file_exists($dir) && !is_dir($dir)) {
-                throw new RuntimeException("State path exists but is not a directory: $dir");
-            }
-            if (!is_dir($dir) && !@mkdir($dir, 0700) && !is_dir($dir)) {
-                throw new RuntimeException("Unable to create state dir: $dir");
-            }
-            if (is_link($dir)) {
-                throw new RuntimeException("Refusing to use a symlinked state dir: $dir");
-            }
-            @chmod($dir, 0700);
-            Util::assertPrivateDir($dir);
+            Util::ensurePrivateDir($dir, 'state');
         }
     }
 
@@ -211,24 +185,11 @@ class RunState
             $out['gen'] = $state['gen'];
         }
 
-        $path = self::statePath($jobId);
-        $dir  = dirname($path);
         $json = json_encode($out, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
         if ($json === false) {
             throw new RuntimeException('Failed to encode run state JSON: ' . json_last_error_msg());
         }
-        $tmp = @tempnam($dir, '.state.');
-        if ($tmp === false) {
-            throw new RuntimeException("Unable to create temp state file in: $dir");
-        }
-        if (@file_put_contents($tmp, $json . "\n") === false) {
-            @unlink($tmp);
-            throw new RuntimeException("Failed to write temp state file: $tmp");
-        }
-        if (!@rename($tmp, $path)) {
-            @unlink($tmp);
-            throw new RuntimeException("Failed to atomically replace state file: $path");
-        }
+        Util::writeAtomic(self::statePath($jobId), $json . "\n", 0600, false, 'state');
     }
 
     /**
@@ -534,7 +495,7 @@ class RunState
             return;
         }
         $json = json_encode(['by' => $by, 'at' => gmdate('Y-m-d\TH:i:s\Z'), 'gen' => $gen]);
-        Util::writeAtomic($path, $json === false ? '' : $json, 0600);
+        Util::writeAtomic($path, $json === false ? '' : $json, 0600, false);
     }
 
     /**

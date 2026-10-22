@@ -95,14 +95,8 @@ require_once __DIR__ . '/Util.php';
 
 class Ssh
 {
-    /**
-     * tmpfs base for materialised secrets. RAM-backed, cleared on reboot. The
-     * dir basename equals the plugin name to match the rest of the plugin's
-     * runtime layout (/tmp/unraid.rsync/...). Overridable for tests.
-     *
-     * @var string
-     */
-    public static $runtimeBase = '/tmp/unraid.rsync';
+    /** tmpfs base for materialised secrets; null/'' = Util::runtimeBase(). Test seam. */
+    public static ?string $runtimeBase = null;
 
     /**
      * Optional explicit path to the SSH_ASKPASS helper. When null, askpassPath()
@@ -110,7 +104,7 @@ class Ssh
      *
      * @var string|null
      */
-    public static $askpassPathOverride = null;
+    public static ?string $askpassPathOverride = null;
 
     // ssh exit code that means "ssh itself failed to connect/authenticate"
     // (as opposed to a remote command's own non-zero exit).
@@ -129,10 +123,17 @@ class Ssh
     // run's own files - so one run's cleanup can never pull a key/known_hosts
     // out from under another in-flight ssh.
 
+    /** The tmpfs base in effect (RAM-backed, cleared on reboot). */
+    public static function base(): string
+    {
+        $b = static::$runtimeBase;
+        return $b !== null && $b !== '' ? rtrim($b, '/') : Util::runtimeBase();
+    }
+
     /** tmpfs dir that holds materialised private keys (mode 700). */
     public static function keysDir(): string
     {
-        return rtrim(static::$runtimeBase, '/') . '/keys';
+        return static::base() . '/keys';
     }
 
     /**
@@ -154,13 +155,13 @@ class Ssh
     /** Path a run's known_hosts materialises to, keyed by run token. */
     public static function knownHostsPath(string $token): string
     {
-        return rtrim(static::$runtimeBase, '/') . '/known_hosts/' . Util::safeFileId($token);
+        return static::base() . '/known_hosts/' . Util::safeFileId($token);
     }
 
     /** tmpfs dir (mode 700) a run fetches its target marker file into. */
     public static function markersDir(): string
     {
-        return rtrim(static::$runtimeBase, '/') . '/markers';
+        return static::base() . '/markers';
     }
 
     /**
@@ -177,7 +178,7 @@ class Ssh
     /** Path a run's password file materialises to, keyed by run token. */
     public static function passFilePath(string $token): string
     {
-        return rtrim(static::$runtimeBase, '/') . '/pass/' . Util::safeFileId($token);
+        return static::base() . '/pass/' . Util::safeFileId($token);
     }
 
     // --- askpass helper -----------------------------------------------------
@@ -652,7 +653,7 @@ class Ssh
             return;
         }
         try {
-            foreach ([rtrim(static::$runtimeBase, '/'), static::keysDir(), dirname(static::knownHostsPath($token)), dirname(static::passFilePath($token))] as $dir) {
+            foreach ([static::base(), static::keysDir(), dirname(static::knownHostsPath($token)), dirname(static::passFilePath($token))] as $dir) {
                 Util::assertPrivateDir($dir);
             }
         } catch (RuntimeException $e) {
@@ -674,68 +675,36 @@ class Ssh
     private static function ensureRuntimeDirs(): void
     {
         foreach ([
-            rtrim(static::$runtimeBase, '/'),
+            static::base(),
             static::keysDir(),
-            rtrim(static::$runtimeBase, '/') . '/known_hosts',
-            rtrim(static::$runtimeBase, '/') . '/pass',
+            static::base() . '/known_hosts',
+            static::base() . '/pass',
             static::markersDir(),
         ] as $dir) {
-            // Reject a symlink at this path outright (do NOT follow it).
-            if (is_link($dir)) {
-                throw new RuntimeException("Refusing to use a symlinked runtime dir: $dir");
-            }
-            if (file_exists($dir) && !is_dir($dir)) {
-                throw new RuntimeException("Runtime path exists but is not a directory: $dir");
-            }
-            if (!is_dir($dir) && !@mkdir($dir, 0700, true) && !is_dir($dir)) {
-                throw new RuntimeException("Unable to create runtime dir: $dir");
-            }
-            // Re-check after creation: a race could have swapped it for a symlink.
-            if (is_link($dir)) {
-                throw new RuntimeException("Refusing to use a symlinked runtime dir: $dir");
-            }
-            @chmod($dir, 0700);
-            Util::assertPrivateDir($dir);
+            Util::ensurePrivateDir($dir);
         }
     }
 
     /**
      * Write a secret to a tmpfs file at mode 600 WITHOUT ever following a
-     * symlink, even under a TOCTOU race. The runtime base is under
-     * world-writable /tmp, so a check-then-write (is_link then file_put_contents)
-     * is racy: an attacker could plant a symlink at $path in between. Instead we
-     * write the body to a fresh tempnam() file in the SAME directory (tempnam
-     * creates with O_EXCL, so it never opens an attacker's file), chmod it 600,
-     * then rename() it over the target. rename() replaces the destination name
-     * atomically and operates on the symlink itself rather than following it, so
-     * the secret can never land on an attacker-chosen target.
+     * symlink, even under a TOCTOU race: Util::writeAtomic's tempnam() creates
+     * with O_EXCL and its rename() replaces a planted symlink rather than
+     * following it, so the secret can never land on an attacker-chosen target.
      */
     private static function safeWriteSecret(string $path, string $body, string $label): void
     {
         $dir = dirname($path);
-        $tmp = @tempnam($dir, '.ur-secret.');
-        if ($tmp === false) {
-            throw new RuntimeException("Unable to create temp file for $label in: $dir");
-        }
-        // tempnam created a regular 600-ish file we own; tighten and fill it.
-        @chmod($tmp, 0600);
-        if (@file_put_contents($tmp, $body) === false) {
-            @unlink($tmp);
+        try {
+            Util::writeAtomic($path, $body, 0600, false);
+        } catch (RuntimeException $e) {
             // No $path in the message, deliberately. Runner::materializeSsh /
             // ::materializeDaemonConn surface a thrown message straight into the
-            // run log AND plugin.log, and that happens BEFORE Logger::setRedaction
-            // is armed (it is armed only on the success arm) - and redactRunLog
-            // never touches plugin.log. The per-run tmpfs path is gone by the time
-            // anyone reads the log, so it has no diagnostic value; $label already
-            // says which secret failed.
-            throw new RuntimeException("Unable to materialise $label.");
-        }
-        @chmod($tmp, 0600);
-        // rename replaces the name atomically and does NOT follow a symlink that
-        // may have been planted at $path.
-        if (!@rename($tmp, $path)) {
-            @unlink($tmp);
-            throw new RuntimeException("Unable to place $label.");
+            // run log AND plugin.log, before Logger::setRedaction is armed.
+            throw new RuntimeException(match ($e->getCode()) {
+                Util::WRITE_TEMP => "Unable to create temp file for $label in: $dir",
+                Util::WRITE_DATA => "Unable to materialise $label.",
+                default          => "Unable to place $label.",
+            });
         }
     }
 

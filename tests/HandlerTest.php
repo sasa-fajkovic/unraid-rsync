@@ -69,7 +69,7 @@ final class HandlerTest extends TestCase
     {
         // The daemon module-listing probe seam is a public static: never let one
         // test's stub leak into the next file's tests.
-        Rsync::$daemonProbeRunner = null;
+        TestSeams::reset();
         if (is_file(Credentials::path())) {
             unlink(Credentials::path());
         }
@@ -1447,7 +1447,7 @@ final class HandlerTest extends TestCase
 
         $this->assertStringNotContainsString($secret, $raw);
         $this->assertStringNotContainsString(Credentials::obfuscate($secret), $raw);
-        $this->assertStringNotContainsString(rtrim(Ssh::$runtimeBase, '/'), $raw);
+        $this->assertStringNotContainsString(Ssh::base(), $raw);
     }
 
     /**
@@ -1521,9 +1521,6 @@ final class HandlerTest extends TestCase
      */
     public function testDaemonTestConnectionAcceptsACsrfTokenThatOnlyVarIniKnows(): void
     {
-        if (!defined('UR_VAR_INI_PATHS')) {
-            $this->markTestSkipped('UR_VAR_INI_PATHS not overridable in this build');
-        }
         $this->seedConnections([$this->daemonConnection()]);
 
         $probed = 0;
@@ -1658,7 +1655,7 @@ final class HandlerTest extends TestCase
 
             $this->assertStringNotContainsString($secret, $raw);
             $this->assertStringNotContainsString($stored['password'], $raw);
-            $this->assertStringNotContainsString(rtrim(Ssh::$runtimeBase, '/'), $raw);
+            $this->assertStringNotContainsString(Ssh::base(), $raw);
         } finally {
             $_SERVER['REQUEST_METHOD'] = $prevMethod;
         }

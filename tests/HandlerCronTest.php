@@ -32,6 +32,7 @@ final class HandlerCronTest extends TestCase
 
     protected function setUp(): void
     {
+        TestSeams::reset();
         $_POST = [];
         $_GET  = [];
         // Reset the handler's intended-status-code test seam instead of calling
@@ -51,13 +52,11 @@ final class HandlerCronTest extends TestCase
             $this->updateCronCalls[] = $argv;
             return 0;
         };
-        Cron::$updateCronPath = null;
     }
 
     protected function tearDown(): void
     {
-        Cron::$updateCronRunner = null;
-        Cron::$updateCronPath = null;
+        TestSeams::reset();
     }
 
     private function runCapture(callable $fn): array

@@ -257,7 +257,7 @@ class Job
      * @param mixed $rawPairs
      * @return array<int,array{local:string,remote:string,sub?:string,seed?:true}>
      */
-    public static function normalizePairs($rawPairs): array
+    public static function normalizePairs(mixed $rawPairs): array
     {
         $pairs = [];
         if (!is_array($rawPairs)) {
@@ -294,7 +294,7 @@ class Job
      * @param mixed $raw
      * @return array<string,mixed>
      */
-    public static function normalizeRsyncOptions($raw): array
+    public static function normalizeRsyncOptions(mixed $raw): array
     {
         $opts = is_array($raw) ? $raw : [];
         $out  = [];
@@ -433,96 +433,17 @@ class Job
         // --delete destination rules.
         $snapshotOn  = Config::normalizeSnapshot($job['snapshot'] ?? null) !== null;
 
-        // The `local` field is ALWAYS a path on this Unraid box; the `remote`
-        // field is on the other host (SSH, DAEMON) or also on this box (LOCAL).
-        // Which side is the destination depends on direction: PUSH writes to
-        // remote, PULL writes to local. The destructive --delete check must
-        // target the destination side.
-        //
-        // Written as an explicit three-way test rather than the old bare
-        // `$direction !== 'PULL'` so it MIRRORS Runner::guardrailErrors exactly.
-        // For an unknown hand-edited transport the Runner resolves the pair with
-        // dest = `remote` unconditionally, so this must too, or the save-time and
-        // run-time --delete guards would disagree about the same job. LOCAL is
-        // unaffected: normalize() coerces it to PUSH, so both forms give true.
-        $destIsRemote = in_array($transport, ['SSH', 'DAEMON'], true) ? ($direction !== 'PULL') : true;
-
-        // The `remote` field is on another host only for SSH and DAEMON
-        // transport; under LOCAL transport it is a second path on this same box,
-        // and under DAEMON it is a module reference rather than a path. Qualify
-        // labels accordingly so a LOCAL job's errors don't say "(remote)" and a
-        // daemon job's point at the right kind of value.
-        $remoteQualifier = ($transport === 'LOCAL')
-            ? 'local'
-            : (($transport === 'DAEMON') ? 'module' : 'remote');
-
         foreach ($pairs as $i => $pair) {
-            $n      = $i + 1;
-            $local  = trim((string) ($pair['local']  ?? ''));
-            $remote = trim((string) ($pair['remote'] ?? ''));
-
-            $localRole  = $destIsRemote ? 'source' : 'destination';
-            $remoteRole = $destIsRemote ? 'destination' : 'source';
-
-            // `local` field: always a local path on this box -> local guardrails.
-            if ($local === '') {
-                $errors[] = "Pair #$n: $localRole (local) path is required.";
-            } else {
-                foreach (self::pairLocalErrors($job, $transport, $local, "Pair #$n $localRole (local)") as $e) {
-                    $errors[] = $e;
-                }
-            }
-
-            // `remote` field: local guardrails under LOCAL transport, otherwise
-            // a non-root remote sub-path.
-            $remoteLabel = "Pair #$n $remoteRole ($remoteQualifier)";
-            if ($snapshotOn) {
-                continue;
-            }
-            if ($remote === '') {
-                $errors[] = "Pair #$n: $remoteRole ($remoteQualifier) path is required.";
-            } else {
-                if ($transport === 'LOCAL') {
-                    foreach (self::checkLocalPath($remote, $remoteLabel) as $e) {
-                        $errors[] = $e;
-                    }
-                } elseif ($transport === 'DAEMON') {
-                    // A module reference, not a path. No daemonModuleNote here:
-                    // that advisory exists to catch a module name typed into an
-                    // SSH job, which is exactly what this transport wants.
-                    foreach (self::checkDaemonModule($remote, $remoteLabel) as $e) {
-                        $errors[] = $e;
-                    }
-                } else {
-                    foreach (self::checkRemotePath($remote, $remoteLabel) as $e) {
-                        $errors[] = $e;
-                    }
-                    // Advisory only, and only for SSH: under LOCAL transport the
-                    // `remote` field is a second path on this box and already had
-                    // to clear the /mnt guardrail above.
-                    $note = self::daemonModuleNote($remote);
-                    if ($note !== '') {
-                        $warnings[] = "$remoteLabel path '$remote' $note";
-                    }
-                }
-            }
-
-            // When --delete is on, the DESTINATION must be a specific
-            // sub-directory (defence in depth on top of the root checks). The
-            // destination is `remote` for PUSH and `local` for PULL.
-            if ($deleteOn) {
-                $e = self::deleteDestError($transport, $destIsRemote, $destIsRemote ? $remote : $local);
-                if ($e !== '') {
-                    $errors[] = "Pair #$n: $e";
-                }
-            }
+            $r        = self::pairErrors($job, is_array($pair) ? $pair : [], $transport, $opts, (int) $i + 1);
+            $errors   = array_merge($errors, $r['errors']);
+            $warnings = array_merge($warnings, $r['warnings']);
         }
 
         foreach (self::pairOverlapErrors($job, $opts) as $e) {
             $errors[] = $e;
         }
 
-        foreach (self::markerErrors($job, $transport, $direction) as $e) {
+        foreach (self::markerErrors($job, $transport) as $e) {
             $errors[] = $e;
         }
 
@@ -845,6 +766,105 @@ class Job
         return $ok ? '' : 'a delete option is enabled, so the destination must be a specific sub-directory, not a root.';
     }
 
+    /**
+     * Which pair field is the source and which the destination. The `local`
+     * field is ALWAYS a path on this box; `remote` is on the other host (SSH,
+     * DAEMON) or a second path here (LOCAL). Only the two remote transports let
+     * PULL make `local` the destination: LOCAL is coerced to PUSH, and an
+     * unknown hand-edited transport runs as LOCAL (Runner::resolvePair).
+     *
+     * @param array<string,mixed> $job
+     * @param string|null $transport the already-resolved transport, else the job's
+     * @return array{src:'local'|'remote', dst:'local'|'remote'}
+     */
+    public static function sides(array $job, ?string $transport = null): array
+    {
+        $transport ??= strtoupper(trim((string) ($job['transport'] ?? 'SSH')));
+        $pull = in_array($transport, ['SSH', 'DAEMON'], true)
+            && strtoupper(trim((string) ($job['direction'] ?? 'PUSH'))) === 'PULL';
+        return $pull ? ['src' => 'remote', 'dst' => 'local'] : ['src' => 'local', 'dst' => 'remote'];
+    }
+
+    /**
+     * One pair's path guardrails, shared by save-time validation (Job::validate,
+     * $saveN = the pair's 1-based number) and the run-time preflight
+     * (Runner::guardrailErrors, $saveN = 0) so the two cannot disagree. Only the
+     * wording differs - save time names the pair and its role ("Pair #1
+     * destination (remote)"), run time the field ("remote path", which the
+     * preflight prefixes with the pair) - plus two save-only rules: a snapshot
+     * job skips the --delete destination rule there (snapshotErrors() covers
+     * its root), and an SSH path that looks like a daemon module earns a warning.
+     *
+     * @param array<string,mixed> $job
+     * @param array<string,mixed> $pair
+     * @param array<string,mixed> $opts the job's (effective) rsync options
+     * @return array{errors:array<int,string>,warnings:array<int,string>}
+     */
+    public static function pairErrors(array $job, array $pair, string $transport, array $opts, int $saveN = 0): array
+    {
+        $errors     = [];
+        $warnings   = [];
+        $atSave     = $saveN > 0;
+        $local      = trim((string) ($pair['local'] ?? ''));
+        $remote     = trim((string) ($pair['remote'] ?? ''));
+        $sides      = self::sides($job, $transport);
+        $snapshotOn = Config::normalizeSnapshot($job['snapshot'] ?? null) !== null;
+
+        if ($atSave) {
+            $localRole   = $sides['dst'] === 'remote' ? 'source' : 'destination';
+            $remoteRole  = $sides['dst'] === 'remote' ? 'destination' : 'source';
+            $qualifier   = ($transport === 'LOCAL') ? 'local' : (($transport === 'DAEMON') ? 'module' : 'remote');
+            $localLabel  = "Pair #$saveN $localRole (local)";
+            $localNone   = "Pair #$saveN: $localRole (local) path is required.";
+            $remoteLabel = "Pair #$saveN $remoteRole ($qualifier)";
+            $remoteNone  = "Pair #$saveN: $remoteRole ($qualifier) path is required.";
+        } else {
+            $localLabel  = 'local path';
+            $localNone   = 'local path is required.';
+            $remoteLabel = ($transport === 'LOCAL') ? 'second local path' : (($transport === 'DAEMON') ? 'daemon module path' : 'remote path');
+            $remoteNone  = "$remoteLabel is required.";
+        }
+
+        if ($local === '') {
+            $errors[] = $localNone;
+        } else {
+            $errors = array_merge($errors, self::pairLocalErrors($job, $transport, $local, $localLabel));
+        }
+
+        // Snapshot mode writes to <root>/<stamp>/<sub>, never to `remote`:
+        // snapshotErrors() checks `remote` and `sub` instead.
+        if ($snapshotOn && $atSave) {
+            return ['errors' => $errors, 'warnings' => $warnings];
+        }
+        if ($snapshotOn) {
+            // run time still applies the --delete rule below
+        } elseif ($remote === '') {
+            $errors[] = $remoteNone;
+        } elseif ($transport === 'LOCAL') {
+            $errors = array_merge($errors, self::checkLocalPath($remote, $remoteLabel));
+        } elseif ($transport === 'DAEMON') {
+            // No daemonModuleNote: that advisory catches a module name typed
+            // into an SSH job, which is exactly what this transport wants.
+            $errors = array_merge($errors, self::checkDaemonModule($remote, $remoteLabel));
+        } else {
+            $errors = array_merge($errors, self::checkRemotePath($remote, $remoteLabel));
+            $note   = $atSave ? self::daemonModuleNote($remote) : '';
+            if ($note !== '') {
+                $warnings[] = "$remoteLabel path '$remote' $note";
+            }
+        }
+
+        // With a delete option on, the DESTINATION must be a specific sub-dir.
+        if (!empty($opts['delete']) || !empty($opts['deleteExcluded'])) {
+            $destIsRemote = $sides['dst'] === 'remote';
+            $e = self::deleteDestError($transport, $destIsRemote, $destIsRemote ? $remote : $local);
+            if ($e !== '') {
+                $errors[] = ($atSave ? "Pair #$saveN: " : '') . $e;
+            }
+        }
+        return ['errors' => $errors, 'warnings' => $warnings];
+    }
+
     /** At least two segments, and at least three under /mnt (/mnt/disk1 is a disk root). */
     public static function isDeepRemoteDeleteTarget(string $path): bool
     {
@@ -868,12 +888,10 @@ class Job
     public static function destinations(array $job, ?array $creds = null): array
     {
         $transport    = strtoupper(trim((string) ($job['transport'] ?? 'SSH')));
-        $direction    = strtoupper(trim((string) ($job['direction'] ?? 'PUSH')));
-        $remoteHost   = in_array($transport, ['SSH', 'DAEMON'], true);
-        $destIsRemote = $remoteHost && $direction !== 'PULL';
         // Under LOCAL (and an unknown transport) the destination is the `remote`
         // field, a second path on this box.
-        $field = ($remoteHost && $direction === 'PULL') ? 'local' : 'remote';
+        $field        = self::sides($job, $transport)['dst'];
+        $destIsRemote = in_array($transport, ['SSH', 'DAEMON'], true) && $field === 'remote';
         $paths = [];
         foreach ((is_array($job['pairs'] ?? null) ? $job['pairs'] : []) as $i => $pair) {
             $p = is_array($pair) ? trim((string) ($pair[$field] ?? '')) : '';
@@ -1084,9 +1102,9 @@ class Job
      * @param array<string,mixed> $job
      * @return array<int,string>
      */
-    public static function markerErrors(array $job, string $transport, string $direction): array
+    public static function markerErrors(array $job, string $transport): array
     {
-        $destIsRemote = in_array($transport, ['SSH', 'DAEMON'], true) && $direction !== 'PULL';
+        $destIsRemote = in_array($transport, ['SSH', 'DAEMON'], true) && self::sides($job, $transport)['dst'] === 'remote';
         $marker  = trim((string) ($job['targetMarker'] ?? ''));
         $content = trim((string) ($job['targetMarkerContent'] ?? ''));
         $label   = 'Target marker';
@@ -1590,7 +1608,7 @@ class Job
      *
      * @param mixed $value
      */
-    public static function toBool($value): bool
+    public static function toBool(mixed $value): bool
     {
         if (is_bool($value)) {
             return $value;

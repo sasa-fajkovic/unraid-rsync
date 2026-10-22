@@ -5,21 +5,3 @@ parameters:
 			identifier: greater.alwaysTrue
 			count: 1
 			path: source/include/Logger.php
-
-		-
-			message: '#^If condition is always false\.$#'
-			identifier: if.alwaysFalse
-			count: 1
-			path: source/include/Logger.php
-
-		-
-			message: '#^If condition is always false\.$#'
-			identifier: if.alwaysFalse
-			count: 1
-			path: source/include/RunState.php
-
-		-
-			message: '#^If condition is always false\.$#'
-			identifier: if.alwaysFalse
-			count: 1
-			path: source/include/Ssh.php

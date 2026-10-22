@@ -53,14 +53,7 @@ final class RunnerNotifyTest extends TestCase
 
     protected function tearDown(): void
     {
-        Notify::$notifyPath = '/usr/local/emhttp/webGui/scripts/notify';
-        Notify::$runner     = null;
-        Runner::$pidProvider      = null;
-        Runner::$hookRunner       = null;
-        Rsync::$rsyncPathOverride = null;
-        Rsync::$runner            = null;
-        RunState::$baseOverride   = null;
-        Logger::$baseOverride     = null;
+        TestSeams::reset();
         if ($this->fakeBin !== '' && is_file($this->fakeBin)) {
             @unlink($this->fakeBin);
         }

@@ -15,9 +15,7 @@ final class CredentialsTest extends TestCase
 {
     protected function setUp(): void
     {
-        // Reset the secrets-dir override BEFORE resolving path() so a leak from a
-        // prior test can't point us at the wrong file.
-        Credentials::$secretsDirOverride = null;
+        TestSeams::reset();
         foreach ([Credentials::path(), Credentials::path() . '.last-good'] as $path) {
             if (is_file($path)) {
                 unlink($path);
@@ -27,7 +25,7 @@ final class CredentialsTest extends TestCase
 
     protected function tearDown(): void
     {
-        Credentials::$secretsDirOverride = null;
+        TestSeams::reset();
     }
 
     public function testLoadWithoutFileReturnsDefaults(): void

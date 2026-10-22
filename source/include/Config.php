@@ -221,7 +221,7 @@ class Config
      *
      * @param mixed $value
      */
-    public static function clampHookTimeout($value, int $default): int
+    public static function clampHookTimeout(mixed $value, int $default): int
     {
         $n = filter_var($value, FILTER_VALIDATE_INT);
         if ($n === false || $n < 0) {
@@ -259,7 +259,7 @@ class Config
      *
      * @param mixed $value
      */
-    public static function clampRetention($value): int
+    public static function clampRetention(mixed $value): int
     {
         // Strict integer validation: FILTER_VALIDATE_INT rejects "1e3", "2.9",
         // "" and other non-integer numerics (which a bare (int) cast would
@@ -297,7 +297,7 @@ class Config
      *
      * @param mixed $value
      */
-    private static function sanitizeMntDir($value): string
+    private static function sanitizeMntDir(mixed $value): string
     {
         if (!is_string($value)) {
             return '';
@@ -477,7 +477,7 @@ class Config
      *
      * @param mixed $value
      */
-    public static function sanitizeLogDir($value): string
+    public static function sanitizeLogDir(mixed $value): string
     {
         return self::sanitizeMntDir($value);
     }
@@ -508,7 +508,7 @@ class Config
      *
      * @param mixed $value
      */
-    public static function sanitizeSecretsDir($value): string
+    public static function sanitizeSecretsDir(mixed $value): string
     {
         return self::sanitizeMntDir($value);
     }
@@ -772,20 +772,12 @@ class Config
             ));
         }
 
-        // Step the config up one version at a time. Each future arm mutates
-        // $data from version N to N+1, then falls through to the next.
-        while ($version < self::SCHEMA_VERSION) {
-            switch ($version) {
-                case 1:
-                    $data = self::migrateV1ToV2($data);
-                    $version = 2;
-                    $data['schemaVersion'] = 2;
-                    break;
-                default:
-                    // No migration path defined; stop to avoid an infinite loop.
-                    $version = self::SCHEMA_VERSION;
-                    break;
-            }
+        // v1 is the oldest shape there is, so a hand-edited 0 or negative
+        // version is a v1 file too: skipping the arm would leave its excludes
+        // and includes to be dropped by mergeDefaults().
+        if ($version <= 1) {
+            $data = self::migrateV1ToV2($data);
+            $data['schemaVersion'] = 2;
         }
 
         // v2 -> v3 needs no transform; mergeDefaults() sets the version.
@@ -989,7 +981,7 @@ class Config
      * @param mixed $raw
      * @return array<int,array{type:string,pattern:string}>
      */
-    public static function normalizeFilters($raw): array
+    public static function normalizeFilters(mixed $raw): array
     {
         if (!is_array($raw)) {
             return [];

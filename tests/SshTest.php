@@ -97,12 +97,11 @@ final class SshTest extends TestCase
 
     protected function setUp(): void
     {
+        TestSeams::reset();
         // Per-test tmpfs override so materialisation never touches /tmp/unraid.rsync.
         $this->rtBase = sys_get_temp_dir() . '/ur-ssh-test-' . getmypid() . '-' . bin2hex(random_bytes(4));
         Ssh::$runtimeBase = $this->rtBase;
         FakeSsh::$runtimeBase = $this->rtBase;
-        Ssh::$askpassPathOverride = null;
-        FakeSsh::$askpassPathOverride = null;
         FakeSsh::$nextProbe = [0, ''];
         FakeSsh::$lastProbeArgv = null;
         FakeSsh::$lastProbeEnv = null;
@@ -113,11 +112,7 @@ final class SshTest extends TestCase
     protected function tearDown(): void
     {
         $this->rmrf($this->rtBase);
-        Ssh::$runtimeBase = '/tmp/unraid.rsync';
-        FakeSsh::$runtimeBase = '/tmp/unraid.rsync';
-        Ssh::$askpassPathOverride = null;
-        FakeSsh::$askpassPathOverride = null;
-        ProcIO::$killGraceSec = 1.0;
+        TestSeams::reset();
     }
 
     private function rmrf(string $dir): void
@@ -1240,13 +1235,7 @@ final class SshTest extends TestCase
         $this->assertStringNotContainsString($this->rtBase, $threw->getMessage());
         $this->assertStringNotContainsString(FixedTokenSsh::TOKEN, $threw->getMessage());
         // ...and the tempnam scratch file is unlinked, so nothing is orphaned.
-        $this->assertSame(
-            [],
-            array_values(array_filter(
-                (array) scandir($this->rtBase . '/pass'),
-                static fn(string $e): bool => strpos($e, '.ur-secret.') === 0
-            ))
-        );
+        $this->assertSame(['.', '..', FixedTokenSsh::TOKEN], scandir($this->rtBase . '/pass'));
     }
 
     public function testNoSecretWriteExceptionInterpolatesAPath(): void

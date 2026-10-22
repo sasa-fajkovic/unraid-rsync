@@ -60,37 +60,37 @@ require_once __DIR__ . '/Util.php';
 class Runner
 {
     /**
-     * Injectable hook runner: fn(string $hookScript, array $env, callable(string):void $onOutput): int
-     * Returns the hook's exit code. null => the live runner (bash -c).
+     * Injectable hook runner: fn(string $hookScript, array $env, callable(string):void $onOutput, int $timeoutSec): int
+     * Returns the hook's exit code (or HOOK_TIMED_OUT). null => the live runner (bash -c).
      *
-     * @var callable|null
+     * @var (\Closure(string, array<string,string>, callable(string):void, int): int)|null
      */
-    public static $hookRunner = null;
+    public static ?\Closure $hookRunner = null;
 
     /**
      * Injectable pid provider: fn(): int. null => getmypid(). Lets tests pin the
      * recorded pid so the state file is deterministic.
      *
-     * @var callable|null
+     * @var \Closure|null
      */
-    public static $pidProvider = null;
+    public static ?\Closure $pidProvider = null;
 
     /**
      * Injectable scandir for a snapshot job's local sources: fn(string $path): array|false.
      * null => scandir().
      *
-     * @var callable|null
+     * @var \Closure|null
      */
-    public static $scanDir = null;
+    public static ?\Closure $scanDir = null;
 
     /**
      * Injectable listing of a delete job's local source and destination:
      * fn(string $path): array|false|null - the entries, false when the path
      * exists but cannot be listed, null when it does not exist. null => scandir().
      *
-     * @var (callable(string):(array<int,string>|false|null))|null
+     * @var (\Closure(string):(array<int,string>|false|null))|null
      */
-    public static $localLister = null;
+    public static ?\Closure $localLister = null;
 
     /**
      * How often, in seconds, a running pair trims its run log back to the cap
@@ -109,17 +109,17 @@ class Runner
      * Injectable mid-pair trim: fn(string $runLog): bool, true when the trim
      * failed. null => Logger::enforceRunLogCap.
      *
-     * @var (callable(string):bool)|null
+     * @var (\Closure(string):bool)|null
      */
-    public static $logTrimmer = null;
+    public static ?\Closure $logTrimmer = null;
 
     /**
      * Injectable teardown fault: fn(string $step): void, called before each
      * teardown step of run()'s finally; tests throw from it. null => none.
      *
-     * @var (callable(string):void)|null
+     * @var (\Closure(string):void)|null
      */
-    public static $teardownFault = null;
+    public static ?\Closure $teardownFault = null;
 
     /** Resolve our own pid (overridable for tests). */
     private static function pid(): int
@@ -342,83 +342,30 @@ class Runner
         $sshMat   = null;
         // Snapshot mode's per-run context (snapshotContext()); null for a mirror.
         $sn       = null;
+        $global   = (isset($config['global']) && is_array($config['global'])) ? $config['global'] : [];
+        $launch   = [
+            'jobId'       => $jobId,
+            'job'         => $job,
+            'config'      => $config,
+            'global'      => $global,
+            'dryRun'      => $dryRun,
+            'trigger'     => $trigger,
+            'gen'         => $gen,
+            'runLog'      => $runLog,
+            'startedAt'   => $startedAt,
+            'startedAtTs' => $startedAtTs,
+            'snap'        => $snap,
+            'stamp'       => $stamp,
+            'retention'   => $retention,
+        ];
 
         try {
             // 4. Remote transport: materialise secrets (LOCAL skips this).
-            $sshPieces = null;
             // trim() as well as strtoupper(): Job::validate resolves the same
             // two fields the same way, and the two guards must agree on a
             // hand-edited config.json byte for byte.
             $transport = strtoupper(trim((string) ($job['transport'] ?? 'SSH')));
-            if ($transport === 'SSH') {
-                $matResult = self::materializeSsh($job, $runLog, $jobId);
-                if ($matResult['ok'] !== true) {
-                    // Materialisation failure fails the run.
-                    $state    = Rsync::STATE_FAILED;
-                    $exitCode = 1;
-                    $reason   = (string) $matResult['reason'];
-                    Logger::event($runLog, $jobId, 'SSH transport could not be prepared: ' . $matResult['message']);
-                } else {
-                    $token     = (string) $matResult['token'];
-                    $mat       = $matResult['mat'];
-                    $sshMat    = $mat;
-                    $sshPieces = [
-                        'dashE'  => (string) $mat['dashE'],
-                        // PASSWORD auth rides in the child ENVIRONMENT (the
-                        // SSH_ASKPASS vars), never in the argv.
-                        'sshEnv' => (array) ($mat['sshEnv'] ?? []),
-                    ];
-                    // F1: arm secret-path redaction BEFORE any captured rsync/ssh
-                    // output reaches the log. At `debug` level rsync echoes the
-                    // remote-shell command (-e "ssh -i <tmpfs-keypath> ... -p N"),
-                    // exposing the per-run tmpfs key/passfile/known_hosts PATHS
-                    // into the root-written, browser-visible log. Scrub them (and,
-                    // defensively, anything under this run's per-token secret
-                    // dirs) on every write until the finally clears it.
-                    Logger::setRedaction(
-                        [
-                            (string) ($mat['keyPath'] ?? ''),
-                            (string) ($mat['passFile'] ?? ''),
-                            (string) ($mat['knownHosts'] ?? ''),
-                        ],
-                        Ssh::$runtimeBase,
-                        $token
-                    );
-                }
-            } elseif ($transport === 'DAEMON') {
-                $matResult = self::materializeDaemonConn($job, $runLog, $jobId);
-                if ($matResult['ok'] !== true) {
-                    $state    = Rsync::STATE_FAILED;
-                    $exitCode = 1;
-                    $reason   = (string) $matResult['reason'];
-                    Logger::event($runLog, $jobId, 'rsync daemon transport could not be prepared: ' . $matResult['message']);
-                } else {
-                    $token     = (string) $matResult['token'];
-                    $mat       = $matResult['mat'];
-                    $sshPieces = [
-                        'daemon'       => true,
-                        'daemonPort'   => (int) $mat['port'],
-                        // '' for an anonymous module (no `auth users` on the
-                        // far side): buildArgv then emits no --password-file,
-                        // and nothing was written to tmpfs to clean up.
-                        'passwordFile' => (string) ($mat['passFile'] ?? ''),
-                        // MANDATORY, even though a daemon run carries nothing in
-                        // the child environment: the pair loop below passes
-                        // $sshPieces['sshEnv'] to Ssh::childEnv(array) UNGUARDED,
-                        // so a bag without this key is an undefined-key warning
-                        // plus a TypeError that would fail EVERY daemon run with
-                        // reason 'exception'. childEnv([]) returns null (inherit).
-                        'sshEnv'       => [],
-                    ];
-                    // Arm redaction BEFORE any captured output exists: rsync
-                    // names the password file verbatim in its own errors
-                    // (authenticate.c:188/:215), and those reach the log through
-                    // its --log-file fd as well as through our sink.
-                    // setRedaction ignores empty strings and skips the per-token
-                    // dirs when $token === '', so the anonymous case is a no-op.
-                    Logger::setRedaction([(string) ($mat['passFile'] ?? '')], Ssh::$runtimeBase, $token);
-                }
-            }
+            [$sshPieces, $mat] = self::prepareTransport($launch, $transport, $token, $sshMat, $state, $exitCode, $reason);
 
             if ($token !== '') {
                 // A SIGKILLed runner never reaches cleanupRuntime(); reportCrashed
@@ -429,9 +376,7 @@ class Runner
                 }
             }
 
-            $global   = (isset($config['global']) && is_array($config['global'])) ? $config['global'] : [];
             $opts     = Rsync::effectiveOptions($job, $global);
-            $pairs    = (isset($job['pairs']) && is_array($job['pairs'])) ? $job['pairs'] : [];
             // Resolve "user@host" ONCE (not per pair) for the remote
             // operands. DAEMON uses the SAME prefix as SSH - the only
             // difference is the '::' separator resolvePair() appends.
@@ -485,50 +430,7 @@ class Runner
             }
 
             // 5c. preHook (only if nothing above failed or was aborted).
-            $hookEnvBase = self::hookEnv(
-                $job,
-                $jobId,
-                $dryRun,
-                null,
-                null,
-                $trigger,
-                $snap !== null ? ['UR_SNAPSHOT' => $stamp, 'UR_SNAPSHOT_STATUS' => ''] : []
-            );
-            if ($state !== Rsync::STATE_FAILED && $state !== Rsync::STATE_ABORTED) {
-                $preHook = (string) ($job['preHook'] ?? '');
-                if (trim($preHook) !== '') {
-                    $preMin = Config::hookTimeoutMinutes($global, 'preHookTimeout');
-                    Logger::event($runLog, $jobId, 'Running pre-run hook.');
-                    $preExit = self::runHook(
-                        $preHook,
-                        $hookEnvBase,
-                        $runLog,
-                        $preMin * 60,
-                        static fn(): bool => RunState::abortRequested($jobId)
-                    );
-                    if ($preExit === self::HOOK_TIMED_OUT) {
-                        Logger::event($runLog, $jobId, "Pre-run hook timed out after $preMin minute(s) and was killed.");
-                    } else {
-                        Logger::event($runLog, $jobId, 'Pre-run hook exited with code ' . $preExit . '.');
-                    }
-                    if (RunState::abortRequested($jobId)) {
-                        // The stop request killed the hook; not a hook failure.
-                        Logger::event($runLog, $jobId, 'Abort requested; stopping after the pre-run hook.');
-                        $state    = Rsync::STATE_ABORTED;
-                        $exitCode = 143;
-                    } elseif ($preExit === self::HOOK_TIMED_OUT) {
-                        $state    = Rsync::STATE_FAILED;
-                        $exitCode = 124;
-                        $reason   = 'prehook-timeout';
-                    } elseif ($preExit !== 0) {
-                        // A failed preHook fails the run; pairs are skipped, but
-                        // postHook STILL runs (the finally-style postHook below).
-                        $state    = Rsync::STATE_FAILED;
-                        $exitCode = $preExit;
-                        $reason   = 'prehook-failed';
-                    }
-                }
-            }
+            self::runPreHook($launch, $state, $exitCode, $reason);
 
             // 5c'. This box's side of every pair, after the pre-hook (it may mount
             //      the storage) and before anything is written.
@@ -559,459 +461,14 @@ class Runner
             }
 
             // 6. Pairs: check abort, build argv, run rsync.
-            if ($state !== Rsync::STATE_FAILED && $state !== Rsync::STATE_ABORTED) {
-                $logLevel = (string) ($job['logLevel'] ?? 'normal');
-                $pairResults = [];
-                if ($sn !== null) {
-                    // --info=stats2 feeds the completion metadata, so it may not
-                    // depend on the level (§11.2): lift quiet like a dry run is.
-                    if ($logLevel === 'quiet') {
-                        $logLevel = 'summary';
-                        Logger::event($runLog, $jobId, 'Snapshot mode runs the quiet log level as summary.');
-                    }
-                    foreach (Job::snapshotOptionWarnings($opts) as $w) {
-                        Logger::event($runLog, $jobId, $w);
-                    }
-                }
-
-                if (count($pairs) === 0) {
-                    $state    = Rsync::STATE_FAILED;
-                    $exitCode = 1;
-                    $reason   = 'no-pairs';
-                    Logger::event($runLog, $jobId, 'No source -> destination pairs configured; nothing to do.');
-                }
-
-                $aborted     = false;
-                $cappedPairs = [];
-                $ceiling     = self::LOG_CEILING_FACTOR * Logger::maxRunLogBytes();
-                foreach ($pairs as $i => $pair) {
-                    $n = (int) $i + 1;
-
-                    // Abort flag is polled BEFORE each pair.
-                    if (RunState::abortRequested($jobId)) {
-                        $aborted = true;
-                        Logger::event($runLog, $jobId, "Abort requested; stopping before pair #$n.");
-                        break;
-                    }
-
-                    // Resolve src/dest by direction (guardrails ran in pre-flight).
-                    $extraTokens = [];
-                    if ($sn !== null) {
-                        $sub         = trim((string) ($pair['sub'] ?? ''));
-                        $resolved    = ['src' => trim((string) ($pair['local'] ?? '')), 'dest' => "$userHost:{$sn['root']}/$stamp.inprogress/$sub/"];
-                        $extraTokens = self::snapshotLinkDests($sn, $i, $sub);
-                    } else {
-                        $resolved = self::resolvePair($job, $pair, $transport, $userHost);
-                    }
-
-                    Logger::event($runLog, $jobId, sprintf(
-                        'Pair #%d: %s -> %s',
-                        $n,
-                        $resolved['src'],
-                        $resolved['dest']
-                    ));
-
-                    $argv = Rsync::buildArgv(
-                        $sn !== null ? Snapshot::runOptions($opts) : $opts,
-                        $logLevel,
-                        $runLog,
-                        $resolved['src'],
-                        $resolved['dest'],
-                        $sshPieces,
-                        $dryRun,
-                        $extraTokens
-                    );
-
-                    // Stream rsync's captured stdout/stderr through Logger::sink,
-                    // which REDACTS armed per-run secret paths (F1) and enforces
-                    // the per-run-log byte cap (F3) before bytes hit the log.
-                    // Snapshot mode also keeps the tail for the stats it records.
-                    $sink     = Logger::sink($runLog);
-                    $captured = '';
-                    $partial  = '';
-                    $missing  = [];
-                    $onOutput = $sn === null ? $sink : static function (string $chunk) use ($sink, &$captured, &$partial, &$missing): void {
-                        $sink($chunk);
-                        $captured = substr($captured . $chunk, -self::SNAPSHOT_CAPTURE_BYTES);
-                        // rsync names a missing --link-dest once, early; it must
-                        // not scroll out of the tail kept for the statistics.
-                        $lines   = explode("\n", $partial . $chunk);
-                        $partial = substr((string) array_pop($lines), -self::SNAPSHOT_CAPTURE_BYTES);
-                        $missing = array_merge($missing, Snapshot::linkDestMissing(implode("\n", $lines)));
-                    };
-                    // rsync's --log-file bypasses the sink's cap, so trim the
-                    // file while the pair runs, not only after it.
-                    $capHit   = false;
-                    $lastTrim = microtime(true);
-                    $stopWhen = static function () use ($runLog, $ceiling, &$capHit, &$lastTrim): bool {
-                        if (microtime(true) - $lastTrim < self::$logCapCheckSec) {
-                            return false;
-                        }
-                        $lastTrim = microtime(true);
-                        if (self::$logTrimmer !== null) {
-                            $failed = (bool) (self::$logTrimmer)($runLog);
-                        } else {
-                            Logger::enforceRunLogCap($runLog, $failed);
-                        }
-                        if (!$failed) {
-                            return false;
-                        }
-                        clearstatcache(true, $runLog);
-                        return $capHit = ((int) @filesize($runLog) > $ceiling);
-                    };
-                    $pairExit = Rsync::run(
-                        $argv,
-                        $onOutput,
-                        Ssh::childEnv(is_array($sshPieces) ? $sshPieces['sshEnv'] : []),
-                        null,
-                        $stopWhen
-                    );
-                    // The sink holds back progress redraws (5%/30s throttle) and
-                    // any unterminated tail; rsync has exited, so land them.
-                    Logger::flushSink($runLog);
-                    // rsync ALSO writes the run log directly via --log-file, which
-                    // bypasses the sink's cap; trim the file to the cap now that
-                    // this pair's rsync has closed --log-file (F3, complete).
-                    Logger::enforceRunLogCap($runLog);
-                    // Cap FIRST (it bounds the file the redactor is about to
-                    // read whole), THEN redact. rsync's own --log-file writes
-                    // never pass through Logger::sink, so this is the only pass
-                    // that scrubs the per-run secret paths out of them - and it
-                    // is safe here precisely because this pair's rsync has
-                    // exited and closed that fd.
-                    Logger::redactRunLog($runLog);
-                    $exitCodes[] = $pairExit;
-                    if ($capHit) {
-                        $cappedPairs[count($exitCodes) - 1] = true;
-                        self::setReason($reason, 'log-cap-exceeded');
-                        Logger::event($runLog, $jobId, sprintf(
-                            'Pair #%d stopped: its run log stayed over the %d MiB hard ceiling after trimming.',
-                            $n,
-                            intdiv($ceiling, 1024 * 1024)
-                        ));
-                    }
-                    Logger::event($runLog, $jobId, "Pair #$n rsync exited with code $pairExit (" . Rsync::exitToState($pairExit) . ').');
-                    if ($sn !== null) {
-                        $missing       = array_merge($missing, Snapshot::linkDestMissing($partial));
-                        $pairResults[] = self::snapshotPairResult($sn, $i, $sub, $pairExit, $captured, $missing, $runLog, $jobId);
-                    }
-
-                    // Abort can land DURING a pair (the SIGTERM that killed rsync
-                    // also set the abort flag). Re-poll AFTER each rsync so an
-                    // interrupted run is recorded as ABORTED rather than as the
-                    // killed-rsync exit code (FAILED) - or, worse, leaving a stale
-                    // previous-run state when the runner used to die mid-pair.
-                    if (RunState::abortRequested($jobId)) {
-                        $aborted = true;
-                        Logger::event($runLog, $jobId, "Abort requested; stopping after pair #$n.");
-                        break;
-                    }
-                }
-
-                if ($aborted) {
-                    $state    = Rsync::STATE_ABORTED;
-                    $exitCode = 143; // 128 + SIGTERM
-                } elseif ($state !== Rsync::STATE_FAILED) {
-                    // A pair stopped at the log ceiling exits 143, which would
-                    // read as ABORTED; it is a WARNING (reason log-cap-exceeded).
-                    $worst    = Rsync::worstOutcome(array_values(array_diff_key($exitCodes, $cappedPairs)));
-                    $state    = $worst['state'];
-                    $exitCode = $worst['exitCode'];
-                    if ($cappedPairs !== [] && $state === Rsync::STATE_SUCCESS) {
-                        $state = Rsync::STATE_WARNING;
-                    }
-                }
-
-                // 6b. Snapshot completion gate (§4.1), then commit.
-                if ($sn !== null && $sn['mkstamped']) {
-                    $gate = !$aborted && $state !== Rsync::STATE_FAILED && count($exitCodes) === count($pairs)
-                        && array_diff($exitCodes, [0, 24]) === [];
-                    if (!$gate) {
-                        Logger::event($runLog, $jobId, "Snapshot $stamp was not committed; $stamp.inprogress is kept for the next run.");
-                        if (!$aborted && $state !== Rsync::STATE_ABORTED) {
-                            self::setReason($reason, 'snapshot-not-committed');
-                        }
-                    } else {
-                        $commit = self::snapshotCommit($sn, $pairResults, $runLog, $jobId);
-                        if ($commit === 'aborted') {
-                            $state    = Rsync::STATE_ABORTED;
-                            $exitCode = 143;
-                        } elseif ($commit !== '') {
-                            $state    = Rsync::STATE_FAILED;
-                            $exitCode = 1;
-                            self::setReason($reason, $commit);
-                        } elseif ($sn['suspect']) {
-                            $state = Rsync::STATE_WARNING;
-                            self::setReason($reason, 'snapshot-suspect');
-                        }
-                    }
-                }
-            }
+            self::runPairs($launch, $transport, $opts, $sshPieces, $userHost, $sn, $exitCodes, $state, $exitCode, $reason);
         } catch (Throwable $e) {
             $state    = Rsync::STATE_FAILED;
             $exitCode = 1;
             $reason   = 'exception';
             Logger::event($runLog, $jobId, 'Run failed with an internal error: ' . $e->getMessage());
         } finally {
-            // Every teardown step runs on its own: a step that throws is logged
-            // once and the rest still run (cleanup, summary, History, state,
-            // lock). Only a summary, History or run-state failure changes the
-            // outcome (teardownFailed).
-            $broken = [];
-            $step = static function (string $name, callable $fn) use ($jobId, $runLog, &$broken): void {
-                try {
-                    if (self::$teardownFault !== null) {
-                        (self::$teardownFault)($name);
-                    }
-                    $fn();
-                } catch (Throwable $e) {
-                    $broken[] = $name;
-                    self::reportTeardownFailure($jobId, $runLog, $name, $e);
-                }
-            };
-
-            // Land whatever the last sink still holds, FIRST. It has to happen
-            // before the postHook: runHook() opens a new sink on this same path
-            // and Logger::sink() RESETS the per-path state, so a flush placed
-            // after the hook would find nothing left to rescue. This is the
-            // abort path's safety net - a SIGTERM'd rsync leaves its last
-            // redraw unterminated, and the trap lets this finally run.
-            $step('flush', static fn() => Logger::flushSink($runLog));
-            $state = self::snapshotWarnState($state, $reason);
-
-            // A stop nobody clicked Abort for (a shutdown's SIGTERM, a killed
-            // rsync exiting 20) is a failure, not an abort: it must alert.
-            if ($state === Rsync::STATE_ABORTED && !RunState::abortedByUser($jobId, $gen)) {
-                $state  = Rsync::STATE_FAILED;
-                $reason = 'terminated';
-                Logger::event($runLog, $jobId, 'The run was stopped by a signal, not by Abort; recording it as FAILED.');
-            }
-
-            // 7. postHook ALWAYS runs (even on failure/abort), with the outcome
-            //    in its environment.
-            $postHook = (string) ($job['postHook'] ?? '');
-            if (trim($postHook) !== '') {
-                $step('post-hook', static function () use ($job, $jobId, $dryRun, $trigger, $snap, $sn, $stamp, $config, $postHook, $runLog, &$state, &$exitCode, &$reason): void {
-                    $postEnv = self::hookEnv($job, $jobId, $dryRun, $state, $exitCode, $trigger, $snap === null ? [] : [
-                        'UR_SNAPSHOT'        => !empty($sn['mkstamped']) ? $stamp : '',
-                        'UR_SNAPSHOT_STATUS' => $dryRun ? 'dry-run'
-                            : (!empty($sn['committed']) ? 'committed' : (!empty($sn['mkstamped']) ? 'not-committed' : 'none')),
-                    ]);
-                    $postMin = Config::hookTimeoutMinutes(
-                        (isset($config['global']) && is_array($config['global'])) ? $config['global'] : [],
-                        'postHookTimeout'
-                    );
-                    // The post-hook ALWAYS runs, so an abort that already ended the
-                    // run must not kill it; only a fresh Abort during it may.
-                    $abortedBefore = RunState::abortRequested($jobId);
-                    Logger::event($runLog, $jobId, 'Running post-run hook.');
-                    $postExit = self::runHook(
-                        $postHook,
-                        $postEnv,
-                        $runLog,
-                        $postMin * 60,
-                        $abortedBefore ? null : static fn(): bool => RunState::abortRequested($jobId)
-                    );
-                    if ($postExit === self::HOOK_TIMED_OUT) {
-                        // Keeps the primary outcome, like a failed post-hook.
-                        Logger::event($runLog, $jobId, "Post-run hook timed out after $postMin minute(s) and was killed.");
-                        $reason = $reason !== '' ? $reason : 'posthook-timeout';
-                        if ($state === Rsync::STATE_SUCCESS) {
-                            $state = Rsync::STATE_WARNING;
-                        }
-                    } else {
-                        Logger::event($runLog, $jobId, 'Post-run hook exited with code ' . $postExit . '.');
-                    }
-                    // A failing postHook does NOT override the run's primary outcome,
-                    // but we surface it on an otherwise-clean run so it isn't silent,
-                    // and record it as the reason wherever none is set yet: an exit-24
-                    // run or a manual abort notify as normal unless a reason says
-                    // otherwise.
-                    if ($postExit !== 0 && $postExit !== self::HOOK_TIMED_OUT && $state !== Rsync::STATE_FAILED) {
-                        if ($state === Rsync::STATE_SUCCESS) {
-                            $state = Rsync::STATE_WARNING;
-                        }
-                        $reason = $reason !== '' ? $reason : 'posthook-failed';
-                    }
-                });
-                // A post-hook that could not be run counts as a failed one.
-                if (in_array('post-hook', $broken, true) && $state !== Rsync::STATE_FAILED) {
-                    if ($state === Rsync::STATE_SUCCESS) {
-                        $state = Rsync::STATE_WARNING;
-                    }
-                    $reason = $reason !== '' ? $reason : 'posthook-failed';
-                }
-            }
-
-            // 7a. Snapshot prune (§6): after the post-hook, so it holds no
-            //     services, and before cleanup, which removes the ssh pieces it
-            //     needs.
-            if ($sn !== null) {
-                $step('snapshot prune', static function () use (&$sn, $dryRun, &$reason, $runLog, $jobId): void {
-                    self::snapshotPrune($sn, $dryRun, $reason, $runLog, $jobId);
-                });
-                $state = self::snapshotWarnState($state, $reason);
-            }
-
-            // 7b. Trust on first use: with accept-new and nothing pinned yet, ssh
-            //     appended the key it accepted to this run's known_hosts. Pin it
-            //     into the connection BEFORE cleanup unlinks that file, so a
-            //     CHANGED key fails closed on the next run instead of being
-            //     silently trusted again.
-            if (is_array($sshMat)) {
-                $step('host-key pin', static function () use ($sshMat, $runLog, $jobId): void {
-                    $connId  = (string) ($sshMat['conn']['id'] ?? '');
-                    $hostKey = Ssh::harvestHostKey($sshMat);
-                    // The endpoint the key came from, not the one stored now: the
-                    // connection may have been edited while this run was going.
-                    if (Ssh::pinHostKey($connId, $hostKey, (string) ($sshMat['conn']['host'] ?? ''), (int) ($sshMat['conn']['port'] ?? 0))) {
-                        // No key material and no tmpfs path in the message.
-                        Logger::event($runLog, $jobId, 'Pinned host key for connection ' . $connId . ' on first use.');
-                    }
-                });
-            }
-
-            // 8. Cleanup the SSH runtime secrets for THIS run's token, and disarm
-            //    the secret-path redaction armed at materialisation (F1).
-            if ($token !== '') {
-                $step('secret cleanup', static fn() => Ssh::cleanupRuntime($token));
-            }
-            // And again for the postHook's own sink, before the redact pass so
-            // an unterminated last line gets scrubbed like everything else.
-            // Final pass, while redaction is still armed: catches anything rsync
-            // or the postHook wrote to the run log after the last pair's cap.
-            $step('log redaction', static function () use ($runLog): void {
-                Logger::flushSink($runLog);
-                Logger::redactRunLog($runLog);
-            });
-            Logger::clearRedaction();
-
-            // 9. Persist the last-run summary to /boot + clear running state.
-            $finishedAtTs = time();
-            // STORAGE timestamp: UTC, always (see the startedAt note above).
-            $finishedAt  = gmdate('Y-m-d\TH:i:s\Z', $finishedAtTs);
-            $durationSec = max(0, $finishedAtTs - $startedAtTs);
-            // Snapshot jobs only, so a mirror's summary and History keep their shape.
-            $snapFields  = $snap === null ? [] : [
-                'snapshot'  => !empty($sn['mkstamped']) ? $stamp : '',
-                'committed' => !empty($sn['committed']),
-            ];
-            $summaryRecord = [
-                'startedAt'   => $startedAt,
-                'finishedAt'  => $finishedAt,
-                'exitCode'    => $exitCode,
-                'durationSec' => $durationSec,
-                'dryRun'      => $dryRun,
-                'trigger'     => $trigger,
-            ] + $snapFields;
-            // null = the step threw (already logged), false = it reported failure.
-            $summaryOk  = null;
-            $summarySaid = [$state, $reason];
-            $step('summary', static function () use ($jobId, $state, $reason, $summaryRecord, &$summaryOk): void {
-                $summaryOk = self::writeSummary($jobId, ['state' => $state, 'reason' => $reason] + $summaryRecord);
-            });
-            if ($summaryOk !== true) {
-                self::teardownFailed($state, $reason);
-            }
-            if ($snap !== null) {
-                $snapFields += ['suspect' => !empty($sn['suspect']), 'pruned' => (int) ($sn['pruned'] ?? 0)];
-                if (isset($sn['growthKB'])) {
-                    $snapFields['growthKB'] = $sn['growthKB'];
-                }
-            }
-
-            // Append a persistent history record (one small /boot write, same
-            // cadence as the summary), then lazily prune to the retention cap.
-            // jobName is snapshotted so the record survives a later rename/delete;
-            // logRef is the run-log BASENAME only (resolves via getJobLog?run=).
-            $historyOk   = null;
-            $historySaid = [$state, $reason];
-            $step('history', static function () use ($jobId, $job, $startedAt, $finishedAt, $dryRun, $trigger, $state, $exitCode, $durationSec, $runLog, $reason, $snapFields, &$historyOk): void {
-                $historyOk = History::append($jobId, [
-                    'startedAt'   => $startedAt,
-                    'finishedAt'  => $finishedAt,
-                    'jobName'     => (string) ($job['name'] ?? $jobId),
-                    'dryRun'      => $dryRun,
-                    'trigger'     => $trigger,
-                    'state'       => $state,
-                    'exitCode'    => $exitCode,
-                    'durationSec' => $durationSec,
-                    'logRef'      => Logger::runIdFromPath($runLog),
-                    'reason'      => $reason,
-                    'lastError'   => $exitCode !== 0 ? Logger::lastRsyncError($runLog) : '',
-                ] + $snapFields);
-            });
-            if ($historyOk !== true) {
-                self::teardownFailed($state, $reason);
-            }
-            self::reportPersistFailure($jobId, array_keys(array_filter([
-                'last-run summary' => $summaryOk === false,
-                'History record'   => $historyOk === false,
-            ])));
-            $step('in-flight record', static function () use ($jobId, $retention): void {
-                RunState::clearInflight($jobId);
-                History::prune($jobId, $retention);
-            });
-
-            Logger::event($runLog, $jobId, "Run finished: state=$state exitCode=$exitCode.");
-            $step('run state', static fn() => RunState::markStopped($jobId));
-            if (in_array('run state', $broken, true)) {
-                self::teardownFailed($state, $reason);
-            }
-            // A step after the summary or History write changed the outcome:
-            // bring what was already written into line (the lock is still ours).
-            if ($summaryOk === true && $summarySaid !== [$state, $reason]) {
-                $step('summary update', static function () use ($jobId, $state, $reason, $summaryRecord): void {
-                    if (!self::writeSummary($jobId, ['state' => $state, 'reason' => $reason] + $summaryRecord)) {
-                        throw new RuntimeException('the summary could not be rewritten as ' . $state);
-                    }
-                });
-            }
-            if ($historyOk === true && $historySaid !== [$state, $reason]) {
-                $step('History update', static function () use ($jobId, $startedAt, $runLog, $state, $reason): void {
-                    if (!History::amend($jobId, $startedAt, Logger::runIdFromPath($runLog), ['state' => $state, 'reason' => $reason])) {
-                        throw new RuntimeException('the History record could not be rewritten as ' . $state);
-                    }
-                });
-            }
-            $step('abort flag', static fn() => RunState::clearAbort($jobId));
-
-            // Dispatch the per-job notification. Best-effort: it is
-            // gated on the job's notifyMode and NEVER throws (see notifyHook),
-            // so a notification failure can't break the run's finally/unwind.
-            $notify = [
-                'state'       => $state,
-                'exitCode'    => $exitCode,
-                'exitCodes'   => $exitCodes,
-                'reason'      => $reason,
-                'trigger'     => $trigger,
-                'dryRun'      => $dryRun,
-                'durationSec' => $durationSec,
-            ];
-            if ($snap !== null && !$dryRun && $state !== Rsync::STATE_ABORTED && empty($sn['committed'])) {
-                $step('snapshot history', static function () use ($jobId, $job, &$notify): void {
-                    $runs = self::notCommittedRuns($jobId);
-                    if ($runs > 1) {
-                        $notify['message'] = sprintf('Job "%s" has not committed a snapshot for %d runs.', (string) ($job['name'] ?? $jobId), $runs);
-                    }
-                });
-            }
-            self::notifyHook($job, $notify);
-
-            // Release the per-job run lock last, so a queued launch only proceeds
-            // once this run has fully wound down (state cleared, summary written).
-            RunState::releaseLock($lock);
-
-            // Restore the signal disposition we changed, so our handlers/async
-            // mode never leak past this run (the detached runner exits anyway,
-            // but the test process and any future long-lived worker reuse it).
-            if ($signalsInstalled) {
-                pcntl_signal(defined('SIGTERM') ? SIGTERM : 15, SIG_DFL);
-                pcntl_signal(defined('SIGINT') ? SIGINT : 2, SIG_DFL);
-                if ($prevAsyncSignals !== null) {
-                    pcntl_async_signals((bool) $prevAsyncSignals);
-                }
-            }
+            self::finishRun($launch, $sn, $token, $sshMat, $exitCodes, $lock, $signalsInstalled, $prevAsyncSignals, $state, $exitCode, $reason);
         }
 
         $result = ['state' => $state, 'exitCode' => $exitCode, 'runLog' => $runLog];
@@ -1019,6 +476,630 @@ class Runner
             $result['reason'] = $reason;
         }
         return $result;
+    }
+
+    /**
+     * Step 4 of run(): materialise the remote transport's secrets (LOCAL skips
+     * this) and arm the log redaction for them. $token and $sshMat are set the
+     * moment they exist, so run()'s teardown cleans up even after a throw here.
+     *
+     * @param array<string,mixed>      $launch run()'s launch context
+     * @param array<string,mixed>|null $sshMat
+     * @return array{0:array<string,mixed>|null,1:array<string,mixed>|null} [transport pieces for Rsync::buildArgv, the materialised bag]
+     */
+    private static function prepareTransport(array $launch, string $transport, string &$token, ?array &$sshMat, string &$state, int &$exitCode, string &$reason): array
+    {
+        ['jobId' => $jobId, 'job' => $job, 'runLog' => $runLog] = $launch;
+        $sshPieces = null;
+        $mat       = null;
+        if ($transport === 'SSH') {
+            $matResult = self::materializeSsh($job);
+            if ($matResult['ok'] !== true) {
+                // Materialisation failure fails the run.
+                $state    = Rsync::STATE_FAILED;
+                $exitCode = 1;
+                $reason   = (string) $matResult['reason'];
+                Logger::event($runLog, $jobId, 'SSH transport could not be prepared: ' . $matResult['message']);
+            } else {
+                $token     = (string) $matResult['token'];
+                $mat       = $matResult['mat'];
+                $sshMat    = $mat;
+                $sshPieces = [
+                    'dashE'  => (string) $mat['dashE'],
+                    // PASSWORD auth rides in the child ENVIRONMENT (the
+                    // SSH_ASKPASS vars), never in the argv.
+                    'sshEnv' => (array) ($mat['sshEnv'] ?? []),
+                ];
+                // F1: arm secret-path redaction BEFORE any captured rsync/ssh
+                // output reaches the log. At `debug` level rsync echoes the
+                // remote-shell command (-e "ssh -i <tmpfs-keypath> ... -p N"),
+                // exposing the per-run tmpfs key/passfile/known_hosts PATHS
+                // into the root-written, browser-visible log. Scrub them (and,
+                // defensively, anything under this run's per-token secret
+                // dirs) on every write until the finally clears it.
+                Logger::setRedaction(
+                    [
+                        (string) ($mat['keyPath'] ?? ''),
+                        (string) ($mat['passFile'] ?? ''),
+                        (string) ($mat['knownHosts'] ?? ''),
+                    ],
+                    Ssh::base(),
+                    $token
+                );
+            }
+        } elseif ($transport === 'DAEMON') {
+            $matResult = self::materializeDaemonConn($job);
+            if ($matResult['ok'] !== true) {
+                $state    = Rsync::STATE_FAILED;
+                $exitCode = 1;
+                $reason   = (string) $matResult['reason'];
+                Logger::event($runLog, $jobId, 'rsync daemon transport could not be prepared: ' . $matResult['message']);
+            } else {
+                $token     = (string) $matResult['token'];
+                $mat       = $matResult['mat'];
+                $sshPieces = [
+                    'daemon'       => true,
+                    'daemonPort'   => (int) $mat['port'],
+                    // '' for an anonymous module (no `auth users` on the
+                    // far side): buildArgv then emits no --password-file,
+                    // and nothing was written to tmpfs to clean up.
+                    'passwordFile' => (string) ($mat['passFile'] ?? ''),
+                    // MANDATORY, even though a daemon run carries nothing in
+                    // the child environment: the pair loop below passes
+                    // $sshPieces['sshEnv'] to Ssh::childEnv(array) UNGUARDED,
+                    // so a bag without this key is an undefined-key warning
+                    // plus a TypeError that would fail EVERY daemon run with
+                    // reason 'exception'. childEnv([]) returns null (inherit).
+                    'sshEnv'       => [],
+                ];
+                // Arm redaction BEFORE any captured output exists: rsync
+                // names the password file verbatim in its own errors
+                // (authenticate.c:188/:215), and those reach the log through
+                // its --log-file fd as well as through our sink.
+                // setRedaction ignores empty strings and skips the per-token
+                // dirs when $token === '', so the anonymous case is a no-op.
+                Logger::setRedaction([(string) ($mat['passFile'] ?? '')], Ssh::base(), $token);
+            }
+        }
+
+        return [$sshPieces, $mat];
+    }
+
+    /**
+     * Step 5c of run(): the pre-run hook, only if nothing before it failed or
+     * was aborted. A failing or timed-out hook fails the run; an Abort during
+     * it is ABORTED.
+     *
+     * @param array<string,mixed> $launch run()'s launch context
+     */
+    private static function runPreHook(array $launch, string &$state, int &$exitCode, string &$reason): void
+    {
+        ['jobId' => $jobId, 'job' => $job, 'global' => $global, 'dryRun' => $dryRun, 'trigger' => $trigger, 'runLog' => $runLog, 'snap' => $snap, 'stamp' => $stamp] = $launch;
+        $hookEnvBase = self::hookEnv(
+            $job,
+            $jobId,
+            $dryRun,
+            null,
+            null,
+            $trigger,
+            $snap !== null ? ['UR_SNAPSHOT' => $stamp, 'UR_SNAPSHOT_STATUS' => ''] : []
+        );
+        if ($state !== Rsync::STATE_FAILED && $state !== Rsync::STATE_ABORTED) {
+            $preHook = (string) ($job['preHook'] ?? '');
+            if (trim($preHook) !== '') {
+                $preMin = Config::hookTimeoutMinutes($global, 'preHookTimeout');
+                Logger::event($runLog, $jobId, 'Running pre-run hook.');
+                $preExit = self::runHook(
+                    $preHook,
+                    $hookEnvBase,
+                    $runLog,
+                    $preMin * 60,
+                    static fn(): bool => RunState::abortRequested($jobId)
+                );
+                if ($preExit === self::HOOK_TIMED_OUT) {
+                    Logger::event($runLog, $jobId, "Pre-run hook timed out after $preMin minute(s) and was killed.");
+                } else {
+                    Logger::event($runLog, $jobId, 'Pre-run hook exited with code ' . $preExit . '.');
+                }
+                if (RunState::abortRequested($jobId)) {
+                    // The stop request killed the hook; not a hook failure.
+                    Logger::event($runLog, $jobId, 'Abort requested; stopping after the pre-run hook.');
+                    $state    = Rsync::STATE_ABORTED;
+                    $exitCode = 143;
+                } elseif ($preExit === self::HOOK_TIMED_OUT) {
+                    $state    = Rsync::STATE_FAILED;
+                    $exitCode = 124;
+                    $reason   = 'prehook-timeout';
+                } elseif ($preExit !== 0) {
+                    // A failed preHook fails the run; pairs are skipped, but
+                    // postHook STILL runs (the finally-style postHook below).
+                    $state    = Rsync::STATE_FAILED;
+                    $exitCode = $preExit;
+                    $reason   = 'prehook-failed';
+                }
+            }
+        }
+    }
+
+    /**
+     * Steps 6 and 6b of run(): each pair's rsync (abort polled before and after
+     * every pair), the worst outcome across them, then the snapshot completion
+     * gate and commit.
+     *
+     * @param array<string,mixed>      $launch    run()'s launch context
+     * @param array<string,mixed>      $opts      EFFECTIVE rsync options
+     * @param array<string,mixed>|null $sshPieces transport pieces (null = LOCAL)
+     * @param array<string,mixed>|null $sn        snapshot context (null = mirror)
+     * @param array<int,int>           $exitCodes each pair's rsync exit, in order
+     */
+    private static function runPairs(array $launch, string $transport, array $opts, ?array $sshPieces, string $userHost, ?array &$sn, array &$exitCodes, string &$state, int &$exitCode, string &$reason): void
+    {
+        ['jobId' => $jobId, 'job' => $job, 'dryRun' => $dryRun, 'runLog' => $runLog, 'stamp' => $stamp] = $launch;
+        $pairs = (isset($job['pairs']) && is_array($job['pairs'])) ? $job['pairs'] : [];
+        if ($state !== Rsync::STATE_FAILED && $state !== Rsync::STATE_ABORTED) {
+            $logLevel = (string) ($job['logLevel'] ?? 'normal');
+            $pairResults = [];
+            if ($sn !== null) {
+                // --info=stats2 feeds the completion metadata, so it may not
+                // depend on the level (§11.2): lift quiet like a dry run is.
+                if ($logLevel === 'quiet') {
+                    $logLevel = 'summary';
+                    Logger::event($runLog, $jobId, 'Snapshot mode runs the quiet log level as summary.');
+                }
+                foreach (Job::snapshotOptionWarnings($opts) as $w) {
+                    Logger::event($runLog, $jobId, $w);
+                }
+            }
+
+            if (count($pairs) === 0) {
+                $state    = Rsync::STATE_FAILED;
+                $exitCode = 1;
+                $reason   = 'no-pairs';
+                Logger::event($runLog, $jobId, 'No source -> destination pairs configured; nothing to do.');
+            }
+
+            $aborted     = false;
+            $cappedPairs = [];
+            $ceiling     = self::LOG_CEILING_FACTOR * Logger::maxRunLogBytes();
+            foreach ($pairs as $i => $pair) {
+                $n = (int) $i + 1;
+
+                // Abort flag is polled BEFORE each pair.
+                if (RunState::abortRequested($jobId)) {
+                    $aborted = true;
+                    Logger::event($runLog, $jobId, "Abort requested; stopping before pair #$n.");
+                    break;
+                }
+
+                // Resolve src/dest by direction (guardrails ran in pre-flight).
+                $extraTokens = [];
+                if ($sn !== null) {
+                    $sub         = trim((string) ($pair['sub'] ?? ''));
+                    $resolved    = ['src' => trim((string) ($pair['local'] ?? '')), 'dest' => "$userHost:{$sn['root']}/$stamp.inprogress/$sub/"];
+                    $extraTokens = self::snapshotLinkDests($sn, $i, $sub);
+                } else {
+                    $resolved = self::resolvePair($job, $pair, $transport, $userHost);
+                }
+
+                Logger::event($runLog, $jobId, sprintf(
+                    'Pair #%d: %s -> %s',
+                    $n,
+                    $resolved['src'],
+                    $resolved['dest']
+                ));
+
+                $argv = Rsync::buildArgv(
+                    $sn !== null ? Snapshot::runOptions($opts) : $opts,
+                    $logLevel,
+                    $runLog,
+                    $resolved['src'],
+                    $resolved['dest'],
+                    $sshPieces,
+                    $dryRun,
+                    $extraTokens
+                );
+
+                // Stream rsync's captured stdout/stderr through Logger::sink,
+                // which REDACTS armed per-run secret paths (F1) and enforces
+                // the per-run-log byte cap (F3) before bytes hit the log.
+                // Snapshot mode also keeps the tail for the stats it records.
+                $sink     = Logger::sink($runLog);
+                $captured = '';
+                $partial  = '';
+                $missing  = [];
+                $onOutput = $sn === null ? $sink : static function (string $chunk) use ($sink, &$captured, &$partial, &$missing): void {
+                    $sink($chunk);
+                    $captured = substr($captured . $chunk, -self::SNAPSHOT_CAPTURE_BYTES);
+                    // rsync names a missing --link-dest once, early; it must
+                    // not scroll out of the tail kept for the statistics.
+                    $lines   = explode("\n", $partial . $chunk);
+                    $partial = substr((string) array_pop($lines), -self::SNAPSHOT_CAPTURE_BYTES);
+                    $missing = array_merge($missing, Snapshot::linkDestMissing(implode("\n", $lines)));
+                };
+                // rsync's --log-file bypasses the sink's cap, so trim the
+                // file while the pair runs, not only after it.
+                $capHit   = false;
+                $lastTrim = microtime(true);
+                $stopWhen = static function () use ($runLog, $ceiling, &$capHit, &$lastTrim): bool {
+                    if (microtime(true) - $lastTrim < self::$logCapCheckSec) {
+                        return false;
+                    }
+                    $lastTrim = microtime(true);
+                    if (self::$logTrimmer !== null) {
+                        $failed = (bool) (self::$logTrimmer)($runLog);
+                    } else {
+                        Logger::enforceRunLogCap($runLog, $failed);
+                    }
+                    if (!$failed) {
+                        return false;
+                    }
+                    clearstatcache(true, $runLog);
+                    return $capHit = ((int) @filesize($runLog) > $ceiling);
+                };
+                $pairExit = Rsync::run(
+                    $argv,
+                    $onOutput,
+                    Ssh::childEnv(is_array($sshPieces) ? $sshPieces['sshEnv'] : []),
+                    null,
+                    $stopWhen
+                );
+                // The sink holds back progress redraws (5%/30s throttle) and
+                // any unterminated tail; rsync has exited, so land them.
+                Logger::flushSink($runLog);
+                // rsync ALSO writes the run log directly via --log-file, which
+                // bypasses the sink's cap; trim the file to the cap now that
+                // this pair's rsync has closed --log-file (F3, complete).
+                Logger::enforceRunLogCap($runLog);
+                // Cap FIRST (it bounds the file the redactor is about to
+                // read whole), THEN redact. rsync's own --log-file writes
+                // never pass through Logger::sink, so this is the only pass
+                // that scrubs the per-run secret paths out of them - and it
+                // is safe here precisely because this pair's rsync has
+                // exited and closed that fd.
+                Logger::redactRunLog($runLog);
+                $exitCodes[] = $pairExit;
+                if ($capHit) {
+                    $cappedPairs[count($exitCodes) - 1] = true;
+                    self::setReason($reason, 'log-cap-exceeded');
+                    Logger::event($runLog, $jobId, sprintf(
+                        'Pair #%d stopped: its run log stayed over the %d MiB hard ceiling after trimming.',
+                        $n,
+                        intdiv($ceiling, 1024 * 1024)
+                    ));
+                }
+                Logger::event($runLog, $jobId, "Pair #$n rsync exited with code $pairExit (" . Rsync::exitToState($pairExit) . ').');
+                if ($sn !== null) {
+                    $missing       = array_merge($missing, Snapshot::linkDestMissing($partial));
+                    $pairResults[] = self::snapshotPairResult($sn, $i, $sub, $pairExit, $captured, $missing, $runLog, $jobId);
+                }
+
+                // Abort can land DURING a pair (the SIGTERM that killed rsync
+                // also set the abort flag). Re-poll AFTER each rsync so an
+                // interrupted run is recorded as ABORTED rather than as the
+                // killed-rsync exit code (FAILED) - or, worse, leaving a stale
+                // previous-run state when the runner used to die mid-pair.
+                if (RunState::abortRequested($jobId)) {
+                    $aborted = true;
+                    Logger::event($runLog, $jobId, "Abort requested; stopping after pair #$n.");
+                    break;
+                }
+            }
+
+            if ($aborted) {
+                $state    = Rsync::STATE_ABORTED;
+                $exitCode = 143; // 128 + SIGTERM
+            } elseif ($state !== Rsync::STATE_FAILED) {
+                // A pair stopped at the log ceiling exits 143, which would
+                // read as ABORTED; it is a WARNING (reason log-cap-exceeded).
+                $worst    = Rsync::worstOutcome(array_values(array_diff_key($exitCodes, $cappedPairs)));
+                $state    = $worst['state'];
+                $exitCode = $worst['exitCode'];
+                if ($cappedPairs !== [] && $state === Rsync::STATE_SUCCESS) {
+                    $state = Rsync::STATE_WARNING;
+                }
+            }
+
+            // 6b. Snapshot completion gate (§4.1), then commit.
+            if ($sn !== null && $sn['mkstamped']) {
+                $gate = !$aborted && $state !== Rsync::STATE_FAILED && count($exitCodes) === count($pairs)
+                    && array_diff($exitCodes, [0, 24]) === [];
+                if (!$gate) {
+                    Logger::event($runLog, $jobId, "Snapshot $stamp was not committed; $stamp.inprogress is kept for the next run.");
+                    if (!$aborted && $state !== Rsync::STATE_ABORTED) {
+                        self::setReason($reason, 'snapshot-not-committed');
+                    }
+                } else {
+                    $commit = self::snapshotCommit($sn, $pairResults, $runLog, $jobId);
+                    if ($commit === 'aborted') {
+                        $state    = Rsync::STATE_ABORTED;
+                        $exitCode = 143;
+                    } elseif ($commit !== '') {
+                        $state    = Rsync::STATE_FAILED;
+                        $exitCode = 1;
+                        self::setReason($reason, $commit);
+                    } elseif ($sn['suspect']) {
+                        $state = Rsync::STATE_WARNING;
+                        self::setReason($reason, 'snapshot-suspect');
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * run()'s teardown (its finally): flush, post-hook, snapshot prune, host-key
+     * pin, secret cleanup, log redaction, summary, History, in-flight cleanup,
+     * mark-stopped and abort-flag clear, each its own step (see $step), then
+     * notify, lock release and the signal disposition restore. Order matters.
+     *
+     * @param array<string,mixed>      $launch    run()'s launch context
+     * @param array<string,mixed>|null $sn        snapshot context (null = mirror)
+     * @param array<string,mixed>|null $sshMat    the SSH bag, for the host-key pin
+     * @param array<int,int>           $exitCodes each pair's rsync exit, in order
+     * @param resource                 $lock      the per-job run lock
+     */
+    private static function finishRun(array $launch, ?array &$sn, string $token, ?array $sshMat, array $exitCodes, $lock, bool $signalsInstalled, ?bool $prevAsyncSignals, string &$state, int &$exitCode, string &$reason): void
+    {
+        ['jobId' => $jobId, 'job' => $job, 'config' => $config, 'dryRun' => $dryRun, 'trigger' => $trigger, 'gen' => $gen, 'runLog' => $runLog, 'startedAt' => $startedAt, 'startedAtTs' => $startedAtTs, 'snap' => $snap, 'stamp' => $stamp, 'retention' => $retention] = $launch;
+        // Every teardown step runs on its own: a step that throws is logged
+        // once and the rest still run (cleanup, summary, History, state,
+        // lock). Only a summary, History or run-state failure changes the
+        // outcome (teardownFailed).
+        $broken = [];
+        $step = static function (string $name, callable $fn) use ($jobId, $runLog, &$broken): void {
+            try {
+                if (self::$teardownFault !== null) {
+                    (self::$teardownFault)($name);
+                }
+                $fn();
+            } catch (Throwable $e) {
+                $broken[] = $name;
+                self::reportTeardownFailure($jobId, $runLog, $name, $e);
+            }
+        };
+
+        // Land whatever the last sink still holds, FIRST. It has to happen
+        // before the postHook: runHook() opens a new sink on this same path
+        // and Logger::sink() RESETS the per-path state, so a flush placed
+        // after the hook would find nothing left to rescue. This is the
+        // abort path's safety net - a SIGTERM'd rsync leaves its last
+        // redraw unterminated, and the trap lets this finally run.
+        $step('flush', static fn() => Logger::flushSink($runLog));
+        $state = self::snapshotWarnState($state, $reason);
+
+        // A stop nobody clicked Abort for (a shutdown's SIGTERM, a killed
+        // rsync exiting 20) is a failure, not an abort: it must alert.
+        if ($state === Rsync::STATE_ABORTED && !RunState::abortedByUser($jobId, $gen)) {
+            $state  = Rsync::STATE_FAILED;
+            $reason = 'terminated';
+            Logger::event($runLog, $jobId, 'The run was stopped by a signal, not by Abort; recording it as FAILED.');
+        }
+
+        // 7. postHook ALWAYS runs (even on failure/abort), with the outcome
+        //    in its environment.
+        $postHook = (string) ($job['postHook'] ?? '');
+        if (trim($postHook) !== '') {
+            $step('post-hook', static function () use ($job, $jobId, $dryRun, $trigger, $snap, $sn, $stamp, $config, $postHook, $runLog, &$state, &$exitCode, &$reason): void {
+                $postEnv = self::hookEnv($job, $jobId, $dryRun, $state, $exitCode, $trigger, $snap === null ? [] : [
+                    'UR_SNAPSHOT'        => !empty($sn['mkstamped']) ? $stamp : '',
+                    'UR_SNAPSHOT_STATUS' => $dryRun ? 'dry-run'
+                        : (!empty($sn['committed']) ? 'committed' : (!empty($sn['mkstamped']) ? 'not-committed' : 'none')),
+                ]);
+                $postMin = Config::hookTimeoutMinutes(
+                    (isset($config['global']) && is_array($config['global'])) ? $config['global'] : [],
+                    'postHookTimeout'
+                );
+                // The post-hook ALWAYS runs, so an abort that already ended the
+                // run must not kill it; only a fresh Abort during it may.
+                $abortedBefore = RunState::abortRequested($jobId);
+                Logger::event($runLog, $jobId, 'Running post-run hook.');
+                $postExit = self::runHook(
+                    $postHook,
+                    $postEnv,
+                    $runLog,
+                    $postMin * 60,
+                    $abortedBefore ? null : static fn(): bool => RunState::abortRequested($jobId)
+                );
+                if ($postExit === self::HOOK_TIMED_OUT) {
+                    // Keeps the primary outcome, like a failed post-hook.
+                    Logger::event($runLog, $jobId, "Post-run hook timed out after $postMin minute(s) and was killed.");
+                    $reason = $reason !== '' ? $reason : 'posthook-timeout';
+                    if ($state === Rsync::STATE_SUCCESS) {
+                        $state = Rsync::STATE_WARNING;
+                    }
+                } else {
+                    Logger::event($runLog, $jobId, 'Post-run hook exited with code ' . $postExit . '.');
+                }
+                // A failing postHook does NOT override the run's primary outcome,
+                // but we surface it on an otherwise-clean run so it isn't silent,
+                // and record it as the reason wherever none is set yet: an exit-24
+                // run or a manual abort notify as normal unless a reason says
+                // otherwise.
+                if ($postExit !== 0 && $postExit !== self::HOOK_TIMED_OUT && $state !== Rsync::STATE_FAILED) {
+                    if ($state === Rsync::STATE_SUCCESS) {
+                        $state = Rsync::STATE_WARNING;
+                    }
+                    $reason = $reason !== '' ? $reason : 'posthook-failed';
+                }
+            });
+            // A post-hook that could not be run counts as a failed one.
+            if (in_array('post-hook', $broken, true) && $state !== Rsync::STATE_FAILED) {
+                if ($state === Rsync::STATE_SUCCESS) {
+                    $state = Rsync::STATE_WARNING;
+                }
+                $reason = $reason !== '' ? $reason : 'posthook-failed';
+            }
+        }
+
+        // 7a. Snapshot prune (§6): after the post-hook, so it holds no
+        //     services, and before cleanup, which removes the ssh pieces it
+        //     needs.
+        if ($sn !== null) {
+            $step('snapshot prune', static function () use (&$sn, $dryRun, &$reason, $runLog, $jobId): void {
+                self::snapshotPrune($sn, $dryRun, $reason, $runLog, $jobId);
+            });
+            $state = self::snapshotWarnState($state, $reason);
+        }
+
+        // 7b. Trust on first use: with accept-new and nothing pinned yet, ssh
+        //     appended the key it accepted to this run's known_hosts. Pin it
+        //     into the connection BEFORE cleanup unlinks that file, so a
+        //     CHANGED key fails closed on the next run instead of being
+        //     silently trusted again.
+        if (is_array($sshMat)) {
+            $step('host-key pin', static function () use ($sshMat, $runLog, $jobId): void {
+                $connId  = (string) ($sshMat['conn']['id'] ?? '');
+                $hostKey = Ssh::harvestHostKey($sshMat);
+                // The endpoint the key came from, not the one stored now: the
+                // connection may have been edited while this run was going.
+                if (Ssh::pinHostKey($connId, $hostKey, (string) ($sshMat['conn']['host'] ?? ''), (int) ($sshMat['conn']['port'] ?? 0))) {
+                    // No key material and no tmpfs path in the message.
+                    Logger::event($runLog, $jobId, 'Pinned host key for connection ' . $connId . ' on first use.');
+                }
+            });
+        }
+
+        // 8. Cleanup the SSH runtime secrets for THIS run's token, and disarm
+        //    the secret-path redaction armed at materialisation (F1).
+        if ($token !== '') {
+            $step('secret cleanup', static fn() => Ssh::cleanupRuntime($token));
+        }
+        // And again for the postHook's own sink, before the redact pass so
+        // an unterminated last line gets scrubbed like everything else.
+        // Final pass, while redaction is still armed: catches anything rsync
+        // or the postHook wrote to the run log after the last pair's cap.
+        $step('log redaction', static function () use ($runLog): void {
+            Logger::flushSink($runLog);
+            Logger::redactRunLog($runLog);
+        });
+        Logger::clearRedaction();
+
+        // 9. Persist the last-run summary to /boot + clear running state.
+        $finishedAtTs = time();
+        // STORAGE timestamp: UTC, always (see the startedAt note above).
+        $finishedAt  = gmdate('Y-m-d\TH:i:s\Z', $finishedAtTs);
+        $durationSec = max(0, $finishedAtTs - $startedAtTs);
+        // Snapshot jobs only, so a mirror's summary and History keep their shape.
+        $snapFields  = $snap === null ? [] : [
+            'snapshot'  => !empty($sn['mkstamped']) ? $stamp : '',
+            'committed' => !empty($sn['committed']),
+        ];
+        $summaryRecord = [
+            'startedAt'   => $startedAt,
+            'finishedAt'  => $finishedAt,
+            'exitCode'    => $exitCode,
+            'durationSec' => $durationSec,
+            'dryRun'      => $dryRun,
+            'trigger'     => $trigger,
+        ] + $snapFields;
+        // null = the step threw (already logged), false = it reported failure.
+        $summaryOk  = null;
+        $summarySaid = [$state, $reason];
+        $step('summary', static function () use ($jobId, $state, $reason, $summaryRecord, &$summaryOk): void {
+            $summaryOk = self::writeSummary($jobId, ['state' => $state, 'reason' => $reason] + $summaryRecord);
+        });
+        if ($summaryOk !== true) {
+            self::teardownFailed($state, $reason);
+        }
+        if ($snap !== null) {
+            $snapFields += ['suspect' => !empty($sn['suspect']), 'pruned' => (int) ($sn['pruned'] ?? 0)];
+            if (isset($sn['growthKB'])) {
+                $snapFields['growthKB'] = $sn['growthKB'];
+            }
+        }
+
+        // Append a persistent history record (one small /boot write, same
+        // cadence as the summary), then lazily prune to the retention cap.
+        // jobName is snapshotted so the record survives a later rename/delete;
+        // logRef is the run-log BASENAME only (resolves via getJobLog?run=).
+        $historyOk   = null;
+        $historySaid = [$state, $reason];
+        $step('history', static function () use ($jobId, $job, $startedAt, $finishedAt, $dryRun, $trigger, $state, $exitCode, $durationSec, $runLog, $reason, $snapFields, &$historyOk): void {
+            $historyOk = History::append($jobId, [
+                'startedAt'   => $startedAt,
+                'finishedAt'  => $finishedAt,
+                'jobName'     => (string) ($job['name'] ?? $jobId),
+                'dryRun'      => $dryRun,
+                'trigger'     => $trigger,
+                'state'       => $state,
+                'exitCode'    => $exitCode,
+                'durationSec' => $durationSec,
+                'logRef'      => Logger::runIdFromPath($runLog),
+                'reason'      => $reason,
+                'lastError'   => $exitCode !== 0 ? Logger::lastRsyncError($runLog) : '',
+            ] + $snapFields);
+        });
+        if ($historyOk !== true) {
+            self::teardownFailed($state, $reason);
+        }
+        self::reportPersistFailure($jobId, array_keys(array_filter([
+            'last-run summary' => $summaryOk === false,
+            'History record'   => $historyOk === false,
+        ])));
+        $step('in-flight record', static function () use ($jobId, $retention): void {
+            RunState::clearInflight($jobId);
+            History::prune($jobId, $retention);
+        });
+
+        Logger::event($runLog, $jobId, "Run finished: state=$state exitCode=$exitCode.");
+        $step('run state', static fn() => RunState::markStopped($jobId));
+        if (in_array('run state', $broken, true)) {
+            self::teardownFailed($state, $reason);
+        }
+        // A step after the summary or History write changed the outcome:
+        // bring what was already written into line (the lock is still ours).
+        if ($summaryOk === true && $summarySaid !== [$state, $reason]) {
+            $step('summary update', static function () use ($jobId, $state, $reason, $summaryRecord): void {
+                if (!self::writeSummary($jobId, ['state' => $state, 'reason' => $reason] + $summaryRecord)) {
+                    throw new RuntimeException('the summary could not be rewritten as ' . $state);
+                }
+            });
+        }
+        if ($historyOk === true && $historySaid !== [$state, $reason]) {
+            $step('History update', static function () use ($jobId, $startedAt, $runLog, $state, $reason): void {
+                if (!History::amend($jobId, $startedAt, Logger::runIdFromPath($runLog), ['state' => $state, 'reason' => $reason])) {
+                    throw new RuntimeException('the History record could not be rewritten as ' . $state);
+                }
+            });
+        }
+        $step('abort flag', static fn() => RunState::clearAbort($jobId));
+
+        // Dispatch the per-job notification. Best-effort: it is
+        // gated on the job's notifyMode and NEVER throws (see notifyHook),
+        // so a notification failure can't break the run's finally/unwind.
+        $notify = [
+            'state'       => $state,
+            'exitCode'    => $exitCode,
+            'exitCodes'   => $exitCodes,
+            'reason'      => $reason,
+            'trigger'     => $trigger,
+            'dryRun'      => $dryRun,
+            'durationSec' => $durationSec,
+        ];
+        if ($snap !== null && !$dryRun && $state !== Rsync::STATE_ABORTED && empty($sn['committed'])) {
+            $step('snapshot history', static function () use ($jobId, $job, &$notify): void {
+                $runs = self::notCommittedRuns($jobId);
+                if ($runs > 1) {
+                    $notify['message'] = sprintf('Job "%s" has not committed a snapshot for %d runs.', (string) ($job['name'] ?? $jobId), $runs);
+                }
+            });
+        }
+        self::notifyHook($job, $notify);
+
+        // Release the per-job run lock last, so a queued launch only proceeds
+        // once this run has fully wound down (state cleared, summary written).
+        RunState::releaseLock($lock);
+
+        // Restore the signal disposition we changed, so our handlers/async
+        // mode never leak past this run (the detached runner exits anyway,
+        // but the test process and any future long-lived worker reuse it).
+        if ($signalsInstalled) {
+            pcntl_signal(defined('SIGTERM') ? SIGTERM : 15, SIG_DFL);
+            pcntl_signal(defined('SIGINT') ? SIGINT : 2, SIG_DFL);
+            if ($prevAsyncSignals !== null) {
+                pcntl_async_signals((bool) $prevAsyncSignals);
+            }
+        }
     }
 
     /** notifyMode values (persisted per job in config.json, set in the Jobs form). */
@@ -1269,7 +1350,7 @@ class Runner
      * @param array<string,mixed> $job
      * @return array{ok:bool,reason?:string,message?:string,token?:string,mat?:array<string,mixed>}
      */
-    private static function materializeSsh(array $job, string $runLog, string $jobId): array
+    private static function materializeSsh(array $job): array
     {
         $connId = (string) ($job['connectionId'] ?? '');
         if ($connId === '') {
@@ -1321,7 +1402,7 @@ class Runner
      * @param array<string,mixed> $job
      * @return array{ok:bool,reason?:string,message?:string,token?:string,mat?:array<string,mixed>}
      */
-    private static function materializeDaemonConn(array $job, string $runLog, string $jobId): array
+    private static function materializeDaemonConn(array $job): array
     {
         $connId = (string) ($job['connectionId'] ?? '');
         if ($connId === '') {
@@ -1384,33 +1465,16 @@ class Runner
      */
     public static function resolvePair(array $job, array $pair, string $transport, string $userHost = ''): array
     {
-        $local  = (string) ($pair['local'] ?? '');
         $remote = (string) ($pair['remote'] ?? '');
-        $direction = strtoupper(trim((string) ($job['direction'] ?? 'PUSH')));
-
-        // DAEMON must come BEFORE the `!== 'SSH'` fallthrough below: after it, a
-        // daemon job would run as LOCAL with a bare relative operand.
-        if ($transport === 'DAEMON') {
-            // One character's difference from the SSH arm: '::' instead of ':'.
-            $remoteOperand = $userHost . '::' . $remote;
-            if ($direction === 'PULL') {
-                return ['src' => $remoteOperand, 'dest' => $local];
-            }
-            return ['src' => $local, 'dest' => $remoteOperand];
-        }
-
-        if ($transport !== 'SSH') {
-            // LOCAL: both are local paths; canonical direction is PUSH.
-            return ['src' => $local, 'dest' => $remote];
-        }
-
-        // SSH: the remote side is qualified user@host:path.
-        $remoteOperand = $userHost . ':' . $remote;
-
-        if ($direction === 'PULL') {
-            return ['src' => $remoteOperand, 'dest' => $local];
-        }
-        return ['src' => $local, 'dest' => $remoteOperand];
+        // SSH qualifies the remote side user@host:path, DAEMON user@host::module;
+        // LOCAL (and an unknown transport) leaves both as paths on this box.
+        $sep      = ['SSH' => ':', 'DAEMON' => '::'][$transport] ?? null;
+        $operands = [
+            'local'  => (string) ($pair['local'] ?? ''),
+            'remote' => $sep === null ? $remote : $userHost . $sep . $remote,
+        ];
+        $sides = Job::sides($job, $transport);
+        return ['src' => $operands[$sides['src']], 'dest' => $operands[$sides['dst']]];
     }
 
     /**
@@ -1453,63 +1517,7 @@ class Runner
      */
     public static function guardrailErrors(array $job, array $pair, string $transport, array $opts): array
     {
-        $errors = [];
-        $local  = trim((string) ($pair['local'] ?? ''));
-        $remote = trim((string) ($pair['remote'] ?? ''));
-        $direction = strtoupper(trim((string) ($job['direction'] ?? 'PUSH')));
-        $snapshotOn = Config::normalizeSnapshot($job['snapshot'] ?? null) !== null;
-
-        // local field: always a local path on this box.
-        if ($local === '') {
-            $errors[] = 'local path is required.';
-        } else {
-            foreach (Job::pairLocalErrors($job, $transport, $local, 'local path') as $e) {
-                $errors[] = $e;
-            }
-        }
-
-        // remote field: local guardrails under LOCAL, a module reference under
-        // DAEMON, otherwise a non-root remote sub-path.
-        if ($snapshotOn) {
-            // Snapshot mode writes to <root>/<stamp>/<sub>; Job::snapshotErrors()
-            // checks `remote` and `sub`, as Job::validate does.
-        } elseif ($remote === '') {
-            if ($transport === 'LOCAL') {
-                $errors[] = 'second local path is required.';
-            } elseif ($transport === 'DAEMON') {
-                $errors[] = 'daemon module path is required.';
-            } else {
-                $errors[] = 'remote path is required.';
-            }
-        } elseif ($transport === 'LOCAL') {
-            foreach (Job::checkLocalPath($remote, 'second local path') as $e) {
-                $errors[] = $e;
-            }
-        } elseif ($transport === 'DAEMON') {
-            foreach (Job::checkDaemonModule($remote, 'daemon module path') as $e) {
-                $errors[] = $e;
-            }
-        } else {
-            foreach (Job::checkRemotePath($remote, 'remote path') as $e) {
-                $errors[] = $e;
-            }
-        }
-
-        // --delete destination must be a specific sub-dir. Determine which side
-        // is the destination EXACTLY as resolvePair() does: for LOCAL transport
-        // direction is coerced to PUSH (dest = `remote`), so we must not let a
-        // hand-edited direction=PULL on a LOCAL job check the wrong side. Only
-        // the two remote transports let PULL flip the destination to the `local`
-        // side - and an unknown hand-edited transport keeps LOCAL's answer,
-        // which is what resolvePair()'s fallthrough does with it too.
-        $deleteOn = !empty($opts['delete']) || !empty($opts['deleteExcluded']);
-        if ($deleteOn) {
-            $destIsRemote = in_array($transport, ['SSH', 'DAEMON'], true) ? ($direction !== 'PULL') : true;
-            $e = Job::deleteDestError($transport, $destIsRemote, $destIsRemote ? $remote : $local);
-            if ($e !== '') {
-                $errors[] = $e;
-            }
-        }
+        $errors = Job::pairErrors($job, $pair, $transport, $opts)['errors'];
 
         // --rsync-path reaches the remote shell, and config.json is user-writable,
         // so re-check it here the same way both path sides are re-checked above:
@@ -1561,7 +1569,7 @@ class Runner
             $errors,
             Job::pairOverlapErrors($job, $opts),
             Job::optionErrors($opts, $transport, $direction),
-            Job::markerErrors($job, $transport, $direction),
+            Job::markerErrors($job, $transport),
             Job::ancestryErrors($job, $opts, Job::protectedTargets($jobs, $jobId, $creds), $creds),
             Job::snapshotRootErrors($job, $jobs, $creds)
         );
@@ -1581,13 +1589,13 @@ class Runner
             return $errors !== [] ? 'guardrail' : 'snapshot-preflight';
         }
 
-        if (!self::checkTargetMarker($job, $transport, $direction, $opts, $sshPieces, $userHost, $runLog, $jobId)) {
+        if (!self::checkTargetMarker($job, $transport, $opts, $sshPieces, $userHost, $runLog, $jobId)) {
             return 'dest-not-mounted';
         }
 
         // Snapshot mode forces delete off, whatever $opts says. A local
         // destination is probed by localChecks(), after the pre-hook.
-        if (!$snapshotOn && in_array($transport, ['SSH', 'DAEMON'], true) && $direction !== 'PULL'
+        if (!$snapshotOn && in_array($transport, ['SSH', 'DAEMON'], true) && Job::sides($job, $transport)['dst'] === 'remote'
             && (!empty($opts['delete']) || !empty($opts['deleteExcluded']))) {
             return self::probeDeleteDestinations($pairs, $opts, $sshPieces, $userHost, $transport === 'DAEMON', $runLog, $jobId);
         }
@@ -1610,7 +1618,7 @@ class Runner
     {
         clearstatcache();
         $remoteHost = in_array($transport, ['SSH', 'DAEMON'], true);
-        $pull       = $remoteHost && strtoupper(trim((string) ($job['direction'] ?? 'PUSH'))) === 'PULL';
+        $pull       = Job::sides($job, $transport)['dst'] === 'local';
         $deleteOn   = Config::normalizeSnapshot($job['snapshot'] ?? null) === null
             && (!empty($opts['delete']) || !empty($opts['deleteExcluded']));
         $list       = self::$localLister
@@ -1677,13 +1685,13 @@ class Runner
      * @param array<string,mixed>      $opts
      * @param array<string,mixed>|null $sshPieces
      */
-    private static function checkTargetMarker(array $job, string $transport, string $direction, array $opts, ?array $sshPieces, string $userHost, string $runLog, string $jobId): bool
+    private static function checkTargetMarker(array $job, string $transport, array $opts, ?array $sshPieces, string $userHost, string $runLog, string $jobId): bool
     {
         $marker = trim((string) ($job['targetMarker'] ?? ''));
         if ($marker === '') {
             return true;
         }
-        $remote = in_array($transport, ['SSH', 'DAEMON'], true) && $direction !== 'PULL';
+        $remote = in_array($transport, ['SSH', 'DAEMON'], true) && Job::sides($job, $transport)['dst'] === 'remote';
         $src    = $remote ? $userHost . ($transport === 'DAEMON' ? '::' : ':') . $marker : $marker;
         $file   = Ssh::ensureMarkersDir() . '/' . Util::safeFileId($jobId . '-' . self::pid() . '-' . bin2hex(random_bytes(6)));
         $argv   = Rsync::auxArgv(
@@ -2446,12 +2454,10 @@ class Runner
         $pipes = [];
         // argv form: bash receives the hook as one argument to -c, so the user's
         // shell is bash and nothing of ours is re-parsed.
-        $argv = ['bash', '-c', $hook];
-        foreach (['/usr/bin/setsid', '/bin/setsid'] as $setsid) {
-            if (is_executable($setsid)) {
-                $argv = array_merge([$setsid, '-w'], $argv);
-                break;
-            }
+        $argv   = ['bash', '-c', $hook];
+        $setsid = ProcIO::which('setsid');
+        if ($setsid !== null) {
+            $argv = array_merge([$setsid, '-w'], $argv);
         }
         $childEnv = array_merge(self::inheritEnv(), $env);
         $proc = @proc_open($argv, $descriptors, $pipes, null, $childEnv);
@@ -2474,71 +2480,20 @@ class Runner
             $stopWhen
         );
 
-        // EOF on both pipes is not proof bash has exited, so the deadline and
-        // the stop request are polled until it has. The status that first
-        // shows the exit is the only one that reports a signal; a later
-        // proc_get_status() call no longer does.
-        $kill = '';
-        while (true) {
-            $status = @proc_get_status($proc);
-            if (empty($status['running'])) {
-                break;
-            }
-            if ($deadline !== null && microtime(true) >= $deadline) {
-                $kill = 'timeout';
-            } elseif ($stopWhen !== null && $stopWhen()) {
-                $kill = 'stop';
-            }
-            if ($kill !== '') {
-                self::killHook($proc, (int) $status['pid']);
-                break;
-            }
-            usleep(100000);
+        [$status, $kill] = ProcIO::waitFor($proc, $deadline, $stopWhen, 100000);
+        if ($kill === '') {
+            return ProcIO::reapExitCode($status, proc_close($proc));
         }
-
-        $code = proc_close($proc);
-        if ($kill === 'timeout') {
-            return self::HOOK_TIMED_OUT;
-        }
-        if ($kill === 'stop') {
-            return 143;
-        }
-        if ($status['signaled']) {
-            return 128 + $status['termsig'];
-        }
-        if ($status['exitcode'] >= 0) {
-            return $status['exitcode'];
-        }
-        return $code < 0 ? 1 : $code;
-    }
-
-    /**
-     * SIGTERM the hook's process group, then SIGKILL it after the grace period.
-     * The group is the hook's own (setsid), so this can never reach the runner;
-     * when there is no such group (no setsid) only bash itself is signalled.
-     *
-     * @param resource $proc
-     */
-    private static function killHook($proc, int $pid): void
-    {
-        $signal = static function (int $sig) use ($proc, $pid): void {
+        // The group is the hook's own (setsid), so this can never reach the
+        // runner; when there is no such group only bash itself is signalled.
+        $pid = (int) ($status['pid'] ?? 0);
+        ProcIO::terminate($proc, (float) self::$hookKillGraceSec, static function (int $sig) use ($proc, $pid): void {
             if ($pid > 0 && function_exists('posix_kill') && @posix_kill(-$pid, $sig)) {
                 return;
             }
             @proc_terminate($proc, $sig);
-        };
-        $signal(15);
-        $until = microtime(true) + self::$hookKillGraceSec;
-        while (microtime(true) < $until) {
-            $status = @proc_get_status($proc);
-            if (empty($status['running'])) {
-                break;
-            }
-            usleep(100000);
-        }
-        // Unconditionally: bash may be gone while a child that ignores SIGTERM
-        // still holds the group.
-        $signal(9);
+        });
+        return $kill === 'timeout' ? self::HOOK_TIMED_OUT : 143;
     }
 
     /**

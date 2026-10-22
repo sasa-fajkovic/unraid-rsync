@@ -2292,4 +2292,32 @@ final class JobTest extends TestCase
         $mirror = $this->sshDeleteJob('/srv/backup/snapshots/a/stray', ['connectionId' => 'c-2', 'rsyncOptions' => []]);
         $this->assertCount(1, Job::snapshotRootErrors($mirror, [$a, $mirror], $creds));
     }
+
+    public function testSidesLetOnlyARemoteTransportPullIntoTheLocalField(): void
+    {
+        $push = ['src' => 'local', 'dst' => 'remote'];
+        $pull = ['src' => 'remote', 'dst' => 'local'];
+        $this->assertSame($push, Job::sides(['transport' => 'SSH', 'direction' => 'PUSH']));
+        $this->assertSame($pull, Job::sides(['transport' => 'ssh', 'direction' => ' pull ']));
+        $this->assertSame($pull, Job::sides(['transport' => 'DAEMON', 'direction' => 'PULL']));
+        $this->assertSame($push, Job::sides(['transport' => 'LOCAL', 'direction' => 'PULL']));
+        $this->assertSame($push, Job::sides(['transport' => 'FTP', 'direction' => 'PULL']));
+        $this->assertSame($pull, Job::sides(['direction' => 'PULL']), 'transport defaults to SSH');
+        $this->assertSame($push, Job::sides(['transport' => 'SSH', 'direction' => 'PULL'], 'LOCAL'));
+    }
+
+    /** The run-time preflight and save-time validation report the same pair faults, worded for each. */
+    public function testPairErrorsWordsOneFaultForSaveAndForRun(): void
+    {
+        $job  = ['transport' => 'SSH', 'direction' => 'PUSH'];
+        $pair = ['local' => '', 'remote' => '/'];
+        $this->assertSame(
+            ['local path is required.', "remote path '/' must be a specific sub-directory, not the filesystem root."],
+            Job::pairErrors($job, $pair, 'SSH', [])['errors']
+        );
+        $this->assertSame(
+            ['Pair #2: source (local) path is required.', "Pair #2 destination (remote) '/' must be a specific sub-directory, not the filesystem root."],
+            Job::pairErrors($job, $pair, 'SSH', [], 2)['errors']
+        );
+    }
 }

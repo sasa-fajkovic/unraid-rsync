@@ -422,15 +422,10 @@ class KeyTools
 
     // --- helpers ------------------------------------------------------------
 
-    /**
-     * The dir holding the per-call keygen temp dirs: a 'keygen' level under the
-     * plugin's own runtime base (the constant is guarded the same way Logger and
-     * RunState guard it, so KeyTools needs no dependency on Ssh).
-     */
+    /** The dir holding the per-call keygen temp dirs, under the plugin's runtime base. */
     private static function keygenBase(): string
     {
-        $base = defined('UR_RUNTIME_BASE') ? (string) UR_RUNTIME_BASE : '/tmp/unraid.rsync';
-        return rtrim($base, '/') . '/keygen';
+        return Util::runtimeBase() . '/keygen';
     }
 
     /**
@@ -442,23 +437,14 @@ class KeyTools
     protected static function tempDir(): string
     {
         $keygen = self::keygenBase();
-        foreach ([dirname($keygen), $keygen] as $dir) {
-            if (!is_dir($dir)) {
-                @mkdir($dir, 0700);
+        $dir    = $keygen . '/ur-keygen-' . getmypid() . '-' . bin2hex(random_bytes(4));
+        try {
+            foreach ([dirname($keygen), $keygen, $dir] as $level) {
+                Util::ensurePrivateDir($level);
             }
-            // Checked AFTER the mkdir so a level planted between the two (a
-            // symlink, or a plain file) is refused rather than written through.
-            if (is_link($dir) || !is_dir($dir)) {
-                return '';
-            }
-            @chmod($dir, 0700);
-        }
-
-        $dir = $keygen . '/ur-keygen-' . getmypid() . '-' . bin2hex(random_bytes(4));
-        if (!@mkdir($dir, 0700) && !is_dir($dir)) {
+        } catch (RuntimeException $e) {
             return '';
         }
-        @chmod($dir, 0700);
         return $dir;
     }
 
@@ -577,13 +563,8 @@ class KeyTools
         // (detached, and group-killable on timeout). If setsid is absent the
         // command still runs detached via the backgrounding shell; the timeout
         // kill then falls back to the recorded child pid.
-        $setsid = '';
-        foreach (['/usr/bin/setsid', '/bin/setsid'] as $cand) {
-            if (@is_executable($cand)) {
-                $setsid = $cand . ' ';
-                break;
-            }
-        }
+        $setsid = ProcIO::which('setsid');
+        $setsid = $setsid !== null ? $setsid . ' ' : '';
 
         // The inner shell: record its own pid (which, under setsid, is the
         // session/process-group leader so a timeout can group-kill the whole

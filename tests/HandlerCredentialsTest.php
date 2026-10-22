@@ -29,6 +29,7 @@ final class HandlerCredentialsTest extends TestCase
 
     protected function setUp(): void
     {
+        TestSeams::reset();
         $_POST    = [];
         $_GET     = [];
         $_REQUEST = [];
@@ -37,9 +38,6 @@ final class HandlerCredentialsTest extends TestCase
         // begun (failOnWarning would fail the test). See sendResponse.
         $GLOBALS['ur_last_response_code'] = 200;
         $GLOBALS['var'] = ['csrf_token' => 'test-token'];
-        // Reset the secrets-dir override BEFORE resolving Credentials::path() so a
-        // leak from a prior migration test can't point cleanup at the wrong file.
-        Credentials::$secretsDirOverride = null;
         foreach ([Credentials::path(), Credentials::path() . '.last-good', Config::path()] as $p) {
             if (is_file($p)) {
                 unlink($p);
@@ -66,14 +64,10 @@ final class HandlerCredentialsTest extends TestCase
     protected function tearDown(): void
     {
         unset($GLOBALS['ur_dirs_alias_probe']);
-        Config::$mntRoot = '/mnt';
+        TestSeams::reset();
         foreach ($this->scratchRoots as $root) {
             exec('rm -rf ' . escapeshellarg($root));
         }
-        Credentials::$secretsDirOverride = null;
-        // The daemon module-listing probe seam is a public static: leaving a
-        // fake installed would silently fake every later test's probe.
-        Rsync::$daemonProbeRunner = null;
     }
 
     /** A throwaway "array" secrets dir path (created by the code under test). */
@@ -555,6 +549,35 @@ final class HandlerCredentialsTest extends TestCase
         $this->assertSame(422, $code);
     }
 
+    /** generateKey and importKey store the key and answer with the same non-secret shape. */
+    public function testGenerateAndImportKeyStoreAndAnswerWithoutTheSecret(): void
+    {
+        if (!is_executable('/usr/bin/ssh-keygen') && !is_executable('/usr/local/bin/ssh-keygen')) {
+            $this->markTestSkipped('needs ssh-keygen');
+        }
+        $_POST = ['name' => 'Gen', 'type' => 'ed25519'];
+        [$gen, $code] = $this->runCapture(fn() => ur_action_generate_key());
+        $this->assertSame(200, $code, json_encode($gen));
+        $this->assertSame(['ok', 'message', 'id', 'name', 'publicKey', 'fingerprint'], array_keys($gen));
+        $this->assertSame('Key generated.', $gen['message']);
+
+        [$dup, $code] = $this->runCapture(fn() => ur_action_generate_key());
+        $this->assertSame(422, $code);
+        $this->assertSame('A key named "Gen" already exists; names must be unique.', $dup['error']);
+
+        $_POST = ['name' => 'Imp', 'publicKey' => $gen['publicKey']];
+        [$imp, $code] = $this->runCapture(fn() => ur_action_import_key());
+        $this->assertSame(200, $code, json_encode($imp));
+        $this->assertSame(['ok', 'message', 'id', 'name', 'publicKey', 'fingerprint', 'hasPrivate'], array_keys($imp));
+        $this->assertSame('Key imported.', $imp['message']);
+        $this->assertFalse($imp['hasPrivate']);
+        $this->assertSame($gen['fingerprint'], $imp['fingerprint']);
+
+        $stored = Credentials::load()['keys'];
+        $this->assertSame([$gen['id'], $imp['id']], array_column($stored, 'id'));
+        $this->assertNotSame('', $stored[0]['privateKey']);
+    }
+
     // --- CSRF on the new actions -------------------------------------------
 
     public function testCsrfEnforcedOnSaveCredentials(): void
@@ -598,9 +621,6 @@ final class HandlerCredentialsTest extends TestCase
 
     public function testCsrfValidatesAgainstVarIniTokenOnDirectPost(): void
     {
-        if (!defined('UR_VAR_INI_PATHS')) {
-            $this->markTestSkipped('UR_VAR_INI_PATHS not overridable in this build');
-        }
         $path = UR_VAR_INI_PATHS[0];
         @mkdir(dirname($path), 0777, true);
         file_put_contents($path, "csrf_token=\"direct-token\"\n");
@@ -626,9 +646,6 @@ final class HandlerCredentialsTest extends TestCase
      */
     public function testCsrfMatchesVarIniEvenWhenVarAndSessionDiffer(): void
     {
-        if (!defined('UR_VAR_INI_PATHS')) {
-            $this->markTestSkipped('UR_VAR_INI_PATHS not overridable in this build');
-        }
         $path = UR_VAR_INI_PATHS[0];
         @mkdir(dirname($path), 0777, true);
         file_put_contents($path, "csrf_token=\"canonical-token\"\n");
@@ -653,9 +670,6 @@ final class HandlerCredentialsTest extends TestCase
     /** A token matching ONLY $_SESSION (var + var.ini differ) must pass. */
     public function testCsrfMatchesSessionOnly(): void
     {
-        if (!defined('UR_VAR_INI_PATHS')) {
-            $this->markTestSkipped('UR_VAR_INI_PATHS not overridable in this build');
-        }
         $path = UR_VAR_INI_PATHS[0];
         @mkdir(dirname($path), 0777, true);
         file_put_contents($path, "csrf_token=\"other-ini-token\"\n");
@@ -680,9 +694,6 @@ final class HandlerCredentialsTest extends TestCase
     /** A token matching NO candidate must 403. */
     public function testCsrfMismatchEverywhereRejected(): void
     {
-        if (!defined('UR_VAR_INI_PATHS')) {
-            $this->markTestSkipped('UR_VAR_INI_PATHS not overridable in this build');
-        }
         $path = UR_VAR_INI_PATHS[0];
         @mkdir(dirname($path), 0777, true);
         file_put_contents($path, "csrf_token=\"ini-token\"\n");
@@ -707,9 +718,6 @@ final class HandlerCredentialsTest extends TestCase
     /** With NO candidates available at all, any supplied token 403s. */
     public function testCsrfNoCandidatesRejected(): void
     {
-        if (!defined('UR_VAR_INI_PATHS')) {
-            $this->markTestSkipped('UR_VAR_INI_PATHS not overridable in this build');
-        }
         $path = UR_VAR_INI_PATHS[0];
         @unlink($path); // ensure no var.ini candidate
         $prevSession = $_SESSION ?? null;
@@ -741,9 +749,6 @@ final class HandlerCredentialsTest extends TestCase
     /** ur_csrf_token_candidates() returns all non-empty sources, de-duplicated. */
     public function testCsrfCandidatesAreCollectedAndDeduped(): void
     {
-        if (!defined('UR_VAR_INI_PATHS')) {
-            $this->markTestSkipped('UR_VAR_INI_PATHS not overridable in this build');
-        }
         $path = UR_VAR_INI_PATHS[0];
         @mkdir(dirname($path), 0777, true);
         // var.ini token DUPLICATES the $var token -> must appear once.
@@ -813,9 +818,6 @@ final class HandlerCredentialsTest extends TestCase
      */
     public function testCsrfAcceptedWhenStrippedFromPostButInRawBody(): void
     {
-        if (!defined('UR_VAR_INI_PATHS')) {
-            $this->markTestSkipped('UR_VAR_INI_PATHS not overridable in this build');
-        }
         $path = UR_VAR_INI_PATHS[0];
         @mkdir(dirname($path), 0777, true);
         file_put_contents($path, "csrf_token=\"raw-only-token\"\n");
@@ -851,9 +853,6 @@ final class HandlerCredentialsTest extends TestCase
      */
     public function testCsrfTokensFromIniRecoversWhenParseIniFails(): void
     {
-        if (!defined('UR_VAR_INI_PATHS')) {
-            $this->markTestSkipped('UR_VAR_INI_PATHS not overridable in this build');
-        }
         $path = UR_VAR_INI_PATHS[0];
         @mkdir(dirname($path), 0777, true);
         // The trailing ']' is a syntax error that makes parse_ini_file() bail on
@@ -877,9 +876,6 @@ final class HandlerCredentialsTest extends TestCase
      */
     public function testCsrfAcceptedFromUnparseableVarIniOnDirectPost(): void
     {
-        if (!defined('UR_VAR_INI_PATHS')) {
-            $this->markTestSkipped('UR_VAR_INI_PATHS not overridable in this build');
-        }
         $path = UR_VAR_INI_PATHS[0];
         @mkdir(dirname($path), 0777, true);
         file_put_contents($path, "csrf_token=\"live-token\"\n]\n");
@@ -904,9 +900,6 @@ final class HandlerCredentialsTest extends TestCase
     /** Unquoted and whitespace-padded token forms are both recovered. */
     public function testCsrfTokensFromIniHandlesUnquotedAndPadding(): void
     {
-        if (!defined('UR_VAR_INI_PATHS')) {
-            $this->markTestSkipped('UR_VAR_INI_PATHS not overridable in this build');
-        }
         $path = UR_VAR_INI_PATHS[0];
         @mkdir(dirname($path), 0777, true);
         file_put_contents($path, "csrf_token = ABC123DEF\n]\n");
@@ -2203,7 +2196,7 @@ final class HandlerCredentialsTest extends TestCase
         $needles = [
             self::DAEMON_SECRET,
             Credentials::obfuscate(self::DAEMON_SECRET),
-            rtrim(Ssh::$runtimeBase, '/'),
+            Ssh::base(),
         ];
 
         $bodies = [];

@@ -5,6 +5,8 @@ declare(strict_types=1);
 /**
  * Util.php - tiny stateless helpers shared across backend classes.
  */
+require_once __DIR__ . '/ProcIO.php';
+
 final class Util
 {
     /** The euid assertPrivateDir() expects to own a dir; null = posix_geteuid(). Test seam. */
@@ -17,9 +19,9 @@ final class Util
      * stat() device id seam: fn(string $path): int|false, false when the path
      * does not exist. null => stat().
      *
-     * @var (callable(string):(int|false))|null
+     * @var (\Closure(string):(int|false))|null
      */
-    public static $devIdOf = null;
+    public static ?\Closure $devIdOf = null;
 
     /**
      * Sanitise an id for use as a filename segment: strip anything that isn't
@@ -33,6 +35,12 @@ final class Util
             return 'unknown';
         }
         return $clean;
+    }
+
+    /** The CLI php to launch scripts with: an absolute path when one exists, else bare 'php'. */
+    public static function phpBinary(): string
+    {
+        return ProcIO::which('php') ?? 'php';
     }
 
     /** First non-empty trimmed line of a (possibly multi-line) blob. */
@@ -77,17 +85,27 @@ final class Util
         return $d !== false && in_array($d, $ram, true);
     }
 
+    /** writeAtomic() failure stages, as the exception code. */
+    public const WRITE_TEMP   = 1;
+    public const WRITE_DATA   = 2;
+    public const WRITE_RENAME = 3;
+
     /**
      * Replace $path with $data through a same-dir temp file and rename. The temp
      * file is fsynced first: /boot is FAT32 with delayed writes, and a rename that
      * reaches the disk before the data leaves a present-but-empty file behind.
+     * tmpfs callers pass $fsync = false. rename() replaces the name without
+     * following a symlink planted at $path.
      *
-     * @throws RuntimeException on any filesystem failure (the target is untouched).
+     * @param string $what names the file in the error ("state" -> "temp state file")
+     * @throws RuntimeException on any filesystem failure (the target is untouched),
+     *         its code one of WRITE_TEMP / WRITE_DATA / WRITE_RENAME.
      */
-    public static function writeAtomic(string $path, string $data, int $mode): void
+    public static function writeAtomic(string $path, string $data, int $mode, bool $fsync = true, string $what = ''): void
     {
-        $dir = dirname($path);
-        $tmp = @tempnam($dir, '.' . basename($path) . '.');
+        $file = $what === '' ? 'file' : "$what file";
+        $dir  = dirname($path);
+        $tmp  = @tempnam($dir, '.' . basename($path) . '.');
         // tempnam() falls back to the system temp dir when $dir is not writable,
         // and a rename from there is a non-atomic cross-device copy.
         if ($tmp !== false && dirname((string) realpath($tmp)) !== realpath($dir)) {
@@ -95,23 +113,25 @@ final class Util
             $tmp = false;
         }
         if ($tmp === false) {
-            throw new RuntimeException("Unable to create temp file in: $dir");
+            throw new RuntimeException("Unable to create temp $file in: $dir", self::WRITE_TEMP);
         }
         @chmod($tmp, $mode);
         $fh = @fopen($tmp, 'wb');
         $ok = $fh !== false && @fwrite($fh, $data) === strlen($data) && fflush($fh);
         if ($fh !== false) {
-            // FAT32 may refuse fsync; the write still stands.
-            @fsync($fh);
+            if ($fsync) {
+                // FAT32 may refuse fsync; the write still stands.
+                @fsync($fh);
+            }
             fclose($fh);
         }
         if (!$ok) {
             @unlink($tmp);
-            throw new RuntimeException("Failed to write temp file: $tmp");
+            throw new RuntimeException("Failed to write temp $file: $tmp", self::WRITE_DATA);
         }
         if (!@rename($tmp, $path)) {
             @unlink($tmp);
-            throw new RuntimeException("Failed to atomically replace: $path");
+            throw new RuntimeException('Failed to atomically replace' . ($what === '' ? '' : " $file") . ": $path", self::WRITE_RENAME);
         }
     }
 
@@ -182,6 +202,53 @@ final class Util
             } elseif (!is_dir($level)) {
                 throw new RuntimeException("Unable to create directory: $level");
             }
+        }
+    }
+
+    /** The tmpfs runtime base: the UR_RUNTIME_BASE constant, else /tmp/unraid.rsync. */
+    public static function runtimeBase(): string
+    {
+        return rtrim(defined('UR_RUNTIME_BASE') ? (string) UR_RUNTIME_BASE : '/tmp/unraid.rsync', '/');
+    }
+
+    /**
+     * ensureDirLevel(), then refuse the dir unless assertPrivateDir() accepts it.
+     *
+     * @throws RuntimeException naming the dir and the reason.
+     */
+    public static function ensurePrivateDir(string $dir, string $label = 'runtime'): void
+    {
+        self::ensureDirLevel($dir, $label);
+        self::assertPrivateDir($dir);
+    }
+
+    /**
+     * Create ONE dir level if missing (0700, non-recursive), chmodding it only
+     * when made here: an existing logDir may be a share others use. A recursive
+     * mkdir would follow a symlink planted under world-writable /tmp; the second
+     * symlink check closes the swap between create and use.
+     *
+     * @param string $label names the dir in the error ("state", "log", "runtime")
+     * @throws RuntimeException naming the dir and the reason.
+     */
+    public static function ensureDirLevel(string $dir, string $label = 'runtime'): void
+    {
+        if (is_link($dir)) {
+            throw new RuntimeException("Refusing to use a symlinked $label dir: $dir");
+        }
+        if (file_exists($dir) && !is_dir($dir)) {
+            throw new RuntimeException(ucfirst($label) . " path exists but is not a directory: $dir");
+        }
+        $made = !is_dir($dir) && @mkdir($dir, 0700);
+        if (!$made && !is_dir($dir)) {
+            throw new RuntimeException("Unable to create $label dir: $dir");
+        }
+        clearstatcache(true, $dir);
+        if (is_link($dir)) {
+            throw new RuntimeException("Refusing to use a symlinked $label dir: $dir");
+        }
+        if ($made) {
+            @chmod($dir, 0700);
         }
     }
 

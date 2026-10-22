@@ -29,22 +29,20 @@ final class NotifyTest extends TestCase
 
     protected function setUp(): void
     {
+        TestSeams::reset();
         // A real executable file so available() returns true in "present" tests.
         $this->fakeBin = sys_get_temp_dir() . '/ur-notify-' . getmypid() . '-' . bin2hex(random_bytes(4));
         file_put_contents($this->fakeBin, "#!/bin/sh\nexit 0\n");
         chmod($this->fakeBin, 0755);
 
         Notify::$notifyPath = $this->fakeBin;
-        Notify::$runner     = null;
         $this->origSleep    = Notify::$sleep;
         @unlink(UR_RUNTIME_BASE . '/notify.last');
     }
 
     protected function tearDown(): void
     {
-        Notify::$notifyPath = '/usr/local/emhttp/webGui/scripts/notify';
-        Notify::$runner     = null;
-        Notify::$clock      = null;
+        TestSeams::reset();
         Notify::$sleep      = $this->origSleep;
         if ($this->fakeBin !== '' && is_file($this->fakeBin)) {
             @unlink($this->fakeBin);

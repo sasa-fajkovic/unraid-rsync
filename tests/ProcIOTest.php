@@ -187,4 +187,60 @@ final class ProcIOTest extends TestCase
         );
         $this->assertSame(0, $calls);
     }
+
+    /**
+     * A child that outlives SIGKILL (stuck in an uninterruptible syscall) must
+     * not wedge the caller in proc_close(): terminate() abandons it. Simulated
+     * with a signaller that delivers nothing.
+     */
+    public function testTerminateNeverBlocksOnAChildThatSurvivesSigkill(): void
+    {
+        $pipes = [];
+        $proc  = proc_open(['sleep', '30'], [0 => ['file', '/dev/null', 'r']], $pipes);
+        $this->assertIsResource($proc);
+        $pid  = (int) proc_get_status($proc)['pid'];
+        $sent = [];
+        $prev = ProcIO::$killGraceSec;
+        ProcIO::$killGraceSec = 0.2;
+        try {
+            $started = microtime(true);
+            $code    = ProcIO::terminate($proc, 0.2, static function (int $sig) use (&$sent): void {
+                $sent[] = $sig;
+            });
+            $elapsed = microtime(true) - $started;
+        } finally {
+            ProcIO::$killGraceSec = $prev;
+            posix_kill($pid, 9);
+        }
+        $this->assertNull($code, 'an unkillable child is abandoned, not waited for');
+        $this->assertSame([15, 9], $sent);
+        $this->assertLessThan(2.0, $elapsed);
+    }
+
+    public function testTerminateReportsTheSignalThatEndedTheChild(): void
+    {
+        $pipes = [];
+        $proc  = proc_open(['sleep', '30'], [0 => ['file', '/dev/null', 'r']], $pipes);
+        $this->assertSame(143, ProcIO::terminate($proc, 2.0));
+
+        $proc = proc_open(['bash', '-c', "trap '' TERM; while :; do sleep 0.05; done"], [0 => ['file', '/dev/null', 'r']], $pipes);
+        usleep(300000); // let bash install the trap
+        $this->assertSame(137, ProcIO::terminate($proc, 0.2));
+    }
+
+    public function testReapExitCodePrefersTheStatusThatSawTheExit(): void
+    {
+        $this->assertSame(143, ProcIO::reapExitCode(['signaled' => true, 'termsig' => 15, 'exitcode' => -1], -1));
+        $this->assertSame(3, ProcIO::reapExitCode(['signaled' => false, 'termsig' => 0, 'exitcode' => 3], -1));
+        $this->assertSame(7, ProcIO::reapExitCode(['signaled' => false, 'termsig' => 0, 'exitcode' => -1], 7));
+        $this->assertSame(1, ProcIO::reapExitCode(['signaled' => false, 'termsig' => 0, 'exitcode' => -1], -1));
+    }
+
+    public function testWhichFindsAnAbsoluteExecutableOrNull(): void
+    {
+        $sh = ProcIO::which('sh');
+        $this->assertNotNull($sh);
+        $this->assertStringStartsWith('/', $sh);
+        $this->assertNull(ProcIO::which('ur-no-such-binary-' . bin2hex(random_bytes(3))));
+    }
 }

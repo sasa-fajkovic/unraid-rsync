@@ -24,10 +24,7 @@ final class LoggerTest extends TestCase
 
     protected function tearDown(): void
     {
-        Logger::$baseOverride = null;
-        Logger::$logsDirOverride = null;
-        Logger::$maxRunLogBytesOverride = null;
-        Logger::clearRedaction();
+        TestSeams::reset();
         foreach (array_filter([$this->rtBase, $this->extBase]) as $dir) {
             if (!is_dir($dir)) {
                 continue;
