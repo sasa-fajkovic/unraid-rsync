@@ -1,5 +1,7 @@
 # Snapshot mode — design spec
 
+Design spec for contributors; the user guide is [docs/snapshot-mode.md](../snapshot-mode.md).
+
 Status: design for the `feat/snapshot-mode` branch (PRs E–J). This file is the branch's first commit.
 Audience: whoever implements PRs E–J, and the maintainer reviewing them.
 Baseline: `main` at 868bc17 (Phase 2 PRs #177–#180 merged). Function names below were checked against that commit.

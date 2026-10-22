@@ -1456,6 +1456,14 @@ final class OptionsFormHelpTest extends TestCase
         $rendered = $page->querySelector('#ur-jobs-container .ur-job-card');
         $this->assertSame($this->names($rendered), $this->names($template), 'a cloned card posts the same fields, in the same order');
         $this->assertContains('jobs[0][snapshot][root]', $this->names($template));
+        foreach (['rendered' => $rendered, 'template' => $template] as $which => $card) {
+            $link = $card->querySelector('.ur-snap-only blockquote.inline_help a');
+            $this->assertNotNull($link, "$which card: the snapshot help links the full guide");
+            $this->assertSame('https://github.com/sasa-fajkovic/unraid-rsync/blob/main/docs/snapshot-mode.md', $link->getAttribute('href'), $which);
+            $this->assertSame('_blank', $link->getAttribute('target'), $which);
+            $this->assertSame('noopener noreferrer', $link->getAttribute('rel'), $which);
+            $this->assertSame('Full guide', $link->textContent, $which);
+        }
 
         $pairTpl = Dom\HTMLDocument::createFromString('<!doctype html><body>' . $page->getElementById('ur-pair-template')->textContent, LIBXML_NOERROR);
         $pairRow = $page->querySelector('#ur-jobs-container .ur-pair-row');
@@ -1516,6 +1524,7 @@ final class OptionsFormHelpTest extends TestCase
             '&quot;Use sudo on the receiver&quot; on the connection',
             'Use 1 to 64 letters, digits, &quot;_&quot; or &quot;-&quot;, starting with a letter or digit; &quot;latest&quot; is reserved, and each pair of the job needs its own name',
             'Seed: allow this pair&#039;s first copy without a previous snapshot to link against: a full copy.',
+            '<a href="https://github.com/sasa-fajkovic/unraid-rsync/blob/main/docs/snapshot-mode.md" target="_blank" rel="noopener noreferrer">Full guide</a>',
         ] as $needle) {
             $this->assertStringContainsString($needle, $html);
         }
