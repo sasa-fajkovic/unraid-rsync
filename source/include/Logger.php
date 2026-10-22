@@ -46,10 +46,20 @@ if (!defined('UR_MAX_RUN_LOG_BYTES')) {
     define('UR_MAX_RUN_LOG_BYTES', 16 * 1024 * 1024); // 16 MiB
 }
 
+// Byte budget for ALL of one job's run logs, enforced by pruneRuns() after the
+// count prune: retention is a file count (up to 9999), so at 16 MiB a log a
+// debug-level job could otherwise hold gigabytes of tmpfs (RAM).
+if (!defined('UR_MAX_JOB_LOG_BYTES')) {
+    define('UR_MAX_JOB_LOG_BYTES', 256 * 1024 * 1024); // 256 MiB
+}
+
 class Logger
 {
     /** Max bytes tail() will read off the END of a log (bounds memory + DoS). */
     const TAIL_MAX_BYTES = 256 * 1024; // 256 KiB
+
+    /** plugin.log is rotated to plugin.log.1 (one generation) past this size. */
+    const PLUGIN_LOG_MAX_BYTES = 1024 * 1024;
 
     /**
      * Progress-line throttle for CAPTURED output. rsync's --info=progress2
@@ -214,6 +224,15 @@ class Logger
         return $n > 0 ? $n : 16 * 1024 * 1024;
     }
 
+    /** @var int|null per-job byte budget override; null => UR_MAX_JOB_LOG_BYTES. */
+    public static $maxJobLogBytesOverride = null;
+
+    /** The per-job run-log byte budget (override > UR_MAX_JOB_LOG_BYTES). */
+    public static function maxJobLogBytes(): int
+    {
+        return max(1, (int) (self::$maxJobLogBytesOverride ?? UR_MAX_JOB_LOG_BYTES));
+    }
+
     /**
      * Default number of per-job run logs to keep. On every run start the oldest
      * run-*.log files beyond this many are pruned (so RAM/tmpfs use is bounded).
@@ -234,11 +253,12 @@ class Logger
     public static $retention = null;
 
     /**
-     * The basename pattern a run log matches: run-<UTCts>.log. Anchored, so only
-     * our own run logs are ever listed/pruned/served - never plugin.log or any
-     * stray file dropped in the job dir.
+     * The basename pattern a run log matches: run-<UTCts>.log, or
+     * run-<UTCts>-<n>.log (n >= 2) for a later run of the job in the same
+     * second. Anchored, so only our own run logs are ever listed/pruned/served -
+     * never plugin.log or any stray file dropped in the job dir.
      */
-    const RUN_FILE_REGEX = '/^run-(\d{8}T\d{6}Z)\.log$/D';
+    const RUN_FILE_REGEX = '/^run-(\d{8}T\d{6}Z)(?:-([2-9]|[1-9]\d{1,3}))?\.log$/D';
 
     /**
      * Override the runtime base for tests (else UR_RUNTIME_BASE).
@@ -376,16 +396,38 @@ class Logger
     }
 
     /**
-     * Create (touch) a fresh run log for a job and return its path. The file is
-     * created empty at mode 600 so rsync's --log-file can append to it and the
-     * runner can write its preamble.
+     * Create a fresh run log for a job and return its path. The file is created
+     * empty at mode 600 so rsync's --log-file can append to it and the runner
+     * can write its preamble. Exclusive create: a later run of the job in the
+     * same second gets run-<UTCts>-2.log (then -3, ...) instead of truncating
+     * the earlier run's log; the stamp stays the real start time.
      */
     public static function openRun(string $jobId, ?int $now = null): string
     {
         self::ensureDir(self::jobLogDir($jobId));
-        $path = self::newRunLogPath($jobId, $now);
-        if (@file_put_contents($path, '') === false) {
-            throw new RuntimeException("Unable to create run log: $path");
+        $base = substr(self::newRunLogPath($jobId, $now), 0, -strlen('.log'));
+        // Past the highest suffix in use, not the first free one: a pruned
+        // run-<ts>.log must not be reused by a later run, which would then sort
+        // as the oldest log of that second.
+        $n = 1;
+        foreach (glob($base . '*.log') ?: [] as $f) {
+            if (preg_match(self::RUN_FILE_REGEX, basename($f), $m)) {
+                $n = max($n, (($m[2] ?? '') !== '' ? (int) $m[2] : 1) + 1);
+            }
+        }
+        $path = '';
+        for (; $n <= 9999 && $path === ''; $n++) {
+            $try = $base . ($n === 1 ? '' : '-' . $n) . '.log';
+            $fh  = @fopen($try, 'x');
+            if ($fh !== false) {
+                fclose($fh);
+                $path = $try;
+            } elseif (!file_exists($try)) {
+                break;
+            }
+        }
+        if ($path === '') {
+            throw new RuntimeException("Unable to create run log: $base.log");
         }
         @chmod($path, 0600);
         // A fresh log starts below the size cap; clear any stale "already capped"
@@ -408,14 +450,14 @@ class Logger
      *     maxRunLogBytes(); once it hits the cap, further content is dropped and
      *     a single truncation marker is written.
      */
-    public static function append(string $path, string $line): void
+    public static function append(string $path, string $line): bool
     {
         self::ensureDir(dirname($path));
         if ($line === '' || substr($line, -1) !== "\n") {
             $line .= "\n";
         }
         $line = self::redact($line);
-        self::appendCapped($path, $line);
+        return self::appendCapped($path, $line);
     }
 
     /**
@@ -425,24 +467,28 @@ class Logger
      * uncapped (plugin.log is the rolling cross-job log, bounded on READ by
      * tail()). Once a run log reaches the cap we stop appending and write a
      * single "[log truncated - exceeded N MiB]" marker.
+     *
+     * @return bool false only when a write failed; bytes dropped at the cap
+     *              are the cap working, not a failure.
      */
-    private static function appendCapped(string $path, string $data): void
+    private static function appendCapped(string $path, string $data): bool
     {
         if ($data === '') {
-            return;
+            return true;
         }
         if (!self::isRunLogPath($path)) {
-            @file_put_contents($path, $data, FILE_APPEND | LOCK_EX);
-            return;
+            return @file_put_contents($path, $data, FILE_APPEND | LOCK_EX) !== false;
         }
 
-        $cap  = self::maxRunLogBytes();
+        $cap = self::maxRunLogBytes();
+        // rsync grows this file through its own --log-file fd.
+        clearstatcache(true, $path);
         $size = @filesize($path);
         $size = ($size === false) ? 0 : (int) $size;
 
         if ($size >= $cap) {
             self::writeTruncationMarker($path, $cap);
-            return;
+            return true;
         }
         // Writing this whole chunk would cross the cap: write only the bytes that
         // fit in the remaining room (truncating this chunk at the cap boundary),
@@ -453,9 +499,9 @@ class Logger
                 @file_put_contents($path, substr($data, 0, $room), FILE_APPEND | LOCK_EX);
             }
             self::writeTruncationMarker($path, $cap);
-            return;
+            return true;
         }
-        @file_put_contents($path, $data, FILE_APPEND | LOCK_EX);
+        return @file_put_contents($path, $data, FILE_APPEND | LOCK_EX) !== false;
     }
 
     /** Write the size-cap marker exactly once per run-log path. */
@@ -676,7 +722,10 @@ class Logger
      * call. No-op for non-run-log paths or an uncapped file under the cap.
      * Best-effort.
      *
-     * ponytail: bounded between pairs only; one long pair's --log-file grows until its rsync exits.
+     * Also safe WHILE a pair runs: rsync opens --log-file with fopen("a")
+     * (O_APPEND), so after a truncate its next line lands at the new end, not
+     * past it. The Runner calls this every Runner::$logCapCheckSec during a
+     * pair, which bounds one long pair's log continuously.
      *
      * @return bool true when the file was trimmed.
      */
@@ -816,7 +865,7 @@ class Logger
      * NOTE: the run-log FILENAME stays UTC (see newRunLogPath) - it is an
      * identifier that has to sort lexically and never repeat across a DST fold.
      */
-    public static function event(string $runLog, string $jobId, string $message): void
+    public static function event(string $runLog, string $jobId, string $message): bool
     {
         $stamp = date('Y-m-d\TH:i:sP');
         $line  = '[' . $stamp . '] ' . $message;
@@ -824,7 +873,16 @@ class Logger
             self::append($runLog, $line);
         }
         self::ensureDir(self::logsDir());
-        self::append(self::pluginLogPath(), '[' . $stamp . '] [' . $jobId . '] ' . $message);
+        $plugin = self::pluginLogPath();
+        // A sibling lock: a lock held on plugin.log itself is renamed away with
+        // it, and a writer waiting on it would then append to plugin.log.1.
+        return Util::withLock($plugin . '.lock', static function () use ($plugin, $stamp, $jobId, $message): bool {
+            clearstatcache(true, $plugin);
+            if ((int) @filesize($plugin) > self::PLUGIN_LOG_MAX_BYTES) {
+                @rename($plugin, $plugin . '.1');
+            }
+            return self::append($plugin, '[' . $stamp . '] [' . $jobId . '] ' . $message);
+        });
     }
 
     /**
@@ -1056,14 +1114,7 @@ class Logger
             $runs[] = ['id' => $name, 'ts' => $ts];
         }
 
-        // Newest first. The stamp sorts lexically the same as chronologically, so
-        // sort by name descending; fall back to ts to be safe.
-        usort($runs, static function ($a, $b) {
-            if ($a['ts'] === $b['ts']) {
-                return strcmp($b['id'], $a['id']);
-            }
-            return $b['ts'] <=> $a['ts'];
-        });
+        usort($runs, static fn($a, $b) => self::compareRunNames($b['id'], $a['id']));
 
         if ($limit > 0 && count($runs) > $limit) {
             $runs = array_slice($runs, 0, $limit);
@@ -1091,6 +1142,7 @@ class Logger
                 && abs($run['ts'] - $summaryStartTs) <= 1 // 1s slack: log stamp vs summary startedAt
             ) {
                 $state = (string) ($summary['state'] ?? '');
+                $summaryStartTs = null; // only the newest match ran last
             }
             $out[] = ['id' => $run['id'], 'ts' => $run['ts'], 'state' => $state];
         }
@@ -1119,15 +1171,33 @@ class Logger
     }
 
     /**
+     * Order two run-log basenames chronologically: by stamp, then by the
+     * same-second suffix numerically (plain = 1), so run-X.log < run-X-2.log
+     * < run-X-10.log. A plain strcmp gets both wrong ('-' sorts before '.').
+     */
+    private static function compareRunNames(string $a, string $b): int
+    {
+        $key = static function (string $name): array {
+            return preg_match(self::RUN_FILE_REGEX, $name, $m)
+                ? [$m[1], (int) (($m[2] ?? '') !== '' ? $m[2] : 1)]
+                : ['', 0];
+        };
+        return $key($a) <=> $key($b);
+    }
+
+    /**
      * Prune a job's run logs to the newest $keep (default = retention()), deleting
-     * the OLDEST first. plugin.log is NEVER touched (it lives one level up under
-     * logsDir and never matches the run-file pattern). Called on every run start
-     * (the one place log pruning mutates state). Best-effort: a failed unlink is
-     * ignored rather than failing a run.
+     * the OLDEST first, then keep deleting the oldest while the job's logs
+     * together exceed maxJobLogBytes(). plugin.log is NEVER touched (it lives one
+     * level up under logsDir and never matches the run-file pattern), and
+     * neither is the newest log or $current (the run that just opened it, which
+     * a clock stepped backwards could otherwise sort as old). Called on every
+     * run start. Best-effort: a failed unlink is ignored rather than failing a
+     * run.
      *
      * @return int the number of run logs deleted
      */
-    public static function pruneRuns(string $jobId, ?int $keep = null): int
+    public static function pruneRuns(string $jobId, ?int $keep = null, string $current = ''): int
     {
         $keep = ($keep === null) ? self::retention() : max(1, (int) $keep);
         $dir  = self::jobLogDir($jobId);
@@ -1145,17 +1215,31 @@ class Logger
                 $runs[] = $name;
             }
         }
-        if (count($runs) <= $keep) {
-            return 0;
+        usort($runs, static fn($a, $b) => self::compareRunNames($b, $a)); // newest first
+        $protected = basename($current);
+        $deleted   = 0;
+        $kept      = [];
+        foreach ($runs as $i => $name) {
+            if ($i >= $keep && $name !== $protected) {
+                if (@unlink($dir . '/' . $name)) {
+                    $deleted++;
+                }
+                continue;
+            }
+            $kept[] = $name;
         }
 
-        // Sort NEWEST first (stamp sorts chronologically); the tail past $keep is
-        // the oldest and gets deleted.
-        rsort($runs); // descending lexical == descending chronological for the stamp
-        $stale   = array_slice($runs, $keep);
-        $deleted = 0;
-        foreach ($stale as $name) {
-            if (@unlink($dir . '/' . $name)) {
+        $sizes = [];
+        foreach ($kept as $name) {
+            clearstatcache(true, $dir . '/' . $name);
+            $sizes[$name] = (int) @filesize($dir . '/' . $name);
+        }
+        $total  = array_sum($sizes);
+        $budget = self::maxJobLogBytes();
+        for ($i = count($kept) - 1; $i > 0 && $total > $budget; $i--) {
+            $name = $kept[$i];
+            if ($name !== $protected && @unlink($dir . '/' . $name)) {
+                $total -= $sizes[$name];
                 $deleted++;
             }
         }

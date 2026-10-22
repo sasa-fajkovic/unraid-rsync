@@ -252,9 +252,9 @@ ur_emit_ajax_helpers();  /* window.urAjax.show, for the inline download error */
       if ('snapshot' in r) { stTd.appendChild(snapLine(r)); }
       tr.appendChild(stTd);
 
-      // A still-running row has no final exit code or duration yet.
+      // A still-running row has no final exit code or duration yet; a skipped one never ran.
       var isRunning = (r.state === 'RUNNING');
-      tr.appendChild(td(isRunning ? '—' : String(r.exitCode)));
+      tr.appendChild(td(isRunning || r.state === 'SKIPPED' ? '—' : String(r.exitCode)));
       tr.appendChild(td(isRunning ? '—' : window.urUtil.formatDuration(r.durationSec)));
 
       // Logs: View (modal) + Download (full file) when a log ref was recorded.

@@ -171,7 +171,7 @@ final class RunnerNotifyTest extends TestCase
             'partial + post-hook failed'       => [['state' => $P, 'exitCode' => 23, 'exitCodes' => [23], 'reason' => 'posthook-failed'], 'warning', false],
             'failed + post-hook timeout'       => [['state' => $F, 'exitCode' => 12, 'exitCodes' => [12], 'reason' => 'posthook-timeout'], 'alert', false],
             'did not start'           => [['state' => $F, 'exitCode' => 1, 'reason' => 'job-not-found'], 'alert', false],
-            'scheduled run skipped'   => [['state' => $F, 'exitCode' => 0, 'reason' => 'already-running', 'trigger' => 'schedule'], 'warning', false],
+            'scheduled run skipped'   => [['state' => Rsync::STATE_SKIPPED, 'exitCode' => 0, 'reason' => 'already-running', 'trigger' => 'schedule'], 'normal', false],
             'crashed'                 => [['state' => $F, 'exitCode' => 1, 'reason' => 'crashed'], 'alert', false],
             // Snapshot mode (§4.4): alert reasons always alert, warning reasons warn unless FAILED.
             'snapshot preflight'      => [['state' => $F, 'exitCode' => 1, 'reason' => 'snapshot-preflight'], 'alert', false],
@@ -441,7 +441,26 @@ final class RunnerNotifyTest extends TestCase
         $this->assertSame(0, History::list($id)['total']);
     }
 
-    public function testAlreadyRunningScheduledWarnsAndRecordsTheSkip(): void
+    public function testAlreadyRunningScheduledIsRecordedAsSkippedNotFailed(): void
+    {
+        $id   = $this->saveJob('always');
+        $held = RunState::acquireLock($id);
+        try {
+            $res = Runner::run($id, false, 'schedule');
+        } finally {
+            RunState::releaseLock($held);
+        }
+        $this->assertSame(['SKIPPED', 'already-running'], [$res['state'], $res['reason']]);
+        $this->assertCount(1, $this->captured);
+        $this->assertSame('normal', $this->importanceOf($this->captured[0]));
+        $this->assertStringContainsString('previous run still running, scheduled run skipped', $this->captured[0]);
+        $this->assertStringContainsString('State: SKIPPED.', $this->captured[0]);
+        $this->assertStringNotContainsString('Exit code', $this->captured[0]);
+        $runs = History::list($id)['runs'];
+        $this->assertSame(['SKIPPED', 'already-running'], [$runs[0]['state'], $runs[0]['reason']]);
+    }
+
+    public function testAlreadyRunningScheduledDoesNotNotifyFailureOnly(): void
     {
         $id   = $this->saveJob('failure-only');
         $held = RunState::acquireLock($id);
@@ -450,11 +469,8 @@ final class RunnerNotifyTest extends TestCase
         } finally {
             RunState::releaseLock($held);
         }
-        $this->assertCount(1, $this->captured);
-        $this->assertSame('warning', $this->importanceOf($this->captured[0]));
-        $this->assertStringContainsString('previous run still running, scheduled run skipped', $this->captured[0]);
-        $runs = History::list($id)['runs'];
-        $this->assertSame(['FAILED', 'already-running'], [$runs[0]['state'], $runs[0]['reason']]);
+        $this->assertCount(0, $this->captured);
+        $this->assertSame('SKIPPED', History::list($id)['runs'][0]['state']);
     }
 
     public function testHardFailHonoursNotifyModeOffWhenTheJobIsReadable(): void

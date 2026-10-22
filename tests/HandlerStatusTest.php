@@ -238,6 +238,24 @@ final class HandlerStatusTest extends TestCase
         $this->assertFalse($entry['lastRun']['dryRun']);
     }
 
+    public function testASkippedScheduledRunIsNotReportedAsAFailure(): void
+    {
+        $id = $this->seedJob('Busy', ['notifyMode' => 'off']);
+        Runner::writeSummary($id, ['state' => 'SUCCESS', 'startedAt' => '2025-01-01T03:00:00Z', 'exitCode' => 0]);
+        $held = RunState::acquireLock($id);
+        try {
+            $res = Runner::run($id, false, 'schedule');
+        } finally {
+            RunState::releaseLock($held);
+            @unlink(History::path($id));
+        }
+        $this->assertSame('SKIPPED', $res['state']);
+
+        [$body] = $this->runCapture('ur_action_get_status');
+        $this->assertSame('SUCCESS', $body['jobs'][$id]['state']);
+        $this->assertSame('SUCCESS', $body['jobs'][$id]['lastRun']['state']);
+    }
+
     /** A stored snapshot job (SSH; getStatus does not validate it). */
     private function seedSnapshotJob(string $name): string
     {
