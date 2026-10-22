@@ -2399,10 +2399,10 @@ function ur_action_get_job_log(): void
  * is truncated at the top there). Params: id (job id, required) + optional run
  * (a run-file id from listRuns/listHistory); with no run id we serve the latest.
  *
- * Safe to serve in full: the stored file was ALREADY redacted of per-run tmpfs
- * secret paths and size-capped (UR_MAX_RUN_LOG_BYTES) when it was written
- * (Logger::setRedaction / Logger::sink), so nothing secret is on disk to leak.
- * It is served as text/plain with X-Content-Type-Options: nosniff and a
+ * The stored file is size-capped (UR_MAX_RUN_LOG_BYTES) and redacted by the
+ * runner, but only once a pair has finished - and never if the runner was
+ * SIGKILLed - so it is streamed through Logger::scrubSecretPaths, like the
+ * tail. There is no Content-Length: scrubbing changes the size. It is served as text/plain with X-Content-Type-Options: nosniff and a
  * Content-Disposition attachment, so the browser saves it rather than rendering
  * it as HTML (no log-XSS path). The run id is whitelisted + realpath-confined to
  * the job's log dir by Logger::runLogPathById; a bad/traversing id is a 400.
@@ -2430,28 +2430,58 @@ function ur_action_download_job_log(): void
     $fname = $jobId . ($servedRun !== '' ? '-' . $servedRun : '') . '.log';
     $fname = preg_replace('/[^A-Za-z0-9._-]/', '_', $fname);
 
-    $size = @filesize($path);
-
     if (!headers_sent()) {
         header('Content-Type: text/plain; charset=utf-8');
         header('X-Content-Type-Options: nosniff');
         header('Content-Disposition: attachment; filename="' . $fname . '"');
         header('Cache-Control: no-store');
-        if ($size !== false) {
-            header('Content-Length: ' . $size);
-        }
     }
 
     // Test seam: expose what WOULD be streamed without terminating the process
     // or emitting bytes the test harness can't capture (mirrors sendResponse).
     if (defined('UR_HANDLER_TESTING')) {
-        $GLOBALS['ur_last_download'] = ['path' => $path, 'filename' => $fname, 'size' => $size];
+        $body = '';
+        ur_stream_scrubbed($path, static function (string $s) use (&$body): void {
+            $body .= $s;
+        });
+        $GLOBALS['ur_last_download'] = ['path' => $path, 'filename' => $fname, 'size' => strlen($body), 'body' => $body];
         $GLOBALS['ur_last_response_code'] = 200;
         return;
     }
 
-    @readfile($path);
+    ur_stream_scrubbed($path, static function (string $s): void {
+        echo $s;
+    });
     exit;
+}
+
+/**
+ * Feed $path to $emit in chunks with Logger::scrubSecretPaths applied. A chunk
+ * is cut at its last newline and the rest carried into the next one, so a
+ * secret path split across two reads is still scrubbed (a match never spans a
+ * line).
+ *
+ * @param callable(string):void $emit
+ */
+function ur_stream_scrubbed(string $path, callable $emit, int $chunkBytes = 65536): void
+{
+    $fh = @fopen($path, 'rb');
+    if ($fh === false) {
+        return;
+    }
+    $carry = '';
+    while (($chunk = fread($fh, $chunkBytes)) !== false && $chunk !== '') {
+        $carry .= $chunk;
+        $nl = strrpos($carry, "\n");
+        if ($nl !== false) {
+            $emit(Logger::scrubSecretPaths(substr($carry, 0, $nl + 1)));
+            $carry = substr($carry, $nl + 1);
+        }
+    }
+    fclose($fh);
+    if ($carry !== '') {
+        $emit(Logger::scrubSecretPaths($carry));
+    }
 }
 
 /**
