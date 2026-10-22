@@ -272,7 +272,11 @@ on, forked from, or derived from any other plugin.
   rsync's own log-file line and captured stderr) or `deleting <path>` lines:
   the empty format only kills the `%i %n` per-file format, and rsync's delete
   path falls back to a plain `deleting <path>`. So there is no data-safety
-  regression on `--delete`.
+  regression on `--delete`. `buildArgv` always emits `--8-bit-output` (every
+  level, real and dry, never in `optionTokens` or the whitelist): without it
+  rsync's stdout escapes UTF-8 names (`Kvr\#305\#276ica`) while the
+  `--log-file` lines beside them stay readable; control characters are still
+  escaped and the log viewer HTML-escapes.
 - **`Logger::sink()` is line-aware and throttles progress.** `--info=progress2`
   redraws one status line with a bare `\r` several times a second and the
   capture path is byte-oriented (`ProcIO` hands raw 8 KiB `fread`s), so the old

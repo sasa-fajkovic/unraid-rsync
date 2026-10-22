@@ -428,6 +428,22 @@ final class RsyncTest extends TestCase
         }
     }
 
+    /** Without it stdout escapes UTF-8 names ("Kvr\#305\#276ica") while --log-file keeps them. */
+    public function testEveryTransferEmits8BitOutputButThePreviewDoesNot(): void
+    {
+        $opts = $this->emptyOpts();
+        foreach (['quiet', 'summary', 'normal', 'verbose', 'debug'] as $lvl) {
+            foreach ([false, true] as $dry) {
+                $argv = Rsync::buildArgv($opts, $lvl, '/rt/r.log', '/mnt/user/s/', '/mnt/user/d/', null, $dry);
+                $this->assertSame(1, count(array_keys($argv, '--8-bit-output', true)), "$lvl dry=" . (int) $dry);
+                $this->assertLessThan(array_search('--', $argv, true), array_search('--8-bit-output', $argv, true));
+            }
+        }
+        $daemon = Rsync::buildArgv($opts, 'normal', '/rt/r.log', '/mnt/user/s/', 'h::m/d', ['daemon' => true]);
+        $this->assertContains('--8-bit-output', $daemon);
+        $this->assertNotContains('--8-bit-output', Rsync::optionTokens($opts));
+    }
+
     public function testBuildArgvLocalNoSsh(): void
     {
         $opts = $this->emptyOpts();
@@ -743,7 +759,8 @@ final class RsyncTest extends TestCase
      * GOLDEN REGRESSION. The SSH argv is frozen byte-for-byte at a3ed950's
      * output: adding DAEMON transport must not move, add or drop a single
      * token on the SSH path. Verified against a checkout of a3ed950, not
-     * against the current implementation.
+     * against the current implementation; since then only the fixed
+     * --8-bit-output after --log-file was added.
      */
     public function testGoldenSshArgvIsByteIdenticalToTheReleasedBuild(): void
     {
@@ -778,6 +795,7 @@ final class RsyncTest extends TestCase
             '--info=progress2,stats2',
             '--itemize-changes',
             '--log-file=/rt/logs/j1/run.log',
+            '--8-bit-output',
             '-e',
             "'ssh' '-i' '/tmp/k'",
             '--',
@@ -819,6 +837,7 @@ final class RsyncTest extends TestCase
             '-v',
             '--info=stats2,progress2',
             '--log-file=/rt/logs/j2/run.log',
+            '--8-bit-output',
             '--',
             '/mnt/user/a/',
             '/mnt/disk1/b/',
@@ -941,6 +960,7 @@ final class RsyncTest extends TestCase
             '--info=progress2,stats2',
             '--itemize-changes',
             '--log-file=/rt/logs/j3/run.log',
+            '--8-bit-output',
             '--port=873',
             '--password-file=/rt/pass/tok',
             '--',
@@ -988,6 +1008,7 @@ final class RsyncTest extends TestCase
             '-v',
             '--info=stats2,progress2',
             '--log-file=/rt/logs/j4/run.log',
+            '--8-bit-output',
             '--dry-run',
             '--port=8730',
             '--',
@@ -1024,6 +1045,7 @@ final class RsyncTest extends TestCase
             '-q',
             '--log-file-format=',
             '--log-file=/rt/r.log',
+            '--8-bit-output',
             '--port=873',
             '--password-file=/rt/pass/tok',
             '--',
@@ -1056,6 +1078,7 @@ final class RsyncTest extends TestCase
             '-q',
             '--log-file-format=',
             '--log-file=/rt/r.log',
+            '--8-bit-output',
             '--port=873',
             '--',
             'bob@nas::mod',
@@ -1079,6 +1102,7 @@ final class RsyncTest extends TestCase
             '-q',
             '--log-file-format=',
             '--log-file=/rt/r.log',
+            '--8-bit-output',
             '--port=' . Credentials::RSYNCD_PORT,
             '--',
             'bob@nas::m',

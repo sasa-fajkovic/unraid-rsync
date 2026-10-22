@@ -1859,6 +1859,7 @@ final class RunnerTest extends TestCase
             '--info=progress2',
             '--log-file-format=',
             '--log-file=' . $res['runLog'],
+            '--8-bit-output',
             '--port=873',
             '--password-file=' . $passDuringRun,
             '--',
@@ -1920,6 +1921,7 @@ final class RunnerTest extends TestCase
             '--info=progress2',
             '--log-file-format=',
             '--log-file=' . $res['runLog'],
+            '--8-bit-output',
             '--port=873',
             '--',
             '/mnt/user/src/',
@@ -2197,6 +2199,7 @@ final class RunnerTest extends TestCase
             '--info=progress2',
             '--log-file-format=',
             '--log-file=' . $res['runLog'],
+            '--8-bit-output',
             '--',
             '/mnt/user/src/',
             '/mnt/disk1/dst/',
@@ -2426,7 +2429,7 @@ final class RunnerTest extends TestCase
             $this->assertMatchesRegularExpression("#^'ssh' '-i' '[^']+' .* '-p' '22'\$#", $e);
             $this->assertSame([
                 PHP_BINARY, '-r', '-h', '-t', '--partial', '--delete', '--mkpath', '--max-delete=50', '--rsync-path=/usr/bin/rsync',
-                '--info=progress2', '--log-file-format=', '--log-file=' . $log, '-e', $e, '--', '/mnt/user/src/', 'root@h.example:/srv/backup/a',
+                '--info=progress2', '--log-file-format=', '--log-file=' . $log, '--8-bit-output', '-e', $e, '--', '/mnt/user/src/', 'root@h.example:/srv/backup/a',
             ], $argv);
             $base = ['UR_JOB_ID' => 'j-golden', 'UR_JOB_NAME' => 'golden', 'UR_DRY_RUN' => '0', 'UR_TRIGGER' => 'schedule'];
             $this->assertSame($base + ['UR_JOB_STATUS' => '', 'UR_EXIT_CODE' => ''], $envs['PRE']);
