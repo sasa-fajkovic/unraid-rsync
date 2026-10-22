@@ -1868,7 +1868,7 @@ final class OptionsFormHelpTest extends TestCase
         $this->assertStringContainsString('<div id="ur-hist-progress" class="ur-notice" hidden>', $html);
         $this->assertStringContainsString('progEl.hidden = !/\(xfr#\d+, (?:to|ir)-chk=\d+\/\d+\)/.test(body.log);', $html);
         $this->assertSame(3, substr_count($html, 'progEl.hidden = true;'), 'hidden again on open, on a failed fetch and on close');
-        $this->assertMatchesRegularExpression('/\.ur-hist-table th, \.ur-hist-table td \{ padding: 3px 8px; line-height: 1\.4;/', $html);
+        $this->assertMatchesRegularExpression('/\.ur-hist-table th, \.ur-hist-table td \{ height: auto; padding: 3px 8px; line-height: 1\.4;/', $html);
         $this->assertStringNotContainsString('blockquote class="inline_help"', $html);
         // UXB-10: View and Download are one compact pair.
         $this->assertStringContainsString("btn.className = 'ur-btn ur-btn-plain ur-btn-sm';", $html);
