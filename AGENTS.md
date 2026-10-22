@@ -493,7 +493,9 @@ on, forked from, or derived from any other plugin.
   job after the upgrade, the `lastReal` write-through above. Not while another
   holder has the run lock: a SIGKILLed runner's orphaned rsync inherits it, so
   `isRunning` stays true and Abort (`RunState::signalRun`) signals the dead
-  runner's process group, never a reused pid. The check
+  runner's process group only while a member of it has that job's lock file
+  open (`RunState::groupHoldsLock`, a `/proc` scan): a dead leader's pid can
+  be reused by an unrelated group. The check
   is **match-ANY** across all server-side-trusted token sources (`$GLOBALS['var']['csrf_token']`,
   `$_SESSION['csrf_token']`, and `var.ini`) — `ur_csrf_token_candidates()` /
   `ur_check_csrf()`. **Do NOT revert to "first non-empty source wins":** on the

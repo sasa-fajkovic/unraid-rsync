@@ -288,10 +288,47 @@ final class RunStateTest extends TestCase
             $sent[] = [$pid, $sig];
             return $pid < 0;
         };
+        $asked = [];
+        RunState::$groupHoldsLock = static function (int $pgid, string $lock) use (&$asked): bool {
+            $asked[] = [$pgid, basename($lock)];
+            return $pgid === 999;
+        };
         FakeRunState::write('j-music', ['pid' => 999, 'running' => true]);
         FakeRunState::$alive = false;
         $this->assertTrue(FakeRunState::signalRun('j-music', 15));
-        $this->assertSame([[-999, 15]], $sent, 'a dead leader: only its group, never the bare pid');
+        $this->assertSame([-999, 15], $sent[0] ?? null, 'a dead leader: only its group, never the bare pid');
+        $this->assertSame([999, 'j-music.lock'], $asked[0], 'only after a member is seen holding this job\'s run lock');
+    }
+
+    /** The runner's pid was reused by a group leader that exited and left children: not ours. */
+    public function testSignalRunLeavesADeadRunnersGroupAloneWhenNoMemberHoldsTheRunLock(): void
+    {
+        $sent = [];
+        RunState::$kill = static function (int $pid, int $sig) use (&$sent): bool {
+            $sent[] = [$pid, $sig];
+            return true;
+        };
+        RunState::$groupHoldsLock = static fn(int $pgid, string $lock): bool => false;
+        FakeRunState::write('j-music', ['pid' => 999, 'running' => true]);
+        FakeRunState::$alive = false;
+        $this->assertFalse(FakeRunState::signalRun('j-music', 15));
+        $this->assertSame([], $sent);
+    }
+
+    public function testGroupHoldsLockFindsAMemberWithTheLockFileOpenThroughProc(): void
+    {
+        if (!is_dir('/proc/self/fd') || !function_exists('posix_getpgid')) {
+            $this->markTestSkipped('needs Linux /proc');
+        }
+        $lock = RunState::acquireLock('j-proc');
+        try {
+            $pgid = (int) posix_getpgid(0);
+            $this->assertTrue(RunState::groupHoldsLock($pgid, RunState::lockPath('j-proc')));
+            $this->assertFalse(RunState::groupHoldsLock($pgid, RunState::lockPath('j-other')));
+            $this->assertFalse(RunState::groupHoldsLock(2147483646, RunState::lockPath('j-proc')), 'no such group');
+        } finally {
+            RunState::releaseLock($lock);
+        }
     }
 
     public function testSignalRunNeverSignalsAReusedPid(): void

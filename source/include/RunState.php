@@ -68,6 +68,14 @@ class RunState
      */
     public static ?\Closure $kill = null;
 
+    /**
+     * Test seam: fn(int $pgid, string $lockPath): bool in place of the /proc
+     * scan in groupHoldsLock. null => the scan.
+     *
+     * @var (\Closure(int,string):bool)|null
+     */
+    public static ?\Closure $groupHoldsLock = null;
+
     /** The runtime base dir actually in effect. */
     public static function base(): string
     {
@@ -306,8 +314,9 @@ class RunState
 
     /**
      * Send $sig to this job's run: the live runner's group (else its pid), or,
-     * once the runner is dead, its group alone - an orphaned rsync is still in
-     * it, and a pid still naming a live group cannot be reused. A pid reused by
+     * once the runner is dead, its group - an orphaned rsync is still in it -
+     * but only while a member of that group holds this job's run lock open: a
+     * dead leader's pid can be reused by an unrelated group. A pid reused by
      * another process is never signalled.
      */
     public static function signalRun(string $jobId, int $sig): bool
@@ -317,12 +326,41 @@ class RunState
             return false;
         }
         if (!static::pidAlive($pid)) {
-            return self::kill(-$pid, $sig);
+            return self::groupHoldsLock($pid, self::lockPath($jobId)) && self::kill(-$pid, $sig);
         }
         if (!self::cmdlineMatchesJob(static::pidCmdline($pid), $jobId)) {
             return false;
         }
         return self::kill(-$pid, $sig) || self::kill($pid, $sig);
+    }
+
+    /**
+     * Does a process in group $pgid have $lockPath open? Linux /proc only (no
+     * /proc => false, so nothing is signalled).
+     */
+    public static function groupHoldsLock(int $pgid, string $lockPath): bool
+    {
+        if (self::$groupHoldsLock !== null) {
+            return (self::$groupHoldsLock)($pgid, $lockPath);
+        }
+        $target = realpath($lockPath);
+        if ($pgid <= 0 || $target === false) {
+            return false;
+        }
+        foreach (glob('/proc/[0-9]*', GLOB_ONLYDIR) ?: [] as $dir) {
+            $stat = @file_get_contents($dir . '/stat');
+            // "pid (comm) state ppid pgrp ...": comm may hold spaces and ")".
+            $end = is_string($stat) ? strrpos($stat, ')') : false;
+            if ($end === false || (int) (explode(' ', substr((string) $stat, $end + 2))[2] ?? 0) !== $pgid) {
+                continue;
+            }
+            foreach (glob($dir . '/fd/*') ?: [] as $fd) {
+                if (@readlink($fd) === $target) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private static function kill(int $pid, int $sig): bool

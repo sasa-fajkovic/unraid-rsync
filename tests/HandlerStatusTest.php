@@ -996,6 +996,9 @@ final class HandlerStatusTest extends TestCase
             $sent[] = $p;
             return true;
         };
+        RunState::$groupHoldsLock = static function (int $pgid, string $lock) use (&$sent, $pid, $id): bool {
+            return $pgid === $pid && $lock === RunState::lockPath($id) && $sent === [];
+        };
         $orphan = RunState::acquireLock($id);
         try {
             $_POST = ['id' => $id];
