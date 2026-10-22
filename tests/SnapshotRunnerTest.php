@@ -798,6 +798,97 @@ final class SnapshotRunnerTest extends TestCase
         $this->assertContains('--link-dest=' . self::ROOT . "/{$stamps[1]}.inprogress/a", $this->transfers[0], 'the kept one is a link-dest');
     }
 
+    /** @return array<string,array{0:bool,1:array<int,int>,2:array<int,int>,3:?int}> */
+    public static function unfinishedProvider(): array
+    {
+        // Ages in hours; the newest complete snapshot, when there is one, is 24 h old.
+        return [
+            'older than the last commit'      => [true, [48], [48], null],
+            'newer than the last commit'      => [true, [1], [], 1],
+            'both older than the last commit' => [true, [72, 48], [72, 48], null],
+            'one older, one newer'            => [true, [48, 1], [48], 1],
+            'no complete snapshot yet'        => [false, [48, 1], [48], 1],
+        ];
+    }
+
+    /**
+     * @param array<int,int> $ages
+     * @param array<int,int> $deleted
+     */
+    #[DataProvider('unfinishedProvider')]
+    public function testAnUnfinishedSnapshotIsKeptOnlyIfNewerThanTheLastCommit(bool $committed, array $ages, array $deleted, ?int $kept): void
+    {
+        $name = fn(int $h): string => Snapshot::stamp(new DateTimeImmutable('@' . ($this->clock - $h * 3600))) . '.inprogress';
+        if ($committed) {
+            $this->saveJob();
+            $this->seedSnapshot($this->stamp(1));
+        } else {
+            $this->saveJob(['pairs' => [['local' => '/mnt/user/a/', 'remote' => '', 'sub' => 'a', 'seed' => true]]]);
+        }
+        foreach ($ages as $h) {
+            $this->rx['dirs'][$name($h)] = ['keep' => false, 'meta' => null, 'subs' => ['a', 'b']];
+        }
+        $res = $this->runJob();
+
+        $this->assertSame(Rsync::STATE_SUCCESS, $res['state'], $this->log($res));
+        $this->assertSame(
+            array_map(fn(int $h): string => 'helper:delete:' . $name($h), $deleted),
+            array_values(array_filter($this->helperCalls(), fn($t) => str_starts_with($t, 'helper:delete:') && str_ends_with($t, '.inprogress')))
+        );
+        foreach ($deleted as $h) {
+            $this->assertArrayNotHasKey($name($h), $this->rx['dirs']);
+        }
+        $this->assertSame(
+            $kept === null ? [] : ['--link-dest=' . self::ROOT . '/' . $name($kept) . '/a'],
+            array_values(array_filter($this->transfers[0], fn($t) => str_starts_with($t, '--link-dest=') && str_contains($t, '.inprogress/')))
+        );
+        $log = $this->log($res);
+        if ($kept === null) {
+            $this->assertStringNotContainsString('reused', $log);
+        } else {
+            $this->assertArrayHasKey($name($kept), $this->rx['dirs']);
+            $this->assertStringContainsString("unfinished {$name($kept)} reused as a link-dest.", $log);
+        }
+    }
+
+    public function testAHoldKeepsAnUnfinishedSnapshotOlderThanTheLastCommit(): void
+    {
+        $this->saveJob();
+        $this->seedSnapshot($this->stamp(1));
+        $old = $this->stamp(2) . '.inprogress';
+        $this->rx['dirs'][$old] = ['keep' => false, 'meta' => null, 'subs' => ['a', 'b']];
+        $this->rx['hold'] = true;
+        $res = $this->runJob();
+
+        $this->assertSame('snapshot-held', $res['reason'] ?? null, $this->log($res));
+        $this->assertSame([], array_filter($this->helperCalls(), fn($t) => str_starts_with($t, 'helper:delete:')));
+        $this->assertArrayHasKey($old, $this->rx['dirs']);
+        $this->assertNotContains('--link-dest=' . self::ROOT . "/$old/a", $this->transfers[0], 'still not a link-dest');
+    }
+
+    public function testAMirrorJobNeverTouchesTheSnapshotRoot(): void
+    {
+        $this->saveJob(['pairs' => [['local' => '/mnt/user/a/', 'remote' => '/mnt/disk1/a/']]], ['enabled' => false]);
+        $this->seedSnapshot($this->stamp(1));
+        $this->rx['dirs'][$this->stamp(2) . '.inprogress'] = ['keep' => false, 'meta' => null, 'subs' => ['a']];
+        $before = $this->rx;
+        $marker = Rsync::$runner;
+        Rsync::$runner = function (array $argv, callable $out) use ($marker): int {
+            if (in_array('--max-size=4K', $argv, true)) {
+                return $marker($argv, $out);
+            }
+            $this->transfers[] = $argv;
+            return 0;
+        };
+        $res = $this->runJob();
+
+        $this->assertSame(Rsync::STATE_SUCCESS, $res['state'], $this->log($res));
+        $this->assertSame([], $this->helperCalls());
+        $this->assertSame($before, $this->rx);
+        $this->assertNotSame([], $this->transfers);
+        $this->assertSame([], array_filter(array_merge(...$this->transfers), fn($t) => str_starts_with($t, '--link-dest=')));
+    }
+
     // --- anomaly ------------------------------------------------------------------------
 
     public function testAHalvedSourceIsSuspectHeldPinnedCommittedAndNotPruned(): void
