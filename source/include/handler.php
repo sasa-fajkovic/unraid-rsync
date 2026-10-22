@@ -1927,8 +1927,9 @@ function ur_action_abort_job(): void
 // GET pollers (status / log tails / run list)
 //
 // These are GET, no CSRF, behind the webGui's own authenticated front
-// controller. All are reads except one deliberate side effect: getStatus ->
-// RunState::isRunning reaps a dead runner's state, which (once) appends a
+// controller. All are reads except one deliberate side effect: getStatus,
+// getJobLog and listHistory call RunState::isRunning, which reaps a dead
+// runner's state and (once) appends a
 // "crashed" History record, sends its notification and deletes the in-flight
 // record (Runner::reportCrashed). Every job id and run-file id is
 // whitelisted against a safe pattern, and every log read is confined to the
@@ -2281,7 +2282,8 @@ function ur_action_list_runs(): void
 
 /**
  * GET listHistory: paginated, newest-first persistent execution history for a
- * job (real + dry runs, manual + scheduled). Read-only. Mirrors listRuns: the
+ * job (real + dry runs, manual + scheduled). A read, apart from the crash reap
+ * its RunState::isRunning calls can trigger. Mirrors listRuns: the
  * job id goes through ur_safe_job_id; offset/limit are clamped (limit 1..100).
  * Returns {ok, jobId, total, offset, limit, runs:[<record>...]} where each
  * record is the History record shape (incl. trigger, dryRun, state, logRef).
@@ -2605,8 +2607,9 @@ function ur_dispatch(): void
                 case 'abortJob':          ur_action_abort_job();           return;
             }
 
-            // GET pollers (no CSRF). Reads, apart from getStatus's crash reap (see
-            // ur_action_get_status); reject a POST to one so the contract is explicit.
+            // GET pollers (no CSRF). Reads, apart from the crash reap that
+            // getStatus/getJobLog/listHistory can trigger via RunState::isRunning;
+            // reject a POST to one so the contract is explicit.
             // no break
         case 'getStatus':
         case 'getJobLog':

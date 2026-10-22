@@ -258,7 +258,8 @@ on, forked from, or derived from any other plugin.
   (`Logger::setRedaction` / `Logger::sink` / `UR_MAX_RUN_LOG_BYTES`).
 - **CSRF**: every state-changing POST verifies the webGui `csrf_token` via
   `hash_equals`; GET pollers take no CSRF token and are reads, with ONE
-  intentional side effect: `getStatus` → `RunState::isRunning` → `reapStale` →
+  intentional side effect: any GET that calls `RunState::isRunning`
+  (`getStatus`, `getJobLog`, `listHistory`) → `reapStale` →
   `Runner::reportCrashed` records a dead runner exactly once (appends a
   `crashed` History record, notifies, deletes the in-flight record). The check
   is **match-ANY** across all server-side-trusted token sources (`$GLOBALS['var']['csrf_token']`,
