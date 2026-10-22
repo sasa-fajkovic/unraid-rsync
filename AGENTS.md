@@ -279,12 +279,16 @@ on, forked from, or derived from any other plugin.
   `Logger::enforceRunLogCap` every `Runner::$logCapCheckSec` (2 s) WHILE a pair
   runs (`Rsync::run`'s `$stopWhen`), not only after it. Trimming a live log is
   safe because rsync opens `--log-file` with `fopen("a")` (O_APPEND): its next
-  line lands at the new end, not past it. Hard ceiling: a log still over
-  `LOG_CEILING_FACTOR` (4) × the cap right AFTER a trim means trimming failed;
-  that pair is stopped, the run ends WARNING with reason `log-cap-exceeded`, and
-  the next pair still runs. It is measured after the trim on purpose: measured
-  before, a healthy big backup at `normal` (one `--log-file` line per file) would
-  trip it. One job: `UR_MAX_JOB_LOG_BYTES` (256 MiB) - `pruneRuns` deletes the
+  line lands at the new end, not past it (confirmed on rsync 3.4.4). Hard
+  ceiling: only when a trim FAILED (`enforceRunLogCap`'s `$failed`: the file
+  could not be opened, locked, truncated or marked) AND the log is over
+  `LOG_CEILING_FACTOR` (4) × the cap is the pair stopped; the run ends WARNING
+  with reason `log-cap-exceeded`, and the next pair still runs. A log that grew
+  again after a successful trim is never stopped: size alone would kill a
+  healthy big backup at `normal` (one `--log-file` line per file) whenever PHP
+  was descheduled after a truncate. `Logger::event` / `append` never throw
+  (they return false): the Runner logs outside its `try`, and a throw there
+  would skip the post-hook. One job: `UR_MAX_JOB_LOG_BYTES` (256 MiB) - `pruneRuns` deletes the
   oldest logs past it after the count prune, never the newest or the current
   run's. `plugin.log` rotates to `plugin.log.1` (one generation) past 1 MiB,
   under the sibling `plugin.log.lock` (a lock on plugin.log itself is renamed

@@ -711,6 +711,7 @@ final class RunnerTest extends TestCase
         $this->assertSame(143, ur_runner_exit_code(Rsync::STATE_ABORTED));
         $this->assertSame(1, ur_runner_exit_code(Rsync::STATE_FAILED));
         $this->assertSame(1, ur_runner_exit_code(Rsync::STATE_TIMEOUT));
+        $this->assertSame(0, ur_runner_exit_code(Rsync::STATE_SKIPPED));
     }
 
     // =====================================================================
@@ -3179,6 +3180,60 @@ final class RunnerTest extends TestCase
         $tail = (string) file_get_contents($plugin, false, null, $before);
         $this->assertStringContainsString('Pair #1 stopped: its run log stayed over the', $tail);
         $this->assertStringContainsString('hard ceiling after trimming.', $tail);
+    }
+
+    public function testGrowthRightAfterASuccessfulTrimNeverStopsThePair(): void
+    {
+        $cap = 1024;
+        Logger::$maxRunLogBytesOverride = $cap;
+        Runner::$logCapCheckSec         = 0.0;
+        // The trim succeeds, then rsync appends far past the ceiling before
+        // PHP gets to look at the size again (descheduled after the truncate).
+        Runner::$logTrimmer = static function (string $path): bool {
+            Logger::enforceRunLogCap($path, $failed);
+            file_put_contents($path, str_repeat('y', 8 * 1024), FILE_APPEND);
+            return (bool) $failed;
+        };
+        $polls = 0;
+        Rsync::$runner = static function (array $argv, $onOutput, $env = null, $timeout = null, ?callable $stopWhen = null) use (&$polls): int {
+            file_put_contents(self::logFileArg($argv), str_repeat('x', 2048), FILE_APPEND);
+            for ($i = 0; $i < 3; $i++) {
+                $polls++;
+                if ($stopWhen !== null && $stopWhen()) {
+                    return 143;
+                }
+            }
+            return 0;
+        };
+        try {
+            $res = Runner::run($this->saveLocalJob('j-growth'), false);
+        } finally {
+            Logger::$maxRunLogBytesOverride = null;
+            Runner::$logCapCheckSec         = 2.0;
+            Runner::$logTrimmer             = null;
+        }
+        $this->assertSame(3, $polls);
+        $this->assertSame(Rsync::STATE_SUCCESS, $res['state'], 'a log that can still be trimmed is never stopped');
+        $this->assertArrayNotHasKey('reason', $res);
+    }
+
+    public function testAnUnusablePluginLogLockNeitherSkipsThePostHookNorTheRecord(): void
+    {
+        Rsync::$runner = fn(array $a, $o): int => 0;
+        $id = $this->saveLocalJob('j-nolock', ['postHook' => 'POST']);
+        Logger::event('', $id, 'make sure the logs dir exists');
+        $lock = Logger::pluginLogPath() . '.lock';
+        @unlink($lock);
+        mkdir($lock); // a directory: the lock file cannot be opened
+        try {
+            $res = Runner::run($id, false);
+        } finally {
+            rmdir($lock);
+        }
+        $this->assertSame(Rsync::STATE_SUCCESS, $res['state']);
+        $this->assertContains('hook:POST:SUCCESS', $this->trace, 'the post-hook still ran');
+        $this->assertSame('SUCCESS', Runner::readSummary($id)['state'] ?? null);
+        $this->assertSame('SUCCESS', History::list($id)['runs'][0]['state'] ?? null);
     }
 
     public function testASummaryOrHistoryWriteFailureIsLoggedOnce(): void

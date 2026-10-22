@@ -17,7 +17,8 @@ declare(strict_types=1);
  *
  * The process exit code mirrors the run's final state so a caller (cron, the
  * detached launcher) can tell success from failure:
- *   SUCCESS -> 0, WARNING/PARTIAL -> 0 (run completed), TIMEOUT/FAILED -> 1,
+ *   SUCCESS -> 0, WARNING/PARTIAL -> 0 (run completed), SKIPPED -> 0 (the
+ *   previous run is still going), TIMEOUT/FAILED -> 1,
  *   ABORTED -> 143. (The authoritative outcome is the /boot summary; this exit
  *   code is just a convenience for shell callers.)
  *
@@ -72,6 +73,7 @@ function ur_runner_exit_code(string $state): int
         case Rsync::STATE_SUCCESS:
         case Rsync::STATE_WARNING:
         case Rsync::STATE_PARTIAL:
+        case Rsync::STATE_SKIPPED:
             return 0;
         case Rsync::STATE_ABORTED:
             return 143;

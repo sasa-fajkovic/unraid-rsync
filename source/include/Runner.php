@@ -96,11 +96,19 @@ class Runner
     public static float $logCapCheckSec = 2.0;
 
     /**
-     * Hard ceiling, as a multiple of the run-log cap: a log still larger than
-     * this right after a trim means trimming is not working, and the pair is
-     * stopped with reason log-cap-exceeded rather than filling RAM.
+     * Hard ceiling, as a multiple of the run-log cap: a pair is stopped with
+     * reason log-cap-exceeded only when a trim FAILED and the log is over it.
+     * A log that grew again after a successful trim is never stopped.
      */
     const LOG_CEILING_FACTOR = 4;
+
+    /**
+     * Injectable mid-pair trim: fn(string $runLog): bool, true when the trim
+     * failed. null => Logger::enforceRunLogCap.
+     *
+     * @var (callable(string):bool)|null
+     */
+    public static $logTrimmer = null;
 
     /** Resolve our own pid (overridable for tests). */
     private static function pid(): int
@@ -604,7 +612,14 @@ class Runner
                             return false;
                         }
                         $lastTrim = microtime(true);
-                        Logger::enforceRunLogCap($runLog);
+                        if (self::$logTrimmer !== null) {
+                            $failed = (bool) (self::$logTrimmer)($runLog);
+                        } else {
+                            Logger::enforceRunLogCap($runLog, $failed);
+                        }
+                        if (!$failed) {
+                            return false;
+                        }
                         clearstatcache(true, $runLog);
                         return $capHit = ((int) @filesize($runLog) > $ceiling);
                     };
