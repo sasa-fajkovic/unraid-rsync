@@ -502,9 +502,15 @@ wrong listing.
 
 Two snapshot roots may not be the same or lie inside each other, and no other
 job may write into a snapshot root (checked per destination host and port, when
-you save and at run time, so two connections to the same host count as one).
-One machine reached under two names (a host name and an IP address) is not
-recognised; the sentinel catches that case at run time.
+you save and at run time, so two connections with the same host name and port
+count as one). The plugin cannot tell that two names (a host name and an IP
+address) reach one machine, so these checks do not cover a job that uses the
+other name. **Use one name per receiver in every connection, and never point
+another job at a path inside a snapshot root through another name.** The
+sentinel does not make up for it: it stops a second snapshot job on the same
+root (it names one job), and a `--delete` mirror whose destination directly
+contains it (`dest-is-protected`), but not a mirror aimed deeper, at
+`<root>/<stamp>/<sub>`.
 
 ### What the plugin never deletes
 
@@ -777,14 +783,17 @@ no new migration is needed.
    mirror after the original migration can exist only there (in a live test,
    two subtitle files did). Save this on the receiver (for example as
    `/root/ur-check.sh`) and run it as root with the root, then one mirror path
-   and sub name per pair. It needs GNU `find`, changes nothing, lists every
-   mirror entry that `latest` lacks or holds with another type, size or mtime,
-   and exits non-zero on any mismatch:
+   and sub name per pair. It needs GNU `find`, `stat`, `sort` and `comm`, and
+   changes nothing. It lists every mirror entry that `latest` lacks or holds
+   differently (a directory by its name, a symlink by its mtime and target,
+   anything else by its type, size and mtime; names quoted, so a newline in a
+   name cannot hide anything), and exits non-zero on any mismatch or on any
+   error while reading either tree:
 
    ```sh
    #!/bin/sh
    set -eu
-   export LC_ALL=C
+   export LC_ALL=C QUOTING_STYLE=shell-escape-always
    die() { echo "check: $*" >&2; exit 1; }
    [ "$#" -ge 3 ] && [ $(( ($# - 1) % 2 )) -eq 0 ] || die "usage: ROOT MIRROR SUB [MIRROR SUB ...]"
    ROOT=$1; shift
@@ -795,23 +804,29 @@ no new migration is needed.
    esac
    T=$(mktemp -d)
    trap 'rm -rf -- "$T"' EXIT
-   list() { (cd -- "$1" && find . ! -type d -printf '%y %s %T@ %p\n') | sed -E 's/^(. [0-9]+ [0-9]+)\.[0-9]+ /\1 /' | sort; }
+   scan() {
+     (cd -- "$1" \
+       && find . -mindepth 1 -type d -exec stat --printf 'd %N\0' -- {} + \
+       && find . -type l -exec stat --printf 'l %Y %N\0' -- {} + \
+       && find . ! -type d ! -type l -exec stat --printf '%F %s %Y %N\0' -- {} +) > "$2.raw" \
+     && sort -z -o "$2" -- "$2.raw"
+   }
    bad=0
    while [ "$#" -gt 0 ]; do
      MIRROR=$1; SUB=$2; shift 2
      [ -d "$MIRROR" ] && [ ! -L "$MIRROR" ] || die "$MIRROR is not a directory"
      [ -d "$ROOT/$LATEST/$SUB" ] || die "no $SUB in $ROOT/$LATEST"
-     list "$MIRROR" > "$T/mirror"
-     list "$ROOT/$LATEST/$SUB" > "$T/latest"
-     comm -23 "$T/mirror" "$T/latest" > "$T/diff"
+     scan "$MIRROR" "$T/mirror" || die "could not read all of $MIRROR"
+     scan "$ROOT/$LATEST/$SUB" "$T/latest" || die "could not read all of $ROOT/$LATEST/$SUB"
+     comm -z -23 -- "$T/mirror" "$T/latest" > "$T/diff" || die "comm failed"
      if [ -s "$T/diff" ]; then
-       echo "$MIRROR: missing from $ROOT/$LATEST/$SUB, or a different type, size or mtime (type size mtime path):"
-       cat -- "$T/diff"
+       echo "$MIRROR: missing from $ROOT/$LATEST/$SUB, or different there (type, size, mtime, link target):"
+       tr '\0' '\n' < "$T/diff"
        bad=1
      fi
    done
    [ "$bad" -eq 0 ] || die "mismatch: keep the mirror until every entry above is accounted for"
-   echo "ok: every file in the mirror(s) is in $ROOT/$LATEST with the same size and mtime"
+   echo "ok: everything in the mirror(s) is in $ROOT/$LATEST with the same type, size, mtime and link target"
    ```
 
    ```sh
