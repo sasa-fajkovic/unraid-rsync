@@ -2441,6 +2441,69 @@ final class OptionsFormHelpTest extends TestCase
         $this->assertSame(PageHelpers::optionsLine($opts, null), $doc->querySelector('.ur-preview-out')?->textContent);
     }
 
+    public function testOptionRowsShowTheRsyncWhitelistFlagsInAFixedOrder(): void
+    {
+        $doc = Dom\HTMLDocument::createFromString('<!doctype html><body>' . $this->renderOptions(Config::defaultRsyncOptions(), 'p', 'o'), LIBXML_NOERROR);
+        $rows = [];
+        foreach ($doc->querySelectorAll('dt.ur-dt > label[for^="o_"]') as $label) {
+            $rows[substr((string) $label->getAttribute('for'), 2)] = $label->querySelector('code')?->textContent;
+        }
+        unset($rows['statsMode']);
+        $this->assertSame([
+            'archive', 'recursive', 'symlinks', 'perms', 'times', 'owner', 'group', 'devices',
+            'xattrs', 'acls', 'hardlinks', 'sparse', 'numericIds', 'omitDirTimes', 'omitLinkTimes',
+            'compress', 'compressLevel', 'humanReadable', 'partial', 'inplace', 'checksum', 'update', 'wholeFile', 'sizeOnly', 'ignoreExisting', 'mkpath',
+            'delete', 'deleteExcluded', 'maxDelete', 'backupDir',
+            'bwlimit', 'timeout', 'contimeout', 'maxSize', 'minSize', 'modifyWindow',
+            'chmod', 'tempDir', 'remoteRsyncPath', 'protocol',
+        ], array_keys($rows));
+        foreach ($rows as $key => $flag) {
+            $this->assertSame(Rsync::BOOL_FLAGS[$key] ?? Rsync::SCALAR_FLAGS[$key] . '=', $flag, $key);
+        }
+        $whitelist = array_keys(Rsync::BOOL_FLAGS + Rsync::SCALAR_FLAGS);
+        sort($whitelist);
+        $labelled = array_keys(ur_option_labels());
+        sort($labelled);
+        $this->assertSame($whitelist, $labelled, 'one label per whitelist flag, no more');
+    }
+
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testPagesReadLimitsFromTheClassConstants(): void
+    {
+        @unlink(Config::path());
+        $conn = $this->renderPageBody(__DIR__ . '/../source/pages/connections.php');
+        $this->assertStringContainsString('var DISCOVER_MAX_SECONDS = ' . KeyTools::DISCOVER_TIMEOUT_MAX . ';', $conn);
+        $this->assertStringContainsString('= <?=ur_js(KeyTools::DISCOVER_TIMEOUT_MAX)?>;', (string) file_get_contents(__DIR__ . '/../source/pages/connections.php'));
+
+        $creds = Dom\HTMLDocument::createFromString('<!doctype html><body>' . $this->renderPageBody(__DIR__ . '/../source/pages/credentials.php'), LIBXML_NOERROR);
+        $types = [];
+        foreach ($creds->querySelectorAll('#ur_key_type option') as $o) {
+            $types[] = $o->getAttribute('value');
+        }
+        $this->assertSame(KeyTools::KEY_TYPES, $types);
+
+        $settings = Dom\HTMLDocument::createFromString('<!doctype html><body>' . $this->renderPageBody(__DIR__ . '/../source/pages/settings.php'), LIBXML_NOERROR);
+        $ret = $settings->querySelector('#ur_global_retention');
+        $this->assertSame((string) Config::MIN_RETENTION, $ret?->getAttribute('min'));
+        $this->assertSame((string) Config::MAX_RETENTION, $ret?->getAttribute('max'));
+        $this->assertStringContainsString(
+            Config::MIN_RETENTION . '–' . Config::MAX_RETENTION . ' (default ' . Config::DEFAULT_RETENTION . ')',
+            (string) $settings->querySelector('#ur_global_retention_help')?->textContent
+        );
+        foreach (['settings', 'credentials'] as $page) {
+            $this->assertStringNotContainsString('9999', (string) file_get_contents(__DIR__ . '/../source/pages/' . $page . '.php'));
+        }
+        $this->assertStringNotContainsString('<option value="ed25519">', (string) file_get_contents(__DIR__ . '/../source/pages/credentials.php'));
+    }
+
+    public function testRetentionBoundsOutsideConfigStayInLockstepWithIt(): void
+    {
+        $this->assertSame(Config::MAX_RETENTION, History::MAX_KEEP);
+        $this->assertSame(Config::DEFAULT_RETENTION, Logger::DEFAULT_RETENTION);
+        $this->assertFalse(defined('History::DEFAULT_KEEP'), 'unused; the retention setting is Config::DEFAULT_RETENTION');
+    }
+
     #[RunInSeparateProcess]
     #[PreserveGlobalState(false)]
     public function testConnectionCardsAreAnAccordionWithNameFirst(): void

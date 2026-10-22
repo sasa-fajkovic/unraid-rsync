@@ -347,64 +347,6 @@ if (!function_exists('ur_render_rsync_options')) {
      */
     function ur_render_rsync_options(array $opts, string $prefix, string $idBase, ?string $transport = null): void
     {
-        // The options -a IMPLIES, rendered as a sub-group under the Archive box.
-        // They are ordinary standalone options too (a plain -r -t copy uses two
-        // of them), but grouping them is the only way the UI can be honest about
-        // -a: ticking Archive turns every one of these on, and unticking one
-        // while Archive is on emits the matching --no-* to turn it back off.
-        // Keys and order mirror Rsync::ARCHIVE_IMPLIED / Config::ARCHIVE_IMPLIED_KEYS.
-        $archiveImplied = [
-            'recursive'      => ['Recurse into directories', '-r'],
-            'symlinks'       => ['Copy symlinks as symlinks', '-l'],
-            'perms'          => ['Preserve permissions', '-p'],
-            'times'          => ['Preserve times', '-t'],
-            'owner'          => ['Preserve owner', '-o'],
-            'group'          => ['Preserve group', '-g'],
-            'devices'        => ['Preserve devices and special files', '-D'],
-        ];
-        // key => [label, flag] for the remaining boolean checkboxes, in display
-        // order. Nothing here is affected by -a.
-        $bools = [
-            'compress'       => ['Compress', '-z'],
-            'humanReadable'  => ['Human-readable', '-h'],
-            'omitDirTimes'   => ['Omit directory times', '-O'],
-            'omitLinkTimes'  => ['Omit symlink times', '-J'],
-            'xattrs'         => ['Preserve extended attributes', '-X'],
-            'acls'           => ['Preserve ACLs', '-A'],
-            'hardlinks'      => ['Preserve hard links', '-H'],
-            'sparse'         => ['Handle sparse files efficiently', '-S'],
-            'numericIds'     => ['Use numeric user/group IDs', '--numeric-ids'],
-            'partial'        => ['Keep partially transferred files', '--partial'],
-            'inplace'        => ['Update files in place', '--inplace'],
-            'checksum'       => ['Compare by checksum', '-c'],
-            'update'         => ['Skip files newer on receiver', '-u'],
-            'wholeFile'      => ['Copy whole files (no delta)', '-W'],
-            'sizeOnly'       => ['Skip files matching size', '--size-only'],
-            'ignoreExisting' => ['Skip files that already exist', '--ignore-existing'],
-            'mkpath'         => ['Create destination path if missing', '--mkpath'],
-        ];
-        // Destructive booleans rendered separately with a warning.
-        $destructive = [
-            'delete'         => ['Delete extraneous files on destination', '--delete'],
-            'deleteExcluded' => ['Also delete excluded files on destination', '--delete-excluded'],
-        ];
-        // key => [label, flag] for scalar value inputs.
-        $scalars = [
-            'maxDelete'     => ['Max delete', '--max-delete='],
-            'bwlimit'       => ['Bandwidth limit (KB/s)', '--bwlimit='],
-            'timeout'       => ['I/O timeout (s)', '--timeout='],
-            'contimeout'    => ['Connect timeout (s)', '--contimeout='],
-            'maxSize'       => ['Max file size', '--max-size='],
-            'minSize'       => ['Min file size', '--min-size='],
-            'chmod'         => ['Chmod', '--chmod='],
-            'tempDir'       => ['Temp dir', '--temp-dir='],
-            'backupDir'     => ['Backup dir (enables --backup)', '--backup-dir='],
-            'compressLevel' => ['Compress level', '--compress-level='],
-            'modifyWindow'  => ['Modify window (s)', '--modify-window='],
-            'remoteRsyncPath' => ['Remote rsync path (SSH jobs)', '--rsync-path='],
-            'protocol'      => ['Protocol version', '--protocol='],
-        ];
-
         // Emit the help CSS + JS exactly once per page, even when several option
         // blocks render (Global Settings has one; the Jobs tab has one per card
         // plus the hidden template). Guarding here keeps the help UI self-contained
@@ -427,19 +369,14 @@ if (!function_exists('ur_render_rsync_options')) {
             'Limits'   => ['bwlimit', 'timeout', 'contimeout', 'maxSize', 'minSize', 'modifyWindow'],
             'Advanced' => ['chmod', 'tempDir', 'remoteRsyncPath', 'protocol'],
         ];
-        $boolRows = $bools + $destructive;
         foreach ($groups as $legend => $keys) {
             echo '<fieldset class="ur-opt-group"><legend>' . ur_h(ur_t_text($legend)) . '</legend>';
             if ($legend === 'Preserve') {
-                ur_render_archive_group($prefix, $idBase, $opts, $archiveImplied);
+                ur_render_archive_group($prefix, $idBase, $opts);
             }
             echo '<dl>';
             foreach ($keys as $key) {
-                if (isset($boolRows[$key])) {
-                    ur_render_bool_row($prefix, $idBase, $key, $boolRows[$key][0], $boolRows[$key][1], !empty($opts[$key]));
-                } else {
-                    ur_render_scalar_row($prefix, $idBase, $key, $scalars[$key][0], $scalars[$key][1], isset($opts[$key]) ? (string) $opts[$key] : '');
-                }
+                ur_render_option_row($prefix, $idBase, $key, $opts);
             }
             echo '</dl>';
             if ($legend === 'Transfer') {
@@ -484,21 +421,93 @@ if (!function_exists('ur_render_rsync_options')) {
     }
 }
 
+if (!function_exists('ur_option_labels')) {
+    /**
+     * The form label of every whitelisted option. The flag shown beside it is
+     * Rsync::BOOL_FLAGS / SCALAR_FLAGS; the row order is the groups in
+     * ur_render_rsync_options() plus Rsync::ARCHIVE_IMPLIED.
+     *
+     * @return array<string,string>
+     */
+    function ur_option_labels(): array
+    {
+        return [
+            'archive'         => 'Archive',
+            'recursive'       => 'Recurse into directories',
+            'symlinks'        => 'Copy symlinks as symlinks',
+            'perms'           => 'Preserve permissions',
+            'times'           => 'Preserve times',
+            'owner'           => 'Preserve owner',
+            'group'           => 'Preserve group',
+            'devices'         => 'Preserve devices and special files',
+            'compress'        => 'Compress',
+            'humanReadable'   => 'Human-readable',
+            'omitDirTimes'    => 'Omit directory times',
+            'omitLinkTimes'   => 'Omit symlink times',
+            'xattrs'          => 'Preserve extended attributes',
+            'acls'            => 'Preserve ACLs',
+            'hardlinks'       => 'Preserve hard links',
+            'sparse'          => 'Handle sparse files efficiently',
+            'numericIds'      => 'Use numeric user/group IDs',
+            'partial'         => 'Keep partially transferred files',
+            'inplace'         => 'Update files in place',
+            'checksum'        => 'Compare by checksum',
+            'update'          => 'Skip files newer on receiver',
+            'wholeFile'       => 'Copy whole files (no delta)',
+            'sizeOnly'        => 'Skip files matching size',
+            'ignoreExisting'  => 'Skip files that already exist',
+            'mkpath'          => 'Create destination path if missing',
+            'delete'          => 'Delete extraneous files on destination',
+            'deleteExcluded'  => 'Also delete excluded files on destination',
+            'maxDelete'       => 'Max delete',
+            'bwlimit'         => 'Bandwidth limit (KB/s)',
+            'timeout'         => 'I/O timeout (s)',
+            'contimeout'      => 'Connect timeout (s)',
+            'maxSize'         => 'Max file size',
+            'minSize'         => 'Min file size',
+            'chmod'           => 'Chmod',
+            'tempDir'         => 'Temp dir',
+            'backupDir'       => 'Backup dir (enables --backup)',
+            'compressLevel'   => 'Compress level',
+            'modifyWindow'    => 'Modify window (s)',
+            'remoteRsyncPath' => 'Remote rsync path (SSH jobs)',
+            'protocol'        => 'Protocol version',
+        ];
+    }
+}
+
+if (!function_exists('ur_render_option_row')) {
+    /**
+     * One whitelisted option: a checkbox for a Rsync::BOOL_FLAGS key, else a
+     * value input for its Rsync::SCALAR_FLAGS flag.
+     *
+     * @param array<string,mixed> $opts
+     */
+    function ur_render_option_row(string $prefix, string $idBase, string $key, array $opts): void
+    {
+        $label = ur_option_labels()[$key];
+        if (isset(Rsync::BOOL_FLAGS[$key])) {
+            ur_render_bool_row($prefix, $idBase, $key, $label, Rsync::BOOL_FLAGS[$key], !empty($opts[$key]));
+        } else {
+            ur_render_scalar_row($prefix, $idBase, $key, $label, Rsync::SCALAR_FLAGS[$key] . '=', isset($opts[$key]) ? (string) $opts[$key] : '');
+        }
+    }
+}
+
 if (!function_exists('ur_render_archive_group')) {
     /**
      * Archive, then the options it implies indented beneath it: -a turns all
      * seven on, and the only way to turn one back off is the --no-* that
      * Rsync::optionTokens() emits for an unticked box. The note is marked
-     * active by JS while Archive is ticked.
+     * active by JS while Archive is ticked. The rows follow Rsync::ARCHIVE_IMPLIED.
      *
-     * @param array<string,mixed>                    $opts
-     * @param array<string,array{0:string,1:string}> $archiveImplied
+     * @param array<string,mixed> $opts
      */
-    function ur_render_archive_group(string $prefix, string $idBase, array $opts, array $archiveImplied): void
+    function ur_render_archive_group(string $prefix, string $idBase, array $opts): void
     {
         $archiveOn = !empty($opts['archive']);
         echo '<dl>';
-        ur_render_bool_row($prefix, $idBase, 'archive', 'Archive', '-a', $archiveOn);
+        ur_render_option_row($prefix, $idBase, 'archive', $opts);
         echo '</dl>';
         echo '<div class="ur-implied' . ($archiveOn ? ' ur-implied-active' : '') . '"'
             . ' data-archive="' . ur_h($idBase . '_archive') . '">';
@@ -506,8 +515,8 @@ if (!function_exists('ur_render_archive_group')) {
             . ur_h(ur_t_text('Implied by Archive (-a): ticking Archive turns all of these on. Untick one while Archive is on and the plugin adds the matching --no- flag to genuinely turn it off. Each also works on its own with Archive off.'))
             . '</p>';
         echo '<dl>';
-        foreach ($archiveImplied as $key => [$label, $flag]) {
-            ur_render_bool_row($prefix, $idBase, $key, $label, $flag, !empty($opts[$key]));
+        foreach (array_keys(Rsync::ARCHIVE_IMPLIED) as $key) {
+            ur_render_option_row($prefix, $idBase, $key, $opts);
         }
         echo '</dl>';
         echo '</div>';

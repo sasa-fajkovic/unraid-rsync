@@ -39,7 +39,7 @@
 
 require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Config.php';
 require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Credentials.php';
-require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Ssh.php';
+require_once '/usr/local/emhttp/plugins/unraid.rsync/include/KeyTools.php';
 require_once '/usr/local/emhttp/plugins/unraid.rsync/pages/_options_form.php'; // ur_h / ur_t
 
 $csrf = ur_render_csrf_token();
@@ -648,7 +648,7 @@ ur_emit_page_assets();
    * + up to ~1s for SIGKILL ≈ 33s) so that, whenever possible, the user gets the
    * server's structured timeout (504) message rather than a generic client-side
    * abort. */
-  var DISCOVER_MAX_SECONDS = 30;          // mirrors KeyTools::DISCOVER_TIMEOUT_MAX
+  var DISCOVER_MAX_SECONDS = <?=ur_js(KeyTools::DISCOVER_TIMEOUT_MAX)?>;
   var DISCOVER_CLIENT_ABORT_MS = 35000;   // > server worst-case (~33s) so the 504 wins
   var DISCOVER_SUCCESS_HIDE_MS = 2000;    // keep the green "done" state briefly, then hide
   var DISCOVER_FAIL_HIDE_MS = 6000;       // keep the red fail+reason longer to read

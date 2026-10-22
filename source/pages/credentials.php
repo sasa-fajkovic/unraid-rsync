@@ -27,7 +27,7 @@
 
 require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Config.php';
 require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Credentials.php';
-require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Ssh.php';
+require_once '/usr/local/emhttp/plugins/unraid.rsync/include/KeyTools.php';
 require_once '/usr/local/emhttp/plugins/unraid.rsync/pages/_options_form.php'; // ur_h / ur_t
 
 $csrf = ur_render_csrf_token();
@@ -143,8 +143,9 @@ $handlerUrl = PageHelpers::HANDLER_URL;
   <dt><label for="ur_key_type"><?=_('Type')?></label>:</dt>
   <dd>
     <select id="ur_key_type">
-      <option value="ed25519">ed25519</option>
-      <option value="rsa">rsa (4096)</option>
+<?php foreach (KeyTools::KEY_TYPES as $t): ?>
+      <option value="<?=ur_h($t)?>"><?=ur_h($t === 'rsa' ? 'rsa (4096)' : $t)?></option>
+<?php endforeach; ?>
     </select>
     <div><button type="button" id="ur-key-generate"><?=_('Generate key')?></button></div>
   </dd>
