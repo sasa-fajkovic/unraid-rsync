@@ -1850,6 +1850,7 @@ final class RunnerTest extends TestCase
             '-t',
             '--partial',
             '--mkpath',
+            '--timeout=' . Rsync::DAEMON_DEFAULT_TIMEOUT,
             '--contimeout=45',
             '--info=progress2',
             '--log-file-format=',
@@ -1911,6 +1912,7 @@ final class RunnerTest extends TestCase
             '-t',
             '--partial',
             '--mkpath',
+            '--timeout=' . Rsync::DAEMON_DEFAULT_TIMEOUT,
             '--info=progress2',
             '--log-file-format=',
             '--log-file=' . $res['runLog'],
@@ -3091,6 +3093,27 @@ final class RunnerTest extends TestCase
         if ($reason === '') {
             $this->assertNull($timeouts[1], 'the transfer itself has none');
         }
+    }
+
+    /**
+     * The marker fetch over a daemon has no ServerAlive either: without a wall
+     * clock a stalled rsyncd held the job lock forever. SSH's needs none.
+     */
+    public function testADaemonTargetMarkerFetchHasAWallClockDeadline(): void
+    {
+        $this->fakeRsync("uuid-1\n");
+        $inner    = Rsync::$runner;
+        $timeouts = [];
+        Rsync::$runner = static function (array $argv, $onOutput, ?array $env = null, ?int $timeoutSec = null) use ($inner, &$timeouts): int {
+            $timeouts[] = $timeoutSec;
+            return $inner($argv, $onOutput);
+        };
+        $rt  = $this->seedDaemonJob('j-dmarker', [], ['targetMarker' => '.unraid-rsync-target', 'targetMarkerContent' => 'uuid-1']);
+        $res = $this->runInTempRuntime($rt, 'j-dmarker');
+
+        $this->assertSame(Rsync::STATE_SUCCESS, $res['state'], (string) @file_get_contents($res['runLog']));
+        $this->assertSame(['marker', 'rsync'], $this->trace);
+        $this->assertSame([2 * Runner::PROBE_TIMEOUT, null], $timeouts, 'the marker fetch is bounded, the transfer is not');
     }
 
     /** @return array<string,array{0:array<string,mixed>}> */

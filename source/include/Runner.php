@@ -1596,7 +1596,9 @@ class Runner
                 static function (string $chunk) use (&$out): void {
                     $out = substr($out . $chunk, 0, 4096);
                 },
-                Ssh::childEnv(($remote && is_array($sshPieces)) ? (array) ($sshPieces['sshEnv'] ?? []) : [])
+                Ssh::childEnv(($remote && is_array($sshPieces)) ? (array) ($sshPieces['sshEnv'] ?? []) : []),
+                // A daemon has no ServerAlive; --timeout does not cover the connect.
+                ($remote && $transport === 'DAEMON') ? 2 * self::PROBE_TIMEOUT : null
             );
             $body = (is_file($file) && !is_link($file)) ? @file_get_contents($file, false, null, 0, 4096) : false;
         } finally {

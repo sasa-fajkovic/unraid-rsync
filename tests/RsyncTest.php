@@ -930,6 +930,7 @@ final class RsyncTest extends TestCase
             '-p',
             '--delete',
             '--bwlimit=2000',
+            '--timeout=' . Rsync::DAEMON_DEFAULT_TIMEOUT,
             '--contimeout=15',
             '--temp-dir=/mnt/user/tmp',
             '--rsync-path=/usr/local/bin/rsync',
@@ -978,6 +979,7 @@ final class RsyncTest extends TestCase
             '-p',
             '--delete',
             '--bwlimit=2000',
+            '--timeout=' . Rsync::DAEMON_DEFAULT_TIMEOUT,
             '--temp-dir=/mnt/user/tmp',
             '--rsync-path=/usr/local/bin/rsync',
             '--include=*/',
@@ -1018,6 +1020,7 @@ final class RsyncTest extends TestCase
         );
         $this->assertSame([
             '/usr/bin/rsync',
+            '--timeout=' . Rsync::DAEMON_DEFAULT_TIMEOUT,
             '-q',
             '--log-file-format=',
             '--log-file=/rt/r.log',
@@ -1049,6 +1052,7 @@ final class RsyncTest extends TestCase
         );
         $this->assertSame([
             '/usr/bin/rsync',
+            '--timeout=' . Rsync::DAEMON_DEFAULT_TIMEOUT,
             '-q',
             '--log-file-format=',
             '--log-file=/rt/r.log',
@@ -1071,6 +1075,7 @@ final class RsyncTest extends TestCase
         $argv = Rsync::buildArgv($this->emptyOpts(), 'quiet', '/rt/r.log', 'bob@nas::m', '/d/', $bag);
         $this->assertSame([
             '/usr/bin/rsync',
+            '--timeout=' . Rsync::DAEMON_DEFAULT_TIMEOUT,
             '-q',
             '--log-file-format=',
             '--log-file=/rt/r.log',
@@ -1128,17 +1133,30 @@ final class RsyncTest extends TestCase
         foreach (Rsync::buildArgv($withCt, 'quiet', '/rt/r.log', '/a/', '/b/', null) as $tok) {
             $this->assertFalse(str_starts_with($tok, '--contimeout'), "LOCAL must not emit $tok");
         }
-        // DAEMON keeps it, in its SCALAR_FLAGS map position (after --bwlimit,
-        // before --temp-dir).
+        // DAEMON keeps it, in its SCALAR_FLAGS map position (after --bwlimit
+        // and the daemon's default --timeout, before --temp-dir).
         $daemon = Rsync::buildArgv($withCt, 'quiet', '/rt/r.log', 'u@h::m', '/b/', $this->daemonPieces());
-        $this->assertContains('--contimeout=15', $daemon);
-        $this->assertSame(
-            array_search('--bwlimit=2000', $daemon, true) + 1,
-            array_search('--contimeout=15', $daemon, true)
-        );
+        $at     = (int) array_search('--bwlimit=2000', $daemon, true);
+        $this->assertSame(['--bwlimit=2000', '--timeout=900', '--contimeout=15'], array_slice($daemon, $at, 3));
     }
 
     /** Dropping contimeout must not mutate the caller's options array. */
+    /**
+     * A stalled rsyncd held the job lock forever: daemon transfers get a
+     * default I/O timeout. An explicit value (0 = wait forever) wins, and SSH
+     * and LOCAL stay without one.
+     */
+    public function testADaemonTransferWithNoTimeoutGetsTheDefault(): void
+    {
+        $opts = $this->emptyOpts();
+        $this->assertSame(['--timeout=900'], Rsync::optionTokens($opts, 'DAEMON'));
+        $this->assertSame(['--timeout=0'], Rsync::optionTokens(['timeout' => '0'] + $opts, 'DAEMON'));
+        $this->assertSame(['--timeout=60'], Rsync::optionTokens(['timeout' => '60'] + $opts, 'DAEMON'));
+        foreach ([null, 'SSH', 'LOCAL'] as $transport) {
+            $this->assertSame([], Rsync::optionTokens($opts, $transport));
+        }
+    }
+
     public function testBuildArgvDoesNotMutateTheCallersOptions(): void
     {
         $opts = $this->emptyOpts();
@@ -1159,14 +1177,14 @@ final class RsyncTest extends TestCase
         $opts = $this->emptyOpts();
         $opts['contimeout'] = '30';
 
-        $this->assertSame(['--contimeout=30'], Rsync::optionTokens($opts, 'DAEMON'));
+        $this->assertSame(['--timeout=900', '--contimeout=30'], Rsync::optionTokens($opts, 'DAEMON'));
         $this->assertSame([], Rsync::optionTokens($opts, 'SSH'));
         $this->assertSame([], Rsync::optionTokens($opts, 'LOCAL'));
         // A hand-edited/unknown transport behaves like the non-daemon ones -
         // the same way buildArgv treats anything without a `daemon` piece.
         $this->assertSame([], Rsync::optionTokens($opts, 'FTP'));
         // Resolved the way every other transport comparison in the tree is.
-        $this->assertSame(['--contimeout=30'], Rsync::optionTokens($opts, ' daemon '));
+        $this->assertSame(['--timeout=900', '--contimeout=30'], Rsync::optionTokens($opts, ' daemon '));
 
         // No transport = no context (the Global Settings block, shared by jobs of
         // every transport): today's behaviour, unchanged, which is what keeps the
@@ -1175,13 +1193,17 @@ final class RsyncTest extends TestCase
         $this->assertSame(['--contimeout=30'], Rsync::optionTokens($opts, null));
     }
 
-    /** The gate touches --contimeout and nothing else, in either direction. */
+    /**
+     * Beyond the daemon's default --timeout, the gate touches --contimeout and
+     * nothing else, in either direction.
+     */
     public function testOptionTokensTransportGateTouchesOnlyContimeout(): void
     {
         $opts = $this->busyOpts();
         unset($opts['contimeout']);
 
-        foreach ([null, 'SSH', 'LOCAL', 'DAEMON', 'FTP'] as $transport) {
+        $this->assertSame(Rsync::optionTokens(['timeout' => '900'] + $opts), Rsync::optionTokens($opts, 'DAEMON'));
+        foreach ([null, 'SSH', 'LOCAL', 'FTP'] as $transport) {
             $this->assertSame(
                 Rsync::optionTokens($opts),
                 Rsync::optionTokens($opts, $transport),

@@ -423,7 +423,8 @@ final class HandlerTest extends TestCase
     public static function previewTransportProvider(): array
     {
         return [
-            'daemon keeps it'      => ['DAEMON', ['--contimeout=30']],
+            // ...after the daemon's default --timeout, which the preview shows too.
+            'daemon keeps it'      => ['DAEMON', ['--timeout=900', '--contimeout=30']],
             'ssh drops it'         => ['SSH', []],
             'local drops it'       => ['LOCAL', []],
             // The Global Settings block has no job and posts no transport: it is

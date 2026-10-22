@@ -142,6 +142,9 @@ class Rsync
         'exclude' => '--exclude',
     ];
 
+    /** --timeout (seconds) for an rsync daemon transfer whose options leave it blank. */
+    const DAEMON_DEFAULT_TIMEOUT = 900;
+
     /**
      * The canonical rsync binary location. rsync ships in Unraid's BASE OS at
      * /usr/bin/rsync, so it is ALWAYS present on a healthy system - the plugin
@@ -286,7 +289,8 @@ class Rsync
      *        emits every whitelisted option exactly as before. Exactly ONE
      *        option depends on it: --contimeout, which rsync refuses outright on
      *        anything but a daemon connection (main.c:1558, exit 1 RERR_SYNTAX),
-     *        so it is dropped for any non-DAEMON value. The gate lives HERE and
+     *        so it is dropped for any non-DAEMON value; and a DAEMON value with
+     *        no --timeout gets DAEMON_DEFAULT_TIMEOUT. The gate lives HERE and
      *        not in buildArgv so the live options preview - which calls this
      *        mapper directly, and whose whole point is to show what will really
      *        run - cannot disagree with the argv that really runs.
@@ -296,6 +300,11 @@ class Rsync
     {
         if ($transport !== null && strtoupper(trim($transport)) !== 'DAEMON') {
             unset($opts['contimeout']);
+        }
+        // A daemon transfer has no ServerAlive to notice a stalled rsyncd, which
+        // then holds the job lock forever and every scheduled run is skipped.
+        if ($transport !== null && strtoupper(trim($transport)) === 'DAEMON' && trim((string) ($opts['timeout'] ?? '')) === '') {
+            $opts['timeout'] = (string) self::DAEMON_DEFAULT_TIMEOUT;
         }
 
         $tokens = [];
