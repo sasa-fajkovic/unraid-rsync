@@ -136,6 +136,21 @@ class Credentials
     }
 
     /**
+     * Run $fn holding the exclusive credentials lock. Every load-modify-save of
+     * credentials.json goes through it (handler saves, Ssh::pinHostKey, the
+     * secretsDir move). The lock stays beside config.json whatever secretsDir
+     * says, so a relocation and every writer contend for the same file.
+     *
+     * @template T
+     * @param callable(): T $fn
+     * @return T
+     */
+    public static function withLock(callable $fn): mixed
+    {
+        return Util::withLock(rtrim(UR_CONFIG_BASE, '/') . '/credentials.lock', $fn);
+    }
+
+    /**
      * The default top-level credentials structure (an empty keychain).
      *
      * @return array<string,mixed>
@@ -203,9 +218,10 @@ class Credentials
      * keys are filled from defaults so callers never have to null-check.
      *
      * Contract (identical to Config::load):
-     *   - File absent or empty            -> the default (empty) keychain.
+     *   - File absent                      -> the default (empty) keychain.
      *   - File present but unreadable      -> throws RuntimeException.
-     *   - File present but malformed JSON  -> throws RuntimeException.
+     *   - File present but empty, whitespace-only or malformed JSON -> throws
+     *     RuntimeException (a truncated file is not an empty keychain).
      *   - File from a NEWER schemaVersion  -> throws RuntimeException.
      *
      * @return array<string,mixed>
@@ -226,14 +242,11 @@ class Credentials
             // recoverable secrets file with an empty one.
             throw new RuntimeException("credentials.json exists but could not be read: $path");
         }
-        $raw = trim($raw);
-        if ($raw === '') {
-            return self::defaults();
-        }
-
         $data = json_decode($raw, true);
         if (!is_array($data)) {
-            throw new RuntimeException('credentials.json is not valid JSON');
+            throw new RuntimeException(trim($raw) === ''
+                ? "credentials.json is empty: $path"
+                : 'credentials.json is not valid JSON');
         }
 
         $data = self::migrate($data);
@@ -241,9 +254,11 @@ class Credentials
     }
 
     /**
-     * Persist the given credentials structure atomically (temp file in the same
-     * dir, then rename). The schemaVersion is always stamped to the current
-     * version and the shape is normalised so on-disk data is always complete.
+     * Persist the given credentials structure atomically (Util::writeAtomic:
+     * same-dir temp file, fsync, rename). The schemaVersion is always stamped to
+     * the current version and the shape is normalised so on-disk data is always
+     * complete. The file being replaced is first kept as
+     * credentials.json.last-good, when it still parses and differs.
      *
      * @param array<string,mixed> $creds
      * @throws RuntimeException on any filesystem failure.
@@ -255,7 +270,7 @@ class Credentials
 
         $path = self::path();
         $dir  = dirname($path);
-        if (!is_dir($dir) && !@mkdir($dir, 0755, true) && !is_dir($dir)) {
+        if (!is_dir($dir) && !@mkdir($dir, 0700, true) && !is_dir($dir)) {
             throw new RuntimeException("Unable to create credentials directory: $dir");
         }
 
@@ -265,26 +280,15 @@ class Credentials
         }
         $json .= "\n";
 
-        $tmp = @tempnam($dir, '.credentials.json.');
-        if ($tmp === false) {
-            throw new RuntimeException("Unable to create temp file in: $dir");
+        // 0600 is a no-op on the default FAT32 /boot (the documented reason
+        // secrets are obfuscation-only and keys are materialised to tmpfs 600
+        // before use); on an /mnt secretsDir it STICKS and is the real at-rest
+        // protection for credentials.json.
+        $current = is_file($path) ? @file_get_contents($path) : false;
+        if (is_string($current) && $current !== $json && is_array(json_decode($current, true))) {
+            Util::writeAtomic($path . '.last-good', $current, 0600);
         }
-
-        if (@file_put_contents($tmp, $json) === false) {
-            @unlink($tmp);
-            throw new RuntimeException("Failed to write temp credentials file: $tmp");
-        }
-        // Tighten perms to root-only. On the default /boot (FAT32) this is a
-        // no-op (the documented reason secrets are obfuscation-only and keys are
-        // materialised to tmpfs 600 before use). When $secretsDirOverride points
-        // at an /mnt array/pool (ext4/xfs/btrfs/zfs), this 600 STICKS and is the
-        // real at-rest protection for credentials.json.
-        @chmod($tmp, 0600);
-
-        if (!@rename($tmp, $path)) {
-            @unlink($tmp);
-            throw new RuntimeException("Failed to atomically replace credentials: $path");
-        }
+        Util::writeAtomic($path, $json, 0600);
     }
 
     /**

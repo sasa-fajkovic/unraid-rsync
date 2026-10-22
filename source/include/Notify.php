@@ -43,6 +43,8 @@ declare(strict_types=1);
  *                          one-send-per-second spacing (see send()).
  */
 
+require_once __DIR__ . '/Util.php';
+
 class Notify
 {
     /** The three webGui importance levels accepted by `notify -i`. */
@@ -172,18 +174,25 @@ class Notify
                 return false;
             }
             $command = static::buildCommand($opts);
-            $lock    = self::acquireSendLock();
+            // An unsafe runtime dir only costs the spacing, never the notification.
+            $dir     = self::privateRuntimeDir();
+            $lock    = $dir !== null ? self::acquireSendLock($dir) : null;
             try {
                 // notify names its archive "<event>-<unix second>" and drops a
                 // send whose file already exists, so never two of ours in one second.
-                $last = (int) @file_get_contents(self::runtimeDir() . '/notify.last');
+                $last = $dir !== null ? (int) @file_get_contents($dir . '/notify.last') : 0;
                 $now  = self::now();
                 if ((int) floor($now) === $last) {
                     self::pause($last + 1 - $now);
                 }
                 $code = self::dispatch($command);
                 // The second dispatch ENDED in: notify's own stamp is never later.
-                @file_put_contents(self::runtimeDir() . '/notify.last', (string) (int) floor(self::now()));
+                if ($dir !== null && !is_link($dir . '/notify.last')) {
+                    try {
+                        Util::writeAtomic($dir . '/notify.last', (string) (int) floor(self::now()), 0600);
+                    } catch (RuntimeException $e) {
+                    }
+                }
             } finally {
                 if ($lock !== null) {
                     flock($lock, LOCK_UN);
@@ -204,11 +213,10 @@ class Notify
      *
      * @return resource|null
      */
-    private static function acquireSendLock()
+    private static function acquireSendLock(string $dir)
     {
-        $dir = self::runtimeDir();
-        if (!is_dir($dir)) {
-            @mkdir($dir, 0700, true);
+        if (is_link($dir . '/notify.lock')) {
+            return null;
         }
         $fh = @fopen($dir . '/notify.lock', 'c');
         if ($fh === false) {
@@ -225,9 +233,23 @@ class Notify
         return $fh;
     }
 
-    private static function runtimeDir(): string
+    /**
+     * The runtime base, created non-recursively at 0700 if missing, or null when
+     * it fails Util::assertPrivateDir (a symlink, or a dir another user owns or
+     * can write) - send() then keeps no lock or stamp there.
+     */
+    private static function privateRuntimeDir(): ?string
     {
-        return rtrim(defined('UR_RUNTIME_BASE') ? (string) UR_RUNTIME_BASE : '/tmp/unraid.rsync', '/');
+        $dir = rtrim(defined('UR_RUNTIME_BASE') ? (string) UR_RUNTIME_BASE : '/tmp/unraid.rsync', '/');
+        if (!is_link($dir) && !file_exists($dir)) {
+            @mkdir($dir, 0700);
+        }
+        try {
+            Util::assertPrivateDir($dir);
+        } catch (RuntimeException $e) {
+            return null;
+        }
+        return $dir;
     }
 
     private static function now(): float

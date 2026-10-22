@@ -1185,6 +1185,17 @@ if (!function_exists('ur_emit_ajax_helpers')) {
     if (act) { params.set('action', act); }
     return fetch(form.getAttribute('action'), { method: 'POST', body: params, credentials: 'same-origin' })
       .then(parseResponse)
+      .then(function (res) {
+        /* Every config form on the page (Jobs and Global Settings share one page
+         * when tabbed) now edits the revision this save produced, so the next
+         * Apply is not refused as stale. */
+        if (res.ok && res.body && typeof res.body.revision === 'number') {
+          Array.prototype.forEach.call(document.querySelectorAll('input[name="configRevision"]'), function (el) {
+            el.value = String(res.body.revision);
+          });
+        }
+        return res;
+      })
       .catch(function () {
         return { ok: false, status: 0, body: null, parseError: false, networkError: true };
       });

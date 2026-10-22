@@ -174,6 +174,39 @@ final class HandlerCronTest extends TestCase
         $this->assertFileDoesNotExist(Cron::cronFilePath());
     }
 
+    public function testDeleteConnectionHoldsBothLocksWhileItWritesBothFiles(): void
+    {
+        $seed = Credentials::defaults();
+        $seed['connections'][] = Credentials::mergeConnection([
+            'id' => 'c-1', 'name' => 'rpi', 'host' => 'h', 'username' => 'u', 'authMethod' => 'PASSWORD',
+        ]);
+        Credentials::save($seed);
+        $config = Config::defaults();
+        $config['jobs'][] = Job::normalize(['name' => 'music', 'connectionId' => 'c-1', 'enabled' => true,
+            'schedule' => '0 3 * * *', 'transport' => 'SSH',
+            'pairs' => [['local' => '/mnt/user/a/', 'remote' => '/srv/a/']]]);
+        Config::save($config);
+
+        $base   = rtrim(UR_CONFIG_BASE, '/');
+        $probes = [fopen($base . '/config.lock', 'c'), fopen($base . '/credentials.lock', 'c')];
+        $held   = null;
+        // update_cron runs after both saves, still inside the action.
+        Cron::$updateCronRunner = static function () use ($probes, &$held): int {
+            $held = array_map(static fn($p) => !flock($p, LOCK_EX | LOCK_NB), $probes);
+            return 0;
+        };
+
+        $_POST = ['action' => 'deleteConnection', 'csrf_token' => 'test-token', 'id' => 'c-1'];
+        [$body, $code] = $this->runCapture(fn() => ur_action_delete_connection());
+
+        $this->assertSame(200, $code, json_encode($body));
+        $this->assertSame([true, true], $held);
+        foreach ($probes as $p) {
+            $this->assertTrue(flock($p, LOCK_EX | LOCK_NB), 'released afterwards');
+            fclose($p);
+        }
+    }
+
     public function testDeleteConnectionWithoutDependentsDoesNotTouchCron(): void
     {
         $seed = Credentials::defaults();

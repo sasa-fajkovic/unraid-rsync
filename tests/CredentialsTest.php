@@ -18,9 +18,10 @@ final class CredentialsTest extends TestCase
         // Reset the secrets-dir override BEFORE resolving path() so a leak from a
         // prior test can't point us at the wrong file.
         Credentials::$secretsDirOverride = null;
-        $path = Credentials::path();
-        if (is_file($path)) {
-            unlink($path);
+        foreach ([Credentials::path(), Credentials::path() . '.last-good'] as $path) {
+            if (is_file($path)) {
+                unlink($path);
+            }
         }
     }
 
@@ -168,6 +169,103 @@ final class CredentialsTest extends TestCase
         } finally {
             chmod($path, 0600);
         }
+    }
+
+    #[DataProvider('blankFileProvider')]
+    public function testLoadThrowsOnAPresentButBlankFile(string $body): void
+    {
+        file_put_contents(Credentials::path(), $body);
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('credentials.json is empty');
+        Credentials::load();
+    }
+
+    /** @return array<string,array{string}> */
+    public static function blankFileProvider(): array
+    {
+        return ['zero bytes' => [''], 'whitespace only' => [" \n\t\n"]];
+    }
+
+    public function testSaveKeepsTheFileItReplacesAsAPrivateLastGood(): void
+    {
+        $creds = Credentials::defaults();
+        $creds['connections'][] = ['id' => 'c-1', 'name' => 'one', 'host' => 'h', 'username' => 'u'];
+        Credentials::save($creds);
+        $before = (string) file_get_contents(Credentials::path());
+
+        $creds['connections'][0]['name'] = 'renamed';
+        Credentials::save($creds);
+
+        $lastGood = Credentials::path() . '.last-good';
+        $this->assertSame($before, file_get_contents($lastGood));
+        clearstatcache();
+        $this->assertSame(0600, fileperms($lastGood) & 0777);
+        $this->assertSame('renamed', Credentials::load()['connections'][0]['name']);
+    }
+
+    public function testSaveKeepsNoLastGoodOfACorruptFile(): void
+    {
+        file_put_contents(Credentials::path(), '{ "keys": [');
+        Credentials::save(Credentials::defaults());
+        $this->assertFileDoesNotExist(Credentials::path() . '.last-good');
+        $this->assertSame([], Credentials::load()['keys']);
+    }
+
+    public function testLockStaysBesideConfigWhateverSecretsDirSays(): void
+    {
+        Credentials::$secretsDirOverride = sys_get_temp_dir() . '/ur-secrets-elsewhere';
+        $probe = fopen(rtrim(UR_CONFIG_BASE, '/') . '/credentials.lock', 'c');
+        $this->assertNotFalse($probe);
+        try {
+            $heldInside = Credentials::withLock(static fn(): bool => !flock($probe, LOCK_EX | LOCK_NB));
+            $this->assertTrue($heldInside, 'credentials.lock under UR_CONFIG_BASE is held');
+            $this->assertTrue(flock($probe, LOCK_EX | LOCK_NB), 'and released afterwards');
+        } finally {
+            fclose($probe);
+        }
+    }
+
+    /**
+     * Ssh::pinHostKey runs in the runner process while the webGui may be saving
+     * credentials.json. Each side reloads, modifies and saves; without the lock
+     * the later save drops the other's change.
+     */
+    public function testAPinAndASaveInterleavedThroughTheLockBothLand(): void
+    {
+        $creds = Credentials::defaults();
+        $creds['connections'][] = ['id' => 'c-a', 'name' => 'a', 'host' => 'ha', 'username' => 'u'];
+        $creds['connections'][] = ['id' => 'c-b', 'name' => 'b', 'host' => 'hb', 'username' => 'u'];
+        Credentials::save($creds);
+
+        $child = sprintf(
+            'define("UR_CONFIG_BASE", %s); define("UR_RUNTIME_BASE", %s); require %s;'
+            . ' echo "ready\n"; exit(Ssh::pinHostKey("c-b", "hb ssh-ed25519 AAAAPIN") ? 0 : 1);',
+            var_export(UR_CONFIG_BASE, true),
+            var_export(UR_RUNTIME_BASE, true),
+            var_export(realpath(__DIR__ . '/../source/include/Ssh.php'), true)
+        );
+
+        $proc  = null;
+        $pipes = [];
+        Credentials::withLock(function () use ($child, &$proc, &$pipes): void {
+            $loaded = Credentials::load();
+            $proc   = proc_open([PHP_BINARY, '-r', $child], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+            $this->assertIsResource($proc);
+            $this->assertSame("ready\n", fgets($pipes[1]));
+            // Give the child time to reach the lock (or, unlocked, to save).
+            usleep(300000);
+            $loaded['connections'][0]['name'] = 'a-renamed';
+            Credentials::save($loaded);
+        });
+        $this->assertIsResource($proc);
+        $stderr = stream_get_contents($pipes[2]);
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        $this->assertSame(0, proc_close($proc), 'the pin landed: ' . $stderr);
+
+        $after = Credentials::load();
+        $this->assertSame('a-renamed', Credentials::findConnection($after, 'c-a')['name'] ?? null);
+        $this->assertSame('hb ssh-ed25519 AAAAPIN', Credentials::findConnection($after, 'c-b')['remoteHostKey'] ?? null);
     }
 
     // --- validation --------------------------------------------------------

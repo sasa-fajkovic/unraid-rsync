@@ -323,6 +323,13 @@ final class OptionsFormHelpTest extends TestCase
         foreach (['postForm', 'postFormElement', 'errText', 'show', 'parseResponse'] as $fn) {
             $this->assertStringContainsString($fn, $html, "window.urAjax must expose $fn().");
         }
+        // Settings does not reload after a save, and Jobs shares its page when
+        // tabbed: the next Apply needs the revision this save produced, or the
+        // handler refuses it as stale.
+        $this->assertMatchesRegularExpression(
+            '/typeof res\.body\.revision === \'number\'.*querySelectorAll\(\'input\[name="configRevision"\]\'\)/s',
+            $html
+        );
     }
 
     /**

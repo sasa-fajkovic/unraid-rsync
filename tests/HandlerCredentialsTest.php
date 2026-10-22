@@ -1067,6 +1067,221 @@ final class HandlerCredentialsTest extends TestCase
         $this->rmSecretsDir($src);
     }
 
+    /**
+     * The move used to run before validation: a 422 left config pointing at the
+     * old dir while the file sat only in the new one, and every job then failed
+     * "Connection not found". Now nothing moves until everything validated. (On
+     * the old code the attempt shows up as a "could not create" warning, since
+     * /mnt is not writable here.)
+     */
+    public function testSecretsDirChangeThatFailsValidationMovesNothing(): void
+    {
+        $seed = Credentials::defaults();
+        $seed['connections'][] = ['id' => 'c-1', 'name' => 'stay', 'host' => 'h', 'username' => 'u'];
+        $this->seedCreds($seed);
+        $before = file_get_contents(Credentials::path());
+        Config::save(Config::defaults());
+
+        $_POST = [
+            'action'     => 'saveConfig',
+            'csrf_token' => 'test-token',
+            'global'     => [
+                'secretsDir'          => '/mnt/user/system/unraid.rsync',
+                'defaultRsyncOptions' => ['bwlimit' => 'abc'],
+            ],
+        ];
+        [$body, $code] = $this->runCapture(fn() => ur_action_save_config());
+
+        $this->assertSame(422, $code, json_encode($body));
+        $this->assertSame([], array_filter($body['warnings'], fn($w) => str_contains($w, 'Secrets directory')));
+        $this->assertSame($before, file_get_contents(Credentials::path()));
+        $this->assertSame('', Config::load()['global']['secretsDir']);
+        $this->assertNull(Credentials::$secretsDirOverride);
+    }
+
+    public function testMigrationCopiesBeforeTheCommitAndRemovesTheSourceOnlyAfterIt(): void
+    {
+        $src = $this->tempSecretsDir();
+        $dst = $this->tempSecretsDir() . '/nested';
+        mkdir($src, 0777, true);
+        $payload = "{\"schemaVersion\":1,\"keys\":[],\"connections\":[]}\n";
+        file_put_contents($src . '/credentials.json', $payload);
+        file_put_contents($src . '/credentials.json.last-good', $payload);
+
+        $seen = [];
+        $res  = ur_migrate_credentials($src, $dst, function () use ($src, $dst, &$seen): void {
+            $seen = [is_file($src . '/credentials.json'), file_get_contents($dst . '/credentials.json')];
+        });
+
+        $this->assertTrue($res['ok'], $res['warning']);
+        $this->assertSame([true, $payload], $seen, 'at commit time both copies exist');
+        $this->assertFileDoesNotExist($src . '/credentials.json');
+        $this->assertFileDoesNotExist($src . '/credentials.json.last-good', 'no secrets linger at the old place');
+        clearstatcache();
+        $this->assertSame(0600, fileperms($dst . '/credentials.json') & 0777);
+        $this->assertSame(0700, fileperms($dst) & 0777);
+
+        $this->rmSecretsDir($src);
+        $this->rmSecretsDir($dst);
+        @rmdir(dirname($dst));
+    }
+
+    public function testMigrationRollsTheCopyBackWhenTheConfigSaveFails(): void
+    {
+        $src = $this->tempSecretsDir();
+        $dst = $this->tempSecretsDir();
+        mkdir($src, 0777, true);
+        file_put_contents($src . '/credentials.json', "SOURCE\n");
+        // A directory where config.json goes makes Config::save's rename fail.
+        mkdir(Config::path());
+        $warnings = [];
+        try {
+            ur_save_config_moving_secrets(Config::defaults(), [$src, $dst], $warnings);
+            $this->fail('the failed save must propagate');
+        } catch (RuntimeException $e) {
+            $this->assertStringContainsString('Failed to atomically replace', $e->getMessage());
+        } finally {
+            rmdir(Config::path());
+        }
+
+        $this->assertSame("SOURCE\n", file_get_contents($src . '/credentials.json'));
+        $this->assertFileDoesNotExist($dst . '/credentials.json');
+        $this->assertNull(Credentials::$secretsDirOverride);
+
+        $this->rmSecretsDir($src);
+        $this->rmSecretsDir($dst);
+    }
+
+    public function testMigrationFinishesAMoveThatLeftAnIdenticalCopyBehind(): void
+    {
+        $src = $this->tempSecretsDir();
+        $dst = $this->tempSecretsDir();
+        mkdir($src, 0777, true);
+        mkdir($dst, 0700, true);
+        file_put_contents($src . '/credentials.json', "SAME\n");
+        file_put_contents($dst . '/credentials.json', "SAME\n");
+
+        $committed = false;
+        $res = ur_migrate_credentials($src, $dst, function () use (&$committed): void {
+            $committed = true;
+        });
+
+        $this->assertTrue($res['ok'], $res['warning']);
+        $this->assertTrue($committed);
+        $this->assertFileDoesNotExist($src . '/credentials.json');
+        $this->assertSame("SAME\n", file_get_contents($dst . '/credentials.json'));
+
+        $this->rmSecretsDir($src);
+        $this->rmSecretsDir($dst);
+    }
+
+    public function testRefusedMigrationNeverCallsTheCommit(): void
+    {
+        $src = $this->tempSecretsDir();
+        $dst = $this->tempSecretsDir();
+        mkdir($src, 0777, true);
+        mkdir($dst, 0777, true);
+        file_put_contents($src . '/credentials.json', "SOURCE\n");
+        file_put_contents($dst . '/credentials.json', "OTHER\n");
+
+        $res = ur_migrate_credentials($src, $dst, function (): void {
+            $this->fail('commit must not run for a refused move');
+        });
+
+        $this->assertFalse($res['ok']);
+        $this->assertSame("SOURCE\n", file_get_contents($src . '/credentials.json'));
+        $this->assertSame("OTHER\n", file_get_contents($dst . '/credentials.json'));
+
+        $this->rmSecretsDir($src);
+        $this->rmSecretsDir($dst);
+    }
+
+    /**
+     * The dispatcher resolves the secrets pointer before the credentials lock;
+     * a saveConfig that held the lock may have moved the file meanwhile. The
+     * save must follow the pointer as it stands once the lock is held.
+     */
+    public function testCredentialsSaveReReadsTheSecretsPointerUnderTheLock(): void
+    {
+        Config::save(Config::defaults());
+        $stale = $this->tempSecretsDir();
+        Credentials::$secretsDirOverride = $stale;
+
+        $_POST = [
+            'action' => 'saveCredentials', 'csrf_token' => 'test-token', 'connections_present' => '1',
+            'connections' => [0 => ['name' => 'n', 'host' => 'h', 'username' => 'u', 'authMethod' => 'KEYFILE',
+                'keyFilePath' => '/root/.ssh/id_ed25519']],
+        ];
+        [$body, $code] = $this->runCapture(fn() => ur_action_save_credentials());
+
+        $this->assertSame(200, $code, json_encode($body));
+        $this->assertFileDoesNotExist($stale . '/credentials.json');
+        $this->assertFileExists(rtrim(UR_CONFIG_BASE, '/') . '/credentials.json');
+        $this->rmSecretsDir($stale);
+    }
+
+    public function testSaveCredentialsRefusedWhenTheFileIsEmpty(): void
+    {
+        file_put_contents(Credentials::path(), "\n");
+        $_POST = [
+            'action' => 'saveCredentials', 'csrf_token' => 'test-token',
+            'keys_present' => '1', 'keys' => [0 => ['id' => '', 'name' => 'x']],
+        ];
+        [$body, $code] = $this->runCapture(fn() => ur_action_save_credentials());
+        $this->assertSame(409, $code);
+        $this->assertStringContainsString('credentials.json is empty', $body['error']);
+        $this->assertSame("\n", file_get_contents(Credentials::path()));
+    }
+
+    // --- a stale Connections tab must not wipe a first-use host-key pin -----
+
+    /** @return array<string,mixed> */
+    private function pinnedConnectionPost(string $host, int $port): array
+    {
+        $seed = Credentials::defaults();
+        $seed['connections'][] = Credentials::mergeConnection([
+            'id' => 'c-pin', 'name' => 'pin', 'host' => 'nas.local', 'port' => 22, 'username' => 'u',
+            'keyFilePath' => '/root/.ssh/id_ed25519',
+            'remoteHostKey' => 'nas.local ssh-ed25519 AAAAPINNED',
+        ]);
+        $this->seedCreds($seed);
+        return [
+            'action' => 'saveCredentials', 'csrf_token' => 'test-token', 'connections_present' => '1',
+            'connections' => [0 => [
+                'id' => 'c-pin', 'name' => 'pin renamed', 'transport' => 'SSH', 'host' => $host,
+                'port' => (string) $port, 'username' => 'u', 'authMethod' => 'KEYFILE',
+                'keyFilePath' => '/root/.ssh/id_ed25519', 'remoteHostKey' => '', 'strictHostKey' => 'accept-new',
+            ]],
+        ];
+    }
+
+    public function testABlankHostKeyFromAStaleTabKeepsThePinForTheSameHost(): void
+    {
+        $_POST = $this->pinnedConnectionPost('nas.local', 22);
+        [$body, $code] = $this->runCapture(fn() => ur_action_save_credentials());
+        $this->assertSame(200, $code, json_encode($body));
+
+        $conn = Credentials::findConnection(Credentials::load(), 'c-pin');
+        $this->assertSame('pin renamed', $conn['name'] ?? null);
+        $this->assertSame('nas.local ssh-ed25519 AAAAPINNED', $conn['remoteHostKey'] ?? null);
+    }
+
+    /** @return array<string,array{string,int}> */
+    public static function movedTargetProvider(): array
+    {
+        return ['host changed' => ['nas2.local', 22], 'port changed' => ['nas.local', 2222]];
+    }
+
+    #[DataProvider('movedTargetProvider')]
+    public function testABlankHostKeyDoesNotCarryThePinToADifferentTarget(string $host, int $port): void
+    {
+        $_POST = $this->pinnedConnectionPost($host, $port);
+        [$body, $code] = $this->runCapture(fn() => ur_action_save_credentials());
+        $this->assertSame(200, $code, json_encode($body));
+
+        $this->assertSame('', Credentials::findConnection(Credentials::load(), 'c-pin')['remoteHostKey'] ?? null);
+    }
+
     // =====================================================================
     // rsync DAEMON transport (issue #139)
     //

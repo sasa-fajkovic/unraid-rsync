@@ -167,6 +167,7 @@ class RunState
                 throw new RuntimeException("Refusing to use a symlinked state dir: $dir");
             }
             @chmod($dir, 0700);
+            Util::assertPrivateDir($dir);
         }
     }
 

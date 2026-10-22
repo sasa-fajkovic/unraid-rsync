@@ -15,9 +15,10 @@ final class ConfigTest extends TestCase
     protected function setUp(): void
     {
         // Start each test from a clean slate (no config.json on disk).
-        $path = Config::path();
-        if (is_file($path)) {
-            unlink($path);
+        foreach ([Config::path(), Config::path() . '.last-good'] as $path) {
+            if (is_file($path)) {
+                unlink($path);
+            }
         }
     }
 
@@ -644,6 +645,82 @@ final class ConfigTest extends TestCase
         Config::load();
     }
 
+    /**
+     * Only a MISSING config.json is a fresh install. A present-but-empty one is
+     * what a FAT32 write cut short leaves, and loading it as zero jobs let
+     * apply-cron delete every schedule.
+     */
+    #[DataProvider('blankFileProvider')]
+    public function testLoadThrowsOnAPresentButBlankFile(string $body): void
+    {
+        file_put_contents(Config::path(), $body);
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('config.json is empty');
+        Config::load();
+    }
+
+    /** @return array<string,array{string}> */
+    public static function blankFileProvider(): array
+    {
+        return ['zero bytes' => [''], 'whitespace only' => [" \n\t\n"]];
+    }
+
+    public function testSaveKeepsTheFileItReplacesAsLastGood(): void
+    {
+        $first = Config::defaults();
+        Config::save($first);
+        $before = (string) file_get_contents(Config::path());
+        $this->assertFileDoesNotExist(Config::path() . '.last-good', 'nothing to keep on the first save');
+
+        $first['global']['retention'] = 7;
+        Config::save($first);
+        $this->assertSame($before, file_get_contents(Config::path() . '.last-good'));
+        $this->assertSame(7, Config::load()['global']['retention']);
+    }
+
+    public function testSaveKeepsNoLastGoodOfACorruptFileAndLeavesBakFilesAlone(): void
+    {
+        $bak = Config::path() . '.bak-2026-10-01';
+        file_put_contents($bak, 'the user\'s own backup');
+        file_put_contents(Config::path() . '.last-good', 'an older good copy');
+        file_put_contents(Config::path(), '{ truncated');
+        try {
+            Config::save(Config::defaults());
+
+            $this->assertSame('an older good copy', file_get_contents(Config::path() . '.last-good'));
+            $this->assertSame('the user\'s own backup', file_get_contents($bak));
+            $this->assertSame([], Config::load()['jobs']);
+        } finally {
+            unlink($bak);
+        }
+    }
+
+    public function testRevisionIsZeroWhenAbsentAndGoesUpOnlyWhenTheFileChanges(): void
+    {
+        file_put_contents(Config::path(), json_encode(['schemaVersion' => 2, 'jobs' => []]));
+        $cfg = Config::load();
+        $this->assertSame(0, Config::revision($cfg));
+        $this->assertArrayNotHasKey('revision', $cfg, 'never invented by a load');
+
+        $this->assertSame(1, Config::save($cfg));
+        $cfg = Config::load();
+        $this->assertSame(1, Config::revision($cfg));
+
+        $before = file_get_contents(Config::path());
+        $this->assertSame(1, Config::save($cfg), 'a no-op re-save keeps the revision');
+        $this->assertSame($before, file_get_contents(Config::path()));
+
+        $cfg['global']['retention'] = 9;
+        $this->assertSame(2, Config::save($cfg));
+        $this->assertSame(['schemaVersion', 'revision', 'global', 'jobs'], array_keys(Config::load()));
+
+        // A caller holding an older copy still moves the revision forward.
+        $stale = $cfg;
+        $stale['revision'] = 1;
+        $stale['global']['retention'] = 10;
+        $this->assertSame(3, Config::save($stale));
+    }
+
     public function testMigrateThrowsOnNewerSchema(): void
     {
         // A config from a newer plugin build must NOT be silently downgraded.
@@ -745,7 +822,8 @@ final class ConfigTest extends TestCase
      * An existing schemaVersion-2 config.json on disk must survive load() and a
      * subsequent save() COMPLETELY unchanged - same keys, same order, same
      * values, same version. This is the no-breaking-change proof for every
-     * pre-daemon install: nothing is added, dropped, reordered or re-stamped.
+     * pre-daemon install: nothing but the revision is added, and nothing is
+     * dropped, reordered or re-stamped.
      */
     public function testExistingV2ConfigOnDiskRoundTripsCompletelyUnchanged(): void
     {
@@ -760,9 +838,10 @@ final class ConfigTest extends TestCase
         $loaded = Config::load();
         $this->assertSame($disk, $loaded);
 
-        // ...and a save/load cycle on top of that is the identity too.
+        // ...and a save/load cycle on top of that is the identity too, apart
+        // from the revision the first save stamps.
         Config::save($loaded);
-        $this->assertSame($disk, Config::load());
+        $this->assertSame(['schemaVersion' => 2, 'revision' => 1] + $disk, Config::load());
 
         // The on-disk version did NOT move, and the daemon job is stored as the
         // literal 'DAEMON' rather than coerced or dropped.

@@ -285,39 +285,16 @@ class Cron
                 $removed = true;
             }
         } else {
-            // Atomic rewrite: temp file in the same dir, then rename over target.
-            $tmp = @tempnam($dir, '.cron.');
-            if ($tmp === false) {
+            try {
+                Util::writeAtomic($path, $content, 0644);
+            } catch (RuntimeException $e) {
                 return [
                     'ok'             => false,
                     'enabledJobs'    => $enabledLines,
                     'wrote'          => false,
                     'removed'        => false,
                     'updateCronCode' => -1,
-                    'error'          => 'Unable to create temp file in: ' . $dir,
-                ];
-            }
-            if (@file_put_contents($tmp, $content) === false) {
-                @unlink($tmp);
-                return [
-                    'ok'             => false,
-                    'enabledJobs'    => $enabledLines,
-                    'wrote'          => false,
-                    'removed'        => false,
-                    'updateCronCode' => -1,
-                    'error'          => 'Failed to write temp cron file: ' . $tmp,
-                ];
-            }
-            @chmod($tmp, 0644);
-            if (!@rename($tmp, $path)) {
-                @unlink($tmp);
-                return [
-                    'ok'             => false,
-                    'enabledJobs'    => $enabledLines,
-                    'wrote'          => false,
-                    'removed'        => false,
-                    'updateCronCode' => -1,
-                    'error'          => 'Failed to atomically replace cron file: ' . $path,
+                    'error'          => 'Failed to write cron file: ' . $e->getMessage(),
                 ];
             }
             $wrote = true;

@@ -432,88 +432,145 @@ function ur_release_session_lock(): void
 /**
  * Relocate credentials.json when the secrets directory changes, so the file
  * always follows the secretsDir pointer. Moves it from $from to $to (each ''
- * meaning the default /boot config dir, UR_CONFIG_BASE).
+ * meaning the default /boot config dir, UR_CONFIG_BASE), as ONE transaction
+ * under Credentials::withLock:
+ *   1. copy privately: a 0600 temp file in the (0700) destination dir, fsynced
+ *      and renamed into place, then verified by sha256 against the source;
+ *   2. $commit() - the caller's Config::save of the new pointer;
+ *   3. only then unlink the source (and its .last-good).
+ * If $commit throws, the copy is removed and the source left as it was, then the
+ * exception propagates, so the pointer and the file can never part ways.
  *
- * Returns ['ok' => bool, 'warning' => string]. ok=false means the caller must
- * NOT commit the new pointer - credentials stay at $from. A non-empty warning on
- * an ok=true result is a non-fatal note (e.g. the old copy couldn't be removed).
+ * Returns ['ok' => bool, 'warning' => string]. ok=false means nothing moved and
+ * $commit was NOT called: the caller keeps the old pointer. A non-empty warning
+ * on an ok=true result is a non-fatal note (the old copy couldn't be removed).
  *
  * Safety:
- *   - copy()+unlink, NOT rename(): /boot is FAT32 and /mnt is ext4/xfs/btrfs/zfs,
- *     so a rename across devices fails (EXDEV); copy works either direction.
- *   - never clobbers: if the destination already has a credentials.json we abort
- *     rather than silently overwrite an existing keychain there.
- *   - chmod 600 on the destination (sticks on /mnt; a documented no-op on /boot).
- *   - removes the source only after the copy is verified, so a move OFF the
- *     world-readable flash never leaves secrets lingering there.
+ *   - copy+unlink, NOT rename(): /boot is FAT32 and /mnt is ext4/xfs/btrfs/zfs,
+ *     so a rename across devices fails (EXDEV); a copy works either direction.
+ *   - never clobbers: a destination credentials.json with DIFFERENT content
+ *     aborts the move. One identical to the source is a copy an interrupted
+ *     earlier move left behind, and the move just completes.
+ *   - removes the source only after the commit, so a move OFF the world-readable
+ *     flash never leaves secrets lingering there.
  *
- * @param string $from validated source secrets dir ('' = /boot)
- * @param string $to   validated destination secrets dir ('' = /boot)
+ * @param string        $from   validated source secrets dir ('' = /boot)
+ * @param string        $to     validated destination secrets dir ('' = /boot)
+ * @param callable|null $commit persists the new pointer; null = nothing to persist
  * @return array{ok: bool, warning: string}
  */
-function ur_migrate_credentials(string $from, string $to): array
+function ur_migrate_credentials(string $from, string $to, ?callable $commit = null): array
 {
-    $base    = rtrim(UR_CONFIG_BASE, '/');
-    $srcDir  = ($from !== '') ? rtrim($from, '/') : $base;
-    $dstDir  = ($to !== '')   ? rtrim($to, '/')   : $base;
-    $srcFile = $srcDir . '/credentials.json';
-    $dstFile = $dstDir . '/credentials.json';
+    return Credentials::withLock(static function () use ($from, $to, $commit): array {
+        $base    = rtrim(UR_CONFIG_BASE, '/');
+        $srcDir  = ($from !== '') ? rtrim($from, '/') : $base;
+        $dstDir  = ($to !== '')   ? rtrim($to, '/')   : $base;
+        $srcFile = $srcDir . '/credentials.json';
+        $dstFile = $dstDir . '/credentials.json';
+        $commit ??= static function (): void {
+        };
 
-    // Nothing stored yet: no file to move. The pointer can change freely; the
-    // load path returns an empty keychain at the new location.
-    if (!is_file($srcFile)) {
+        // Nothing stored yet: no file to move. The pointer can change freely; the
+        // load path returns an empty keychain at the new location.
+        if (!is_file($srcFile)) {
+            $commit();
+            return ['ok' => true, 'warning' => ''];
+        }
+
+        $copied = false;
+        if (is_file($dstFile)) {
+            if (@hash_file('sha256', $dstFile) !== @hash_file('sha256', $srcFile)) {
+                return [
+                    'ok'      => false,
+                    'warning' => 'Secrets directory not changed: ' . $dstDir
+                        . ' already contains a different credentials.json. Remove or rename it first.',
+                ];
+            }
+        } else {
+            // A missing /mnt share usually means the array is not started -
+            // surface that rather than failing obscurely.
+            if (!is_dir($dstDir) && !@mkdir($dstDir, 0700, true) && !is_dir($dstDir)) {
+                return [
+                    'ok'      => false,
+                    'warning' => 'Secrets directory not changed: could not create ' . $dstDir
+                        . ' (is the array started?). Credentials stay where they are.',
+                ];
+            }
+            try {
+                // An unreadable source copies as '' and fails the sha256 check below.
+                Util::writeAtomic($dstFile, (string) @file_get_contents($srcFile), 0600);
+            } catch (RuntimeException $e) {
+                return [
+                    'ok'      => false,
+                    'warning' => 'Secrets directory not changed: failed to copy credentials to '
+                        . $dstDir . '. Credentials stay where they are.',
+                ];
+            }
+            $copied = true;
+            if (@hash_file('sha256', $dstFile) !== @hash_file('sha256', $srcFile)) {
+                @unlink($dstFile);
+                return [
+                    'ok'      => false,
+                    'warning' => 'Secrets directory not changed: the copied credentials file did not '
+                        . 'match the original, so it was discarded. Credentials stay where they are.',
+                ];
+            }
+        }
+
+        try {
+            $commit();
+        } catch (Throwable $e) {
+            if ($copied) {
+                @unlink($dstFile);
+            }
+            throw $e;
+        }
+
+        // Remove the old copy so secrets don't linger at the previous location.
+        @unlink($srcFile . '.last-good');
+        if (!@unlink($srcFile)) {
+            return [
+                'ok'      => true,
+                'warning' => 'Credentials were copied to ' . $dstDir . ', but the old copy at '
+                    . $srcDir . ' could not be removed - delete it manually.',
+            ];
+        }
+
         return ['ok' => true, 'warning' => ''];
-    }
+    });
+}
 
-    // Never overwrite an existing keychain at the destination.
-    if (is_file($dstFile)) {
-        return [
-            'ok'      => false,
-            'warning' => 'Secrets directory not changed: ' . $dstDir
-                . ' already contains a credentials.json. Remove or rename it first.',
-        ];
+/**
+ * Save $config, moving credentials.json along when $secretsMove = [from, to]:
+ * the save is the commit step of ur_migrate_credentials' transaction. A refused
+ * move saves with the old pointer and adds its warning.
+ *
+ * @param array<string,mixed>           $config   carrying the OLD secretsDir
+ * @param array{0:string,1:string}|null $secretsMove
+ * @param array<int,string>             $warnings
+ * @return int the saved revision
+ */
+function ur_save_config_moving_secrets(array $config, ?array $secretsMove, array &$warnings): int
+{
+    if ($secretsMove === null) {
+        return Config::save($config);
     }
-
-    // Ensure the destination dir exists. A missing /mnt share usually means the
-    // array is not started - surface that rather than failing obscurely.
-    if (!is_dir($dstDir) && !@mkdir($dstDir, 0755, true) && !is_dir($dstDir)) {
-        return [
-            'ok'      => false,
-            'warning' => 'Secrets directory not changed: could not create ' . $dstDir
-                . ' (is the array started?). Credentials stay where they are.',
-        ];
+    [$from, $to] = $secretsMove;
+    $revision    = 0;
+    $mig = ur_migrate_credentials($from, $to, static function () use ($config, $to, &$revision): void {
+        $config['global']['secretsDir'] = $to;
+        $revision = Config::save($config);
+    });
+    if ($mig['ok']) {
+        // Any later credential read in THIS request uses the new path.
+        Credentials::$secretsDirOverride = ($to !== '') ? $to : null;
+    } else {
+        $revision = Config::save($config);
     }
-
-    if (!@copy($srcFile, $dstFile)) {
-        @unlink($dstFile);
-        return [
-            'ok'      => false,
-            'warning' => 'Secrets directory not changed: failed to copy credentials to '
-                . $dstDir . '. Credentials stay where they are.',
-        ];
+    if ($mig['warning'] !== '') {
+        $warnings[] = $mig['warning'];
     }
-    @chmod($dstFile, 0600);
-
-    // Verify the copy is byte-identical before removing the original.
-    if (@filesize($dstFile) !== @filesize($srcFile)) {
-        @unlink($dstFile);
-        return [
-            'ok'      => false,
-            'warning' => 'Secrets directory not changed: the copied credentials file did not '
-                . 'match the original, so it was discarded. Credentials stay where they are.',
-        ];
-    }
-
-    // Remove the old copy so secrets don't linger at the previous location.
-    if (!@unlink($srcFile)) {
-        return [
-            'ok'      => true,
-            'warning' => 'Credentials were copied to ' . $dstDir . ', but the old copy at '
-                . $srcDir . ' could not be removed - delete it manually.',
-        ];
-    }
-
-    return ['ok' => true, 'warning' => ''];
+    return $revision;
 }
 
 /**
@@ -559,8 +616,18 @@ function ur_validate_jobs(array $jobs, array $global, ?array $creds): array
  * Expected POST shape (nested form names round-trip into these):
  *   jobs[<i>][name], jobs[<i>][pairs][<k>][local], jobs[<i>][rsyncOptions][...]
  *   global[defaultRsyncOptions][...]
+ *   configRevision (optional) - the Config::revision the form rendered from
  */
 function ur_action_save_config(): void
+{
+    Config::withLock('ur_save_config_locked');
+}
+
+/**
+ * ur_action_save_config's body, run under Config::withLock so the load, the
+ * revision check and the save cannot interleave with another save.
+ */
+function ur_save_config_locked(): void
 {
     // Start from the on-disk config so we preserve schemaVersion and any keys
     // the form does not submit. If the existing config can't be loaded (corrupt
@@ -574,6 +641,20 @@ function ur_action_save_config(): void
             'Existing configuration could not be read, so the save was refused to '
             . 'avoid overwriting it: ' . $e->getMessage(),
             409
+        );
+        return;
+    }
+
+    // A form rendered from an older config.json would silently undo whatever was
+    // saved since (another tab, a deleteConnection). A client without the field
+    // predates the check and is let through.
+    $revision = Config::revision($config);
+    if (array_key_exists('configRevision', $_POST)
+        && filter_var($_POST['configRevision'], FILTER_VALIDATE_INT) !== $revision) {
+        sendError(
+            'Configuration changed since this page loaded; reload and reapply.',
+            409,
+            ['ok' => false, 'revision' => $revision]
         );
         return;
     }
@@ -667,10 +748,12 @@ function ur_action_save_config(): void
 
     // secretsDir (where credentials.json lives): validate/confine. Changing it
     // RELOCATES credentials.json so the file always follows the pointer (the load
-    // path reads it from wherever this points). The new pointer is committed only
-    // to match where the file actually ended up - if the move fails we keep the
-    // old location so connections never appear to vanish. Only when the field is
-    // present, so a partial (Jobs-only) POST never wipes it.
+    // path reads it from wherever this points). The move happens only at save
+    // time, after every validation below has passed, and the new pointer is
+    // committed only to match where the file actually ended up - see
+    // ur_save_config_moving_secrets. Only when the field is present, so a partial
+    // (Jobs-only) POST never wipes it.
+    $secretsMove = null;
     if ($hasGlobal && array_key_exists('secretsDir', $globalIn)) {
         $oldSecretsDir   = Config::sanitizeSecretsDir($config['global']['secretsDir'] ?? '');
         $rawSecretsDir   = is_string($globalIn['secretsDir']) ? trim($globalIn['secretsDir']) : '';
@@ -679,25 +762,10 @@ function ur_action_save_config(): void
             // Non-empty but invalid: reject, keep the current location.
             $allWarnings[] = 'Secrets directory ignored: it must be an absolute path under /mnt '
                 . '(e.g. /mnt/user/system/unraid.rsync). Credentials stay where they are.';
-            $config['global']['secretsDir'] = $oldSecretsDir;
         } elseif ($cleanSecretsDir !== $oldSecretsDir) {
-            // Effective location changed: move credentials.json old -> new.
-            $mig = ur_migrate_credentials($oldSecretsDir, $cleanSecretsDir);
-            if ($mig['ok']) {
-                $config['global']['secretsDir'] = $cleanSecretsDir;
-                // Any later credential read in THIS request uses the new path.
-                Credentials::$secretsDirOverride = ($cleanSecretsDir !== '') ? $cleanSecretsDir : null;
-                if ($mig['warning'] !== '') {
-                    $allWarnings[] = $mig['warning'];
-                }
-            } else {
-                // Move failed: keep the old pointer so credentials stay reachable.
-                $config['global']['secretsDir'] = $oldSecretsDir;
-                $allWarnings[] = $mig['warning'];
-            }
-        } else {
-            $config['global']['secretsDir'] = $cleanSecretsDir; // unchanged
+            $secretsMove = [$oldSecretsDir, $cleanSecretsDir];
         }
+        $config['global']['secretsDir'] = $oldSecretsDir;
     }
 
     // Jobs (the Jobs tab) - only rebuild the jobs list when it was submitted.
@@ -732,7 +800,7 @@ function ur_action_save_config(): void
             return;
         }
         try {
-            Config::save($config);
+            $revision = ur_save_config_moving_secrets($config, $secretsMove, $allWarnings);
         } catch (Throwable $e) {
             sendError('Failed to save configuration: ' . $e->getMessage(), 500);
             return;
@@ -742,6 +810,7 @@ function ur_action_save_config(): void
             'message'  => 'Configuration saved.',
             'warnings' => $allWarnings,
             'jobs'     => count($config['jobs'] ?? []),
+            'revision' => $revision,
         ], 200);
         return;
     }
@@ -830,7 +899,7 @@ function ur_action_save_config(): void
     $config['jobs'] = $normalized;
 
     try {
-        Config::save($config);
+        $revision = ur_save_config_moving_secrets($config, $secretsMove, $allWarnings);
     } catch (Throwable $e) {
         sendError('Failed to save configuration: ' . $e->getMessage(), 500);
         return;
@@ -859,12 +928,32 @@ function ur_action_save_config(): void
         'message'  => 'Configuration saved.',
         'warnings' => $allWarnings,
         'jobs'     => count($normalized),
+        'revision' => $revision,
     ], 200);
 }
 
 // =====================================================================
 // Credentials actions
 // =====================================================================
+
+/**
+ * Run a credentials load-modify-save action under Credentials::withLock,
+ * re-reading the secretsDir pointer once the lock is held: the dispatcher
+ * resolved it before, and a saveConfig holding the lock may have moved
+ * credentials.json since - a write to the old path would start a second file.
+ */
+function ur_with_credentials_lock(callable $action): void
+{
+    Credentials::withLock(static function () use ($action): void {
+        try {
+            $dir = Config::sanitizeSecretsDir(Config::load()['global']['secretsDir'] ?? '');
+            Credentials::$secretsDirOverride = ($dir !== '') ? $dir : null;
+        } catch (Throwable $e) {
+            // Unreadable config: keep the dispatcher's resolution.
+        }
+        $action();
+    });
+}
 
 /**
  * Normalise a raw key submission ($_POST['keys'][i]) into the stored shape.
@@ -1004,6 +1093,14 @@ function ur_normalize_connection_for_save(array $raw, array $existing): array
         // that no key file is in use.
         $conn['keyFilePath'] = '';
     }
+    // A tab opened before a run pinned the host key on first use posts the field
+    // empty; that must not wipe the pin while it still belongs to the same host.
+    if ($prev !== null && trim((string) $conn['remoteHostKey']) === ''
+        && trim((string) ($prev['remoteHostKey'] ?? '')) !== ''
+        && $conn['host'] === (string) ($prev['host'] ?? '')
+        && (int) $conn['port'] === (int) ($prev['port'] ?? 0)) {
+        $conn['remoteHostKey'] = (string) $prev['remoteHostKey'];
+    }
     if ($conn['transport'] === 'DAEMON') {
         // Same display:none-still-submits problem as the password above: a card
         // switched to DAEMON still posts whatever the hidden SSH controls held.
@@ -1025,6 +1122,11 @@ function ur_normalize_connection_for_save(array $raw, array $existing): array
  * can't be read, to avoid clobbering a recoverable secrets file.
  */
 function ur_action_save_credentials(): void
+{
+    ur_with_credentials_lock('ur_save_credentials_locked');
+}
+
+function ur_save_credentials_locked(): void
 {
     try {
         $creds = Credentials::load();
@@ -1300,6 +1402,11 @@ function ur_action_save_credentials(): void
  */
 function ur_action_generate_key(): void
 {
+    ur_with_credentials_lock('ur_generate_key_locked');
+}
+
+function ur_generate_key_locked(): void
+{
     try {
         $creds = Credentials::load();
     } catch (Throwable $e) {
@@ -1367,6 +1474,11 @@ function ur_action_generate_key(): void
  */
 function ur_action_import_key(): void
 {
+    ur_with_credentials_lock('ur_import_key_locked');
+}
+
+function ur_import_key_locked(): void
+{
     try {
         $creds = Credentials::load();
     } catch (Throwable $e) {
@@ -1428,6 +1540,11 @@ function ur_action_import_key(): void
  */
 function ur_action_delete_key(): void
 {
+    ur_with_credentials_lock('ur_delete_key_locked');
+}
+
+function ur_delete_key_locked(): void
+{
     try {
         $creds = Credentials::load();
     } catch (Throwable $e) {
@@ -1479,6 +1596,12 @@ function ur_action_delete_key(): void
  * the response reports which jobs were disabled.
  */
 function ur_action_delete_connection(): void
+{
+    // Writes both files: config lock first, as saveConfig takes them.
+    Config::withLock(static fn() => ur_with_credentials_lock('ur_delete_connection_locked'));
+}
+
+function ur_delete_connection_locked(): void
 {
     try {
         $creds = Credentials::load();
