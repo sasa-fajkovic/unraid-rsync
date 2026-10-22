@@ -21,8 +21,8 @@ Run multiple **independent** rsync jobs, each with:
 - a **transport**: **SSH** (push to or pull from a remote host), **rsync
   daemon** (an `rsyncd` module on a NAS or another server), or **Local** (both
   sides are paths on this server, confined under `/mnt`);
-- its own cron schedule (per-job, not one global schedule), with a live
-  **Next run** column;
+- its own cron schedule (per-job, not one global schedule), with its live
+  **Next run** shown on the job;
 - a curated, **whitelisted** set of rsync flags exposed as checkboxes and value
   inputs (no free-form flag string — destructive flags are gated with
   guardrails), each with native **inline help** (`?`-on-hover → blue box);
@@ -120,6 +120,22 @@ on both ends; **Preserve times** on; and a target marker with expected content
 - A tabbed **Unraid Rsync** page under **Settings → User Utilities** with
   **Overview**, **Jobs**, **Connections**, **Credentials**, **Global Settings**,
   **Status** and **History** tabs.
+- A **Jobs** tab with **one list**: each job is a card whose header row is its
+  status (state badge, enabled · transport · schedule, **Last run**, **Next
+  run**) with **Logs / Run / Dry-run / Abort** beside it; click the header to
+  edit the job in place. Run and Dry-run stay disabled on a card with unsaved
+  edits until you Apply.
+- An **Overview** tab (a read-only status board of every job) and a
+  **Dashboard** tile on Unraid's dashboard, both updated automatically.
+- A **History** tab: every execution of every job, real and dry runs, filtered
+  by job (deleted jobs included), status and type and paged; a failed run's
+  badge tooltip names its reason (or rsync's last error), the exit code's
+  tooltip its meaning, and **View** / **Download** open or save its log. How
+  many executions are kept per job is the **Keep last N executions** setting.
+- **A dry run never paints the status.** The badge, **Last run** and the
+  Dashboard come from the last *real* run; when the newest execution was a dry
+  run it shows as a neutral second line (`Dry-run OK · <time>`), so a green
+  preview can never hide a failed backup.
 - Jobs CRUD + Global Settings (config persisted to `config.json`).
 - A **Connections** tab (see [Credentials](#credentials)) in two flavours:
   **SSH** connections with three auth methods — **key file on disk** (default),
@@ -135,12 +151,17 @@ on both ends; **Preserve times** on; and a target marker with expected content
   path guardrails) with manual **Run / Dry-run / Abort** per job, and native
   **inline help** on every rsync flag and option.
 - **Per-job cron scheduling**: each enabled job runs on its own 5-field cron
-  schedule, plus a **Next run** column on the Jobs list.
+  schedule, and its **Next run** is shown on the job (`manual (on demand)` for
+  a run-on-demand job).
 - **Live status badges** in clear status colors —
-  **success** (green), **warning** (orange), **failed** (red),
-  **aborted** (grey), **pending** (grey), **running** (blue, pulsing).
+  **success** (green), **warning** (orange; also partial and timeout),
+  **failed** (red; also crashed), **aborted** (grey), **skipped** and **never
+  run** (grey), **running** (blue, pulsing).
 - A **per-run log viewer**: pick any past run from a selector and watch the log
-  tail update live (1-second poll while a run is in progress).
+  tail update live (1-second poll while a run is in progress). When the log
+  holds rsync's overall progress line (`--info=progress2`), a note explains
+  that its percentage can read 0% for most of a run, because rsync keeps
+  growing the total while it scans; only the final line is reliable.
 - A **per-job log level**, so a nightly backup of a large tree does not bury its
   own errors under a file listing:
 
@@ -169,17 +190,20 @@ on both ends; **Preserve times** on; and a target marker with expected content
   protocol for a peer that misbehaves at the version it advertises; leave it
   blank otherwise. ACL and extended-attribute preservation over SSH or rsync
   daemon need 30 or higher.
-- A **Status** tab showing the rolling cross-job plugin log and an
-  **rsync-binary presence indicator** (detected path + the first line of
-  `rsync --version`, or a clear warning if rsync is somehow absent).
+- A **Status** tab showing the rolling cross-job plugin log (filter by job,
+  wrap, copy, download) and an **rsync-binary presence indicator** (detected
+  path + the first line of `rsync --version`, or a clear warning if rsync is
+  somehow absent). Overview, Jobs, Status and History share one status poll:
+  every 2 seconds while a job runs, every 15 seconds otherwise.
 - **Notifications** through Unraid's native `notify`, with a per-job
   **notify mode** — `off`, `success-only`, `failure-only`, or `always` — and
   importance chosen by cause, so it can be routed to agents: *alert* = act now
   (failed, pre-hook timeout, run did not start, runner died mid-run), *warning*
   = look today (partial, timeout, `--max-delete` cap hit, post-hook failed or
-  timed out, scheduled run aborted or skipped because the previous one still
-  runs), *normal* = FYI (success, files vanished during transfer (exit 24),
-  manual abort). `failure-only` sends every non-normal one. `notify init` is run
+  timed out, scheduled run aborted), *normal* = FYI (success, files vanished
+  during transfer (exit 24), manual abort, scheduled run skipped because the
+  previous one still runs). `failure-only` sends every non-normal one;
+  `success-only` every normal one except aborts and skips. `notify init` is run
   on install so notifications work out of the box.
 - **Snapshot mode** for SSH push jobs: dated, hard-linked versioned copies
   with daily / weekly / monthly retention, a completion gate, a suspect-run hold,
@@ -218,6 +242,49 @@ re-applied automatically:
   configured schedule is live immediately without waiting for a reboot;
 - on **array start** (the `event/started` hook re-applies), which works around a
   known Unraid 7.x bug where the boot-time `update_cron` may not run.
+
+### Delete safety
+
+A mirror with `--delete` makes the destination match the source, so an empty or
+wrong path on either side can wipe a backup. The plugin refuses those runs:
+
+- **At save:** two pairs of one delete job may not write to the same or nested
+  directories, and a `--delete` destination may not be, contain or lie inside
+  another job's destination on the same host and port. A host name and an IP
+  address for one machine are not recognised as the same host, so use one name
+  per destination machine in every connection.
+- **Target marker** (optional per job): a file on the destination drive, with
+  the content it must hold. Missing or different → the run fails with
+  `dest-not-mounted` before the pre-run hook and before anything is written.
+- **Before the pre-run hook**, every remote `--delete` destination (SSH or rsync
+  daemon, push) is listed one level deep. One that holds
+  `.unraid-rsync-target`, `.ur-snapshot-root` or `snapshots` is a drive root or
+  a snapshot store and is refused (`dest-is-protected`); one that exists but
+  cannot be listed is refused too (`dest-probe-failed`).
+- **After the pre-run hook** (which may mount the drive), a local source or
+  destination on Unraid's RAM root filesystem is refused
+  (`source-not-mounted` / `dest-not-mounted`): an unmounted drive is never
+  backed up into RAM, and an empty mountpoint never empties a backup. With a
+  delete option on, an empty local source is refused (`source-empty`; a
+  dry run only reports it) and a local destination gets the same protected-name
+  check.
+
+### Where things are stored
+
+- **Configuration** (`config.json`, `credentials.json`) lives in
+  `/boot/config/plugins/unraid.rsync/`. Every save writes a temp file, fsyncs it
+  and renames it over the old one, keeping the previous parsable copy as
+  `<name>.last-good`. A present but empty or unreadable file is refused, never
+  treated as a fresh install. A Jobs or Global Settings save from a page loaded
+  before another change was saved is refused (HTTP 409, *Configuration changed
+  since this page loaded; reload and reapply.*) instead of undoing that change.
+- **Run logs** live in RAM (`/tmp/unraid.rsync`) by default: no flash wear, but
+  gone after a reboot (History survives; only the log bodies are lost). Set
+  **Persistent log directory** on the Global Settings tab to a path under
+  `/mnt` to keep them across reboots. One run log is capped at 16 MiB, a job's
+  logs at 256 MiB, and `plugin.log` rotates past 1 MiB.
+- **Credentials** can move off the flash with **Secrets directory** (see
+  [below](#storing-credentials-on-the-array-instead-of-the-flash)).
 
 ### Credentials
 
@@ -277,7 +344,9 @@ do not apply there. Consequences:
   the host key it saw to the connection; a later, changed key then fails
   closed instead of being silently re-accepted. Run **Discover host key**
   ahead of time to pin it explicitly rather than trusting whatever the first
-  scheduled run sees.
+  scheduled run sees. The connection card shows the pinned key's fingerprint,
+  with **Clear pin on Apply** and **Replace…**; changing the connection's host
+  or port clears the old pin, so the next connection pins the new host's key.
 
 #### Storing credentials on the array instead of the flash
 
@@ -287,7 +356,12 @@ tab to an absolute path under `/mnt` (an array share or pool — ideally one tha
 is **encrypted** and **not** exported over SMB/NFS), e.g.
 `/mnt/user/system/unraid.rsync`. The plugin then stores `credentials.json` there
 with real `chmod 600` permissions (ext4/xfs/btrfs/zfs honour Unix perms; FAT32
-does not). Changing the setting **moves** the existing file to the new location.
+does not). Changing the setting **moves** the existing file to the new location:
+it is copied, verified by checksum and only then removed from the old place, and a
+move cut short is completed or undone the next time credentials are written. A path under
+`/mnt/remotes` or `/mnt/addons`, a share or pool root itself (use a directory
+inside it), or an existing directory another user owns or others can write is
+refused.
 
 This does **not** remove the run-time copy-to-`tmpfs` step — `ssh -i` still needs
 a discrete key file extracted from the JSON at mode `600`, and the materialised
