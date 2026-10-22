@@ -1755,14 +1755,16 @@ final class HandlerCredentialsTest extends TestCase
     #[DataProvider('movedTargetProvider')]
     public function testTheOldPinPostedBackForADifferentTargetIsCleared(string $host, int $port): void
     {
-        $_POST = $this->pinnedConnectionPost($host, $port, "nas.local ssh-ed25519 AAAAPINNED\r\n");
+        $_POST  = $this->pinnedConnectionPost($host, $port, "nas.local ssh-ed25519 AAAAPINNED\r\n");
+        $logged = (int) @filesize(Logger::pluginLogPath());
         [$body, $code] = $this->runCapture(fn() => ur_action_save_credentials());
         $this->assertSame(200, $code, json_encode($body));
 
         $this->assertSame('', Credentials::findConnection(Credentials::load(), 'c-pin')['remoteHostKey'] ?? null);
+        clearstatcache();
         $this->assertStringContainsString(
-            'Connection c-pin: the host or port changed, so its pinned host key was cleared.',
-            (string) file_get_contents(Logger::pluginLogPath())
+            'Connection c-pin: the host or port changed, so its pinned host key was cleared',
+            (string) file_get_contents(Logger::pluginLogPath(), false, null, $logged)
         );
     }
 
