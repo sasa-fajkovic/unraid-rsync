@@ -174,4 +174,70 @@ final class PageHelpersTest extends TestCase
             PageHelpers::dryRunLine(['label' => 'Dry-run OK', 'finishedAt' => '2026-01-01T01:23:15Z'], self::NOW)
         );
     }
+
+    public function testTransportAndAuthAreNamedInWordsNotCodes(): void
+    {
+        $this->assertSame(['SSH', 'DAEMON', 'LOCAL'], array_keys(PageHelpers::TRANSPORT_LABELS));
+        $this->assertSame('Key file on disk', PageHelpers::authLabel(['transport' => 'SSH', 'authMethod' => 'KEYFILE']));
+        $this->assertSame('Managed key', PageHelpers::authLabel(['transport' => 'SSH', 'authMethod' => 'KEY']));
+        $this->assertSame('Password', PageHelpers::authLabel(['authMethod' => 'PASSWORD']));
+        // A daemon's authMethod is whatever its hidden select posted: never shown.
+        $this->assertSame('Module secret', PageHelpers::authLabel(['transport' => 'DAEMON', 'authMethod' => 'KEYFILE', 'password' => 'x']));
+        $this->assertSame('None', PageHelpers::authLabel(['transport' => 'DAEMON', 'authMethod' => 'PASSWORD', 'password' => '']));
+        $this->assertSame('ODD', PageHelpers::authLabel(['authMethod' => 'odd']));
+    }
+
+    public function testConnectionOptionsHideTheOtherTransportButNeverDropOne(): void
+    {
+        $conns = [
+            ['id' => 'c-legacy', 'name' => 'Legacy'],              // predates the transport key: SSH
+            ['id' => 'c-d', 'name' => 'Daemon', 'transport' => 'daemon'],
+            ['id' => '', 'name' => 'no id'],
+            'not a record',
+        ];
+        $ssh = PageHelpers::connectionOptions($conns, 'SSH', '');
+        $this->assertSame(['c-legacy', 'c-d'], array_column($ssh, 'id'));
+        $this->assertSame([false, true], array_column($ssh, 'hidden'));
+        $this->assertSame(['Legacy', 'Daemon [rsyncd]'], array_column($ssh, 'label'));
+        $this->assertSame(['SSH', 'DAEMON'], array_column($ssh, 'transport'));
+
+        // The selected one stays visible, marked as a mismatch.
+        $sel = PageHelpers::connectionOptions($conns, 'DAEMON', 'c-legacy');
+        $this->assertSame([false, false], array_column($sel, 'hidden'));
+        $this->assertSame([true, false], array_column($sel, 'mismatch'));
+
+        // A Local job uses no connection: nothing filtered or marked.
+        $local = PageHelpers::connectionOptions($conns, 'LOCAL', 'c-d');
+        $this->assertSame([false, false], array_column($local, 'hidden'));
+        $this->assertSame([false, false], array_column($local, 'mismatch'));
+    }
+
+    public function testOptionsLineIsThePreviewOfTheTransportsArgv(): void
+    {
+        $opts = Config::defaultRsyncOptions();
+        $this->assertSame(
+            implode(' ', PageHelpers::previewTokens(Rsync::optionTokens(Config::mergeRsyncOptions($opts), 'SSH'))),
+            PageHelpers::optionsLine($opts, 'SSH')
+        );
+        $opts['delete'] = true;
+        $opts['timeout'] = '';
+        $this->assertStringContainsString('--delete', PageHelpers::optionsLine($opts, 'SSH'));
+        // A blank timeout means 900 s on a daemon only (Rsync::DAEMON_DEFAULT_TIMEOUT).
+        $this->assertStringContainsString('--timeout=900', PageHelpers::optionsLine($opts, 'DAEMON'));
+        $this->assertStringNotContainsString('--timeout=', PageHelpers::optionsLine($opts, 'SSH'));
+    }
+
+    public function testHostKeyFingerprintsMatchSshKeygen(): void
+    {
+        // ssh-keygen -lf of this key: 256 SHA256:+ZjfDhL77345365Qi0LcRjDa7c+ztg8TCGjlwLbhKx4 (ED25519)
+        $key = 'AAAAC3NzaC1lZDI1NTE5AAAAIFH++n/GvCAHHKUzjnBGVlq/ldPq0biex6u5ivgysR44';
+        $this->assertSame(
+            [['type' => 'ssh-ed25519', 'fingerprint' => 'SHA256:+ZjfDhL77345365Qi0LcRjDa7c+ztg8TCGjlwLbhKx4']],
+            PageHelpers::hostKeyFingerprints("# nas.local:22 SSH-2.0-OpenSSH\r\nnas.local ssh-ed25519 $key\r\n")
+        );
+        // A bare "type key" line, a hashed host and a marker all parse; junk does not.
+        $multi = PageHelpers::hostKeyFingerprints("ssh-ed25519 $key\n|1|abc=|def= ssh-ed25519 $key\n@revoked h ssh-ed25519 $key\nnas.local ssh-ed25519 !!notbase64\njunk");
+        $this->assertCount(3, $multi);
+        $this->assertSame([], PageHelpers::hostKeyFingerprints(''));
+    }
 }

@@ -1777,6 +1777,32 @@ final class HandlerCredentialsTest extends TestCase
         $this->assertSame('nas2.local ssh-ed25519 AAAANEW', Credentials::findConnection(Credentials::load(), 'c-pin')['remoteHostKey'] ?? null);
     }
 
+    public function testClearHostKeyDropsThePinForTheSameTarget(): void
+    {
+        $_POST  = $this->pinnedConnectionPost('nas.local', 22, 'nas.local ssh-ed25519 AAAAPINNED');
+        $_POST['connections'][0]['clearHostKey'] = '1';
+        $logged = (int) @filesize(Logger::pluginLogPath());
+        [$body, $code] = $this->runCapture(fn() => ur_action_save_credentials());
+        $this->assertSame(200, $code, json_encode($body));
+
+        $this->assertSame('', Credentials::findConnection(Credentials::load(), 'c-pin')['remoteHostKey'] ?? null);
+        clearstatcache();
+        $this->assertStringContainsString(
+            'Connection c-pin: its pinned host key was cleared on request.',
+            (string) file_get_contents(Logger::pluginLogPath(), false, null, $logged)
+        );
+    }
+
+    public function testClearHostKeyWorksFromABlankStaleTabToo(): void
+    {
+        $_POST = $this->pinnedConnectionPost('nas.local', 22);
+        $_POST['connections'][0]['clearHostKey'] = '1';
+        [$body, $code] = $this->runCapture(fn() => ur_action_save_credentials());
+        $this->assertSame(200, $code, json_encode($body));
+
+        $this->assertSame('', Credentials::findConnection(Credentials::load(), 'c-pin')['remoteHostKey'] ?? null);
+    }
+
     public function testTheOldPinPostedBackForTheSameTargetIsKept(): void
     {
         $_POST = $this->pinnedConnectionPost('nas.local', 22, 'nas.local ssh-ed25519 AAAAPINNED');

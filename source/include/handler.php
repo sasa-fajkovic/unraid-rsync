@@ -1177,6 +1177,16 @@ function ur_normalize_connection_for_save(array $raw, array $existing): array
             }
         }
     }
+    // Explicit "Clear pin": the only way to drop a pin through the UI, since a
+    // blank field keeps it (above).
+    if (!empty($raw['clearHostKey']) && trim((string) $conn['remoteHostKey']) !== '') {
+        $conn['remoteHostKey'] = '';
+        try {
+            Logger::event('', 'credentials', 'Connection ' . Util::safeFileId($conn['id'])
+                . ': its pinned host key was cleared on request.');
+        } catch (Throwable $e) {
+        }
+    }
     if ($conn['transport'] === 'DAEMON') {
         // Same display:none-still-submits problem as the password above: a card
         // switched to DAEMON still posts whatever the hidden SSH controls held.
@@ -2616,8 +2626,43 @@ function ur_action_list_runs(): void
         $limit = 200;
     }
 
-    $runs = Logger::listRuns($jobId, $limit);
+    $runs = ur_runs_with_history(Logger::listRuns($jobId, $limit), History::records($jobId));
     sendResponse(['ok' => true, 'jobId' => $jobId, 'runs' => $runs], 200);
+}
+
+/**
+ * Add each run's finish time (finishedTs, UTC epoch) and dryRun from its
+ * History record (matched by logRef), and its state when the summary did not
+ * supply one, so the log picker can read "start → finish state".
+ *
+ * @param array<int,array<string,mixed>> $runs    Logger::listRuns() output
+ * @param array<int,array<string,mixed>> $records History::records(), newest first
+ * @return array<int,array<string,mixed>>
+ */
+function ur_runs_with_history(array $runs, array $records): array
+{
+    $byRef = [];
+    foreach ($records as $r) {
+        $ref = (string) ($r['logRef'] ?? '');
+        if ($ref !== '' && !isset($byRef[$ref])) {
+            $byRef[$ref] = $r;
+        }
+    }
+    foreach ($runs as $i => $run) {
+        $r = $byRef[(string) ($run['id'] ?? '')] ?? null;
+        if ($r === null) {
+            continue;
+        }
+        $fin = DateTime::createFromFormat('Y-m-d\TH:i:s\Z', (string) ($r['finishedAt'] ?? ''), new DateTimeZone('UTC'));
+        if ($fin !== false) {
+            $runs[$i]['finishedTs'] = $fin->getTimestamp();
+        }
+        $runs[$i]['dryRun'] = !empty($r['dryRun']);
+        if ((string) ($run['state'] ?? '') === '') {
+            $runs[$i]['state'] = (string) ($r['state'] ?? '');
+        }
+    }
+    return $runs;
 }
 
 /**

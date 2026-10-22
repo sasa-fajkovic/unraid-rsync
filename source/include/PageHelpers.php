@@ -41,6 +41,20 @@ final class PageHelpers
         'PENDING' => ['cls' => 'pending', 'label' => 'Never run'],
     ];
 
+    /** One label per transport, shared by the Job and Connection selects. */
+    public const TRANSPORT_LABELS = [
+        'SSH'    => 'SSH (rsync over SSH)',
+        'DAEMON' => 'rsync daemon (rsyncd)',
+        'LOCAL'  => 'Local (this server)',
+    ];
+
+    /** SSH auth methods as the Connections tab names them. */
+    public const AUTH_LABELS = [
+        'KEYFILE'  => 'Key file on disk',
+        'KEY'      => 'Managed key',
+        'PASSWORD' => 'Password',
+    ];
+
     /** @return array{cls:string,label:string} */
     public static function state(string $state): array
     {
@@ -198,5 +212,96 @@ final class PageHelpers
     {
         $basis = rtrim(($value !== '') ? $value : $placeholder, "\n");
         return max(1, substr_count($basis, "\n") + 1);
+    }
+
+    /**
+     * The Auth cell of the Connections table. A daemon connection has no SSH
+     * auth method (its stored authMethod is whatever the hidden select posted).
+     *
+     * @param array<string,mixed> $conn a merged connection
+     */
+    public static function authLabel(array $conn): string
+    {
+        if (strtoupper((string) ($conn['transport'] ?? 'SSH')) === 'DAEMON') {
+            return ((string) ($conn['password'] ?? '')) !== '' ? 'Module secret' : 'None';
+        }
+        $auth = strtoupper((string) ($conn['authMethod'] ?? ''));
+        return self::AUTH_LABELS[$auth] ?? $auth;
+    }
+
+    /**
+     * The job editor's Connection options: every connection, the ones whose
+     * transport does not match the job's hidden (never dropped: a dropped
+     * selected option would clear connectionId on the next save), the selected
+     * mismatched one kept visible and marked. A Local job filters nothing.
+     * A record with no transport key predates the daemon transport: SSH.
+     * Mirrored by filterConnOptions() in jobs.php.
+     *
+     * @param array<int|string,mixed> $conns raw credentials connections
+     * @return list<array{id:string,label:string,transport:string,hidden:bool,mismatch:bool}>
+     */
+    public static function connectionOptions(array $conns, string $jobTransport, string $selectedId): array
+    {
+        $jobTransport = strtoupper(trim($jobTransport));
+        $out = [];
+        foreach ($conns as $conn) {
+            if (!is_array($conn) || (string) ($conn['id'] ?? '') === '') {
+                continue;
+            }
+            $id        = (string) $conn['id'];
+            $transport = strtoupper(trim((string) ($conn['transport'] ?? 'SSH'))) === 'DAEMON' ? 'DAEMON' : 'SSH';
+            $other     = $jobTransport !== 'LOCAL' && $transport !== $jobTransport;
+            $selected  = $id === $selectedId;
+            $out[] = [
+                'id'        => $id,
+                'label'     => (string) ($conn['name'] ?? $id) . ($transport === 'DAEMON' ? ' [rsyncd]' : ''),
+                'transport' => $transport,
+                'hidden'    => $other && !$selected,
+                'mismatch'  => $other && $selected,
+            ];
+        }
+        return $out;
+    }
+
+    /**
+     * The flags a rsyncOptions block produces, as the preview shows them, or
+     * '' for none. Needs Config and Rsync, which every caller has loaded.
+     *
+     * @param array<string,mixed> $opts
+     */
+    public static function optionsLine(array $opts, ?string $transport): string
+    {
+        return implode(' ', self::previewTokens(Rsync::optionTokens(Config::mergeRsyncOptions($opts), $transport)));
+    }
+
+    /**
+     * Key type + SHA256 fingerprint of every key line in a pinned
+     * known_hosts block, in the form ssh-keygen -lf prints the hash
+     * (unpadded base64 of the SHA-256 of the key blob). Lines without a
+     * decodable key are skipped.
+     *
+     * @return list<array{type:string,fingerprint:string}>
+     */
+    public static function hostKeyFingerprints(string $knownHosts): array
+    {
+        $out = [];
+        foreach (preg_split('/\R/', $knownHosts) ?: [] as $line) {
+            $line = trim($line);
+            if ($line === '' || $line[0] === '#') {
+                continue;
+            }
+            $f = preg_split('/\s+/', $line) ?: [];
+            for ($i = 0; $i + 1 < count($f); $i++) {
+                if (preg_match('/^(?:ssh-[a-z0-9-]+|ecdsa-sha2-[a-z0-9-]+|sk-[a-z0-9@.-]+)$/', $f[$i]) !== 1) {
+                    continue;
+                }
+                $blob = base64_decode($f[$i + 1], true);
+                if ($blob !== false && $blob !== '') {
+                    $out[] = ['type' => $f[$i], 'fingerprint' => 'SHA256:' . rtrim(base64_encode(hash('sha256', $blob, true)), '=')];
+                }
+                break;
+            }
+        }
+        return $out;
     }
 }
