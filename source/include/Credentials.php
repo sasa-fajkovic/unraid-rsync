@@ -912,17 +912,15 @@ class Credentials
             $jobs = (is_array($config) && isset($config['jobs']) && is_array($config['jobs']))
                 ? $config['jobs']
                 : [];
-            if (is_array($jobs)) {
-                foreach ($jobs as $job) {
-                    if (!is_array($job)) {
-                        continue;
-                    }
-                    if ((string) ($job['connectionId'] ?? '') === $id) {
-                        $deps[] = [
-                            'id'   => (string) ($job['id'] ?? ''),
-                            'name' => (string) ($job['name'] ?? ''),
-                        ];
-                    }
+            foreach ($jobs as $job) {
+                if (!is_array($job)) {
+                    continue;
+                }
+                if ((string) ($job['connectionId'] ?? '') === $id) {
+                    $deps[] = [
+                        'id'   => (string) ($job['id'] ?? ''),
+                        'name' => (string) ($job['name'] ?? ''),
+                    ];
                 }
             }
             return ['jobs' => $deps];

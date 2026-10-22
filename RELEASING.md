@@ -63,19 +63,21 @@ it.
 
 ## The authoritative manifest is the Release asset (not the repo `.plg`)
 
-`unraid.rsync.plg` carries two values that must always match the built package:
+`unraid.rsync.plg` carries three values that must always match the built package:
 
 - `<!ENTITY version "...">`
 - `<!ENTITY md5     "...">`
+- `<!ENTITY sha256  "...">`
 
-The MD5 is what `upgradepkg --install-new` verifies against the downloaded
-`.txz` before installing. `pkg_build.sh` builds the `.txz`, computes its md5, and
-rewrites both ENTITYs in place so they are always consistent. **Never hand-edit
-either ENTITY** — they change together, in the build.
+Unraid's plugin manager verifies the downloaded `.txz` against `<SHA256>` when
+its parser supports it and falls back to `<MD5>` on older ones, before
+`upgradepkg --install-new` runs. `pkg_build.sh` builds the `.txz`, computes both
+hashes, and rewrites all three ENTITYs in place so they are always consistent.
+**Never hand-edit them** — they change together, in the build.
 
 Crucially, this rewrite happens **only in the build / Release artifact**. The
-repo copy of `unraid.rsync.plg` is just the **source template**: its `version`
-and `md5` values are placeholders and are **not** kept current, because the
+repo copy of `unraid.rsync.plg` is just the **source template**: its `version`,
+`md5` and `sha256` values are placeholders and are **not** kept current, because the
 workflow no longer commits the regenerated `.plg` back to `main`. There is no
 release -> commit-back -> CI loop.
 
@@ -87,7 +89,7 @@ https://github.com/sasa-fajkovic/unraid-rsync/releases/latest/download/unraid.rs
 ```
 
 That is exactly where the plugin's `pluginURL` ENTITY points, so install and
-auto-update both read the per-release manifest (correct version + md5) directly
+auto-update both read the per-release manifest (correct version + hashes) directly
 from the Release — never from the branch. Because every release is published
 with `make_latest: true`, the `releases/latest` redirect always resolves to the
 newest release.
@@ -100,11 +102,11 @@ easiest way to build locally is the same container CI uses:
 ```bash
 docker run --rm -v "$PWD":/workspace -w /workspace \
   aclemons/slackware:15.0 \
-  bash -c "./pkg_build.sh -y -V 2026.06.13"
+  bash -c "bash pkg_build.sh -y -V 2026.06.13"
 ```
 
-This produces `archive/unraid.rsync-2026.06.13.txz` and rewrites the `version`
-and `md5` ENTITYs in `unraid.rsync.plg`.
+This produces `archive/unraid.rsync-2026.06.13.txz` and rewrites the `version`,
+`md5` and `sha256` ENTITYs in `unraid.rsync.plg`.
 
 `pkg_build.sh` flags:
 
@@ -125,9 +127,12 @@ to `main`** (i.e. a merged PR) and on `workflow_dispatch`:
 2. **Merge to `main`.** The push to `main` runs the release Action, which:
    - **computes the version** (auto next-same-day, or the explicit dispatch
      input — see "Version scheme" above);
-   - runs `pkg_build.sh -y -V <version>` inside `aclemons/slackware:15.0` to
-     build the `.txz` and rewrite the `.plg`'s version + md5 in the build
-     workspace;
+   - runs `bash gen-plg-changes.sh -V <version> -r <build_ref>` on the runner
+     to regenerate the `.plg`'s `<CHANGES>` block from the release history, then
+     checks the result with `xmllint`;
+   - runs `bash pkg_build.sh -y -V <version>` inside `aclemons/slackware:15.0`
+     to build the `.txz` and rewrite the `.plg`'s version + md5 + sha256 in the
+     build workspace;
    - publishes a **GitHub Release** tagged with the version, attaching both
      `archive/*.txz` and the regenerated `unraid.rsync.plg`, with
      `make_latest: true`.

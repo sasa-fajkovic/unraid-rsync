@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # pkg_build.sh - Build the Unraid Rsync Slackware package (.txz) and regenerate
-# the .plg manifest's version + md5 ENTITY values to match.
+# the .plg manifest's version + md5 + sha256 ENTITY values to match.
 #
 # It follows the standard Unraid plugin packaging convention: a .plg manifest that
 # installs a Slackware .txz. All user-facing strings are about Unraid Rsync.
@@ -19,9 +19,10 @@
 #   -u <host>      Optional: sideload the freshly built .txz to a running Unraid
 #                  host over SSH (scp + plugin install). For local dev only.
 #
-# The .plg's <!ENTITY version ...> and <!ENTITY md5 ...> lines are rewritten in
-# place. Never hand-edit those two ENTITYs - regenerate them here so version and
-# md5 always change together (upgradepkg verifies the md5 against the .txz).
+# The .plg's <!ENTITY version ...>, <!ENTITY md5 ...> and <!ENTITY sha256 ...>
+# lines are rewritten in place. Never hand-edit those ENTITYs - regenerate them
+# here so they always change together (the plugin manager verifies the .txz
+# against sha256, or md5 on parsers without SHA256 support).
 
 set -euo pipefail
 
@@ -123,10 +124,12 @@ makepkg --linkadd y --chown y "$archive_file"
 
 # --- checksum + .plg rewrite ------------------------------------------------
 hash="$(md5sum "$archive_file" | awk '{print $1}')"
+sha256="$(sha256sum "$archive_file" | awk '{print $1}')"
 echo "Built $archive_file"
 echo "md5: $hash"
+echo "sha256: $sha256"
 
-# Rewrite the version and md5 ENTITY declarations. The match is keyed on the
+# Rewrite the version, md5 and sha256 ENTITY declarations. The match is keyed on the
 # ENTITY name and tolerates any amount of whitespace before the value, so
 # reformatting/realigning the .plg cannot silently break the rewrite (which
 # would publish a .txz against a stale manifest). The replacement re-pads to the
@@ -145,12 +148,12 @@ update_entity() { # $1=entity name  $2=new value
 }
 
 update_entity md5 "$hash"
+update_entity sha256 "$sha256"
 update_entity version "$version"
 
-echo "Updated $plg_filepath (version=$version, md5=$hash)"
+echo "Updated $plg_filepath (version=$version, md5=$hash, sha256=$sha256)"
 
 # --- optional sideload to a live Unraid host (local dev convenience) --------
-# NOTE: the correct shell syntax requires the `then` keyword: `if [[ ... ]]; then`.
 if [[ -z "$unraidHost" ]]; then
   echo "Done."
   exit 0

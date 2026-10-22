@@ -21,15 +21,16 @@
        auto-update against is the GitHub Release asset, served via the stable
        redirect https://github.com/<user>/<repo>/releases/latest/download/unraid.rsync.plg
        (that is what `pluginURL` above points at). That asset carries the real,
-       per-release version + md5 (rewritten by pkg_build.sh at build time) and
+       per-release version + md5 + sha256 (rewritten by pkg_build.sh at build time) and
        its FILE <URL> points at that same release's own .txz via releaseLocation.
 
-       The version/md5 ENTITYs in THIS repo copy are build-time PLACEHOLDERS.
+       The version/md5/sha256 ENTITYs in THIS repo copy are build-time PLACEHOLDERS.
        pkg_build.sh rewrites them per release in the built artifact; this repo
        .plg is only the source TEMPLATE and is no longer synced back to the
        branch, so do not rely on (or try to keep current) the values below.
-       Never hand-edit version/md5 - they change together, in the build. -->
+       Never hand-edit version/md5/sha256 - they change together, in the build. -->
   <!ENTITY md5            "de35dad106eb4e06cf45f3f8f9c41823">
+  <!ENTITY sha256         "e6ce78defed1db320e4c4001f44bafbd05d13bb3739d0ec7c18e47f8eaf1534d">
 ]>
 <PLUGIN name="&pluginName;" author="&gitUser;" version="&version;"
         launch="Settings/UnraidRsync" pluginURL="&pluginURL;" icon="&iconURL;"
@@ -69,10 +70,12 @@ https://github.com/&gitUser;/&repoName;/releases
     </INLINE>
   </FILE>
 
-  <!-- Download + install the package; upgradepkg verifies the MD5 -->
+  <!-- Download + install the package. The plugin manager checks SHA256 when
+       present and falls back to MD5 on parsers that predate it. -->
   <FILE Name="/boot/config/plugins/&pluginName;/&pluginName;-&version;.txz" Run="upgradepkg --install-new">
     <URL>&releaseLocation;/&pluginName;-&version;.txz</URL>
     <MD5>&md5;</MD5>
+    <SHA256>&sha256;</SHA256>
   </FILE>
 
   <FILE Run="/bin/bash">

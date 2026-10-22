@@ -25,11 +25,10 @@
  * rewriting the row index placeholders, so the indices stay contiguous and the
  * names round-trip. Every rendered value is htmlspecialchars-escaped.
  *
- * Phase 4 adds per-job Run / Dry-run / Abort buttons that POST to the handler
- * (CSRF-checked) to launch / stop the detached runner; Run/Dry-run are disabled
- * while a job is running (RunState::isRunning), Abort while it is idle. Live
- * status badges, the per-run log viewer, and 1s polling are Phase 6 - here the
- * buttons just fire-and-confirm and reload to refresh their enabled state.
+ * Per-job Run / Dry-run / Abort buttons POST to the handler (CSRF-checked) to
+ * launch / stop the detached runner; Run/Dry-run are disabled while a job is
+ * running (RunState::isRunning), Abort while it is idle. After a click the 1s
+ * getStatus poll refreshes the badges and button state in place (no reload).
  */
 
 require_once '/usr/local/emhttp/plugins/unraid.rsync/include/Config.php';
@@ -419,7 +418,7 @@ function ur_render_job_card($job, $index): void
     // placeholder and no real id, so its run controls are rendered disabled and
     // the user must save first. A job currently running has Run/Dry-run disabled
     // and Abort enabled (and vice versa); state comes from RunState::isRunning,
-    // PID-reuse-safe. Live status badges + polling are Phase 6.
+    // PID-reuse-safe; the getStatus poll keeps them current after load.
     $hasId   = ($id !== '' && strpos($id, '__IDX__') === false);
     $running = $hasId && RunState::isRunning($id);
     $runDis  = (!$hasId || $running) ? ' disabled' : '';
@@ -515,9 +514,9 @@ function ur_snap_disabled(bool $snapOn): string
 
 /**
  * Build the "Next run" cell label for one job. Returns a plain string (the
- * caller escapes it). Phase 5 shows the computed next fire time; colored state
- * badges + last-run are Phase 6.
+ * caller escapes it).
  *
+ *   - manual-only job               -> "manual (on demand)"
  *   - disabled job                  -> "disabled"
  *   - enabled, schedule uncomputable-> "—"   (malformed expr; save validation
  *                                             normally blocks this, but a stored
@@ -1602,7 +1601,7 @@ ur_emit_time_helpers();
   }
 
   /* ===================================================================
-   * Phase 6: live status polling + per-run log viewer.
+   * Live status polling + per-run log viewer.
    * =================================================================== */
 
   var STATUS_URL = HANDLER_URL + '?action=getStatus';

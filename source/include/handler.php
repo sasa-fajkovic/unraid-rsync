@@ -6,20 +6,32 @@ declare(strict_types=1);
  * handler.php - the single AJAX/REST endpoint for the Unraid Rsync plugin.
  *
  * Actions:
- *   POST saveConfig      (Phase 2) validate + persist jobs + global defaults.
- *   POST saveCredentials (Phase 3) validate + persist keys + connections
- *                        (section-aware: keys and connections are separate
- *                        forms and one never clobbers the other).
- *   POST generateKey     (Phase 3) ssh-keygen a new key pair (returns
- *                        fingerprint + public key; NEVER the private key).
- *   POST importKey       (Phase 3) import a pasted private/public key.
- *   POST deleteKey       (Phase 3) delete a key; BLOCKED when a connection
- *                        references it (returns the dependent connection names).
- *   POST deleteConnection(Phase 3) delete a connection; DISABLES dependent jobs
- *                        in config.json and reports which were disabled.
- *   POST discoverHostKey (Phase 3) ssh-keyscan a host -> host key for the form.
- *   POST testConnection  (Phase 3) probe a connection once and classify the
- *                        result (auth / host-key / unreachable).
+ *   POST saveConfig       validate + persist jobs + global defaults.
+ *   POST previewOptions   map a submitted options block to its rsync flag
+ *                         tokens (read-only; POST for the uniform CSRF check).
+ *   POST saveCredentials  validate + persist keys + connections
+ *                         (section-aware: keys and connections are separate
+ *                         forms and one never clobbers the other).
+ *   POST generateKey      ssh-keygen a new key pair (returns
+ *                         fingerprint + public key; NEVER the private key).
+ *   POST importKey        import a pasted private/public key.
+ *   POST deleteKey        delete a key; BLOCKED when a connection
+ *                         references it (returns the dependent connection names).
+ *   POST deleteConnection delete a connection; DISABLES dependent jobs
+ *                         in config.json and reports which were disabled.
+ *   POST discoverHostKey  ssh-keyscan a host -> host key for the form.
+ *   POST testConnection   probe a connection once and classify the result
+ *                         (auth / host-key / unreachable); for an rsync daemon
+ *                         connection, list its modules instead.
+ *   POST runJob / dryRunJob  launch the detached runner for a job.
+ *   POST abortJob         request an abort of a running job.
+ *   GET  getStatus        per-job running / last-run / next-run state.
+ *   GET  getJobLog        HTML-escaped tail of a run log.
+ *   GET  downloadJobLog   a whole (redacted, size-capped) run log as text/plain.
+ *   GET  listRuns         a job's recent run logs.
+ *   GET  listHistory      a job's paginated execution history.
+ *   GET  getPluginLog     HTML-escaped tail of the cross-job plugin.log.
+ *   GET  getRsyncStatus   rsync binary presence + version line.
  *
  * Every POST action is CSRF-protected with the webGui csrf_token. Secrets
  * (private keys, passwords) are NEVER echoed back to the browser.
@@ -788,8 +800,8 @@ function ur_action_save_config(): void
         }
         $job = Job::normalize($rawJob);
 
-        // Ensure unique ids across the set (a duplicate would clobber state /
-        // cron files in later phases).
+        // Ensure unique ids across the set (a duplicate would share, and clobber,
+        // the other job's run state and logs).
         $baseId = $job['id'];
         $id = $baseId;
         $suffix = 2;
@@ -850,7 +862,7 @@ function ur_action_save_config(): void
 }
 
 // =====================================================================
-// Phase 3: Credentials actions
+// Credentials actions
 // =====================================================================
 
 /**
@@ -1674,7 +1686,7 @@ function ur_action_test_connection(): void
 }
 
 // =====================================================================
-// Phase 4: execution actions (runJob / dryRunJob / abortJob)
+// Execution actions (runJob / dryRunJob / abortJob)
 // =====================================================================
 
 /**
@@ -1706,7 +1718,7 @@ function ur_runner_script_path(): string
  */
 function ur_php_binary(): string
 {
-    if (PHP_SAPI === 'cli' && defined('PHP_BINARY') && PHP_BINARY !== '' && is_executable(PHP_BINARY)) {
+    if (PHP_SAPI === 'cli' && defined('PHP_BINARY') && is_executable(PHP_BINARY)) {
         return PHP_BINARY;
     }
     foreach (['/usr/bin/php', '/usr/local/bin/php', '/bin/php'] as $cand) {
@@ -1780,7 +1792,7 @@ function ur_launch_runner(string $jobId, bool $dryRun): bool
 /**
  * POST runJob / dryRunJob: validate the job id, refuse if already running, then
  * launch the runner detached. Returns a fire-and-confirm response (the live
- * outcome is observed via the run log / state in Phase 6).
+ * outcome is observed via the run log / state pollers).
  */
 function ur_action_run_job(bool $dryRun): void
 {
@@ -1912,10 +1924,14 @@ function ur_action_abort_job(): void
 }
 
 // =====================================================================
-// Phase 6: read-only GET pollers (status / log tails / run list)
+// GET pollers (status / log tails / run list)
 //
-// These are GET, no CSRF (they are side-effect-free reads behind the webGui's
-// own authenticated front controller). Every job id and run-file id is
+// These are GET, no CSRF, behind the webGui's own authenticated front
+// controller. All are reads except one deliberate side effect: getStatus,
+// getJobLog and listHistory call RunState::isRunning, which reaps a dead
+// runner's state and (once) appends a
+// "crashed" History record, sends its notification and deletes the in-flight
+// record (Runner::reportCrashed). Every job id and run-file id is
 // whitelisted against a safe pattern, and every log read is confined to the
 // job's own log dir and BOUNDED in size. Log text returned to the browser is
 // ALREADY HTML-escaped by Logger::tail() - the UI injects it verbatim and must
@@ -2016,8 +2032,9 @@ function ur_last_run_shape(?array $summary): ?array
  * enabled  <- the job's enabled flag, so the UI can render "disabled" for the
  *             Next-run cell (distinct from an enabled job with no computable next)
  *
- * Side-effect-free (isRunning may CLEAR a provably-stale state file, which is a
- * self-heal, not a state change driven by this request).
+ * Not side-effect-free, deliberately: isRunning reaps a provably-dead runner's
+ * state, and the first poll to see it records the crash in History, notifies
+ * and deletes the in-flight record (RunState::reapStale -> Runner::reportCrashed).
  */
 function ur_action_get_status(): void
 {
@@ -2265,7 +2282,8 @@ function ur_action_list_runs(): void
 
 /**
  * GET listHistory: paginated, newest-first persistent execution history for a
- * job (real + dry runs, manual + scheduled). Read-only. Mirrors listRuns: the
+ * job (real + dry runs, manual + scheduled). A read, apart from the crash reap
+ * its RunState::isRunning calls can trigger. Mirrors listRuns: the
  * job id goes through ur_safe_job_id; offset/limit are clamped (limit 1..100).
  * Returns {ok, jobId, total, offset, limit, runs:[<record>...]} where each
  * record is the History record shape (incl. trigger, dryRun, state, logRef).
@@ -2588,11 +2606,11 @@ function ur_dispatch(): void
                 case 'dryRunJob':         ur_action_run_job(true);         return;
                 case 'abortJob':          ur_action_abort_job();           return;
             }
-            return;
 
-            // Read-only GET pollers (no CSRF; side-effect-free reads). They must be
-            // GET so a poll never mutates state; reject a POST to one so the contract
-            // is explicit.
+            // GET pollers (no CSRF). Reads, apart from the crash reap that
+            // getStatus/getJobLog/listHistory can trigger via RunState::isRunning;
+            // reject a POST to one so the contract is explicit.
+            // no break
         case 'getStatus':
         case 'getJobLog':
         case 'downloadJobLog':
@@ -2613,8 +2631,8 @@ function ur_dispatch(): void
                 case 'getPluginLog':    ur_action_get_plugin_log();   return;
                 case 'getRsyncStatus':  ur_action_get_rsync_status(); return;
             }
-            return;
 
+            // no break
         default:
             sendError('Unknown action.', 400);
             return;
@@ -2644,9 +2662,7 @@ function ur_fatal_shutdown_handler(): void
         // nothing - the client's bad-JSON path will surface an error with status.
         return;
     }
-    if (!headers_sent()) {
-        header('Content-Type: application/json');
-    }
+    header('Content-Type: application/json');
     http_response_code(500);
     echo json_encode(
         ['error' => 'The request failed with an internal error.'],

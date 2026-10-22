@@ -20,7 +20,7 @@ declare(strict_types=1);
  *     ($runner) so tests can supply a fake rsync and assert on argv + drive the
  *     exit code without a real binary.
  *
- * SCOPE (Phase 4): only the whitelisted, structured options object is mapped to
+ * SCOPE: only the whitelisted, structured options object is mapped to
  * tokens. There is deliberately no free-form flag string anywhere in the
  * plugin, so an unlisted flag simply cannot be emitted - the map below is the
  * single source of truth, and it mirrors the keys Job.php normalises and
@@ -148,8 +148,7 @@ class Rsync
      * deliberately does NOT install rsync (there is no clean Slackware artifact
      * to pin, and a bundled copy would shadow the base binary). We only guard
      * against a broken/misconfigured system with a defensive presence check
-     * (rsyncAvailable() below), mirroring how sshpass is detect-and-degrade -
-     * except here the expected state is "present", not "optional".
+     * (rsyncAvailable() below).
      *
      * Overridable for tests via $rsyncPathOverride so the run path can be driven
      * with a present/absent binary without touching the real /usr/bin/rsync.
@@ -819,15 +818,13 @@ class Rsync
         $status = @proc_get_status($proc);
         $code   = proc_close($proc);
 
-        if (is_array($status)) {
-            if (!empty($status['signaled']) && isset($status['termsig'])) {
-                return 128 + (int) $status['termsig'];
-            }
-            // While `running` is false the reported exitcode is authoritative;
-            // proc_close may already have returned -1 by the time we get here.
-            if (array_key_exists('exitcode', $status) && (int) $status['exitcode'] >= 0) {
-                return (int) $status['exitcode'];
-            }
+        if ($status['signaled']) {
+            return 128 + $status['termsig'];
+        }
+        // While `running` is false the reported exitcode is authoritative;
+        // proc_close may already have returned -1 by the time we get here.
+        if ($status['exitcode'] >= 0) {
+            return $status['exitcode'];
         }
 
         // Fallback to proc_close's value; a negative (already-reaped) result has
@@ -842,6 +839,9 @@ class Rsync
      * minutes on a black-holed host). Mirrors KeyTools::DISCOVER_TIMEOUT_MAX.
      */
     const DAEMON_PROBE_TIMEOUT = 20;
+
+    /** Effective probe deadline; tests lower it so the deadline tests do not wait 20 s each. */
+    public static int $daemonProbeTimeout = self::DAEMON_PROBE_TIMEOUT;
 
     /** Hard cap on bytes captured from a probe (a hostile or huge daemon MOTD). */
     const DAEMON_PROBE_MAX_BYTES = 65536;
@@ -901,8 +901,8 @@ class Rsync
         // says nothing; --contimeout guards one that never accepts it.
         $argv = [
             self::rsyncPath(),
-            '--contimeout=' . self::DAEMON_PROBE_TIMEOUT,
-            '--timeout=' . self::DAEMON_PROBE_TIMEOUT,
+            '--contimeout=' . self::$daemonProbeTimeout,
+            '--timeout=' . self::$daemonProbeTimeout,
             '--port=' . (int) ($conn['port'] ?? Credentials::RSYNCD_PORT),
             '--',
             $username . '@' . $host . '::',
@@ -932,7 +932,7 @@ class Rsync
 
             $out      = '';
             $captured = 0;
-            $deadline = microtime(true) + self::DAEMON_PROBE_TIMEOUT;
+            $deadline = microtime(true) + self::$daemonProbeTimeout;
             ProcIO::drainPipes(
                 [1 => $pipes[1], 2 => $pipes[2]],
                 static function (int $fd, string $chunk) use (&$out, &$captured): void {
@@ -1008,7 +1008,7 @@ class Rsync
         if ($reason !== 'ok') {
             $messages = [
                 'unreachable' => 'Could not reach the rsync daemon. Check the host, the port and the network.',
-                'timeout'     => 'The rsync daemon did not answer within ' . self::DAEMON_PROBE_TIMEOUT . ' seconds.',
+                'timeout'     => 'The rsync daemon did not answer within ' . self::$daemonProbeTimeout . ' seconds.',
                 'refused'     => 'The rsync daemon answered but refused the request (rsync exit ' . $exit . ').'
                     . ' Check that the daemon is really rsyncd and not an SSH server.',
                 'error'       => 'The rsync daemon probe failed (rsync exit ' . $exit . ').',

@@ -6,7 +6,7 @@ declare(strict_types=1);
  * Config.php - the single source of truth for the Unraid Rsync plugin's
  * persistent configuration (config.json).
  *
- * Responsibilities (Phase 2):
+ * Responsibilities:
  *   - Locate config.json on the USB flash at
  *     /boot/config/plugins/unraid.rsync/config.json.
  *   - Load it, merging in defaults for any missing keys so callers always get
@@ -14,8 +14,8 @@ declare(strict_types=1);
  *   - Save it atomically (write to a temp file in the same directory, then
  *     rename over the target) so a crash mid-write can never leave a truncated
  *     or partial config behind.
- *   - Carry a schemaVersion and provide a forward-migration scaffold so future
- *     phases can upgrade older on-disk configs in place.
+ *   - Carry a schemaVersion and upgrade older on-disk configs in place
+ *     (migrate()).
  *
  * This file is intentionally free of any webGui dependency and does no output:
  * all logic is plain, unit-testable PHP. The config base directory is
@@ -655,10 +655,10 @@ class Config
     }
 
     /**
-     * Forward-migration scaffold. Given an on-disk config of any prior schema
-     * version, return it upgraded to the current SCHEMA_VERSION. Phase 2 only
-     * knows about version 1, so this currently just stamps the version; future
-     * phases add `case` arms that transform the structure step by step.
+     * Forward migration. Given an on-disk config of any prior schema version,
+     * return it upgraded to the current SCHEMA_VERSION, one `case` arm per step
+     * (v1 -> v2: migrateV1ToV2). A v3 file needs no transform: v3 only marks a
+     * snapshot-enabled job, and mergeDefaults() restamps the version.
      *
      * If the on-disk config carries a schemaVersion NEWER than this build
      * understands, we refuse to "migrate" it (we cannot downgrade, and

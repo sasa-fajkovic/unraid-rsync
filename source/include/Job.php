@@ -20,8 +20,8 @@ declare(strict_types=1);
  *      bare array/pool root.
  *
  * Job.php does NOT build any rsync command line - mapping the structured
- * options object to argv tokens is Phase 4 (Rsync.php). Phase 2 only stores the
- * structured object.
+ * options object to argv tokens is Rsync.php's job. Job.php only normalises,
+ * validates and stores the structured object.
  */
 
 require_once __DIR__ . '/Config.php';

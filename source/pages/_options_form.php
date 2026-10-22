@@ -6,8 +6,8 @@
  *
  * It renders ONLY the curated whitelist: boolean flags as checkboxes and
  * value inputs next to the flags that take an argument. There is deliberately
- * no free-form flag string anywhere. Phase 2 only renders + persists these;
- * mapping a key to its rsync argv token is Phase 4.
+ * no free-form flag string anywhere. This file only renders them; mapping a
+ * key to its rsync argv token is Rsync::optionTokens().
  *
  * NATIVE LOOK. The options are laid out in Unraid's native two-column settings
  * style: every option is a definition-list row (<dl><dt>label</dt><dd>control

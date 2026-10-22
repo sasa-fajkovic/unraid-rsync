@@ -54,9 +54,10 @@ on, forked from, or derived from any other plugin.
   Unraid version for the pre-7.2 header fixup.
 - **Backend classes** in `source/include/`: `Config`, `Credentials`, `Job`, `Ssh`,
   `Rsync`, `RunState`, `Runner`, `Logger`, `Cron`, `Notify`, `KeyTools`,
-  `handler.php` (the POST/GET front controller). Plus
-  `source/scripts/{runner,apply-cron}.php` and the `source/event/started` array-
-  start hook.
+  `History`, `Snapshot`, `ProcIO`, `Util`, and `handler.php` (the POST/GET front
+  controller). Plus `source/scripts/{runner,apply-cron,reap-crashed}.php`, the
+  `askpass.sh` password helper and `ur-snapshot.sh` remote snapshot helper in
+  `source/scripts/`, and the `source/event/started` array-start hook.
 
 ## Hard conventions / invariants
 
@@ -65,7 +66,11 @@ on, forked from, or derived from any other plugin.
 - **Build rsync/ssh invocations as argv ARRAYS, never shell strings**, and
   run them through `proc_open` without a shell. The ONLY intentional shell uses
   are: `Notify` exec (every arg `escapeshellarg`'d, incl. `-i`), user pre/post
-  **hooks** (`bash -c "$hook"`), the detached runner launcher, and the
+  **hooks** (`bash -c "$hook"`), the detached runner launcher, the detached
+  **ssh-keyscan** launcher (`KeyTools::runKeyscan`, `setsid sh -c …` via `exec`,
+  every element `escapeshellarg`'d), **update_cron** (`Cron::defaultRunUpdateCron`
+  hands `proc_open` a STRING - the escaped fixed path - because execvp cannot
+  run it on a live box; `/bin/sh` supplies the ENOEXEC fallback), and the
   **snapshot remote helper**: `Snapshot::remoteCommand()` builds the one command
   string ssh hands the receiver's shell from the shipped
   `source/scripts/ur-snapshot.sh` (sha256-pinned by `Snapshot::HELPER_SHA256`),
@@ -101,11 +106,15 @@ on, forked from, or derived from any other plugin.
      each implied key to its negation; `Config::ARCHIVE_IMPLIED_KEYS` holds the
      same keys for the migration (Config cannot depend on Rsync), and `RsyncTest`
      asserts the two stay in lockstep.
-- **`config.json` is schemaVersion 2.** `Config::migrate()` has a real `case 1:`
-  arm now: it folds `excludes`/`includes` into ordered `filters` (includes first)
-  and, where `archive` is on, forces every `ARCHIVE_IMPLIED_KEYS` option true so
-  an upgrade does not silently start emitting `--no-perms`/`--no-links` and change
-  what existing backups preserve. Migration MUST keep running before
+- **`config.json` is schemaVersion 2, or 3 while any job has `snapshot.enabled`**
+  (`Config::SCHEMA_VERSION` = 2, `MAX_SCHEMA_VERSION` = 3; `schemaVersionFor()`
+  picks the stamp on every `mergeDefaults()`, so an older plugin refuses a v3 file
+  instead of running a snapshot job as a mirror). `Config::migrate()` has a real
+  `case 1:` arm: it folds `excludes`/`includes` into ordered `filters` (includes
+  first) and, where `archive` is on, forces every `ARCHIVE_IMPLIED_KEYS` option
+  true so an upgrade does not silently start emitting `--no-perms`/`--no-links`
+  and change what existing backups preserve. v2 → v3 needs no transform (v3 only
+  marks the snapshot block). Migration MUST keep running before
   `mergeDefaults()` (which drops unknown keys).
 - **Secrets** (SSH keys, passwords) live in `credentials.json`, by default on
   **FAT32 `/boot` (world-readable)**, so Unix perms don't protect them there. They
@@ -139,18 +148,19 @@ on, forked from, or derived from any other plugin.
   a DST fold, so **never** localise it. **Everything a user reads** is the
   server's timezone: `Logger::event()` stamps lines as `date('Y-m-d\TH:i:sP')`
   (offset kept, so it stays unambiguous) to match the rsync lines interleaved
-  beside them in the same file. `Config.php` resolves the system zone
-  (`Config::systemTimezone()`: `$TZ` → `/etc/localtime` → ambient, validated
-  against `DateTimeZone::listIdentifiers()`) and calls
-  `date_default_timezone_set()` **at file load** — it is the ONLY place that does,
-  reading `$TZ` → Unraid's `ident.cfg`/`var.ini` `timeZone` → `/etc/localtime`(`-copied-from`)
-  → ambient. **Do not drop the ident.cfg rung**: php-fpm may scrub `$TZ` and
+  beside them in the same file. `Config.php` resolves the system zone with
+  `Config::systemTimezone()` — `$TZ` → Unraid's `ident.cfg`/`var.ini` `timeZone`
+  → the `/etc/localtime` (or `/etc/localtime-copied-from`) zoneinfo symlink →
+  ambient, first one valid in `DateTimeZone::listIdentifiers()` wins, else UTC —
+  and calls `date_default_timezone_set()` with it **at file load**; it is the ONLY
+  place that does. **Do not drop the ident.cfg rung**: php-fpm may scrub `$TZ` and
   Slackware may write `/etc/localtime` as a plain copy rather than a zoneinfo
   symlink, so without it a stock box can miss every source and fall back to UTC —
   silently reproducing #135 while looking fixed. The Runner logs the resolved zone
   at the top of every run and the UI labels it (`ur_tz_note()`) precisely so that
   fallback is visible rather than invisible,
-  and it is why `Cron::nextRun()`'s bare `date()`/`mktime()` walk is correct: PHP
+  and it is why `Cron::nextRun()`'s `date()` + `DateTimeImmutable` (`localTs()`)
+  walk in the process zone is correct: PHP
   defaults to UTC whenever php.ini leaves `date.timezone` unset, which would
   compute every next-run a full UTC offset away from when crond actually fires.
   Config.php is required transitively by every entry point (pages, `handler.php`,
@@ -222,7 +232,7 @@ on, forked from, or derived from any other plugin.
   + `manualOnly` is exactly how "run on demand" is stored, and such a job keeps
   whatever `schedule` string it was last saved with — so anything that computes
   a next fire from that string is reporting a time that will never happen
-  (`Cron::build()` skips the job). `getStatus` carries `manualOnly` and a null
+  (`Cron::buildContent()` skips the job). `getStatus` carries `manualOnly` and a null
   `nextRun` for it, and all THREE renderers must agree, in this clause order:
   manual-only, then disabled, then no computable next (em-dash), then the time.
   They are `ur_next_run_label()` (PHP, Jobs), `nextRunLabel()` (JS, Jobs) and
@@ -247,8 +257,12 @@ on, forked from, or derived from any other plugin.
   per-run tmpfs secret paths and **size-capped** before it is written
   (`Logger::setRedaction` / `Logger::sink` / `UR_MAX_RUN_LOG_BYTES`).
 - **CSRF**: every state-changing POST verifies the webGui `csrf_token` via
-  `hash_equals`; GET pollers are read-only. The check is **match-ANY** across all
-  server-side-trusted token sources (`$GLOBALS['var']['csrf_token']`,
+  `hash_equals`; GET pollers take no CSRF token and are reads, with ONE
+  intentional side effect: any GET that calls `RunState::isRunning`
+  (`getStatus`, `getJobLog`, `listHistory`) → `reapStale` →
+  `Runner::reportCrashed` records a dead runner exactly once (appends a
+  `crashed` History record, notifies, deletes the in-flight record). The check
+  is **match-ANY** across all server-side-trusted token sources (`$GLOBALS['var']['csrf_token']`,
   `$_SESSION['csrf_token']`, and `var.ini`) — `ur_csrf_token_candidates()` /
   `ur_check_csrf()`. **Do NOT revert to "first non-empty source wins":** on the
   live box a stale `$var`/`$_SESSION` token masked the canonical `var.ini` token
@@ -256,8 +270,8 @@ on, forked from, or derived from any other plugin.
   the page legitimately echoes).
 - **Client AJAX POSTs are `application/x-www-form-urlencoded`, NEVER multipart.**
   All POSTs go out as `URLSearchParams` via the shared `window.urAjax` helpers
-  (`source/pages/_options_form.php`) and the per-page equivalents in
-  `credentials.php` / `status.php`. **Never use a `FormData` object as a fetch
+  (`source/pages/_options_form.php`), which `credentials.php`, `status.php` and
+  the other pages call too. **Never use a `FormData` object as a fetch
   `body`** (use `URLSearchParams(new FormData(form))` to serialize a form):
   multipart request bodies **stall in php-fpm** on the live box (the worker blocks
   forever in `skb_wait_for_more_packets` waiting for the body over the FastCGI

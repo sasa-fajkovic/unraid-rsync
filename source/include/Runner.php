@@ -25,14 +25,14 @@ declare(strict_types=1);
  *   - rsync is built as an argv array via Rsync::buildArgv and run without a
  *     shell.
  *   - pre/post HOOKS are user-authored shell, run via `bash -c "$hook"` as root
- *     BY DESIGN (a documented privilege surface) - this is the ONE intentional
- *     shell use; their output+exit are captured to the run log.
+ *     BY DESIGN (a documented privilege surface) - the one intentional shell
+ *     use in this class; their output+exit are captured to the run log.
  *   - path guardrails (Job.php) are RE-ENFORCED at runtime for EVERY pair
  *     before the pre-hook (preflight()): a dest of /boot/system/array-or-pool
  *     root, or --delete without a specific sub-dir destination, fails the run
  *     before any rsync starts.
  *
- * SUMMARY (read by Phase 6 for the Jobs list, and durable across reboot) is
+ * SUMMARY (read by getStatus for the Jobs list, and durable across reboot) is
  * written to /boot at <UR_CONFIG_BASE>/runs/<jobid>.summary.json:
  *   {state, startedAt, finishedAt, exitCode, durationSec, dryRun}
  *
@@ -766,7 +766,7 @@ class Runner
             RunState::markStopped($jobId);
             RunState::clearAbort($jobId);
 
-            // Dispatch the per-job notification (Phase 7). Best-effort: it is
+            // Dispatch the per-job notification. Best-effort: it is
             // gated on the job's notifyMode and NEVER throws (see notifyHook),
             // so a notification failure can't break the run's finally/unwind.
             $notify = [

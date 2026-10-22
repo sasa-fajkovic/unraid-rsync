@@ -1,6 +1,6 @@
 <?php
 /**
- * status.php - the Status / Log tab body (Phase 6).
+ * status.php - the Status / Log tab body.
  *
  * Renders:
  *   - an overall running/idle indicator + a live list of currently-running jobs,
