@@ -913,6 +913,10 @@ function ur_save_config_locked(): void
             $storedById[(string) ($stored['id'] ?? '')] = $stored;
         }
     }
+    // Leftover logs are looked for where THIS save puts them, not where the
+    // request was dispatched with (a post may change global.logDir too).
+    $savedLogDir = Config::sanitizeLogDir($config['global']['logDir'] ?? '');
+    $logsDir     = $savedLogDir !== '' ? rtrim($savedLogDir, '/') : Logger::base() . '/logs';
 
     foreach ($rawJobs as $rawJob) {
         if (!is_array($rawJob)) {
@@ -922,8 +926,8 @@ function ur_save_config_locked(): void
         // tab opened before snapshot mode existed, and must not silently turn a
         // stored snapshot job into a mirror. A posted key, even with enabled
         // off, is the user's intent.
-        $rawId  = is_scalar($rawJob['id'] ?? null) ? trim((string) $rawJob['id']) : '';
-        $stored = $storedById[$rawId] ?? null;
+        $rawId  = is_scalar($rawJob['id'] ?? null) ? ur_safe_job_id((string) $rawJob['id']) : '';
+        $stored = $rawId !== '' ? ($storedById[$rawId] ?? null) : null;
         if ($stored !== null && !array_key_exists('snapshot', $rawJob) && isset($stored['snapshot'])) {
             $rawJob['snapshot'] = $stored['snapshot'];
             $rawPairs = is_array($rawJob['pairs'] ?? null) ? $rawJob['pairs'] : [];
@@ -945,18 +949,21 @@ function ur_save_config_locked(): void
         }
         $job = Job::normalize($rawJob);
 
-        // Ensure unique ids across the set (a duplicate would share, and clobber,
-        // the other job's run state and logs). A NEW job also skips an id a
-        // removed job left a summary, History, in-flight record or logs under:
-        // it would otherwise show that job's last result before ever running
-        // (DI-20). A stored job keeps its id whatever is on disk.
-        $isNew  = $stored === null;
-        $baseId = $job['id'];
-        $id = $baseId;
-        $suffix = 2;
-        while (isset($seenIds[$id]) || ($isNew && ur_job_id_has_leftovers($id))) {
-            $id = $baseId . '-' . $suffix;
-            $suffix++;
+        // A stored job posted once keeps its id whatever is on disk (cron lines,
+        // summary and History hang off it); every other row is NEW: it must not
+        // take an id a stored job holds (whatever the posted order) nor one a
+        // removed job left a summary, History, in-flight record or logs under,
+        // or it would show that job's last result before ever running (DI-20).
+        // Duplicates take the -2/-3 suffix, bounded so ur_safe_job_id accepts it.
+        $id = $job['id'];
+        if ($stored === null || $id !== $rawId || isset($seenIds[$id])) {
+            $baseId = substr($id, 0, 128);
+            $id     = $baseId;
+            $suffix = 1;
+            while (isset($seenIds[$id]) || isset($storedById[$id]) || ur_job_id_has_leftovers($id, $logsDir)) {
+                $sfx = '-' . (++$suffix);
+                $id  = substr($baseId, 0, 128 - strlen($sfx)) . $sfx;
+            }
         }
         $job['id'] = $id;
         $seenIds[$id] = true;
@@ -2230,13 +2237,13 @@ const UR_LIST_RUNS_DEFAULT = 10;
  * rejection.
  */
 /** True when a removed job's summary, History, in-flight record or log dir still carries this id. */
-function ur_job_id_has_leftovers(string $id): bool
+function ur_job_id_has_leftovers(string $id, string $logsDir): bool
 {
     $runs = rtrim(UR_CONFIG_BASE, '/') . '/runs/' . Util::safeFileId($id);
     return is_file($runs . '.summary.json')
         || is_file(History::path($id))
         || is_file(RunState::inflightPath($id))
-        || is_dir(Logger::jobLogDir($id));
+        || is_dir($logsDir . '/' . Util::safeFileId($id));
 }
 
 function ur_safe_job_id(string $id): string

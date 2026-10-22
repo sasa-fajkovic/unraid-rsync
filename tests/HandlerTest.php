@@ -537,34 +537,63 @@ final class HandlerTest extends TestCase
         $this->assertContains('j-dup-2', $ids);
     }
 
-    /** DI-20: a re-created job must not inherit a removed job's summary or logs. */
+    /** DI-20: a re-created job must not inherit a removed job's summary, History, in-flight record or logs. */
     public function testSaveConfigGivesANewJobAFreshIdWhenARemovedJobLeftFilesBehind(): void
     {
         $runs = rtrim(UR_CONFIG_BASE, '/') . '/runs';
         @mkdir($runs, 0700, true);
+        @mkdir(dirname(RunState::inflightPath('x')), 0700, true);
         file_put_contents($runs . '/j-again.summary.json', '{"state":"FAILED"}');
         @mkdir(Logger::jobLogDir('j-again-2'), 0700, true);
+        file_put_contents(History::path('j-again-3'), "{}\n");
+        file_put_contents(RunState::inflightPath('j-again-4'), '{}');
+        $cleanup = function () use ($runs): void {
+            @unlink($runs . '/j-again.summary.json');
+            @rmdir(Logger::jobLogDir('j-again-2'));
+            @unlink(History::path('j-again-3'));
+            @unlink(RunState::inflightPath('j-again-4'));
+            @unlink($runs . '/j-again-5.summary.json');
+        };
 
         $job = ['name' => 'again', 'schedule' => '0 3 * * *', 'transport' => 'LOCAL',
                 'pairs' => [['local' => '/mnt/user/a/', 'remote' => '/mnt/disk1/a/']]];
-        $_POST = ['action' => 'saveConfig', 'csrf_token' => 'test-token', 'jobs' => [0 => $job]];
-        [$body, $code] = $this->runCapture(function () {
-            ur_action_save_config();
-        });
-        $this->assertSame(200, $code, json_encode($body));
-        $this->assertSame(['j-again-3'], array_column(Config::load()['jobs'], 'id'), 'summary and log dir both skipped');
+        $save = function (array $jobs): array {
+            $_POST = ['action' => 'saveConfig', 'csrf_token' => 'test-token', 'jobs' => $jobs];
+            [$body, $code] = $this->runCapture(function () {
+                ur_action_save_config();
+            });
+            $this->assertSame(200, $code, json_encode($body));
+            return array_column(Config::load()['jobs'], 'id');
+        };
 
-        // A stored job keeps its id even though a summary exists under it.
-        $_POST = ['action' => 'saveConfig', 'csrf_token' => 'test-token',
-                  'jobs' => [0 => ['id' => 'j-again-3', 'name' => 'renamed'] + $job]];
-        [$body, $code] = $this->runCapture(function () {
-            ur_action_save_config();
-        });
-        $this->assertSame(200, $code, json_encode($body));
-        $this->assertSame(['j-again-3'], array_column(Config::load()['jobs'], 'id'));
+        try {
+            // Summary, log dir, History and in-flight record each reserve an id.
+            $this->assertSame(['j-again-5'], $save([0 => $job]));
+            // The removed job's evidence is untouched and still listed by History.
+            $this->assertFileExists($runs . '/j-again.summary.json');
+            $this->assertContains('j-again-3', History::jobIds());
 
-        unlink($runs . '/j-again.summary.json');
-        rmdir(Logger::jobLogDir('j-again-2'));
+            // A stored job keeps its id although a summary now exists under it,
+            // whatever the posted order: a new "again" posted BEFORE it must
+            // not take j-again-5 and push the stored job to j-again-5-2.
+            file_put_contents($runs . '/j-again-5.summary.json', '{"state":"SUCCESS"}');
+            $ids = $save([0 => $job, 1 => ['id' => 'j-again-5', 'name' => 'renamed'] + $job]);
+            $this->assertSame(['j-again-6', 'j-again-5'], $ids);
+
+            // A tampered stored id ("j-again-5\n") is not that stored job: it is
+            // a NEW row, allocated past every leftover and the stored id.
+            $ids = $save([0 => ['id' => 'j-again-5', 'name' => 'renamed'] + $job, 1 => ['id' => "j-again-5\n"] + $job]);
+            $this->assertSame(['j-again-5', 'j-again-7'], $ids);
+
+            // A suffixed id never exceeds the 128 bytes ur_safe_job_id accepts.
+            $long = str_repeat('a', 130);
+            $ids  = $save([0 => ['name' => $long] + $job, 1 => ['name' => $long] + $job]);
+            $this->assertSame([128, 128], array_map('strlen', $ids));
+            $this->assertSame('-2', substr($ids[1], -2));
+            $this->assertNotSame('', ur_safe_job_id($ids[1]));
+        } finally {
+            $cleanup();
+        }
     }
 
     public function testSettingsOnlySaveDoesNotWipeJobs(): void
