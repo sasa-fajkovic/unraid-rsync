@@ -521,8 +521,10 @@ function ur_migrate_credentials(string $from, string $to, ?callable $commit = nu
         }
         // A missing /mnt share usually means the array is not started - surface
         // that rather than failing obscurely.
-        if (!is_dir($dstDir) && !@mkdir($dstDir, 0700, true) && !is_dir($dstDir)) {
-            return $refuse('could not create ' . $dstDir . ' (is the array started?).');
+        try {
+            Util::mkdirs($dstDir, 0700);
+        } catch (RuntimeException $e) {
+            return $refuse('could not create ' . $dstDir . ' (is the array started?): ' . $e->getMessage() . '.');
         }
 
         // Two names for one directory: the file is already where the pointer is
@@ -557,8 +559,8 @@ function ur_migrate_credentials(string $from, string $to, ?callable $commit = nu
                         . ' already contains a different credentials.json. Remove or rename it first.',
                 ];
             }
-            // About to become THE keychain: the perms a fresh copy would get.
-            @chmod($dstDir, 0700);
+            // About to become THE keychain: the perms a fresh copy would get. The
+            // dir itself is never chmodded: secretsDirRefusal vetted it.
             @chmod($dstFile, 0600);
         } else {
             try {
@@ -813,10 +815,14 @@ function ur_save_config_locked(): void
         $oldSecretsDir   = Config::sanitizeSecretsDir($config['global']['secretsDir'] ?? '');
         $rawSecretsDir   = is_string($globalIn['secretsDir']) ? trim($globalIn['secretsDir']) : '';
         $cleanSecretsDir = Config::sanitizeSecretsDir($rawSecretsDir);
+        $refusal         = ($cleanSecretsDir !== '' && $cleanSecretsDir !== $oldSecretsDir)
+            ? Config::secretsDirRefusal($cleanSecretsDir) : '';
         if ($rawSecretsDir !== '' && $cleanSecretsDir === '') {
             // Non-empty but invalid: reject, keep the current location.
             $allWarnings[] = 'Secrets directory ignored: it must be an absolute path under /mnt '
                 . '(e.g. /mnt/user/system/unraid.rsync). Credentials stay where they are.';
+        } elseif ($refusal !== '') {
+            $allWarnings[] = 'Secrets directory not changed: ' . $refusal . ' Credentials stay where they are.';
         } elseif ($cleanSecretsDir !== $oldSecretsDir) {
             $secretsMove = [$oldSecretsDir, $cleanSecretsDir];
         }

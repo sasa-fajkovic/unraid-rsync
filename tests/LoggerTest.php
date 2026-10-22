@@ -81,6 +81,46 @@ final class LoggerTest extends TestCase
         $this->assertDirectoryDoesNotExist($this->rtBase . '/logs');
     }
 
+    /**
+     * The live box's logDir (/mnt/cache/appdata/unraid.rsync/logs) already
+     * exists, root-owned: it validates as it is, and a run never chmods it -
+     * an existing logDir may be a share other users read. Only the per-job dir
+     * the plugin creates is made 0700.
+     */
+    public function testAnExistingExternalLogsDirIsNeverChmodded(): void
+    {
+        $this->assertSame('/mnt/cache/appdata/unraid.rsync/logs', Config::sanitizeLogDir('/mnt/cache/appdata/unraid.rsync/logs'));
+
+        $this->extBase = sys_get_temp_dir() . '/ur-logger-ext-' . getmypid() . '-' . bin2hex(random_bytes(4));
+        $extLogs = $this->extBase . '/appdata/unraid.rsync/logs';
+        mkdir($extLogs, 0755, true);
+        chmod($extLogs, 0755);
+        Logger::$logsDirOverride = $extLogs;
+
+        $path = Logger::openRun('j-photos', 1750000000);
+        Logger::event($path, 'j-photos', 'hello');
+        clearstatcache();
+        $this->assertSame(0755, fileperms($extLogs) & 0777);
+        $this->assertSame(0700, fileperms($extLogs . '/j-photos') & 0777);
+    }
+
+    public function testAnExternalLogsDirIsNotCreatedThroughASymlinkedAncestor(): void
+    {
+        $this->extBase = sys_get_temp_dir() . '/ur-logger-ext-' . getmypid() . '-' . bin2hex(random_bytes(4));
+        mkdir($this->extBase . '/elsewhere', 0700, true);
+        symlink($this->extBase . '/elsewhere', $this->extBase . '/link');
+        Logger::$logsDirOverride = $this->extBase . '/link/unraid.rsync/logs';
+        try {
+            Logger::openRun('j-photos', 1750000000);
+            $this->fail('expected a refusal');
+        } catch (RuntimeException $e) {
+            $this->assertStringContainsString('symlink', $e->getMessage());
+        } finally {
+            unlink($this->extBase . '/link');
+        }
+        $this->assertDirectoryDoesNotExist($this->extBase . '/elsewhere/unraid.rsync');
+    }
+
     public function testOpenRunCreatesEmptyLogUnderJobDir(): void
     {
         $path = Logger::openRun('j-music', 1750000000);

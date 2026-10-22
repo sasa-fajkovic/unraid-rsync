@@ -321,6 +321,30 @@ final class ConfigTest extends TestCase
         }
     }
 
+    public function testSecretsDirRefusalNamesEachUnsafeChoice(): void
+    {
+        $root = realpath(sys_get_temp_dir()) . '/ur-mnt-' . getmypid() . '-' . bin2hex(random_bytes(4));
+        mkdir($root . '/pool/share/private', 0700, true);
+        mkdir($root . '/pool/share/open', 0777, true);
+        chmod($root . '/pool/share/open', 0777);
+        Config::$mntRoot = $root;
+        try {
+            $this->assertStringContainsString('network or add-on mount', Config::secretsDirRefusal($root . '/remotes/nas/creds'));
+            $this->assertStringContainsString('network or add-on mount', Config::secretsDirRefusal($root . '/addons/x/creds'));
+            $this->assertStringContainsString('share or pool root', Config::secretsDirRefusal($root . '/user/system'));
+            $this->assertStringContainsString('share or pool root', Config::secretsDirRefusal($root . '/pool/share'));
+            $this->assertSame('', Config::secretsDirRefusal($root . '/pool/share/new'), 'a missing leaf is created 0700');
+            $this->assertSame('', Config::secretsDirRefusal($root . '/pool/share/private'));
+            $this->assertStringContainsString('chmod 700', Config::secretsDirRefusal($root . '/pool/share/open'));
+            Util::$euid = 4242;
+            $this->assertStringContainsString('owned by another user', Config::secretsDirRefusal($root . '/pool/share/private'));
+        } finally {
+            Util::$euid      = null;
+            Config::$mntRoot = '/mnt';
+            exec('rm -rf ' . escapeshellarg($root));
+        }
+    }
+
     public function testMergeDefaultsSanitizesSecretsDir(): void
     {
         $ok = Config::mergeDefaults(['global' => ['secretsDir' => '/mnt/user/system/unraid.rsync']]);

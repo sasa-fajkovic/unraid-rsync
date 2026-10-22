@@ -426,10 +426,7 @@ class Credentials
         $creds = self::mergeDefaults($creds);
 
         $path = self::path();
-        $dir  = dirname($path);
-        if (!is_dir($dir) && !@mkdir($dir, 0700, true) && !is_dir($dir)) {
-            throw new RuntimeException("Unable to create credentials directory: $dir");
-        }
+        Util::mkdirs(dirname($path), 0700);
 
         $json = json_encode($creds, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
         if ($json === false) {
