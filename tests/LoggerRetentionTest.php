@@ -20,15 +20,14 @@ final class LoggerRetentionTest extends TestCase
 
     protected function setUp(): void
     {
+        TestSeams::reset();
         $this->rtBase = sys_get_temp_dir() . '/ur-logret-' . getmypid() . '-' . bin2hex(random_bytes(4));
         Logger::$baseOverride = $this->rtBase;
-        Logger::$retention = null;
     }
 
     protected function tearDown(): void
     {
-        Logger::$baseOverride = null;
-        Logger::$retention = null;
+        TestSeams::reset();
         if (is_dir($this->rtBase)) {
             $it = new RecursiveIteratorIterator(
                 new RecursiveDirectoryIterator($this->rtBase, FilesystemIterator::SKIP_DOTS),

@@ -1452,11 +1452,7 @@ final class RsyncTest extends TestCase
 
     protected function tearDown(): void
     {
-        Rsync::$daemonProbeRunner = null;
-        Rsync::$daemonProbeTimeout = Rsync::DAEMON_PROBE_TIMEOUT;
-        Rsync::$versionProbeTimeout = 10;
-        ProcIO::$killGraceSec = 1.0;
-        Rsync::$rsyncPathOverride = null;
+        TestSeams::reset();
         foreach ($this->fakeBins as $path) {
             @unlink($path);
         }

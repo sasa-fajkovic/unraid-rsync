@@ -69,7 +69,7 @@ final class HandlerTest extends TestCase
     {
         // The daemon module-listing probe seam is a public static: never let one
         // test's stub leak into the next file's tests.
-        Rsync::$daemonProbeRunner = null;
+        TestSeams::reset();
         if (is_file(Credentials::path())) {
             unlink(Credentials::path());
         }

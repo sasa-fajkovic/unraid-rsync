@@ -29,6 +29,7 @@ final class HandlerCredentialsTest extends TestCase
 
     protected function setUp(): void
     {
+        TestSeams::reset();
         $_POST    = [];
         $_GET     = [];
         $_REQUEST = [];
@@ -37,9 +38,6 @@ final class HandlerCredentialsTest extends TestCase
         // begun (failOnWarning would fail the test). See sendResponse.
         $GLOBALS['ur_last_response_code'] = 200;
         $GLOBALS['var'] = ['csrf_token' => 'test-token'];
-        // Reset the secrets-dir override BEFORE resolving Credentials::path() so a
-        // leak from a prior migration test can't point cleanup at the wrong file.
-        Credentials::$secretsDirOverride = null;
         foreach ([Credentials::path(), Credentials::path() . '.last-good', Config::path()] as $p) {
             if (is_file($p)) {
                 unlink($p);
@@ -66,14 +64,10 @@ final class HandlerCredentialsTest extends TestCase
     protected function tearDown(): void
     {
         unset($GLOBALS['ur_dirs_alias_probe']);
-        Config::$mntRoot = '/mnt';
+        TestSeams::reset();
         foreach ($this->scratchRoots as $root) {
             exec('rm -rf ' . escapeshellarg($root));
         }
-        Credentials::$secretsDirOverride = null;
-        // The daemon module-listing probe seam is a public static: leaving a
-        // fake installed would silently fake every later test's probe.
-        Rsync::$daemonProbeRunner = null;
     }
 
     /** A throwaway "array" secrets dir path (created by the code under test). */

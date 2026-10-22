@@ -26,6 +26,7 @@ final class RunnerTest extends TestCase
 
     protected function setUp(): void
     {
+        TestSeams::reset();
         $this->trace = [];
 
         // FAKE hook runner: record the order + which hook, return its scripted code.
@@ -53,9 +54,6 @@ final class RunnerTest extends TestCase
         // Reset config to a clean empty install for each test.
         Config::save(Config::defaults());
 
-        // Reset the secrets-dir override so a leak can't redirect Credentials I/O.
-        Credentials::$secretsDirOverride = null;
-
         // Ensure no leftover state/abort for our test jobs.
         foreach (['j-local', 'j-fail', 'j-pre', 'j-guard', 'j-delete', 'j-multi', 'j-redact', 'j-secrets'] as $jid) {
             RunState::clear($jid);
@@ -65,13 +63,7 @@ final class RunnerTest extends TestCase
 
     protected function tearDown(): void
     {
-        Runner::$hookRunner = null;
-        Runner::$pidProvider = null;
-        Rsync::$runner = null;
-        Rsync::$rsyncPathOverride = null;
-        Credentials::$secretsDirOverride = null;
-        Runner::$scanDir = null;
-        Runner::$localLister = null;
+        TestSeams::reset();
     }
 
     /** Build + persist a LOCAL job, returning its id. */

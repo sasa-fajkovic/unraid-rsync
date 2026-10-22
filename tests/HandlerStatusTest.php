@@ -62,7 +62,7 @@ final class HandlerStatusTest extends TestCase
 
     protected function tearDown(): void
     {
-        Logger::$baseOverride = null;
+        TestSeams::reset();
         if (is_dir($this->rtBase)) {
             $it = new RecursiveIteratorIterator(
                 new RecursiveDirectoryIterator($this->rtBase, FilesystemIterator::SKIP_DOTS),

@@ -46,8 +46,7 @@ final class RunStateTest extends TestCase
 
     protected function tearDown(): void
     {
-        RunState::$baseOverride = null;
-        FakeRunState::$baseOverride = null;
+        TestSeams::reset();
         if (is_dir($this->rtBase)) {
             $it = new RecursiveIteratorIterator(
                 new RecursiveDirectoryIterator($this->rtBase, FilesystemIterator::SKIP_DOTS),

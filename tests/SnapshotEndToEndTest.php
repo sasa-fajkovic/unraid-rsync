@@ -99,12 +99,7 @@ final class SnapshotEndToEndTest extends TestCase
 
     protected function tearDown(): void
     {
-        Snapshot::$nowProvider    = null;
-        Snapshot::$remoteRunner   = null;
-        Rsync::$runner            = null;
-        Rsync::$rsyncPathOverride = null;
-        Runner::$scanDir          = null;
-        Ssh::$runtimeBase         = '/tmp/unraid.rsync';
+        TestSeams::reset();
         if ($this->base !== '') {
             Credentials::save(Credentials::defaults());
             @unlink(History::path(self::JOB));

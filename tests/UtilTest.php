@@ -21,10 +21,7 @@ final class UtilTest extends TestCase
 
     protected function tearDown(): void
     {
-        Util::$euid             = null;
-        RunState::$baseOverride = null;
-        Logger::$baseOverride   = null;
-        Ssh::$runtimeBase       = '/tmp/unraid.rsync';
+        TestSeams::reset();
         exec('rm -rf ' . escapeshellarg($this->dir));
     }
 

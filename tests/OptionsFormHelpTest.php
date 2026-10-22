@@ -488,6 +488,10 @@ final class OptionsFormHelpTest extends TestCase
     public function testHistoryPageShowsEmptyStateWithNoJobs(): void
     {
         @unlink(Config::path()); // ensure no jobs
+        // ...and no History of a deleted job, which another test may have left.
+        foreach (History::jobIds() as $id) {
+            @unlink(History::path($id));
+        }
         $html = $this->renderPageBody(__DIR__ . '/../source/pages/history.php');
         $this->assertStringContainsString('No jobs configured yet', $html);
         // The table/poller must NOT render in the empty state.
