@@ -55,7 +55,7 @@ on, forked from, or derived from any other plugin.
   tabs/bodies (`connections.php` / `credentials.php`); a connection references a
   managed key by id via its KEY auth method. **Overview** (`overview.php`) is a
   read-only status board. All seven tabs render into ONE document, so every
-  tab's script runs whichever tab is shown: Overview, Jobs and Status subscribe
+  tab's script runs whichever tab is shown: Overview, Jobs, Status and History subscribe
   to the ONE `getStatus` poller (`window.urStatus`, `ur_emit_status_poller()`;
   2 s while a job runs, 15 s idle, paused while the document is hidden), and
   shared CSS/JS is emitted once by the `ur_emit_*` helpers. Never add a per-tab

@@ -286,7 +286,17 @@ if (!function_exists('ur_option_help_affordance')) {
      */
     function ur_option_help_affordance(string $key, string $helpId): string
     {
-        $text = ur_option_help_for($key);
+        return ur_help_affordance(ur_option_help_for($key), $helpId);
+    }
+}
+
+if (!function_exists('ur_help_affordance')) {
+    /**
+     * The "?" affordance for any row: $text is PLAIN text (the title tooltip),
+     * $helpId the id of the help blockquote it toggles. '' renders nothing.
+     */
+    function ur_help_affordance(string $text, string $helpId): string
+    {
         if ($text === '') {
             return '';
         }
@@ -552,14 +562,14 @@ if (!function_exists('ur_render_rsync_options')) {
         // --contimeout is emitted only on rsync daemon transport (rsync refuses
         // it outright anywhere else), so a preview that ignored the transport
         // would promise a flag the run drops.
-        $previewTokens = Rsync::optionTokens(Config::mergeRsyncOptions($opts), $transport);
+        $previewTokens = PageHelpers::previewTokens(Rsync::optionTokens(Config::mergeRsyncOptions($opts), $transport));
         echo '<div class="ur-preview">';
         echo '<div class="ur-preview-label">' . ur_h(ur_t_text('rsync options preview')) . '</div>';
         echo '<code class="ur-preview-out" aria-live="polite">'
             . ur_h($previewTokens ? implode(' ', $previewTokens) : ur_t_text('(no options set)'))
             . '</code>';
         echo '<div class="ur-preview-note">'
-            . ur_h(ur_t_text('These option flags only. The log-level flags, --log-file, the transport flags and the source/destination paths are added when the job runs.'))
+            . ur_h(ur_t_text('These option flags only. The log-level flags, --log-file, the transport flags and the source/destination paths are added when the job runs. Flags that -a already implies are not repeated here; the job still passes them.'))
             . '</div>';
         echo '</div>';
 
@@ -718,11 +728,14 @@ if (!function_exists('ur_emit_option_help_assets')) {
 /* The options -a implies, indented under the Archive row so the relationship is
    visible. The note reads dim until Archive is actually ticked (ur-implied-active,
    toggled by the script below), because that is the only state in which unticking
-   one of these changes the emitted command. */
+   one of these changes the emitted command. The bar is an inset shadow, not a
+   border + padding: those narrowed this dl, so its label column and checkboxes
+   sat ~8px off every other row's. */
 .ur-implied {
-  margin: 0 0 .6rem 0; padding: .1rem 0 .1rem .9rem;
-  border-left: 3px solid var(--blue-200, #bce8f1);
+  margin: 0 0 .6rem 0; padding: .1rem 0;
+  box-shadow: inset 3px 0 0 var(--blue-200, #bce8f1);
 }
+.ur-implied > .ur-implied-note { padding-left: .9rem; }
 .ur-implied-note {
   margin: .3rem 0 .5rem 0; font-size: .85em; line-height: 1.45;
   color: var(--blockquote-text-color, #31708f); opacity: .65;
@@ -1041,8 +1054,9 @@ if (!function_exists('ur_emit_option_help_assets')) {
       .then(window.urAjax.parseResponse)
       .then(function (res) {
         if (res.ok && res.body && res.body.ok && res.body.tokens) {
+          var shown = res.body.display || res.body.tokens;
           out.classList.remove('ur-preview-err');
-          out.textContent = res.body.tokens.length ? res.body.tokens.join(' ') : '(no options set)';
+          out.textContent = shown.length ? shown.join(' ') : '(no options set)';
         } else {
           out.classList.add('ur-preview-err');
           out.textContent = window.urAjax.errText(res, 'Preview failed');
@@ -1412,9 +1426,9 @@ if (!function_exists('ur_emit_badge_assets')) {
 .ur-badge-aborted  { background: #6b6b6b; }                 /* grey   */
 .ur-badge-pending  { background: #9aa0a6; }                 /* grey   */
 .ur-badge-running  { background: #1565c0; animation: ur-pulse 1.3s ease-in-out infinite; }
-/* Not part of the run-state vocabulary: the Status tab's binary running/idle and
-   rsync present/missing indicators reuse the badge shape. */
-.ur-badge-idle     { background: #1c7d3f; }
+/* Not part of the run-state vocabulary: the Status tab's "nothing running"
+   indicator. Neutral grey, so idle never reads as a success. */
+.ur-badge-idle     { background: #757575; }
 @keyframes ur-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.55; } }
 </style>
 <script type="text/javascript">
@@ -1635,6 +1649,25 @@ if (!function_exists('ur_emit_page_assets')) {
 .ur-result { margin: 6px 0; white-space: pre-wrap; }
 .ur-ok { color: var(--green-800, #1c7d3f); }
 .ur-err { color: var(--red-800, #b71c1c); font-weight: bold; }
+/* Small action buttons (log View / Copy / Download). The resets shed the webGui
+   <button> chrome (min-width, uppercase, margins) so a <button> and an <a> match. */
+.ur-btn {
+  display: inline-block; padding: 3px 10px; margin: 0; min-width: 0; border: 1px solid transparent;
+  border-radius: 4px; cursor: pointer; vertical-align: middle;
+  font-size: 12px; font-weight: bold; line-height: 1.5; letter-spacing: normal;
+  text-decoration: none; text-transform: none;
+}
+.ur-btn-dl    { background: var(--green, #1c7d3f); color: #fff; }
+.ur-btn-copy  { background: var(--blue-500, #216feb); color: #fff; }
+.ur-btn-plain { background: rgba(127,127,127,0.15); border-color: rgba(127,127,127,0.4); color: inherit; }
+.ur-btn-sm    { padding: 1px 8px; font-size: 11px; }
+.ur-btn:hover { filter: brightness(1.12); text-decoration: none; }
+/* A plain always-visible notice (NOT blockquote.inline_help, which the help toggle hides). */
+.ur-notice {
+  margin: 0 0 8px; padding: 6px 10px; border-radius: 4px; font-size: 12px; line-height: 1.5;
+  background: rgba(127,127,127,0.10); border: 1px solid rgba(127,127,127,0.30);
+}
+.ur-notice-warn { background: rgba(177,92,0,0.12); border-color: #b15c00; }
 </style>
 <script type="text/javascript">
 (function () {
@@ -1701,6 +1734,52 @@ if (!function_exists('ur_emit_page_assets')) {
     setTimeout(function () { window.location.reload(); }, hasWarnings ? RELOAD_WARN_MS : RELOAD_MS);
   }
 
+  /* Save a log via fetch, not a bare <a download> navigation: a log that is
+   * gone (RAM, cleared on reboot) answers with a JSON error envelope, which a
+   * plain anchor would save as "handler.json". onError(message) gets the reason. */
+  function downloadFile(href, onError) {
+    fetch(href, { credentials: 'same-origin', cache: 'no-store' })
+      .then(function (r) {
+        var ct = r.headers.get('Content-Type') || '';
+        if (!r.ok || ct.indexOf('application/json') !== -1) {
+          return r.json().then(
+            function (j) { throw new Error((j && j.error) ? j.error : 'Log not available.'); },
+            function () { throw new Error('Log not available.'); }
+          );
+        }
+        var fname = 'run.log';
+        var m = (r.headers.get('Content-Disposition') || '').match(/filename="?([^"]+)"?/);
+        if (m) { fname = m[1]; }
+        return r.blob().then(function (blob) { return { blob: blob, fname: fname }; });
+      })
+      .then(function (res) {
+        var url = URL.createObjectURL(res.blob);
+        var a = document.createElement('a');
+        a.href = url; a.download = res.fname;
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+      })
+      .catch(function (err) {
+        onError((err && err.message) ? err.message : 'Log not available (run logs live in RAM and are cleared on reboot).');
+      });
+  }
+
+  /* Copy text and flash the button; without the Clipboard API (a non-secure
+   * context) select fallbackEl so the user can copy it by hand. */
+  function copyText(text, btn, fallbackEl) {
+    function selectIt() {
+      var rng = document.createRange(); rng.selectNodeContents(fallbackEl);
+      var sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(rng);
+      try { document.execCommand('copy'); } catch (e) { /* left selected */ }
+    }
+    function flash() { var o = btn.textContent; btn.textContent = 'Copied!'; setTimeout(function () { btn.textContent = o; }, 1200); }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(flash).catch(selectIt);
+    } else {
+      selectIt();
+    }
+  }
+
   window.urUtil = {
     HANDLER_URL: <?=ur_js(PageHelpers::HANDLER_URL)?>,
     relativeTime: relativeTime,
@@ -1709,7 +1788,9 @@ if (!function_exists('ur_emit_page_assets')) {
     cssEsc: cssEsc,
     nextRunLabel: nextRunLabel,
     lastRunLabel: lastRunLabel,
-    reloadSoon: reloadSoon
+    reloadSoon: reloadSoon,
+    downloadFile: downloadFile,
+    copyText: copyText
   };
 })();
 </script>
@@ -1720,7 +1801,7 @@ if (!function_exists('ur_emit_page_assets')) {
 if (!function_exists('ur_emit_status_poller')) {
     /**
      * Emit (once per document) window.urStatus, the ONE getStatus poller that
-     * Overview, Jobs and Status subscribe to. Each tab used to run its own loop
+     * Overview, Jobs, Status and History subscribe to. Each tab used to run its own loop
      * in the shared document whichever tab was visible - Status at 1 s forever -
      * while the Jobs loop stopped when idle and missed scheduled runs.
      *
