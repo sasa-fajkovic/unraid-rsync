@@ -76,7 +76,7 @@ final class HandlerEmailUsernameTest extends TestCase
             $this->assertSame('test-secret', Credentials::deobfuscate($connections[0]['password']));
         } else {
             $this->assertSame([], $connections);
-            $this->assertStringContainsString(Credentials::SSH_USER_RULE, $body['error']);
+            $this->assertStringContainsString(Credentials::SSH_USER_RULE, implode(' | ', $body['errors']));
         }
     }
 }
