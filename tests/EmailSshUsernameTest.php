@@ -222,6 +222,47 @@ final class EmailSshUsernameTest extends TestCase
         Snapshot::runRemote(['sshArgv' => ['ssh']], $user . '@nas.example', 'probe', [], false, 30);
     }
 
+    public static function unsafeSnapshotDestinations(): array
+    {
+        return [
+            'leading user space' => [' backup@example.com@nas.example'],
+            'trailing user space' => ['backup@example.com @nas.example'],
+            'leading user tab' => ["\tbackup@example.com@nas.example"],
+            'trailing user newline' => ["backup@example.com\n@nas.example"],
+            'leading user nul' => ["\0backup@example.com@nas.example"],
+            'trailing user nul' => ["backup@example.com\0@nas.example"],
+            'leading host space' => ['backup@example.com@ nas.example'],
+            'trailing host space' => ['backup@example.com@nas.example '],
+            'leading host tab' => ["backup@example.com@\tnas.example"],
+            'trailing host newline' => ["backup@example.com@nas.example\n"],
+            'leading host nul' => ["backup@example.com@\0nas.example"],
+            'trailing host nul' => ["backup@example.com@nas.example\0"],
+            'embedded host control' => ["backup@example.com@nas\x01.example"],
+            'host port suffix' => ['backup@example.com@nas.example:22'],
+            'host slash' => ['backup@example.com@nas.example/path'],
+            'host option' => ['backup@example.com@-oProxyCommand=evil'],
+            'host open bracket' => ['backup@example.com@[2001:db8::1'],
+            'host close bracket' => ['backup@example.com@2001:db8::1]'],
+            'host nested brackets' => ['backup@example.com@[[2001:db8::1]]'],
+            'host bracketed name' => ['backup@example.com@[nas.example]'],
+            'host bracket suffix' => ['backup@example.com@[2001:db8::1]evil'],
+            'host substitution' => ['backup@example.com@nas$(id).example'],
+            'host backtick' => ['backup@example.com@nas`id`.example'],
+            'host semicolon' => ['backup@example.com@nas;id'],
+            'empty host' => ['backup@example.com@'],
+        ];
+    }
+
+    #[DataProvider('unsafeSnapshotDestinations')]
+    public function testSnapshotRejectsUnsafeDestinationBeforeExecution(string $destination): void
+    {
+        Snapshot::$remoteRunner = function (): array {
+            $this->fail('Unsafe destination reached SSH');
+        };
+        $this->expectException(InvalidArgumentException::class);
+        Snapshot::runRemote(['sshArgv' => ['ssh']], $destination, 'probe', [], false, 30);
+    }
+
     public function testEmailAllowanceDoesNotRelaxHostOrDaemonValidation(): void
     {
         foreach (['backup@example.com', 'backup+alias'] as $value) {
