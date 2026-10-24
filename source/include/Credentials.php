@@ -900,9 +900,8 @@ class Credentials
         if ($value === '' || $value[0] === '-') {
             return false;
         }
-        // Reject '@' explicitly: the SSH destination is built as "user@host", so
-        // an '@' inside either component makes it ambiguous (user@evil@host) and
-        // could connect to an unintended user/host.
+        // This legacy shared-token check remains conservative for daemon operands.
+        // SSH usernames use isSafeSshUser(), which permits email-style names.
         if (strpos($value, '@') !== false) {
             return false;
         }
@@ -913,7 +912,7 @@ class Credentials
 
     const SSH_HOST_RULE = 'Host must be a host name or IPv4 address (letters, digits, ".", "-" and "_", '
         . 'not beginning with "-") or an IPv6 address.';
-    const SSH_USER_RULE = 'Username may contain only letters, digits, ".", "-" and "_", and must not begin with "-" or ".".';
+    const SSH_USER_RULE = 'Username must start with a letter, digit or "_", and may contain only letters, digits, ".", "-", "_", "@" and "+".';
 
     /**
      * True when $value is safe as the host of an SSH "user@host:path" operand: a
@@ -933,12 +932,12 @@ class Credentials
 
     /**
      * True when $value is safe as the user of an SSH "user@host:path" operand:
-     * a POSIX-style name. A ':' or '/' in it re-splits the operand the same way
-     * a bad host does, and an '@' makes it ambiguous. PURE.
+     * a conventional account or email-style name. rsync and OpenSSH split at the
+     * last '@'; ':' and '/' still change rsync's operand interpretation. PURE.
      */
     public static function isSafeSshUser(string $value): bool
     {
-        return (bool) preg_match('/^[A-Za-z0-9_][A-Za-z0-9_.-]*$/D', trim($value));
+        return (bool) preg_match('/^[A-Za-z0-9_][A-Za-z0-9_.@+-]*$/D', trim($value));
     }
 
     /**
