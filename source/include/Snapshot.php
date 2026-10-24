@@ -884,11 +884,16 @@ class Snapshot
         if (!is_array($ssh) || $ssh === [] || !array_is_list($ssh) || array_filter($ssh, 'is_string') !== $ssh) {
             throw new InvalidArgumentException('The ssh argv is missing.');
         }
-        if (!preg_match('/^[^\s\x00-\x1f\x7f@-][^\s\x00-\x1f\x7f@]*@[^\s\x00-\x1f\x7f@-][^\s\x00-\x1f\x7f@]*$/D', $userHost)) {
+        $at = strrpos($userHost, '@');
+        $user = $at === false ? '' : substr($userHost, 0, $at);
+        $host = $at === false ? '' : substr($userHost, $at + 1);
+        $operandHost = Util::isIpv6Address($host) ? '[' . $host . ']' : $host;
+        if ($user !== trim($user) || $host !== trim($host)
+            || !Credentials::isSafeSshUser($user) || !Credentials::isSafeSshHost($operandHost)) {
             throw new InvalidArgumentException('The ssh destination must be user@host.');
         }
         // ssh takes an IPv6 literal unbracketed; the [] form is for rsync operands.
-        $userHost = preg_replace('/@\[([^\]]*)\]$/D', '@$1', $userHost) ?? $userHost;
+        $userHost = $user . '@' . trim($host, '[]');
         $argv = array_merge($ssh, ['-o', 'LogLevel=ERROR', '--', $userHost, self::remoteCommand(self::helperScript(), $op, $args, $useSudo)]);
         $env  = Ssh::childEnv(is_array($sshPieces['sshEnv'] ?? null) ? $sshPieces['sshEnv'] : []);
 
