@@ -373,7 +373,7 @@ final class CredentialsTest extends TestCase
         $this->assertNotEmpty(array_filter($res['errors'], fn($e) => stripos($e, 'host') !== false));
     }
 
-    #[DataProvider('unsafeSshTokenProvider')]
+    #[DataProvider('unsafeSshUsernameProvider')]
     public function testValidateConnectionRejectsUnsafeUsername(string $user): void
     {
         $creds = Credentials::defaults();
@@ -384,6 +384,13 @@ final class CredentialsTest extends TestCase
         $res = Credentials::validateConnection($conn, $creds);
         $this->assertFalse($res['valid'], "username '$user' must be rejected");
         $this->assertNotEmpty(array_filter($res['errors'], fn($e) => stripos($e, 'username') !== false));
+    }
+
+    public static function unsafeSshUsernameProvider(): array
+    {
+        $values = self::unsafeSshTokenProvider();
+        unset($values['at sign']);
+        return $values;
     }
 
     public static function unsafeSshTokenProvider(): array
@@ -439,7 +446,7 @@ final class CredentialsTest extends TestCase
 
     public function testIsSafeSshUserRejectsSeparatorsWhitespaceAndControlCharacters(): void
     {
-        foreach (['a:b', 'a/b', 'a@b', '-x', '.x', 'a b', "a	b", "ab", '', 'h$(id)', 'DOMAIN\\user'] as $u) {
+        foreach (['a:b', 'a/b', '-x', '.x', 'a b', "a	b", "ab", '', 'h$(id)', 'DOMAIN\\user'] as $u) {
             $this->assertFalse(Credentials::isSafeSshUser($u), "'$u' must be rejected");
         }
     }

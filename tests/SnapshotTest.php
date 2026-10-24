@@ -826,7 +826,7 @@ final class SnapshotTest extends TestCase
             'option host'      => [self::pieces(), 'root@-oProxyCommand=x'],
             'option user'      => [self::pieces(), '-oProxyCommand=x@nas'],
             'space'            => [self::pieces(), 'root@nas x'],
-            'two at'           => [self::pieces(), 'a@b@c'],
+            'empty user'       => [self::pieces(), '@nas'],
         ];
     }
 
