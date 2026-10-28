@@ -331,16 +331,12 @@ class Logger
         $logsDir = self::logsDir();
 
         if (self::hasExternalLogsDir()) {
-            // The share may not exist yet, so its ancestry is created recursively
-            // (Util::mkdirs refuses a symlinked ancestor); the levels we own are not
-            // under world-writable /tmp, so no ownership check.
-            if (is_link($logsDir)) {
-                throw new RuntimeException("Refusing to use a symlinked log dir: $logsDir");
-            }
+            self::assertExternalLogAncestry($logsDir);
             Util::mkdirs($logsDir, 0700);
-            Util::ensureDirLevel($logsDir, 'log');
+            self::assertExternalLogAncestry($logsDir);
+            Util::ensurePrivateDir($logsDir, 'log');
             if ($dir !== $logsDir) {
-                Util::ensureDirLevel($dir, 'log');
+                Util::ensurePrivateDir($dir, 'log');
             }
             return;
         }
@@ -352,6 +348,106 @@ class Logger
         foreach ($chain as $d) {
             Util::ensurePrivateDir($d, 'log');
         }
+    }
+
+    public static function logDirRefusal(string $dir): string
+    {
+        try {
+            self::assertExternalLogAncestry($dir);
+            if (file_exists($dir) || is_link($dir)) {
+                Util::assertPrivateDir($dir);
+            }
+        } catch (Throwable $e) {
+            return $e->getMessage();
+        }
+        return '';
+    }
+
+    private static function assertExternalLogAncestry(string $dir): void
+    {
+        if ($dir === '' || $dir[0] !== '/') {
+            throw new RuntimeException('Persistent log directory must be an absolute path.');
+        }
+        $euid = function_exists('posix_geteuid') ? posix_geteuid() : null;
+        if ($euid === null) {
+            throw new RuntimeException('Cannot verify persistent log directory ownership.');
+        }
+        for ($p = $dir; $p !== '/'; $p = dirname($p)) {
+            clearstatcache(true, $p);
+            if (is_link($p)) {
+                $link = @lstat($p);
+                $target = @realpath($p);
+                if (dirname($p) === '/' && $link !== false && $link['uid'] === 0 && $target !== false) {
+                    self::assertExternalLogAncestry($target);
+                    continue;
+                }
+                throw new RuntimeException("Refusing a symlinked log ancestor: $p");
+            }
+            if (!file_exists($p)) {
+                continue;
+            }
+            $st = @stat($p);
+            if ($st === false || !is_dir($p)
+                || ($st['uid'] !== 0 && $st['uid'] !== $euid)
+                || (($st['mode'] & 0022) !== 0 && !($p !== $dir && ($st['mode'] & 01000) !== 0))) {
+                throw new RuntimeException("Refusing an untrusted log ancestor: $p");
+            }
+        }
+    }
+
+    public static function safeLogReadPath(string $path): ?string
+    {
+        if (!self::safeExistingPath($path, false)) {
+            return null;
+        }
+        $real = @realpath($path);
+        return $real === false ? null : $real;
+    }
+
+    private static function safeExistingPath(string $path, bool $allowMissing): bool
+    {
+        $root = self::logsDir();
+        $dir = dirname($path);
+        $roots = array_unique([$root, @realpath($root) ?: $root]);
+        if (!in_array($dir, $roots, true) && !in_array(dirname($dir), $roots, true)) {
+            return false;
+        }
+        try {
+            if (self::hasExternalLogsDir()) {
+                self::assertExternalLogAncestry($dir);
+            } else {
+                foreach ([self::base(), $root] as $level) {
+                    if (file_exists($level) || is_link($level)) {
+                        Util::assertPrivateDir($level);
+                    }
+                }
+            }
+            foreach (array_unique([$root, $dir]) as $level) {
+                if (file_exists($level) || is_link($level)) {
+                    Util::assertPrivateDir($level);
+                }
+            }
+        } catch (Throwable $e) {
+            return false;
+        }
+        clearstatcache(true, $path);
+        $st = @lstat($path);
+        if ($st === false) {
+            return $allowMissing && !file_exists($path) && !is_link($path);
+        }
+        $euid = function_exists('posix_geteuid') ? posix_geteuid() : null;
+        return ($st['mode'] & 0170000) === 0100000 && $st['nlink'] === 1
+            && ($st['mode'] & 0022) === 0 && $euid !== null && $st['uid'] === $euid;
+    }
+
+    private static function safeWritePath(string $path): bool
+    {
+        try {
+            self::ensureDir(dirname($path));
+        } catch (Throwable $e) {
+            return false;
+        }
+        return self::safeExistingPath($path, true);
     }
 
     /**
@@ -440,6 +536,9 @@ class Logger
     {
         if ($data === '') {
             return true;
+        }
+        if (!self::safeWritePath($path)) {
+            return false;
         }
         if (!self::isRunLogPath($path)) {
             return @file_put_contents($path, $data, FILE_APPEND | LOCK_EX) !== false;
@@ -699,6 +798,10 @@ class Logger
     public static function enforceRunLogCap(string $path, ?bool &$failed = null): bool
     {
         $failed = false;
+        if (!self::safeWritePath($path)) {
+            $failed = true;
+            return false;
+        }
         if (!self::isRunLogPath($path) || !is_file($path)) {
             return false;
         }
@@ -766,6 +869,9 @@ class Logger
             return false;
         }
         if (!self::isRunLogPath($path) || !is_file($path)) {
+            return false;
+        }
+        if (!self::safeWritePath($path)) {
             return false;
         }
         $body = @file_get_contents($path);
@@ -848,6 +954,9 @@ class Logger
         // append to plugin.log.1.
         try {
             self::ensureDir(self::logsDir());
+            if (!self::safeWritePath($plugin) || !self::safeWritePath($plugin . '.lock')) {
+                return false;
+            }
             return Util::withLock($plugin . '.lock', static function () use ($plugin, $stamp, $jobId, $message): bool {
                 clearstatcache(true, $plugin);
                 if ((int) @filesize($plugin) > self::PLUGIN_LOG_MAX_BYTES) {
@@ -1046,19 +1155,11 @@ class Logger
         $dir  = self::jobLogDir($jobId);
         $path = $dir . '/' . $runId;
 
-        // Defence in depth: the basename pattern already forbids traversal, but
-        // confirm the resolved path is still inside the job log dir before use.
-        $realDir  = @realpath($dir);
-        $realPath = @realpath($path);
-        if ($realPath === false) {
-            // The file may not exist (yet) - that's fine; the pattern guarantees
-            // it can only ever name a file directly under the job dir.
-            return $path;
-        }
-        if ($realDir === false || strpos($realPath, $realDir . '/') !== 0) {
+        if (!self::safeExistingPath($path, true)) {
             return null;
         }
-        return $realPath;
+        $real = @realpath($path);
+        return $real === false ? $path : $real;
     }
 
     /**
@@ -1196,6 +1297,11 @@ class Logger
         $keep = ($keep === null) ? self::retention() : max(1, (int) $keep);
         $dir  = self::jobLogDir($jobId);
         if (!is_dir($dir)) {
+            return 0;
+        }
+        try {
+            self::ensureDir($dir);
+        } catch (Throwable $e) {
             return 0;
         }
         $entries = @scandir($dir);

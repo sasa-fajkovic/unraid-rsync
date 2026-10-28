@@ -748,6 +748,10 @@ function ur_apply_global_settings(array &$config, array $globalIn, array &$allEr
             $allWarnings[] = 'Log directory ignored: it must be an absolute path under /mnt '
                 . '(e.g. /mnt/user/appdata/unraid.rsync/logs). Logs will stay in RAM.';
         }
+        if ($cleanLogDir !== '' && ($refusal = Logger::logDirRefusal($cleanLogDir)) !== '') {
+            $config['global']['logDir'] = '';
+            $allWarnings[] = 'Log directory ignored: ' . $refusal . ' Logs will stay in RAM.';
+        }
     }
 
     // secretsDir (where credentials.json lives): validate/confine. Changing it
@@ -2433,7 +2437,7 @@ function ur_resolve_run_log(): ?array
         $path = Logger::latestRunLogPath($jobId);
     }
 
-    return ['jobId' => $jobId, 'path' => $path];
+    return ['jobId' => $jobId, 'path' => Logger::safeLogReadPath($path) ?? ''];
 }
 
 /**
@@ -2552,16 +2556,7 @@ function ur_action_download_job_log(): void
  */
 function ur_plugin_log_read_path(): string
 {
-    $path = Logger::pluginLogPath();
-    if (is_link($path)) {
-        return '';
-    }
-    $real = @realpath($path);
-    $dir  = @realpath(Logger::logsDir());
-    if ($real === false || $dir === false || $real !== $dir . '/plugin.log' || !is_file($real)) {
-        return '';
-    }
-    return $real;
+    return Logger::safeLogReadPath(Logger::pluginLogPath()) ?? '';
 }
 
 /**
