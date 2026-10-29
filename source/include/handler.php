@@ -749,6 +749,10 @@ function ur_apply_global_settings(array &$config, array $globalIn, array &$allEr
             $allWarnings[] = 'Log directory not changed: ' . $refusal . ' The existing logging setting is kept.';
         } else {
             $config['global']['logDir'] = $cleanLogDir;
+            $advice = $cleanLogDir !== '' ? Logger::logDirWarning($cleanLogDir) : '';
+            if ($advice !== '') {
+                $allWarnings[] = 'Log directory: ' . $advice;
+            }
         }
     }
 

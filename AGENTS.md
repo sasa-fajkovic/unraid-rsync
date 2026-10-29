@@ -318,6 +318,22 @@ on, forked from, or derived from any other plugin.
   RESETS the per-path state, so a flush placed after the hook would find nothing
   left to rescue. Anything feeding the sink a string with no trailing newline
   and reading the file back immediately needs that flush.
+- **Log files are opened through `LogDirectory`, never by path.** It pins the
+  cwd one level at a time from `/`, refusing symlinks (the tmpfs tree must also
+  be private; a persistent `logDir` may be a share others write, so it is only
+  advised against, `Logger::logDirWarning`). Every file must be a regular file
+  with one link, created with `x` (O_EXCL), and its fstat compared with the
+  pinned entry, because **PHP's `fopen()` is not cwd-relative**: it opens
+  `getcwd() . '/' . $name`, a fresh walk from `/` (strace-verified), and
+  `fopen('/proc/self/fd/N')` readlink()s and reopens the PATH. Only
+  lstat/unlink/rename/mkdir/scandir really are relative. A run's log stays
+  pinned for the whole run (`Logger::withRunLogs`, handles opened `e` =
+  O_CLOEXEC so hooks never inherit them); rsync gets it as fd 3 with
+  `--log-file=/proc/self/fd/3`, which its C `fopen` does reopen by inode.
+  `plugin.log` is appended `r+b` + seek under `plugin.log.lock`, never `a`
+  (no O_CREAT on an existing name); the lock's mode is never checked, or one
+  umask-0 writer would switch plugin.log off. `Config::sanitizeLogDir` stays
+  canonical: exclusive shares make `/mnt/user/<share>` a symlink.
 - **Log bounds (all RAM by default).** One run log: `UR_MAX_RUN_LOG_BYTES`
   (16 MiB). The sink stops appending once the file is over it (one marker), and
   because rsync's `--log-file` bypasses the sink, the Runner also calls

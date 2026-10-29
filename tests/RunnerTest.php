@@ -3278,25 +3278,18 @@ final class RunnerTest extends TestCase
 
     public function testAPairWhoseLogCannotBeTrimmedStopsAtTheHardCeiling(): void
     {
-        $probe = tempnam(sys_get_temp_dir(), 'ur-ro-');
-        chmod($probe, 0400);
-        $writable = is_writable($probe);
-        unlink($probe);
-        if ($writable) {
-            $this->markTestSkipped('cannot make a file read-only as the current user');
-        }
-
         $cap = 1024;
         Logger::$maxRunLogBytesOverride = $cap;
         Runner::$logCapCheckSec         = 0.0;
+        // The run log is pinned open, so a mode change no longer makes the trim
+        // fail; the seam reports the failure instead.
+        Runner::$logTrimmer = static fn(string $path): bool => true;
         $log   = '';
         $calls = 0;
         Rsync::$runner = static function (array $argv, $onOutput, $env = null, $timeout = null, ?callable $stopWhen = null) use (&$log, &$calls): int {
             $calls++;
             $log = self::logFileArg($argv);
-            chmod($log, 0600);
             file_put_contents($log, str_repeat('x', 5 * 1024), FILE_APPEND);
-            chmod($log, 0400); // the trim cannot open it for writing
             return ($stopWhen !== null && $stopWhen()) ? 143 : 0;
         };
         $plugin = Logger::pluginLogPath();
@@ -3310,9 +3303,7 @@ final class RunnerTest extends TestCase
         } finally {
             Logger::$maxRunLogBytesOverride = null;
             Runner::$logCapCheckSec         = 2.0;
-            if ($log !== '') {
-                chmod($log, 0600);
-            }
+            Runner::$logTrimmer             = null;
         }
 
         $this->assertSame(2, $calls, 'the next pair still runs');

@@ -14,9 +14,9 @@ final class HandlerLogSecurityTest extends TestCase
         require_once __DIR__ . '/../source/include/handler.php';
     }
 
-    public function testUnsafeNewLogDirectoryKeepsExistingSettingWithWarning(): void
+    public function testSharedNewLogDirectoryIsSavedWithAdvice(): void
     {
-        $root = sys_get_temp_dir() . '/ur-log-settings-' . bin2hex(random_bytes(6));
+        $root = realpath(sys_get_temp_dir()) . '/ur-log-settings-' . bin2hex(random_bytes(6));
         mkdir($root . '/pool/logs', 0700, true);
         chmod($root . '/pool/logs', 0777);
         $previous = Config::$mntRoot;
@@ -27,9 +27,9 @@ final class HandlerLogSecurityTest extends TestCase
             $errors = [];
             $warnings = [];
             ur_apply_global_settings($config, ['logDir' => $root . '/pool/logs'], $errors, $warnings);
-            $this->assertSame($root . '/pool/existing', $config['global']['logDir']);
+            $this->assertSame($root . '/pool/logs', $config['global']['logDir']);
             $this->assertSame([], $errors);
-            $this->assertStringContainsString('not changed', implode(' ', $warnings));
+            $this->assertStringContainsString('other users', implode(' ', $warnings));
             $this->assertSame(0777, fileperms($root . '/pool/logs') & 0777);
         } finally {
             Config::$mntRoot = $previous;
@@ -39,9 +39,33 @@ final class HandlerLogSecurityTest extends TestCase
         }
     }
 
+    public function testNonDirectoryLogPathKeepsExistingSettingWithWarning(): void
+    {
+        $root = realpath(sys_get_temp_dir()) . '/ur-log-settings-' . bin2hex(random_bytes(6));
+        mkdir($root . '/pool', 0700, true);
+        file_put_contents($root . '/pool/file', 'x');
+        $previous = Config::$mntRoot;
+        Config::$mntRoot = $root;
+        try {
+            $config = Config::defaults();
+            $config['global']['logDir'] = $root . '/pool/existing';
+            $errors = [];
+            $warnings = [];
+            ur_apply_global_settings($config, ['logDir' => $root . '/pool/file/logs'], $errors, $warnings);
+            $this->assertSame($root . '/pool/existing', $config['global']['logDir']);
+            $this->assertStringContainsString('not changed', implode(' ', $warnings));
+            $this->assertStringContainsString($root . '/pool/file', implode(' ', $warnings));
+        } finally {
+            Config::$mntRoot = $previous;
+            unlink($root . '/pool/file');
+            rmdir($root . '/pool');
+            rmdir($root);
+        }
+    }
+
     public function testTrustedLogDirectoryIsSavedWithoutCreatingIt(): void
     {
-        $root = sys_get_temp_dir() . '/ur-log-settings-' . bin2hex(random_bytes(6));
+        $root = realpath(sys_get_temp_dir()) . '/ur-log-settings-' . bin2hex(random_bytes(6));
         mkdir($root, 0777);
         chmod($root, 0777);
         $previous = Config::$mntRoot;
@@ -63,7 +87,7 @@ final class HandlerLogSecurityTest extends TestCase
     }
     public function testExistingPrivateLogsUnderWritableShareRemainSelected(): void
     {
-        $root = sys_get_temp_dir() . '/ur-log-settings-' . bin2hex(random_bytes(6));
+        $root = realpath(sys_get_temp_dir()) . '/ur-log-settings-' . bin2hex(random_bytes(6));
         mkdir($root . '/share/logs', 0700, true);
         chmod($root . '/share', 0777);
         $previous = Config::$mntRoot;
@@ -88,32 +112,32 @@ final class HandlerLogSecurityTest extends TestCase
         }
     }
 
-    public function testSymlinkRemainsVisibleToValidationAndExistingPointerIsKept(): void
+    public function testSymlinkedPathIsStoredAsItsTarget(): void
     {
-        $root = sys_get_temp_dir() . '/ur-log-settings-' . bin2hex(random_bytes(6));
+        // 6.12+ exclusive shares: /mnt/user/<share> is a symlink to the pool.
+        $root = realpath(sys_get_temp_dir()) . '/ur-log-settings-' . bin2hex(random_bytes(6));
         mkdir($root . '/share', 0700, true);
-        mkdir($root . '/target', 0700);
-        symlink($root . '/target', $root . '/share/linked');
+        mkdir($root . '/pool/target', 0700, true);
+        symlink($root . '/pool/target', $root . '/share/linked');
         $previous = Config::$mntRoot;
         Config::$mntRoot = $root;
         try {
             $linked = $root . '/share/linked';
-            $this->assertSame($linked, Config::sanitizeLogDir($linked));
-            $this->assertNotSame('', Logger::logDirRefusal($linked));
+            $this->assertSame($root . '/pool/target', Config::sanitizeLogDir($linked));
             $config = Config::defaults();
             $config['global']['logDir'] = $root . '/share/existing';
             $errors = [];
             $warnings = [];
             ur_apply_global_settings($config, ['logDir' => $linked], $errors, $warnings);
-            $this->assertSame($root . '/share/existing', $config['global']['logDir']);
+            $this->assertSame($root . '/pool/target', $config['global']['logDir']);
             $this->assertSame([], $errors);
-            $this->assertStringContainsString('not changed', implode(' ', $warnings));
-            $this->assertSame([], array_values(array_diff(scandir($root . '/target'), ['.', '..'])));
+            $this->assertSame([], $warnings);
         } finally {
             Config::$mntRoot = $previous;
             unlink($root . '/share/linked');
             rmdir($root . '/share');
-            rmdir($root . '/target');
+            rmdir($root . '/pool/target');
+            rmdir($root . '/pool');
             rmdir($root);
         }
     }

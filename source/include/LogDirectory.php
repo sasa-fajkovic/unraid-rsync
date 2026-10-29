@@ -10,6 +10,10 @@ final class LogDirectory
     public static $afterEnter = null;
 
     /**
+     * Run $callback with the cwd pinned to $dir, entered one level at a time
+     * from / and never through a symlink. Levels from $privateRoot down must be
+     * private (Util::assertPrivateDir); null means $dir itself, '' none.
+     *
      * @template T
      * @param callable():T $callback
      * @return T
@@ -17,13 +21,13 @@ final class LogDirectory
     public static function withDirectory(string $dir, callable $callback, bool $create = false, ?string $privateRoot = null): mixed
     {
         $dir = self::normalize($dir);
-        $privateRoot = self::normalize($privateRoot ?? $dir);
-        if ($privateRoot !== '/' && $dir !== '/' && $dir !== $privateRoot
+        $privateRoot = $privateRoot === '' ? null : self::normalize($privateRoot ?? $dir);
+        if ($privateRoot !== null && $privateRoot !== '/' && $dir !== '/' && $dir !== $privateRoot
             && !str_starts_with($dir, $privateRoot . '/') && !str_starts_with($privateRoot, $dir . '/')) {
             throw new RuntimeException('Private log root must contain the requested directory.');
         }
         $savedPath = getcwd();
-        $saved = @fopen('.', 'r');
+        $saved = @fopen('.', 're');
         $savedStat = $saved === false ? false : @fstat($saved);
         if ($savedPath === false || $saved === false || $savedStat === false) {
             if (is_resource($saved)) {
@@ -36,7 +40,7 @@ final class LogDirectory
                 throw new RuntimeException('Unable to enter the filesystem root.');
             }
             if ($privateRoot === '/') {
-                Util::assertPrivateDir('.');
+                self::assertPrivate('/');
             }
             $walked = '';
             foreach (array_filter(explode('/', $dir), static fn(string $part): bool => $part !== '') as $part) {
@@ -69,8 +73,9 @@ final class LogDirectory
                 if ($entered === false || !self::sameDirectory($before, $entered)) {
                     throw new RuntimeException("Log directory changed while opening: $walked");
                 }
-                if ($privateRoot === '/' || $walked === $privateRoot || str_starts_with($walked, $privateRoot . '/')) {
-                    Util::assertPrivateDir('.');
+                if ($privateRoot !== null
+                    && ($privateRoot === '/' || $walked === $privateRoot || str_starts_with($walked, $privateRoot . '/'))) {
+                    self::assertPrivate($walked);
                 }
             }
             if (self::$afterEnter !== null) {
@@ -83,6 +88,16 @@ final class LogDirectory
             } finally {
                 fclose($saved);
             }
+        }
+    }
+
+    /** Util::assertPrivateDir on the cwd, naming $walked rather than "." in the error. */
+    private static function assertPrivate(string $walked): void
+    {
+        try {
+            Util::assertPrivateDir('.');
+        } catch (RuntimeException $e) {
+            throw new RuntimeException((string) preg_replace('/: \.$/', ': ' . $walked, $e->getMessage()), 0, $e);
         }
     }
 

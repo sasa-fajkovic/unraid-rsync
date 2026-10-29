@@ -790,20 +790,24 @@ class Rsync
         ];
         $log = false;
         $logPath = '';
+        $ownLog = false;
         foreach ($argv as $i => $arg) {
             if (str_starts_with($arg, '--log-file=')) {
                 $logPath = substr($arg, strlen('--log-file='));
-                $log = Logger::openLog($logPath, 'ab');
+                $log = Logger::pinnedLogHandle($logPath) ?? false;
                 if ($log === false) {
-                    $onOutput("Unable to open the run log safely.\n");
-                    return 127;
+                    $log = Logger::openLog($logPath, 'ab');
+                    if ($log === false) {
+                        $onOutput("Unable to open the run log safely.\n");
+                        return 127;
+                    }
+                    $ownLog = true;
+                    Logger::pinLog($logPath, $log);
                 }
                 $descriptors[3] = $log;
-                // rsync reopens its log itself; an inherited descriptor survives parent-path replacement.
+                // rsync's C fopen() of its own fd 3 reopens the pinned inode, so a
+                // parent directory replaced mid-run cannot redirect its writes.
                 $argv[$i] = '--log-file=' . (PHP_OS_FAMILY === 'Linux' ? '/proc/self/fd/3' : '/dev/fd/3');
-                if (PHP_OS_FAMILY === 'Linux') {
-                    Logger::retainLog($logPath, $log);
-                }
                 break;
             }
         }
@@ -841,8 +845,8 @@ class Rsync
             }
             return self::reapExitCode($proc);
         } finally {
-            if ($log !== false) {
-                Logger::releaseLog($logPath);
+            if ($ownLog) {
+                Logger::unpinLog($logPath);
                 fclose($log);
             }
         }

@@ -297,7 +297,7 @@ class Config
      *
      * @param mixed $value
      */
-    private static function sanitizeMntDir(mixed $value, bool $canonical = true): string
+    private static function sanitizeMntDir(mixed $value): string
     {
         if (!is_string($value)) {
             return '';
@@ -314,7 +314,7 @@ class Config
                 return '';
             }
         }
-        $v = $canonical ? self::canonicalPath($v) : '/' . implode('/', array_filter(explode('/', $v), static fn(string $part): bool => $part !== ''));
+        $v = self::canonicalPath($v);
         // Require at least /mnt/<top>/<leaf> so the bare /mnt and /mnt/user roots
         // (and any non-/mnt system path) are rejected.
         if (!preg_match('#^' . preg_quote(rtrim(self::$mntRoot, '/'), '#') . '/[^/]+/.+#', $v)) {
@@ -473,14 +473,13 @@ class Config
     /**
      * Validate a user-supplied persistent log directory, returning the cleaned
      * absolute path or '' (meaning "unset" -> logs stay in RAM/tmpfs). See
-     * sanitizeMntDir() for the confinement rules. Logs keep their lexical path
-     * so the directory walker can reject symlinks before opening them.
+     * sanitizeMntDir() for the confinement rules.
      *
      * @param mixed $value
      */
     public static function sanitizeLogDir(mixed $value): string
     {
-        return self::sanitizeMntDir($value, false);
+        return self::sanitizeMntDir($value);
     }
 
     /**

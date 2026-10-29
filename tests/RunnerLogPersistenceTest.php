@@ -88,10 +88,9 @@ final class RunnerLogPersistenceTest extends TestCase
             rename($root, $moved);
             symlink($outside, $root);
             Logger::setRedaction([$runtimePath]);
-            $raw = Logger::openLog($originalLog, 'ab');
+            $raw = Logger::pinnedLogHandle($originalLog);
             $this->assertIsResource($raw);
             fwrite($raw, 'raw path ' . $runtimePath . "\n");
-            fclose($raw);
             $output('unterminated transfer tail');
             return 0;
         };
@@ -114,7 +113,7 @@ final class RunnerLogPersistenceTest extends TestCase
         $this->assertSame('outside run sentinel', file_get_contents($outside . '/' . $this->jobId . '/' . basename($originalLog)));
         $this->assertSame('outside plugin sentinel', file_get_contents($outside . '/plugin.log'));
         $this->assertSame(Rsync::STATE_SUCCESS, Runner::readSummary($this->jobId)['state']);
-        $this->assertSame($root, Config::load()['global']['logDir']);
+        $this->assertSame($root, json_decode((string) file_get_contents(Config::path()), true)['global']['logDir']);
         $this->assertSame($cwd, getcwd());
         $this->assertFalse(Logger::openLog($originalLog));
         $identity = stat($movedPath);
@@ -127,5 +126,18 @@ final class RunnerLogPersistenceTest extends TestCase
             }
         }
         $this->assertSame(0, $remaining, 'The completed run must release every retained descriptor.');
+    }
+
+    public function testChildProcessesDoNotInheritThePinnedRunLog(): void
+    {
+        Logger::$logsDirOverride = $this->base . '/share/logs';
+        $seen = Logger::withRunLogs(static function (): array {
+            $path = Logger::openRun('audit');
+            $proc = proc_open(['sh', '-c', 'ls -l /proc/$$/fd'], [1 => ['pipe', 'w']], $pipes);
+            $out = (string) stream_get_contents($pipes[1]);
+            proc_close($proc);
+            return [basename($path), $out];
+        });
+        $this->assertStringNotContainsString($seen[0], $seen[1]);
     }
 }

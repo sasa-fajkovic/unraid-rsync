@@ -131,7 +131,7 @@ final class LoggerSecurityTest extends TestCase
         $this->assertDirectoryDoesNotExist($this->rtBase);
     }
 
-    public function testTrustedStickyAncestorAllowsPrivateChildButNotLogsAtItsRoot(): void
+    public function testStickyAncestorIsUsableAndAdvisedAgainstAsTheRoot(): void
     {
         $this->extBase = sys_get_temp_dir() . '/ur-logger-ext-' . bin2hex(random_bytes(4));
         mkdir($this->extBase, 01777);
@@ -141,10 +141,12 @@ final class LoggerSecurityTest extends TestCase
         $path = Logger::openRun('audit');
         $this->assertTrue(Logger::append($path, 'accepted'));
         $this->assertNotNull(Logger::safeLogReadPath($path));
-        $this->assertNotSame('', Logger::logDirRefusal($this->extBase));
+        $this->assertSame('', Logger::logDirRefusal($this->extBase));
+        $this->assertNotSame('', Logger::logDirWarning($this->extBase));
+        $this->assertSame('', Logger::logDirWarning(Logger::logsDir()));
     }
 
-    public function testSymlinkedLockAndWritableFilesAreRefused(): void
+    public function testSymlinkedLockIsRefusedButPermissiveFilesStillLog(): void
     {
         $path = Logger::openRun('audit');
         $victim = $this->rtBase . '/victim';
@@ -153,19 +155,50 @@ final class LoggerSecurityTest extends TestCase
         $this->assertFalse(Logger::event('', 'audit', 'blocked'));
         $this->assertSame('sentinel', file_get_contents($victim));
         chmod($path, 0666);
-        $this->assertFalse(Logger::append($path, 'blocked'));
-        $this->assertNull(Logger::safeLogReadPath($path));
+        $this->assertTrue(Logger::append($path, 'accepted'));
+        $this->assertNotNull(Logger::safeLogReadPath($path));
     }
 
-    public function testOtherOwnersDirectoryAndFileAreRefused(): void
+    public function testLockCreatedUnderUmaskZeroKeepsPluginLogWorking(): void
+    {
+        $mask = umask(0);
+        try {
+            $this->assertTrue(Logger::event('', 'audit', 'first'));
+        } finally {
+            umask($mask);
+        }
+        chmod(Logger::pluginLogPath() . '.lock', 0666);
+        $this->assertTrue(Logger::event('', 'audit', 'second'));
+        $this->assertStringContainsString('second', Logger::tail(Logger::pluginLogPath()));
+    }
+
+    public function testPersistentShareWrittenByOthersKeepsLoggingButNeverFollowsLinks(): void
+    {
+        $this->extBase = sys_get_temp_dir() . '/ur-logger-ext-' . bin2hex(random_bytes(4));
+        mkdir($this->extBase . '/logs', 0777, true);
+        chmod($this->extBase . '/logs', 0777);
+        Logger::$logsDirOverride = $this->extBase . '/logs';
+        $path = Logger::openRun('audit');
+        $this->assertTrue(Logger::event($path, 'audit', 'persisted'));
+        $this->assertStringContainsString('persisted', Logger::tail($path));
+        $this->assertSame(0777, fileperms($this->extBase . '/logs') & 0777);
+        $victim = $this->extBase . '/victim';
+        file_put_contents($victim, 'sentinel');
+        rename(Logger::pluginLogPath(), Logger::pluginLogPath() . '.old');
+        symlink($victim, Logger::pluginLogPath());
+        $this->assertFalse(Logger::event('', 'audit', 'blocked'));
+        $this->assertSame('sentinel', file_get_contents($victim));
+    }
+
+    public function testOtherOwnersFileStillLogsButAForeignRuntimeDirIsRefused(): void
     {
         if (!function_exists('posix_geteuid') || posix_geteuid() !== 0) {
             $this->markTestSkipped('Changing ownership requires root.');
         }
         $path = Logger::openRun('audit');
         chown($path, 65534);
-        $this->assertFalse(Logger::append($path, 'blocked'));
-        $this->assertNull(Logger::safeLogReadPath($path));
+        $this->assertTrue(Logger::append($path, 'accepted'));
+        $this->assertNotNull(Logger::safeLogReadPath($path));
         chown(Logger::jobLogDir('audit'), 65534);
         $this->assertNull(Logger::runLogPathById('audit', basename($path)));
     }
@@ -244,5 +277,15 @@ final class LoggerSecurityTest extends TestCase
         $this->assertSame('outside sentinel', file_get_contents($outside . '/audit/' . basename($path)));
         $this->assertSame('outside latest sentinel', file_get_contents($outside . '/audit/' . basename($latest)));
         $this->assertSame($cwd, getcwd());
+    }
+
+    public function testDeletedPinnedLogNeverCreatesAStrayFile(): void
+    {
+        Logger::withRunLogs(function (): void {
+            $path = Logger::openRun('audit');
+            unlink($path);
+            $this->assertTrue(Logger::append($path, 'still pinned'));
+            $this->assertSame([], array_values(array_diff(scandir(dirname($path)) ?: [], ['.', '..'])));
+        });
     }
 }
