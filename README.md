@@ -281,8 +281,13 @@ wrong path on either side can wipe a backup. The plugin refuses those runs:
 - **Run logs** live in RAM (`/tmp/unraid.rsync`) by default: no flash wear, but
   gone after a reboot (History survives; only the log bodies are lost). Set
   **Persistent log directory** on the Global Settings tab to a path under
-  `/mnt` to keep them across reboots. One run log is capped at 16 MiB, a job's
-  logs at 256 MiB, and `plugin.log` rotates past 1 MiB.
+  `/mnt` to keep them across reboots. The plugin never reads or writes a log
+  through a symbolic link or a hardlink and never changes the folder's
+  permissions. A folder other users can write still works, but they could
+  delete or rename the logs in it, so the settings page recommends one only
+  root can write (`chmod 700`). An invalid change keeps the previous setting.
+  One run log is capped at 16 MiB, a job's logs at 256 MiB, and `plugin.log`
+  rotates past 1 MiB.
 - **Credentials** can move off the flash with **Secrets directory** (see
   [below](#storing-credentials-on-the-array-instead-of-the-flash)).
 
