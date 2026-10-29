@@ -164,6 +164,12 @@ class Runner
      */
     public static function run(string $jobId, bool $dryRun = false, string $trigger = 'manual', string $gen = ''): array
     {
+        return Logger::withRunLogs(static fn(): array => self::runWithLogs($jobId, $dryRun, $trigger, $gen));
+    }
+
+    /** @return array{state:string,exitCode:int,runLog:string,reason?:string} */
+    private static function runWithLogs(string $jobId, bool $dryRun, string $trigger, string $gen): array
+    {
         $gen = preg_match('/^[0-9a-f]{1,64}$/D', $gen) === 1 ? $gen : RunState::newGen();
         // How this run was triggered: 'manual' (UI Run/Dry-run) or 'schedule'
         // (cron). Clamped to the closed set so a junk value never propagates into

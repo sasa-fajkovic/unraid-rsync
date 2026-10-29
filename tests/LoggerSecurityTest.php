@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 final class LoggerSecurityTest extends TestCase
 {
@@ -17,6 +18,7 @@ final class LoggerSecurityTest extends TestCase
 
     protected function tearDown(): void
     {
+        LogDirectory::$afterEnter = null;
         TestSeams::reset();
         foreach (array_filter([$this->rtBase, $this->extBase]) as $dir) {
             $this->removeTree($dir);
@@ -37,15 +39,22 @@ final class LoggerSecurityTest extends TestCase
         @rmdir($path);
     }
 
-    public function testExternalWritableAncestorIsRefusedWithoutChangingPermissions(): void
+    public function testExternalWritableAncestorPreservesPersistentLogsAndPermissions(): void
     {
         $this->extBase = sys_get_temp_dir() . '/ur-logger-ext-' . bin2hex(random_bytes(4));
         mkdir($this->extBase, 0777);
         chmod($this->extBase, 0777);
         Logger::$logsDirOverride = $this->extBase . '/logs';
-        $this->assertFalse(Logger::event('', 'audit', 'blocked'));
-        $this->assertDirectoryDoesNotExist($this->extBase . '/logs');
+        $path = Logger::openRun('audit');
+        $this->assertTrue(Logger::event($path, 'audit', 'persisted'));
         $this->assertSame(0777, fileperms($this->extBase) & 0777);
+        $this->assertSame(0700, fileperms(Logger::logsDir()) & 0777);
+        TestSeams::reset();
+        Logger::$baseOverride = $this->rtBase;
+        Logger::$logsDirOverride = $this->extBase . '/logs';
+        $this->assertStringContainsString('persisted', Logger::tail($path));
+        $this->assertStringContainsString('persisted', Logger::tail(Logger::pluginLogPath()));
+        $this->assertDirectoryDoesNotExist($this->rtBase . '/logs');
     }
 
     public function testPluginLogSymlinkCannotModifyItsTarget(): void
@@ -176,5 +185,64 @@ final class LoggerSecurityTest extends TestCase
     {
         $this->assertNotSame('', Logger::logDirRefusal(''));
         $this->assertNotSame('', Logger::logDirRefusal('relative/logs'));
+    }
+    public static function pinnedOperations(): array
+    {
+        return [['append'], ['read'], ['cap'], ['redact'], ['prune']];
+    }
+
+    #[DataProvider('pinnedOperations')]
+    public function testPinnedOperationsSurviveLogRootReplacement(string $operation): void
+    {
+        $cwd = getcwd();
+        $this->extBase = sys_get_temp_dir() . '/ur-logger-ext-' . bin2hex(random_bytes(4));
+        mkdir($this->extBase, 0777);
+        chmod($this->extBase, 0777);
+        $root = $this->extBase . '/logs';
+        $moved = $this->extBase . '/moved';
+        $outside = $this->extBase . '/outside';
+        Logger::$logsDirOverride = $root;
+        $path = Logger::openRun('audit', 1750000000);
+        $latest = Logger::openRun('audit', 1750000001);
+        $body = $operation === 'cap' ? str_repeat('x', 512) : "original <tag> hide-me\n";
+        file_put_contents($path, $body);
+        mkdir($outside . '/audit', 0700, true);
+        file_put_contents($outside . '/audit/' . basename($path), 'outside sentinel');
+        file_put_contents($outside . '/audit/' . basename($latest), 'outside latest sentinel');
+        Logger::$maxRunLogBytesOverride = 64;
+        Logger::setRedaction(['hide-me']);
+        LogDirectory::$afterEnter = static function () use ($root, $moved, $outside): void {
+            LogDirectory::$afterEnter = null;
+            rename($root, $moved);
+            symlink($outside, $root);
+        };
+        $movedPath = $moved . '/audit/' . basename($path);
+        switch ($operation) {
+            case 'append':
+                $this->assertTrue(Logger::append($path, 'appended'));
+                $this->assertStringContainsString('appended', file_get_contents($movedPath));
+                break;
+            case 'read':
+                $this->assertStringContainsString('original &lt;tag&gt;', Logger::tail($path));
+                break;
+            case 'cap':
+                $failed = false;
+                $this->assertTrue(Logger::enforceRunLogCap($path, $failed));
+                $this->assertFalse($failed);
+                $this->assertLessThan(512, filesize($movedPath));
+                break;
+            case 'redact':
+                $this->assertTrue(Logger::redactRunLog($path));
+                $this->assertStringNotContainsString('hide-me', file_get_contents($movedPath));
+                break;
+            case 'prune':
+                $this->assertSame(1, Logger::pruneRuns('audit', 1));
+                $this->assertFileDoesNotExist($movedPath);
+                $this->assertFileExists($moved . '/audit/' . basename($latest));
+                break;
+        }
+        $this->assertSame('outside sentinel', file_get_contents($outside . '/audit/' . basename($path)));
+        $this->assertSame('outside latest sentinel', file_get_contents($outside . '/audit/' . basename($latest)));
+        $this->assertSame($cwd, getcwd());
     }
 }

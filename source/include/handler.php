@@ -737,20 +737,18 @@ function ur_apply_global_settings(array &$config, array $globalIn, array &$allEr
     }
 
     // logDir (persistent log directory): validate/confine. A non-empty value that
-    // fails the rules is rejected (logs stay in RAM) WITH a warning so the user
-    // isn't left thinking persistence is on. Only when the field is present, so a
-    // partial (Jobs-only) POST never wipes it.
+    // fails the rules keeps the previous setting with a warning. Only when the
+    // field is present, so a partial (Jobs-only) POST never wipes it.
     if (array_key_exists('logDir', $globalIn)) {
-        $rawLogDir   = is_string($globalIn['logDir']) ? trim($globalIn['logDir']) : '';
+        $rawLogDir = is_string($globalIn['logDir']) ? trim($globalIn['logDir']) : '';
         $cleanLogDir = Config::sanitizeLogDir($rawLogDir);
-        $config['global']['logDir'] = $cleanLogDir;
+        $refusal = $cleanLogDir !== '' ? Logger::logDirRefusal($cleanLogDir) : '';
         if ($rawLogDir !== '' && $cleanLogDir === '') {
-            $allWarnings[] = 'Log directory ignored: it must be an absolute path under /mnt '
-                . '(e.g. /mnt/user/appdata/unraid.rsync/logs). Logs will stay in RAM.';
-        }
-        if ($cleanLogDir !== '' && ($refusal = Logger::logDirRefusal($cleanLogDir)) !== '') {
-            $config['global']['logDir'] = '';
-            $allWarnings[] = 'Log directory ignored: ' . $refusal . ' Logs will stay in RAM.';
+            $allWarnings[] = 'Log directory not changed: it must be an absolute path under /mnt.';
+        } elseif ($refusal !== '') {
+            $allWarnings[] = 'Log directory not changed: ' . $refusal . ' The existing logging setting is kept.';
+        } else {
+            $config['global']['logDir'] = $cleanLogDir;
         }
     }
 
@@ -2511,7 +2509,8 @@ function ur_action_download_job_log(): void
     $jobId = $resolved['jobId'];
     $path  = $resolved['path'];
 
-    if ($path === '' || !is_file($path) || !is_readable($path)) {
+    $stream = $path !== '' ? Logger::openLog($path) : false;
+    if ($stream === false) {
         // The History record persists across reboots but its tmpfs log does not.
         sendError('Log not found (run logs live in RAM and are cleared on reboot).', 404);
         return;
@@ -2534,7 +2533,7 @@ function ur_action_download_job_log(): void
     // or emitting bytes the test harness can't capture (mirrors sendResponse).
     if (defined('UR_HANDLER_TESTING')) {
         $body = '';
-        ur_stream_scrubbed($path, static function (string $s) use (&$body): void {
+        ur_stream_scrubbed($stream, static function (string $s) use (&$body): void {
             $body .= $s;
         });
         $GLOBALS['ur_last_download'] = ['path' => $path, 'filename' => $fname, 'size' => strlen($body), 'body' => $body];
@@ -2542,7 +2541,7 @@ function ur_action_download_job_log(): void
         return;
     }
 
-    ur_stream_scrubbed($path, static function (string $s): void {
+    ur_stream_scrubbed($stream, static function (string $s): void {
         echo $s;
     });
     exit;
@@ -2567,7 +2566,8 @@ function ur_plugin_log_read_path(): string
 function ur_action_download_plugin_log(): void
 {
     $path = ur_plugin_log_read_path();
-    if ($path === '' || !is_readable($path)) {
+    $stream = $path !== '' ? Logger::openLog($path) : false;
+    if ($stream === false) {
         sendError('The plugin log is empty (it lives in RAM and is cleared on reboot).', 404);
         return;
     }
@@ -2582,7 +2582,7 @@ function ur_action_download_plugin_log(): void
 
     if (defined('UR_HANDLER_TESTING')) {
         $body = '';
-        ur_stream_scrubbed($path, static function (string $s) use (&$body): void {
+        ur_stream_scrubbed($stream, static function (string $s) use (&$body): void {
             $body .= $s;
         });
         $GLOBALS['ur_last_download'] = ['path' => $path, 'filename' => $fname, 'size' => strlen($body), 'body' => $body];
@@ -2590,7 +2590,7 @@ function ur_action_download_plugin_log(): void
         return;
     }
 
-    ur_stream_scrubbed($path, static function (string $s): void {
+    ur_stream_scrubbed($stream, static function (string $s): void {
         echo $s;
     });
     exit;
@@ -2602,11 +2602,12 @@ function ur_action_download_plugin_log(): void
  * secret path split across two reads is still scrubbed (a match never spans a
  * line).
  *
+ * @param resource|string|false $source
  * @param callable(string):void $emit
  */
-function ur_stream_scrubbed(string $path, callable $emit, int $chunkBytes = 65536): void
+function ur_stream_scrubbed(mixed $source, callable $emit, int $chunkBytes = 65536): void
 {
-    $fh = @fopen($path, 'rb');
+    $fh = is_resource($source) ? $source : (is_string($source) ? @fopen($source, 'rb') : false);
     if ($fh === false) {
         return;
     }

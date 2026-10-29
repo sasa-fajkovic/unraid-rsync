@@ -32,6 +32,7 @@ declare(strict_types=1);
 
 
 require_once __DIR__ . '/Util.php';
+require_once __DIR__ . '/LogDirectory.php';
 
 // Max bytes a single in-progress RUN log may grow to before further captured
 // output is dropped. The run log lives in RAM (tmpfs), so an unbounded
@@ -275,6 +276,46 @@ class Logger
      */
     public static ?string $logsDirOverride = null;
 
+    /** @var array<string,list<resource>> */
+    private static array $retainedLogs = [];
+
+    /** @var list<list<array{string,resource}>> */
+    private static array $runLogScopes = [];
+
+    /** @param resource $handle */
+    public static function retainLog(string $path, $handle): void
+    {
+        self::$retainedLogs[$path][] = $handle;
+    }
+
+    public static function releaseLog(string $path): void
+    {
+        if (isset(self::$retainedLogs[$path])) {
+            array_pop(self::$retainedLogs[$path]);
+            if (self::$retainedLogs[$path] === []) {
+                unset(self::$retainedLogs[$path]);
+            }
+        }
+    }
+
+    /**
+     * @template T
+     * @param callable():T $run
+     * @return T
+     */
+    public static function withRunLogs(callable $run): mixed
+    {
+        self::$runLogScopes[] = [];
+        try {
+            return $run();
+        } finally {
+            foreach (array_reverse(array_pop(self::$runLogScopes) ?? []) as [$path, $handle]) {
+                self::releaseLog($path);
+                fclose($handle);
+            }
+        }
+    }
+
     public static function base(): string
     {
         if (self::$baseOverride !== null && self::$baseOverride !== '') {
@@ -321,133 +362,133 @@ class Logger
         return self::jobLogDir($jobId) . '/run-' . $ts . '.log';
     }
 
-    /**
-     * Ensure a log directory exists (mode 700; logs may name paths/hosts), one
-     * level at a time from base() (tmpfs) or the configured logs root, never
-     * through a symlink (Util::ensureDirLevel).
-     */
-    private static function ensureDir(string $dir): void
-    {
-        $logsDir = self::logsDir();
-
-        if (self::hasExternalLogsDir()) {
-            self::assertExternalLogAncestry($logsDir);
-            Util::mkdirs($logsDir, 0700);
-            self::assertExternalLogAncestry($logsDir);
-            Util::ensurePrivateDir($logsDir, 'log');
-            if ($dir !== $logsDir) {
-                Util::ensurePrivateDir($dir, 'log');
-            }
-            return;
-        }
-
-        $chain = [self::base(), $logsDir];
-        if ($dir !== $logsDir) {
-            $chain[] = $dir;
-        }
-        foreach ($chain as $d) {
-            Util::ensurePrivateDir($d, 'log');
-        }
-    }
-
     public static function logDirRefusal(string $dir): string
     {
+        if ($dir === '' || $dir[0] !== '/' || preg_match('#(?:^|/)\.\.?(?:/|$)|[\x00-\x1f]#', $dir)) {
+            return 'Persistent log directory must be a normalized absolute path.';
+        }
+        $head = $dir;
+        while (!file_exists($head) && !is_link($head) && $head !== '/') {
+            $head = dirname($head);
+        }
         try {
-            self::assertExternalLogAncestry($dir);
-            if (file_exists($dir) || is_link($dir)) {
-                Util::assertPrivateDir($dir);
-            }
+            LogDirectory::withDirectory($head, static fn() => null, false, $dir);
         } catch (Throwable $e) {
             return $e->getMessage();
         }
         return '';
     }
 
-    private static function assertExternalLogAncestry(string $dir): void
-    {
-        if ($dir === '' || $dir[0] !== '/') {
-            throw new RuntimeException('Persistent log directory must be an absolute path.');
-        }
-        $euid = function_exists('posix_geteuid') ? posix_geteuid() : null;
-        if ($euid === null) {
-            throw new RuntimeException('Cannot verify persistent log directory ownership.');
-        }
-        for ($p = $dir; $p !== '/'; $p = dirname($p)) {
-            clearstatcache(true, $p);
-            if (is_link($p)) {
-                $link = @lstat($p);
-                $target = @realpath($p);
-                if (dirname($p) === '/' && $link !== false && $link['uid'] === 0 && $target !== false) {
-                    self::assertExternalLogAncestry($target);
-                    continue;
-                }
-                throw new RuntimeException("Refusing a symlinked log ancestor: $p");
-            }
-            if (!file_exists($p)) {
-                continue;
-            }
-            $st = @stat($p);
-            if ($st === false || !is_dir($p)
-                || ($st['uid'] !== 0 && $st['uid'] !== $euid)
-                || (($st['mode'] & 0022) !== 0 && !($p !== $dir && ($st['mode'] & 01000) !== 0))) {
-                throw new RuntimeException("Refusing an untrusted log ancestor: $p");
-            }
-        }
-    }
-
-    public static function safeLogReadPath(string $path): ?string
-    {
-        if (!self::safeExistingPath($path, false)) {
-            return null;
-        }
-        $real = @realpath($path);
-        return $real === false ? null : $real;
-    }
-
-    private static function safeExistingPath(string $path, bool $allowMissing): bool
+    /** @return array{string,string}|null */
+    private static function location(string $path): ?array
     {
         $root = self::logsDir();
         $dir = dirname($path);
         $roots = array_unique([$root, @realpath($root) ?: $root]);
-        if (!in_array($dir, $roots, true) && !in_array(dirname($dir), $roots, true)) {
-            return false;
+        $name = basename($path);
+        if ($name === '.' || $name === '..' || str_contains($name, "\0")) {
+            return null;
         }
-        try {
-            if (self::hasExternalLogsDir()) {
-                self::assertExternalLogAncestry($dir);
-            } else {
-                foreach ([self::base(), $root] as $level) {
-                    if (file_exists($level) || is_link($level)) {
-                        Util::assertPrivateDir($level);
-                    }
-                }
-            }
-            foreach (array_unique([$root, $dir]) as $level) {
-                if (file_exists($level) || is_link($level)) {
-                    Util::assertPrivateDir($level);
-                }
-            }
-        } catch (Throwable $e) {
-            return false;
+        if (in_array($dir, $roots, true)) {
+            return [$root, $name];
         }
-        clearstatcache(true, $path);
-        $st = @lstat($path);
+        $job = basename($dir);
+        if (in_array(dirname($dir), $roots, true) && $job !== '' && Util::safeFileId($job) === $job) {
+            return [$root . '/' . $job, $name];
+        }
+        return null;
+    }
+
+    /**
+     * @template T
+     * @param callable():T $callback
+     * @return T
+     */
+    private static function inDirectory(string $dir, callable $callback, bool $create = false): mixed
+    {
+        return LogDirectory::withDirectory($dir, $callback, $create,
+            self::hasExternalLogsDir() ? self::logsDir() : self::base());
+    }
+
+    private static function safeEntry(string $name, bool $allowMissing = false): bool
+    {
+        clearstatcache(true, $name);
+        $st = @lstat($name);
         if ($st === false) {
-            return $allowMissing && !file_exists($path) && !is_link($path);
+            return $allowMissing && !file_exists($name) && !is_link($name);
         }
         $euid = function_exists('posix_geteuid') ? posix_geteuid() : null;
         return ($st['mode'] & 0170000) === 0100000 && $st['nlink'] === 1
             && ($st['mode'] & 0022) === 0 && $euid !== null && $st['uid'] === $euid;
     }
 
-    private static function safeWritePath(string $path): bool
+    /** @return resource|false */
+    public static function openLog(string $path, string $mode = 'rb')
     {
+        if (!in_array($mode, ['rb', 'ab', 'r+b'], true)) {
+            return false;
+        }
+        if (isset(self::$retainedLogs[$path])) {
+            $handles = self::$retainedLogs[$path];
+            $st = fstat(end($handles));
+            foreach (glob('/proc/self/fd/*') ?: [] as $fd) {
+                clearstatcache(true, $fd);
+                $candidate = @stat($fd);
+                if ($st !== false && $candidate !== false && $st['dev'] === $candidate['dev'] && $st['ino'] === $candidate['ino']) {
+                    return @fopen($fd, $mode === 'ab' ? 'a+b' : $mode);
+                }
+            }
+            return false;
+        }
+        $location = self::location($path);
+        if ($location === null) {
+            return false;
+        }
+        [$dir, $name] = $location;
         try {
-            self::ensureDir(dirname($path));
+            return self::inDirectory($dir, static function () use ($name, $mode) {
+                if (!self::safeEntry($name, $mode === 'ab')) {
+                    return false;
+                }
+                $before = @lstat($name);
+                $mask = umask(0177);
+                try {
+                    $fh = @fopen($name, $mode === 'ab' ? 'a+b' : $mode);
+                } finally {
+                    umask($mask);
+                }
+                if ($fh === false) {
+                    return false;
+                }
+                $st = fstat($fh);
+                if ($st === false || !self::safeEntry($name)
+                    || ($before !== false && ($st['dev'] !== $before['dev'] || $st['ino'] !== $before['ino']))) {
+                    fclose($fh);
+                    return false;
+                }
+                return $fh;
+            }, $mode === 'ab');
         } catch (Throwable $e) {
             return false;
         }
-        return self::safeExistingPath($path, true);
+    }
+
+    public static function safeLogReadPath(string $path): ?string
+    {
+        $fh = self::openLog($path);
+        if ($fh === false) {
+            return null;
+        }
+        fclose($fh);
+        return @realpath($path) ?: $path;
+    }
+
+    private static function safeExistingPath(string $path, bool $allowMissing): bool
+    {
+        if (self::safeLogReadPath($path) !== null) {
+            return true;
+        }
+        return $allowMissing && self::location($path) !== null && !file_exists($path) && !is_link($path);
     }
 
     /**
@@ -459,36 +500,40 @@ class Logger
      */
     public static function openRun(string $jobId, ?int $now = null): string
     {
-        self::ensureDir(self::jobLogDir($jobId));
-        $base = substr(self::newRunLogPath($jobId, $now), 0, -strlen('.log'));
-        // Past the highest suffix in use, not the first free one: a pruned
-        // run-<ts>.log must not be reused by a later run, which would then sort
-        // as the oldest log of that second.
-        $n = 1;
-        foreach (glob($base . '*.log') ?: [] as $f) {
-            if (preg_match(self::RUN_FILE_REGEX, basename($f), $m)) {
-                $n = max($n, (($m[2] ?? '') !== '' ? (int) $m[2] : 1) + 1);
+        $dir = self::jobLogDir($jobId);
+        $base = basename(substr(self::newRunLogPath($jobId, $now), 0, -strlen('.log')));
+        return self::inDirectory($dir, static function () use ($dir, $base): string {
+            $n = 1;
+            foreach (glob($base . '*.log') ?: [] as $f) {
+                if (preg_match(self::RUN_FILE_REGEX, basename($f), $m)) {
+                    $n = max($n, (($m[2] ?? '') !== '' ? (int) $m[2] : 1) + 1);
+                }
             }
-        }
-        $path = '';
-        for (; $n <= 9999 && $path === ''; $n++) {
-            $try = $base . ($n === 1 ? '' : '-' . $n) . '.log';
-            $fh  = @fopen($try, 'x');
-            if ($fh !== false) {
-                fclose($fh);
-                $path = $try;
-            } elseif (!file_exists($try)) {
-                break;
+            for (; $n <= 9999; $n++) {
+                $name = $base . ($n === 1 ? '' : '-' . $n) . '.log';
+                $mask = umask(0177);
+                try {
+                    $fh = @fopen($name, 'x+b');
+                } finally {
+                    umask($mask);
+                }
+                if ($fh !== false) {
+                    $path = $dir . '/' . $name;
+                    if (self::$runLogScopes !== [] && PHP_OS_FAMILY === 'Linux') {
+                        self::retainLog($path, $fh);
+                        self::$runLogScopes[count(self::$runLogScopes) - 1][] = [$path, $fh];
+                    } else {
+                        fclose($fh);
+                    }
+                    unset(self::$capped[$path]);
+                    return $path;
+                }
+                if (!file_exists($name) && !is_link($name)) {
+                    break;
+                }
             }
-        }
-        if ($path === '') {
-            throw new RuntimeException("Unable to create run log: $base.log");
-        }
-        @chmod($path, 0600);
-        // A fresh log starts below the size cap; clear any stale "already capped"
-        // marker for this exact path (a re-used path in a long-lived process/test).
-        unset(self::$capped[$path]);
-        return $path;
+            throw new RuntimeException("Unable to create run log: $dir/$base.log");
+        }, true);
     }
 
     /**
@@ -507,18 +552,10 @@ class Logger
      */
     public static function append(string $path, string $line): bool
     {
-        // Never throws: the Runner logs outside its try, and an exception there
-        // would skip the post-hook and leave pre-hook-stopped services down.
-        try {
-            self::ensureDir(dirname($path));
-        } catch (Throwable $e) {
-            return false;
-        }
         if ($line === '' || substr($line, -1) !== "\n") {
             $line .= "\n";
         }
-        $line = self::redact($line);
-        return self::appendCapped($path, $line);
+        return self::appendCapped($path, self::redact($line));
     }
 
     /**
@@ -537,45 +574,37 @@ class Logger
         if ($data === '') {
             return true;
         }
-        if (!self::safeWritePath($path)) {
+        $fh = self::openLog($path, 'ab');
+        if ($fh === false) {
             return false;
         }
-        if (!self::isRunLogPath($path)) {
-            return @file_put_contents($path, $data, FILE_APPEND | LOCK_EX) !== false;
-        }
-
-        $cap = self::maxRunLogBytes();
-        // rsync grows this file through its own --log-file fd.
-        clearstatcache(true, $path);
-        $size = @filesize($path);
-        $size = ($size === false) ? 0 : (int) $size;
-
-        if ($size >= $cap) {
-            self::writeTruncationMarker($path, $cap);
-            return true;
-        }
-        // Writing this whole chunk would cross the cap: write only the bytes that
-        // fit in the remaining room (truncating this chunk at the cap boundary),
-        // then the one-time marker. The file never exceeds the cap + the marker.
-        if ($size + strlen($data) > $cap) {
-            $room = $cap - $size;
-            if ($room > 0) {
-                @file_put_contents($path, substr($data, 0, $room), FILE_APPEND | LOCK_EX);
+        try {
+            if (!flock($fh, LOCK_EX)) {
+                return false;
             }
-            self::writeTruncationMarker($path, $cap);
+            if (!self::isRunLogPath($path)) {
+                return fwrite($fh, $data) === strlen($data);
+            }
+            $cap = self::maxRunLogBytes();
+            $size = (int) (fstat($fh)['size'] ?? 0);
+            if ($size < $cap) {
+                $part = substr($data, 0, $cap - $size);
+                if (fwrite($fh, $part) !== strlen($part)) {
+                    return false;
+                }
+            }
+            if (($size >= $cap || $size + strlen($data) > $cap) && empty(self::$capped[$path])) {
+                $marker = self::truncationMarker($cap);
+                if (fwrite($fh, $marker) !== strlen($marker)) {
+                    return false;
+                }
+                self::$capped[$path] = true;
+            }
             return true;
+        } finally {
+            flock($fh, LOCK_UN);
+            fclose($fh);
         }
-        return @file_put_contents($path, $data, FILE_APPEND | LOCK_EX) !== false;
-    }
-
-    /** Write the size-cap marker exactly once per run-log path. */
-    private static function writeTruncationMarker(string $path, int $cap): void
-    {
-        if (!empty(self::$capped[$path])) {
-            return;
-        }
-        self::$capped[$path] = true;
-        @file_put_contents($path, self::truncationMarker($cap), FILE_APPEND | LOCK_EX);
     }
 
     private static function truncationMarker(int $cap): string
@@ -798,48 +827,43 @@ class Logger
     public static function enforceRunLogCap(string $path, ?bool &$failed = null): bool
     {
         $failed = false;
-        if (!self::safeWritePath($path)) {
-            $failed = true;
+        if (!self::isRunLogPath($path)) {
             return false;
         }
-        if (!self::isRunLogPath($path) || !is_file($path)) {
-            return false;
-        }
-        clearstatcache(true, $path);
-        $cap    = self::maxRunLogBytes();
-        $marker = self::truncationMarker($cap);
-        $size   = @filesize($path);
-        $size   = ($size === false) ? 0 : (int) $size;
-        if ($size <= $cap && empty(self::$capped[$path])) {
-            return false;
-        }
-        $fh = @fopen($path, 'r+b');
+        $fh = self::openLog($path, 'r+b');
         if ($fh === false) {
-            $failed = true;
+            $failed = is_file($path) || is_link($path);
             return false;
         }
-        $trimmed = false;
-        if (@flock($fh, LOCK_EX)) {
-            // By content, not at $cap: redactRunLog() shortens the kept head and
-            // so moves an earlier marker below the cap.
-            $at = strpos((string) @stream_get_contents($fh, $cap + strlen($marker), 0), $marker);
+        try {
+            $cap = self::maxRunLogBytes();
+            $marker = self::truncationMarker($cap);
+            $size = (int) (fstat($fh)['size'] ?? 0);
+            if ($size <= $cap && empty(self::$capped[$path])) {
+                return false;
+            }
+            if (!flock($fh, LOCK_EX)) {
+                $failed = true;
+                return false;
+            }
+            $at = strpos((string) stream_get_contents($fh, $cap + strlen($marker), 0), $marker);
+            $trimmed = false;
             if ($at !== false && $size > $at + strlen($marker)) {
-                $trimmed = @ftruncate($fh, $at + strlen($marker));
-                $failed  = !$trimmed;
+                $trimmed = ftruncate($fh, $at + strlen($marker));
+                $failed = !$trimmed;
             } elseif ($at === false && $size > $cap) {
-                $trimmed = @ftruncate($fh, $cap) && @fseek($fh, $cap) === 0
-                    && @fwrite($fh, $marker) === strlen($marker);
-                $failed  = !$trimmed;
+                $trimmed = ftruncate($fh, $cap) && fseek($fh, $cap) === 0
+                    && fwrite($fh, $marker) === strlen($marker);
+                $failed = !$trimmed;
             }
             if ($at !== false || $trimmed) {
                 self::$capped[$path] = true;
             }
-            @flock($fh, LOCK_UN);
-        } else {
-            $failed = true;
+            return $trimmed;
+        } finally {
+            flock($fh, LOCK_UN);
+            fclose($fh);
         }
-        @fclose($fh);
-        return $trimmed;
     }
 
     /**
@@ -865,38 +889,27 @@ class Logger
      */
     public static function redactRunLog(string $path): bool
     {
-        if (self::$redactStrings === [] && self::$redactDirs === []) {
+        if ((self::$redactStrings === [] && self::$redactDirs === []) || !self::isRunLogPath($path)) {
             return false;
         }
-        if (!self::isRunLogPath($path) || !is_file($path)) {
-            return false;
-        }
-        if (!self::safeWritePath($path)) {
-            return false;
-        }
-        $body = @file_get_contents($path);
-        if ($body === false || $body === '') {
-            return false;
-        }
-        $red = self::redact($body);
-        if ($red === $body) {
-            return false;
-        }
-        // r+b, not w: the run may still be live, and truncating the file open
-        // would race the next append. Rewrite in place under the same LOCK_EX
-        // the appenders use, then cut the tail (redaction only ever shortens).
-        $fh = @fopen($path, 'r+b');
+        $fh = self::openLog($path, 'r+b');
         if ($fh === false) {
             return false;
         }
-        if (@flock($fh, LOCK_EX)) {
-            @rewind($fh);
-            @fwrite($fh, $red);
-            @ftruncate($fh, strlen($red));
-            @flock($fh, LOCK_UN);
+        try {
+            if (!flock($fh, LOCK_EX)) {
+                return false;
+            }
+            $body = stream_get_contents($fh);
+            if ($body === false || $body === '') {
+                return false;
+            }
+            $red = self::redact($body);
+            return $red !== $body && rewind($fh) && fwrite($fh, $red) === strlen($red) && ftruncate($fh, strlen($red));
+        } finally {
+            flock($fh, LOCK_UN);
+            fclose($fh);
         }
-        @fclose($fh);
-        return true;
     }
 
     /**
@@ -944,26 +957,30 @@ class Logger
     public static function event(string $runLog, string $jobId, string $message): bool
     {
         $stamp = date('Y-m-d\TH:i:sP');
-        $line  = '[' . $stamp . '] ' . $message;
         if ($runLog !== '') {
-            self::append($runLog, $line);
+            self::append($runLog, '[' . $stamp . '] ' . $message);
         }
-        $plugin = self::pluginLogPath();
-        // Never throws, like append(). A sibling lock: a lock held on plugin.log
-        // itself is renamed away with it, and a writer waiting on it would then
-        // append to plugin.log.1.
         try {
-            self::ensureDir(self::logsDir());
-            if (!self::safeWritePath($plugin) || !self::safeWritePath($plugin . '.lock')) {
-                return false;
-            }
-            return Util::withLock($plugin . '.lock', static function () use ($plugin, $stamp, $jobId, $message): bool {
-                clearstatcache(true, $plugin);
-                if ((int) @filesize($plugin) > self::PLUGIN_LOG_MAX_BYTES) {
-                    @rename($plugin, $plugin . '.1');
+            return self::inDirectory(self::logsDir(), static function () use ($stamp, $jobId, $message): bool {
+                if (!self::safeEntry('plugin.log', true) || !self::safeEntry('plugin.log.lock', true)) {
+                    return false;
                 }
-                return self::append($plugin, '[' . $stamp . '] [' . $jobId . '] ' . $message);
-            });
+                return Util::withLock('plugin.log.lock', static function () use ($stamp, $jobId, $message): bool {
+                    clearstatcache(true, 'plugin.log');
+                    if ((int) @filesize('plugin.log') > self::PLUGIN_LOG_MAX_BYTES) {
+                        if (!self::safeEntry('plugin.log.1', true) || !@rename('plugin.log', 'plugin.log.1')) {
+                            return false;
+                        }
+                    }
+                    $line = self::redact('[' . $stamp . '] [' . $jobId . '] ' . $message . "\n");
+                    $mask = umask(0177);
+                    try {
+                        return @file_put_contents('plugin.log', $line, FILE_APPEND | LOCK_EX) !== false;
+                    } finally {
+                        umask($mask);
+                    }
+                });
+            }, true);
         } catch (Throwable $e) {
             return false;
         }
@@ -983,18 +1000,11 @@ class Logger
         if ($maxBytes <= 0) {
             $maxBytes = self::TAIL_MAX_BYTES;
         }
-        if (!is_file($path)) {
-            return '';
-        }
-        $size = @filesize($path);
-        if ($size === false || $size === 0) {
-            return '';
-        }
-
-        $fh = @fopen($path, 'rb');
+        $fh = self::openLog($path);
         if ($fh === false) {
             return '';
         }
+        $size = (int) (fstat($fh)['size'] ?? 0);
         $truncated = false;
         if ($size > $maxBytes) {
             @fseek($fh, -$maxBytes, SEEK_END);
@@ -1037,12 +1047,14 @@ class Logger
      */
     public static function lastRsyncError(string $path): string
     {
-        clearstatcache(true, $path);
-        $size = is_file($path) ? (int) @filesize($path) : 0;
-        if ($size === 0) {
+        $fh = self::openLog($path);
+        if ($fh === false) {
             return '';
         }
-        $data = @file_get_contents($path, false, null, max(0, $size - 65536));
+        $size = (int) (fstat($fh)['size'] ?? 0);
+        fseek($fh, max(0, $size - 65536));
+        $data = stream_get_contents($fh);
+        fclose($fh);
         if (!is_string($data) || !preg_match_all('/rsync error: [\x20-\x7e]*/', $data, $m)) {
             return '';
         }
@@ -1070,14 +1082,17 @@ class Logger
         if ($maxBytes <= 0) {
             $maxBytes = self::TAIL_MAX_BYTES;
         }
-        clearstatcache(true, $path);
-        $size  = is_file($path) ? (int) @filesize($path) : 0;
+        $fh = self::openLog($path);
+        $size = $fh !== false ? (int) (fstat($fh)['size'] ?? 0) : 0;
         $reset = ($since < 0 || $since > $size);
         if ($reset) {
             $since = 0;
         }
         $out = ['size' => $size, 'offset' => $since, 'text' => '', 'truncated' => false, 'reset' => $reset];
-        if ($since >= $size) {
+        if ($since >= $size || $fh === false) {
+            if ($fh !== false) {
+                fclose($fh);
+            }
             return $out;
         }
 
@@ -1085,10 +1100,6 @@ class Logger
         $truncated = ($size - $since) > $maxBytes;
         if ($truncated) {
             $start = $size - $maxBytes;
-        }
-        $fh = @fopen($path, 'rb');
-        if ($fh === false) {
-            return $out;
         }
         @fseek($fh, $start);
         $data = @stream_get_contents($fh, $size - $start);
@@ -1191,11 +1202,10 @@ class Logger
     public static function listRuns(string $jobId, int $limit = 0, ?callable $summaryReader = null): array
     {
         $dir = self::jobLogDir($jobId);
-        if (!is_dir($dir)) {
-            return [];
-        }
-        $entries = @scandir($dir);
-        if ($entries === false) {
+        try {
+            $entries = self::inDirectory($dir, static fn() => array_values(array_filter(scandir('.') ?: [],
+                static fn(string $name): bool => preg_match(self::RUN_FILE_REGEX, $name) === 1 && self::safeEntry($name))));
+        } catch (Throwable $e) {
             return [];
         }
 
@@ -1295,55 +1305,52 @@ class Logger
     public static function pruneRuns(string $jobId, ?int $keep = null, string $current = ''): int
     {
         $keep = ($keep === null) ? self::retention() : max(1, (int) $keep);
-        $dir  = self::jobLogDir($jobId);
-        if (!is_dir($dir)) {
-            return 0;
-        }
         try {
-            self::ensureDir($dir);
+            return self::inDirectory(self::jobLogDir($jobId), static function () use ($keep, $current): int {
+                $entries = @scandir('.');
+                if ($entries === false) {
+                    return 0;
+                }
+
+                $runs = [];
+                foreach ($entries as $name) {
+                    if (preg_match(self::RUN_FILE_REGEX, $name) && self::safeEntry($name)) {
+                        $runs[] = $name;
+                    }
+                }
+                usort($runs, static fn($a, $b) => self::compareRunNames($b, $a)); // newest first
+                $protected = basename($current);
+                $deleted   = 0;
+                $kept      = [];
+                foreach ($runs as $i => $name) {
+                    if ($i >= $keep && $name !== $protected) {
+                        if (@unlink($name)) {
+                            $deleted++;
+                        }
+                        continue;
+                    }
+                    $kept[] = $name;
+                }
+
+                $sizes = [];
+                foreach ($kept as $name) {
+                    clearstatcache(true, $name);
+                    $sizes[$name] = (int) @filesize($name);
+                }
+                $total  = array_sum($sizes);
+                $budget = self::maxJobLogBytes();
+                for ($i = count($kept) - 1; $i > 0 && $total > $budget; $i--) {
+                    $name = $kept[$i];
+                    if ($name !== $protected && @unlink($name)) {
+                        $total -= $sizes[$name];
+                        $deleted++;
+                    }
+                }
+                return $deleted;
+            });
         } catch (Throwable $e) {
             return 0;
         }
-        $entries = @scandir($dir);
-        if ($entries === false) {
-            return 0;
-        }
-
-        $runs = [];
-        foreach ($entries as $name) {
-            if (preg_match(self::RUN_FILE_REGEX, $name)) {
-                $runs[] = $name;
-            }
-        }
-        usort($runs, static fn($a, $b) => self::compareRunNames($b, $a)); // newest first
-        $protected = basename($current);
-        $deleted   = 0;
-        $kept      = [];
-        foreach ($runs as $i => $name) {
-            if ($i >= $keep && $name !== $protected) {
-                if (@unlink($dir . '/' . $name)) {
-                    $deleted++;
-                }
-                continue;
-            }
-            $kept[] = $name;
-        }
-
-        $sizes = [];
-        foreach ($kept as $name) {
-            clearstatcache(true, $dir . '/' . $name);
-            $sizes[$name] = (int) @filesize($dir . '/' . $name);
-        }
-        $total  = array_sum($sizes);
-        $budget = self::maxJobLogBytes();
-        for ($i = count($kept) - 1; $i > 0 && $total > $budget; $i--) {
-            $name = $kept[$i];
-            if ($name !== $protected && @unlink($dir . '/' . $name)) {
-                $total -= $sizes[$name];
-                $deleted++;
-            }
-        }
-        return $deleted;
     }
 
     /** Parse a run-log stamp (YYYYmmddTHHMMSSZ) to a UTC epoch (0 on failure). */

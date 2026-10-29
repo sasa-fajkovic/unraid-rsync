@@ -32,6 +32,7 @@ require_once __DIR__ . '/Job.php';
 require_once __DIR__ . '/Credentials.php';
 require_once __DIR__ . '/ProcIO.php';
 require_once __DIR__ . '/Util.php';
+require_once __DIR__ . '/Logger.php';
 
 class Rsync
 {
@@ -787,38 +788,64 @@ class Rsync
             1 => ['pipe', 'w'],
             2 => ['pipe', 'w'],
         ];
-        $pipes = [];
-        $proc  = @proc_open($argv, $descriptors, $pipes, null, $env);
-        if (!is_resource($proc)) {
-            $onOutput("Failed to start rsync.\n");
-            return 127;
-        }
-
-        // Non-blocking reads so a slow/long transfer streams to the log rather
-        // than buffering until exit. The shared drain loop selects across stdout
-        // and stderr (reading one to EOF first could deadlock). [ROB-01]
-        $deadline = $timeoutSec !== null ? microtime(true) + $timeoutSec : null;
-        $stopped  = false;
-        ProcIO::drainPipes(
-            [1 => $pipes[1], 2 => $pipes[2]],
-            static function (int $fd, string $chunk) use ($onOutput): void {
-                $onOutput($chunk);
-            },
-            $deadline,
-            $stopWhen === null ? null : static function () use ($stopWhen, &$stopped): bool {
-                return $stopped = (bool) $stopWhen();
+        $log = false;
+        $logPath = '';
+        foreach ($argv as $i => $arg) {
+            if (str_starts_with($arg, '--log-file=')) {
+                $logPath = substr($arg, strlen('--log-file='));
+                $log = Logger::openLog($logPath, 'ab');
+                if ($log === false) {
+                    $onOutput("Unable to open the run log safely.\n");
+                    return 127;
+                }
+                $descriptors[3] = $log;
+                // rsync reopens its log itself; an inherited descriptor survives parent-path replacement.
+                $argv[$i] = '--log-file=' . (PHP_OS_FAMILY === 'Linux' ? '/proc/self/fd/3' : '/dev/fd/3');
+                if (PHP_OS_FAMILY === 'Linux') {
+                    Logger::retainLog($logPath, $log);
+                }
+                break;
             }
-        );
+        }
+        try {
+            $pipes = [];
+            $proc  = @proc_open($argv, $descriptors, $pipes, null, $env);
+            if (!is_resource($proc)) {
+                $onOutput("Failed to start rsync.\n");
+                return 127;
+            }
 
-        if ($stopped) {
-            // 143 as well when a child that survived SIGKILL had to be abandoned.
-            return ProcIO::terminate($proc, 5.0) ?? 143;
+            // Non-blocking reads so a slow/long transfer streams to the log rather
+            // than buffering until exit. The shared drain loop selects across stdout
+            // and stderr (reading one to EOF first could deadlock). [ROB-01]
+            $deadline = $timeoutSec !== null ? microtime(true) + $timeoutSec : null;
+            $stopped  = false;
+            ProcIO::drainPipes(
+                [1 => $pipes[1], 2 => $pipes[2]],
+                static function (int $fd, string $chunk) use ($onOutput): void {
+                    $onOutput($chunk);
+                },
+                $deadline,
+                $stopWhen === null ? null : static function () use ($stopWhen, &$stopped): bool {
+                    return $stopped = (bool) $stopWhen();
+                }
+            );
+
+            if ($stopped) {
+                // 143 as well when a child that survived SIGKILL had to be abandoned.
+                return ProcIO::terminate($proc, 5.0) ?? 143;
+            }
+            if ($deadline !== null && self::waitOrKill($proc, $deadline)) {
+                $onOutput("rsync did not finish within $timeoutSec seconds and was stopped.\n");
+                return 35;
+            }
+            return self::reapExitCode($proc);
+        } finally {
+            if ($log !== false) {
+                Logger::releaseLog($logPath);
+                fclose($log);
+            }
         }
-        if ($deadline !== null && self::waitOrKill($proc, $deadline)) {
-            $onOutput("rsync did not finish within $timeoutSec seconds and was stopped.\n");
-            return 35;
-        }
-        return self::reapExitCode($proc);
     }
 
     /**
