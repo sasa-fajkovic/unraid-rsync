@@ -304,9 +304,6 @@ final class PageHelpers
         $right = $transport === 'LOCAL' ? 'pairs.localSecond'
             : ($transport === 'DAEMON' ? ($pull ? 'pairs.moduleSource' : 'pairs.moduleDest')
                 : ($pull ? 'pairs.remoteSource' : 'pairs.remoteDest'));
-        if (Config::normalizeSnapshot($job['snapshot'] ?? null) !== null) {
-            $right = 'pairs.snapshotDest';
-        }
         return ['local' => $pull ? 'pairs.localDest' : 'pairs.localSource', 'remote' => $right, 'arrow' => $pull ? '←' : '→'];
     }
 

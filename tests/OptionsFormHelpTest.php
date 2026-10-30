@@ -2529,8 +2529,8 @@ final class OptionsFormHelpTest extends TestCase
         $this->assertSame('ur_job_0_body', $card?->querySelector('.ur-job-head')?->getAttribute('aria-controls'));
         $this->assertNotNull($card?->querySelector('#ur_job_0_body.ur-job-body'));
         $this->assertSame('Remove pair', $card?->querySelector('.ur-pair-del')?->getAttribute('aria-label'));
-        $this->assertSame('Path on this server', $card?->querySelector('input[name="jobs[0][pairs][0][local]"]')?->getAttribute('aria-label'));
-        $this->assertSame('Path on the other side', $card?->querySelector('input[name="jobs[0][pairs][0][remote]"]')?->getAttribute('aria-label'));
+        $this->assertSame('Source (this Unraid server)', $card?->querySelector('.ur-pair-local-label')?->textContent);
+        $this->assertSame('Destination (remote host)', $card?->querySelector('.ur-pair-remote-label')?->textContent);
     }
 
     #[RunInSeparateProcess]

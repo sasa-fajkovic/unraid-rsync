@@ -484,13 +484,14 @@ function ur_render_pair_row(string $prefix, $k, array $pair, bool $snapOn, array
     $presentation = PageHelpers::pairPresentation($job);
     echo '<div class="ur-pair-row">';
     echo '<label class="ur-pair-path"><span class="ur-pair-local-label">' . ur_h(PageHelpers::t($presentation['local'])) . '</span>';
-    echo '<input type="text" name="' . ur_h($base . '[local]') . '" value="' . ur_h((string) ($pair['local'] ?? '')) . '" placeholder="/mnt/user/share/sub/" required aria-label="' . ur_h(ur_t_text('Path on this server')) . '">';
+    echo '<input type="text" name="' . ur_h($base . '[local]') . '" value="' . ur_h((string) ($pair['local'] ?? '')) . '" placeholder="/mnt/user/share/sub/" required>';
     echo '</label><span class="ur-pair-arrow" aria-hidden="true">' . $presentation['arrow'] . '</span>';
-    echo '<label class="ur-pair-path"><span class="ur-pair-remote-label">' . ur_h(PageHelpers::t($presentation['remote'])) . '</span>';
+    echo '<label class="ur-pair-path ur-pair-remote-wrap"' . ($snapOn ? ' style="display:none"' : '') . '><span class="ur-pair-remote-label">' . ur_h(PageHelpers::t($presentation['remote'])) . '</span>';
     echo '<input type="text" class="ur-pair-remote" name="' . ur_h($base . '[remote]') . '" value="' . ur_h((string) ($pair['remote'] ?? ''))
-        . '" placeholder="/mnt/disk/backup/ or /remote/path/on/host/" aria-label="' . ur_h(ur_t_text('Path on the other side')) . '"' . ($snapOn ? ' disabled style="display:none"' : ' required') . '>';
+        . '" placeholder="/mnt/disk/backup/ or /remote/path/on/host/"' . ($snapOn ? ' disabled style="display:none"' : ' required') . '>';
+    echo '</label><label class="ur-pair-path ur-snap-only"' . ur_snap_style($snapOn) . '><span>' . ur_h(PageHelpers::t('pairs.snapshotDest')) . '</span>';
     echo '<input type="text" class="ur-snap-field ur-snap-only ur-pair-sub" name="' . ur_h($base . '[sub]') . '" value="' . ur_h((string) ($pair['sub'] ?? ''))
-        . '" placeholder="' . ur_h(ur_t_text('sub-directory name, e.g. appdata')) . '" spellcheck="false" aria-label="' . ur_h(ur_t_text('Snapshot sub-directory name')) . '"'
+        . '" placeholder="' . ur_h(ur_t_text('sub-directory name, e.g. appdata')) . '" spellcheck="false"'
         . ($snapOn ? ' required' : ' disabled style="display:none"') . '>';
     echo '</label>';
     echo '<label class="ur-snap-only"' . ur_snap_style($snapOn) . '> <input type="checkbox" class="ur-snap-field" name="' . ur_h($base . '[seed]') . '" value="1"'
@@ -1242,12 +1243,10 @@ ur_emit_status_poller();
     if (!card) { return; }
     var tr = card.querySelector('.ur-transport-select').value;
     var pull = (tr === 'SSH' || tr === 'DAEMON') && card.querySelector('.ur-direction-select').value === 'PULL';
-    var snap = card.querySelector('.ur-snap-toggle');
     var left = pull ? urI18n('pairs.localDest', 'Destination (this Unraid server)') : urI18n('pairs.localSource', 'Source (this Unraid server)');
     var right = tr === 'LOCAL' ? urI18n('pairs.localSecond', 'Destination (this Unraid server)')
       : tr === 'DAEMON' ? (pull ? urI18n('pairs.moduleSource', 'Source (remote module)') : urI18n('pairs.moduleDest', 'Destination (remote module)'))
       : (pull ? urI18n('pairs.remoteSource', 'Source (remote host)') : urI18n('pairs.remoteDest', 'Destination (remote host)'));
-    if (snap && snap.checked) { right = urI18n('pairs.snapshotDest', 'Destination (snapshot sub-directory)'); }
     card.querySelectorAll('.ur-pair-local-label').forEach(function (el) { el.textContent = left; });
     card.querySelectorAll('.ur-pair-remote-label').forEach(function (el) { el.textContent = right; });
     card.querySelectorAll('.ur-pair-arrow').forEach(function (el) { el.textContent = pull ? '←' : '→'; });
@@ -1262,6 +1261,7 @@ ur_emit_status_poller();
     syncPairPresentation(card);
     var toggle = card.querySelector('.ur-snap-toggle');
     var on = !!(toggle && toggle.checked);
+    card.querySelectorAll('.ur-pair-remote-wrap').forEach(function (el) { el.style.display = on ? 'none' : ''; });
     Array.prototype.forEach.call(card.querySelectorAll('.ur-snap-only'), function (el) { el.style.display = on ? '' : 'none'; });
     Array.prototype.forEach.call(card.querySelectorAll('.ur-snap-field'), function (el) { el.disabled = !on; });
     Array.prototype.forEach.call(card.querySelectorAll('.ur-pair-sub'), function (el) { el.required = on; });

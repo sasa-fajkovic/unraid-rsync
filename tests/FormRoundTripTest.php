@@ -245,7 +245,14 @@ final class FormRoundTripTest extends TestCase
         foreach ($cases as $i => [, , $left, $right, $arrow]) {
             $row = $this->card($doc, $i)->querySelector('.ur-pair-row');
             $this->assertSame($left, $row?->querySelector('.ur-pair-local-label')?->textContent);
-            $this->assertSame($right, $row?->querySelector('.ur-pair-remote-label')?->textContent);
+            $rightLabel = $row?->querySelector($i === 5 ? 'label.ur-pair-path.ur-snap-only' : '.ur-pair-remote-wrap');
+            $this->assertSame($right, $rightLabel?->querySelector('span')?->textContent);
+            $this->assertSame(1, $rightLabel?->querySelectorAll('input')->length);
+            $this->assertFalse($rightLabel?->querySelector('input')?->hasAttribute('disabled'));
+            foreach ($row?->querySelectorAll('.ur-pair-path input') ?? [] as $input) {
+                $this->assertFalse($input->hasAttribute('aria-label'), 'the visible role label supplies the accessible name');
+            }
+            $this->assertSame($i === 5 ? 'display:none' : null, $row?->querySelector('.ur-pair-remote-wrap')?->getAttribute('style'));
             $this->assertSame($arrow, $row?->querySelector('.ur-pair-arrow')?->textContent);
         }
         [$body, $code] = $this->save('ur_action_save_config', $this->submit($doc, 'ur-jobs-form'));
