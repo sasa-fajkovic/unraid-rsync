@@ -85,6 +85,14 @@ final class PageHelpers
         'preview.none'        => '(no options set)',
         'preview.failed'      => 'Preview failed',
         'preview.unreachable' => 'Preview failed: could not reach the server.',
+        'pairs.localSource'   => 'Source (this Unraid server)',
+        'pairs.localDest'     => 'Destination (this Unraid server)',
+        'pairs.remoteSource'  => 'Source (remote host)',
+        'pairs.remoteDest'    => 'Destination (remote host)',
+        'pairs.localSecond'   => 'Destination (this Unraid server)',
+        'pairs.moduleSource'  => 'Source (remote module)',
+        'pairs.moduleDest'    => 'Destination (remote module)',
+        'pairs.snapshotDest'  => 'Destination (snapshot sub-directory)',
         'jobs.applyFirst'     => 'Apply changes first.',
         'jobs.actionFailed'   => 'Action failed.',
         'jobs.dryStarted'     => 'Dry-run started.',
@@ -280,6 +288,23 @@ final class PageHelpers
         return (string) preg_replace_callback('/%[sd]/', static function (array $m) use (&$args): string {
             return $args === [] ? $m[0] : (string) array_shift($args);
         }, $text);
+    }
+
+    /**
+     * Pair labels follow the same source/destination rule as the runner.
+     * Returned keys are shared with the browser's translation map.
+     *
+     * @param array<string,mixed> $job
+     * @return array{local:string,remote:string,arrow:string}
+     */
+    public static function pairPresentation(array $job): array
+    {
+        $transport = strtoupper(trim((string) ($job['transport'] ?? 'SSH')));
+        $pull = Job::sides($job)['dst'] === 'local';
+        $right = $transport === 'LOCAL' ? 'pairs.localSecond'
+            : ($transport === 'DAEMON' ? ($pull ? 'pairs.moduleSource' : 'pairs.moduleDest')
+                : ($pull ? 'pairs.remoteSource' : 'pairs.remoteDest'));
+        return ['local' => $pull ? 'pairs.localDest' : 'pairs.localSource', 'remote' => $right, 'arrow' => $pull ? '←' : '→'];
     }
 
     /**

@@ -2320,4 +2320,18 @@ final class JobTest extends TestCase
             Job::pairErrors($job, $pair, 'SSH', [], 2)['errors']
         );
     }
+    public function testSynologyPullRequiresTheUnraidPathInTheLocalField(): void
+    {
+        $job = Job::normalize([
+            'name' => 'Aamarnas_Daily', 'transport' => 'SSH', 'direction' => 'PULL',
+            'connectionId' => 'c-test', 'schedule' => '0 4 * * *',
+            'pairs' => [['local' => '/volume1/FTP_FOLDER/', 'remote' => '/mnt/user/Backup/aamarnas/']],
+        ]);
+        $this->assertSame([
+            "Pair #1 destination (local) '/volume1/FTP_FOLDER/' must be a sub-directory of /mnt (for example /mnt/user/share/...).",
+        ], Job::validate($job)['errors']);
+        $job['pairs'] = [['local' => '/mnt/user/Backup/aamarnas/', 'remote' => '/volume1/FTP_FOLDER/']];
+        $this->assertTrue(Job::validate($job)['valid']);
+    }
+
 }

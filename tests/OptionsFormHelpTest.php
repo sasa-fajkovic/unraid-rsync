@@ -2529,8 +2529,8 @@ final class OptionsFormHelpTest extends TestCase
         $this->assertSame('ur_job_0_body', $card?->querySelector('.ur-job-head')?->getAttribute('aria-controls'));
         $this->assertNotNull($card?->querySelector('#ur_job_0_body.ur-job-body'));
         $this->assertSame('Remove pair', $card?->querySelector('.ur-pair-del')?->getAttribute('aria-label'));
-        $this->assertSame('Path on this server', $card?->querySelector('input[name="jobs[0][pairs][0][local]"]')?->getAttribute('aria-label'));
-        $this->assertSame('Path on the other side', $card?->querySelector('input[name="jobs[0][pairs][0][remote]"]')?->getAttribute('aria-label'));
+        $this->assertSame('Source (this Unraid server)', $card?->querySelector('.ur-pair-local-label')?->textContent);
+        $this->assertSame('Destination (remote host)', $card?->querySelector('.ur-pair-remote-label')?->textContent);
     }
 
     #[RunInSeparateProcess]
@@ -2562,7 +2562,7 @@ final class OptionsFormHelpTest extends TestCase
         }
         $this->assertSame('Off — e.g. /mnt/disks/backup/.unraid-rsync-target', $card?->querySelector('#ur_job_0_marker')?->getAttribute('placeholder'));
         $this->assertStringContainsString('Use global defaults', (string) $card?->querySelector('label[for="ur_job_0_useglobal"]')?->textContent);
-        $this->assertStringContainsString('Source → destination pairs', (string) $card?->textContent);
+        $this->assertStringContainsString('Path pairs', (string) $card?->textContent);
         $this->assertStringNotContainsString('Use global config', (string) $card?->textContent);
 
         $css = (string) file_get_contents(__DIR__ . '/../source/pages/_options_form.php');
