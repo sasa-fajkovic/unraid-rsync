@@ -215,6 +215,49 @@ final class FormRoundTripTest extends TestCase
 
     #[RunInSeparateProcess]
     #[PreserveGlobalState(false)]
+    public function testPairRolesMatchTransportWithoutChangingStoredPaths(): void
+    {
+        $cases = [
+            ['SSH', 'PUSH', 'Source (this Unraid server)', 'Destination (remote host)', '→'],
+            ['SSH', 'PULL', 'Destination (this Unraid server)', 'Source (remote host)', '←'],
+            ['DAEMON', 'PUSH', 'Source (this Unraid server)', 'Destination (remote module)', '→'],
+            ['DAEMON', 'PULL', 'Destination (this Unraid server)', 'Source (remote module)', '←'],
+            ['LOCAL', 'PUSH', 'Source (this Unraid server)', 'Destination (this Unraid server)', '→'],
+        ];
+        $jobs = [];
+        foreach ($cases as $i => [$transport, $direction]) {
+            $jobs[] = [
+                'id' => 'j-role-' . $i, 'name' => 'Role ' . $i, 'manualOnly' => true,
+                'transport' => $transport, 'direction' => $direction, 'notifyMode' => 'off',
+                'connectionId' => $transport === 'DAEMON' ? 'c-d' : 'c-1',
+                'pairs' => [['local' => '/mnt/user/Backup/Share Name/', 'remote' => match ($transport) {
+                    'DAEMON' => 'backup/data/',
+                    'LOCAL' => '/mnt/disk2/Backup/Share Name/',
+                    default => '/volume1/Share Name/',
+                }]],
+            ];
+        }
+        $jobs[] = $this->snapshotJob();
+        $cases[] = ['SSH', 'PUSH', 'Source (this Unraid server)', 'Destination (snapshot sub-directory)', '→'];
+        $this->seedJobs($jobs);
+        $before = Config::load()['jobs'];
+        $doc = $this->render('jobs.php');
+        foreach ($cases as $i => [, , $left, $right, $arrow]) {
+            $row = $this->card($doc, $i)->querySelector('.ur-pair-row');
+            $this->assertSame($left, $row?->querySelector('.ur-pair-local-label')?->textContent);
+            $this->assertSame($right, $row?->querySelector('.ur-pair-remote-label')?->textContent);
+            $this->assertSame($arrow, $row?->querySelector('.ur-pair-arrow')?->textContent);
+        }
+        [$body, $code] = $this->save('ur_action_save_config', $this->submit($doc, 'ur-jobs-form'));
+        $this->assertSame(200, $code, (string) json_encode($body));
+        $this->assertSame($before, Config::load()['jobs'], 'labels must never change persisted job semantics');
+        $this->assertSame([
+            'src' => 'backup@nas:/volume1/Share Name/', 'dest' => '/mnt/user/Backup/Share Name/',
+        ], Runner::resolvePair($before[1], $before[1]['pairs'][0], 'SSH', 'backup@nas'));
+    }
+
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
     public function testBothConfigFormsPostTheirRevisionAndAFormStaleByAnotherSaveIsRefused(): void
     {
         $this->seedJobs([$this->localJob()]);

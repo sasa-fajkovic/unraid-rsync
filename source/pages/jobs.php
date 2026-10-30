@@ -191,7 +191,7 @@ function ur_render_job_card($job, $index): void
 
     // direction
     echo '<dt><label for="' . ur_h($idb . '_direction') . '">' . ur_h(ur_t_text('Direction')) . '</label>:</dt>';
-    echo '<dd><select id="' . ur_h($idb . '_direction') . '" name="' . ur_h($p . '[direction]') . '">';
+    echo '<dd><select id="' . ur_h($idb . '_direction') . '" class="ur-direction-select" name="' . ur_h($p . '[direction]') . '">';
     foreach (['PUSH' => 'Push (local → remote)', 'PULL' => 'Pull (remote → local)'] as $val => $lbl) {
         $sel = ($direction === $val) ? ' selected' : '';
         echo '<option value="' . ur_h($val) . '"' . $sel . '>' . ur_h(ur_t_text($lbl)) . '</option>';
@@ -268,14 +268,14 @@ function ur_render_job_card($job, $index): void
 
     // pairs
     $pairsRowsId = $idb . '_pairs';
-    echo '<dt>' . ur_h(ur_t_text('Source → destination pairs')) . ':</dt>';
+    echo '<dt>' . ur_h(ur_t_text('Path pairs')) . ':</dt>';
     echo '<dd>';
     echo '<div class="ur-pairs" id="' . ur_h($pairsRowsId) . '" data-prefix="' . ur_h($p . '[pairs]') . '">';
     if (empty($pairs)) {
-        ur_render_pair_row($p, 0, [], $snapOn);
+        ur_render_pair_row($p, 0, [], $snapOn, $job);
     } else {
         foreach ($pairs as $k => $pair) {
-            ur_render_pair_row($p, (int) $k, is_array($pair) ? $pair : [], $snapOn);
+            ur_render_pair_row($p, (int) $k, is_array($pair) ? $pair : [], $snapOn, $job);
         }
     }
     echo '</div>';
@@ -473,22 +473,26 @@ function ur_hook_gutter_html(int $lines): string
  * @param int|string          $k
  * @param array<string,mixed> $pair
  */
-function ur_render_pair_row(string $prefix, $k, array $pair, bool $snapOn): void
+function ur_render_pair_row(string $prefix, $k, array $pair, bool $snapOn, array $job = []): void
 {
-    // Both the source (local) and destination (remote) of a pair are mandatory;
+    // Both the local and remote paths of a pair are mandatory;
     // mark them required so the browser blocks a half-filled pair before submit
     // (the server re-enforces this and the path guardrails). In snapshot mode
     // the sub name takes the remote's place; whichever one is inactive is
     // disabled, so it is neither validated nor posted.
     $base = $prefix . '[pairs][' . $k . ']';
+    $presentation = PageHelpers::pairPresentation($job);
     echo '<div class="ur-pair-row">';
+    echo '<label class="ur-pair-path"><span class="ur-pair-local-label">' . ur_h(PageHelpers::t($presentation['local'])) . '</span>';
     echo '<input type="text" name="' . ur_h($base . '[local]') . '" value="' . ur_h((string) ($pair['local'] ?? '')) . '" placeholder="/mnt/user/share/sub/" required aria-label="' . ur_h(ur_t_text('Path on this server')) . '">';
-    echo ' &rarr; ';
+    echo '</label><span class="ur-pair-arrow" aria-hidden="true">' . $presentation['arrow'] . '</span>';
+    echo '<label class="ur-pair-path"><span class="ur-pair-remote-label">' . ur_h(PageHelpers::t($presentation['remote'])) . '</span>';
     echo '<input type="text" class="ur-pair-remote" name="' . ur_h($base . '[remote]') . '" value="' . ur_h((string) ($pair['remote'] ?? ''))
         . '" placeholder="/mnt/disk/backup/ or /remote/path/on/host/" aria-label="' . ur_h(ur_t_text('Path on the other side')) . '"' . ($snapOn ? ' disabled style="display:none"' : ' required') . '>';
     echo '<input type="text" class="ur-snap-field ur-snap-only ur-pair-sub" name="' . ur_h($base . '[sub]') . '" value="' . ur_h((string) ($pair['sub'] ?? ''))
         . '" placeholder="' . ur_h(ur_t_text('sub-directory name, e.g. appdata')) . '" spellcheck="false" aria-label="' . ur_h(ur_t_text('Snapshot sub-directory name')) . '"'
         . ($snapOn ? ' required' : ' disabled style="display:none"') . '>';
+    echo '</label>';
     echo '<label class="ur-snap-only"' . ur_snap_style($snapOn) . '> <input type="checkbox" class="ur-snap-field" name="' . ur_h($base . '[seed]') . '" value="1"'
         . (!empty($pair['seed']) ? ' checked' : '') . ur_snap_disabled($snapOn) . '> ' . ur_h(ur_t_text('seed')) . '</label>';
     echo ' <button type="button" class="ur-pair-del ur-btn ur-btn-plain" data-ur-edit aria-label="' . ur_h(ur_t_text('Remove pair')) . '" title="' . ur_h(ur_t_text('Remove pair')) . '">&minus;</button>';
@@ -576,6 +580,11 @@ function ur_snap_disabled(bool $snapOn): string
   .ur-log-modal-head { flex-wrap: wrap; }
   .ur-log-modal-head .ur-log-title { white-space: normal; flex: 1 1 100%; }
 }
+.ur-pair-row { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 6px; margin-bottom: 8px; }
+.ur-pair-row .ur-pair-path { display: flex; flex: 1 1 240px; min-width: 0; flex-direction: column; gap: 4px; }
+.ur-pair-path > span { font-size: 0.9em; }
+.ur-pair-row .ur-pair-path input { width: 100%; min-width: 0; box-sizing: border-box; margin: 0; }
+.ur-pair-arrow { padding-bottom: 5px; }
 /* Unraid's global button rules (86px min-width, margins, orange border) would
    make the "−" an empty orange box: same out-ranking reset as History's buttons. */
 .ur-pair-row button.ur-pair-del {
@@ -1156,6 +1165,8 @@ ur_emit_status_poller();
     } else if (t.classList.contains('ur-transport-select')) {
       syncConnRequired(t);
       syncTransport(t);
+    } else if (t.classList.contains('ur-direction-select')) {
+      syncPairPresentation(t.closest('.ur-job-card'));
     } else if (t.classList.contains('ur-manual-only')) {
       syncManualOnly(t);
     } else if (t.classList.contains('ur-snap-toggle')) {
@@ -1171,6 +1182,7 @@ ur_emit_status_poller();
     var card = sel.closest ? sel.closest('.ur-job-card') : null;
     if (!card) { return; }
     var tr = sel.value;
+    syncPairPresentation(card);
     var conn = document.getElementById(sel.getAttribute('data-conn'));
     if (conn) {
       Array.prototype.forEach.call(conn.options, function (o) {
@@ -1225,12 +1237,29 @@ ur_emit_status_poller();
     if (b) { markDirty(b.closest('.ur-job-card')); }
   }, true);
 
+  /* Presentation only: local/remote input names, values and positions never change. */
+  function syncPairPresentation(card) {
+    if (!card) { return; }
+    var tr = card.querySelector('.ur-transport-select').value;
+    var pull = (tr === 'SSH' || tr === 'DAEMON') && card.querySelector('.ur-direction-select').value === 'PULL';
+    var snap = card.querySelector('.ur-snap-toggle');
+    var left = pull ? urI18n('pairs.localDest', 'Destination (this Unraid server)') : urI18n('pairs.localSource', 'Source (this Unraid server)');
+    var right = tr === 'LOCAL' ? urI18n('pairs.localSecond', 'Destination (this Unraid server)')
+      : tr === 'DAEMON' ? (pull ? urI18n('pairs.moduleSource', 'Source (remote module)') : urI18n('pairs.moduleDest', 'Destination (remote module)'))
+      : (pull ? urI18n('pairs.remoteSource', 'Source (remote host)') : urI18n('pairs.remoteDest', 'Destination (remote host)'));
+    if (snap && snap.checked) { right = urI18n('pairs.snapshotDest', 'Destination (snapshot sub-directory)'); }
+    card.querySelectorAll('.ur-pair-local-label').forEach(function (el) { el.textContent = left; });
+    card.querySelectorAll('.ur-pair-remote-label').forEach(function (el) { el.textContent = right; });
+    card.querySelectorAll('.ur-pair-arrow').forEach(function (el) { el.textContent = pull ? '←' : '→'; });
+  }
+
   /* Snapshot mode switch: show + enable the snapshot fields and each pair's sub
    * name and seed, and hide + disable the remote path, or the reverse. A
    * disabled control is neither validated nor posted, so `required` only bites
    * on the visible one. Mirrors ur_render_job_card()'s server-seeded state. */
   function syncSnapshot(card) {
     if (!card) { return; }
+    syncPairPresentation(card);
     var toggle = card.querySelector('.ur-snap-toggle');
     var on = !!(toggle && toggle.checked);
     Array.prototype.forEach.call(card.querySelectorAll('.ur-snap-only'), function (el) { el.style.display = on ? '' : 'none'; });

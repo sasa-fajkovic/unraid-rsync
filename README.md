@@ -497,3 +497,14 @@ See [RELEASING.md](RELEASING.md) for the full pipeline. In short:
 ## License
 
 See [LICENSE](LICENSE).
+
+### Pulling from a Synology NAS
+
+Path pairs keep the **Unraid path on the left** and the **remote path on the
+right**, regardless of direction. For an SSH Pull job, enter
+`/mnt/user/Backup/aamarnas/` on the left and `/volume1/FTP_FOLDER/` on the right.
+The arrow points left because data is copied from Synology to Unraid. Use the
+exact remote directory name and case; spaces in share names are supported.
+Only the Unraid path must be beneath `/mnt`; the remote path uses the NAS's
+filesystem layout. For rsync daemon transport, enter a module reference instead
+of an absolute remote path.

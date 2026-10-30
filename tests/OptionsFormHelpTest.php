@@ -2562,7 +2562,7 @@ final class OptionsFormHelpTest extends TestCase
         }
         $this->assertSame('Off — e.g. /mnt/disks/backup/.unraid-rsync-target', $card?->querySelector('#ur_job_0_marker')?->getAttribute('placeholder'));
         $this->assertStringContainsString('Use global defaults', (string) $card?->querySelector('label[for="ur_job_0_useglobal"]')?->textContent);
-        $this->assertStringContainsString('Source → destination pairs', (string) $card?->textContent);
+        $this->assertStringContainsString('Path pairs', (string) $card?->textContent);
         $this->assertStringNotContainsString('Use global config', (string) $card?->textContent);
 
         $css = (string) file_get_contents(__DIR__ . '/../source/pages/_options_form.php');
