@@ -1,8 +1,5 @@
 name: Lint
 
-# Lightweight static checks that run on every push / PR. (The release workflow
-# only runs on a version tag, so this gives PRs a fast, dependency-light gate.)
-#
 # Checks:
 #   - .plg is well-formed XML (xmllint)
 #   - pkg_build.sh has valid bash syntax (bash -n) + shellcheck
